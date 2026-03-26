@@ -85,10 +85,7 @@ function resolveMessageLinks(content: string): string {
  * Download a file from Telegram's file API.
  * Returns a Buffer with the file contents.
  */
-async function downloadTelegramFile(
-  bot: Bot,
-  fileId: string,
-): Promise<Buffer> {
+async function downloadTelegramFile(bot: Bot, fileId: string): Promise<Buffer> {
   const file = await bot.api.getFile(fileId);
   const filePath = file.file_path!;
   const token = bot.token;
@@ -463,7 +460,10 @@ export class TelegramChannel implements Channel {
         timestamp,
         is_from_me: false,
       });
-      logger.info({ chatJid, senderName, containerPath }, 'Telegram photo stored');
+      logger.info(
+        { chatJid, senderName, containerPath },
+        'Telegram photo stored',
+      );
     });
 
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
