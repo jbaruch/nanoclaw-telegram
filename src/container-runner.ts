@@ -180,6 +180,16 @@ function buildVolumeMounts(
     });
   }
 
+  // Mount host ~/.claude (persona, rhetoric vault, etc.) as read-only
+  const hostClaudeDir = path.join(os.homedir(), '.claude');
+  if (fs.existsSync(hostClaudeDir)) {
+    mounts.push({
+      hostPath: hostClaudeDir,
+      containerPath: '/workspace/extra/host-claude',
+      readonly: true,
+    });
+  }
+
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
   const groupIpcDir = resolveGroupIpcPath(group.folder);
