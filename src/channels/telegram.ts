@@ -2,6 +2,7 @@ import https from 'https';
 import { Api, Bot } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import { getMessageById } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -38,6 +39,121 @@ async function sendTelegramMessage(
     // Fallback: send as plain text if Markdown parsing fails
     logger.debug({ err }, 'Markdown send failed, falling back to plain text');
     await api.sendMessage(chatId, text, options);
+  }
+}
+
+/**
+ * Truncate a string to a maximum length, appending "..." if truncated.
+ */
+function truncate(s: string, max = 120): string {
+  return s.length > max ? s.slice(0, max) + '...' : s;
+}
+
+/**
+ * Resolve a Telegram reply context: look up the replied-to message in the DB
+ * and return a prefix string like `[Replying to "..."]`.
+ */
+function resolveReply(replyMsgId: number, chatJid: string): string {
+  const original = getMessageById(replyMsgId.toString(), chatJid);
+  if (!original) return '';
+  return `[Replying to "${truncate(original.content)}"]\n`;
+}
+
+/**
+ * Resolve t.me/c/<chat_id>/<message_id> links in content.
+ * Replaces each link with `[Message: "<content>"]` if found in DB.
+ */
+function resolveMessageLinks(content: string): string {
+  return content.replace(
+    /https?:\/\/t\.me\/c\/(\d+)\/(\d+)/g,
+    (_match, rawChatId, msgId) => {
+      // Telegram supergroup JID: URL chat_id is bare id without -100 prefix
+      const candidateJids = [`tg:-100${rawChatId}`, `tg:${rawChatId}`];
+      for (const jid of candidateJids) {
+        const msg = getMessageById(msgId, jid);
+        if (msg) return `[Message: "${truncate(msg.content)}"]`;
+      }
+      return `[Message: not found]`;
+    },
+  );
+}
+
+// Bot pool for agent teams: send-only Api instances (no polling)
+const poolApis: Api[] = [];
+// Maps "{groupFolder}:{senderName}" → pool Api index for stable assignment
+const senderBotMap = new Map<string, number>();
+let nextPoolIndex = 0;
+
+/**
+ * Initialize send-only Api instances for the bot pool.
+ * Each pool bot can send messages but doesn't poll for updates.
+ */
+export async function initBotPool(tokens: string[]): Promise<void> {
+  for (const token of tokens) {
+    try {
+      const api = new Api(token);
+      const me = await api.getMe();
+      poolApis.push(api);
+      logger.info(
+        { username: me.username, id: me.id, poolSize: poolApis.length },
+        'Pool bot initialized',
+      );
+    } catch (err) {
+      logger.error({ err }, 'Failed to initialize pool bot');
+    }
+  }
+  if (poolApis.length > 0) {
+    logger.info({ count: poolApis.length }, 'Telegram bot pool ready');
+  }
+}
+
+/**
+ * Send a message via a pool bot assigned to the given sender name.
+ * Assigns bots round-robin on first use; subsequent messages from the
+ * same sender in the same group always use the same bot.
+ * On first assignment, renames the bot to match the sender's role.
+ */
+export async function sendPoolMessage(
+  chatId: string,
+  text: string,
+  sender: string,
+  groupFolder: string,
+): Promise<void> {
+  if (poolApis.length === 0) {
+    // No pool bots — fall back to main bot sendMessage via channel
+    return;
+  }
+
+  const key = `${groupFolder}:${sender}`;
+  let idx = senderBotMap.get(key);
+  if (idx === undefined) {
+    idx = nextPoolIndex % poolApis.length;
+    nextPoolIndex++;
+    senderBotMap.set(key, idx);
+    // Rename the bot to match the sender's role, then wait for Telegram to propagate
+    try {
+      await poolApis[idx].setMyName(sender);
+      await new Promise((r) => setTimeout(r, 2000));
+      logger.info({ sender, groupFolder, poolIndex: idx }, 'Assigned and renamed pool bot');
+    } catch (err) {
+      logger.warn({ sender, err }, 'Failed to rename pool bot (sending anyway)');
+    }
+  }
+
+  const api = poolApis[idx];
+  try {
+    const numericId = chatId.replace(/^tg:/, '');
+    const MAX_LENGTH = 4096;
+    if (text.length <= MAX_LENGTH) {
+      await sendTelegramMessage(api, numericId, text);
+    } else {
+      for (let i = 0; i < text.length; i += MAX_LENGTH) {
+        await sendTelegramMessage(api, numericId, text.slice(i, i + MAX_LENGTH));
+      }
+    }
+    logger.info({ chatId, sender, poolIndex: idx, length: text.length }, 'Pool message sent');
+  } catch (err) {
+    logger.error({ chatId, sender, err }, 'Failed to send pool message');
   }
 }
 
@@ -148,6 +264,16 @@ export class TelegramChannel implements Channel {
         );
         return;
       }
+
+      // Resolve reply context
+      const replyTo = ctx.message.reply_to_message;
+      if (replyTo) {
+        const prefix = resolveReply(replyTo.message_id, chatJid);
+        if (prefix) content = prefix + content;
+      }
+
+      // Resolve t.me/c message links
+      content = resolveMessageLinks(content);
 
       // Deliver message — startMessageLoop() will pick it up
       this.opts.onMessage(chatJid, {
