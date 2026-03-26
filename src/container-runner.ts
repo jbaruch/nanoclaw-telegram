@@ -131,6 +131,9 @@ function buildVolumeMounts(
       JSON.stringify(
         {
           env: {
+            // Model: Opus 4.6 with 1M context
+            CLAUDE_CODE_MODEL: 'claude-opus-4-6',
+            CLAUDE_CODE_MAX_CONTEXT_WINDOW: '1000000',
             // Enable agent swarms (subagent orchestration)
             // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
             CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
