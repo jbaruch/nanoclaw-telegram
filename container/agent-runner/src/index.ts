@@ -429,6 +429,14 @@ async function runQuery(
               : {}),
           },
         },
+        ...(process.env.COMPOSIO_API_KEY
+          ? {
+              composio: {
+                type: 'http' as const,
+                url: `https://connect.composio.dev/mcp?apiKey=${process.env.COMPOSIO_API_KEY}`,
+              },
+            }
+          : {}),
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
