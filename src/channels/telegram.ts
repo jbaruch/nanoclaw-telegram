@@ -31,7 +31,10 @@ async function sendTelegramMessage(
   api: { sendMessage: Api['sendMessage'] },
   chatId: string | number,
   text: string,
-  options: { message_thread_id?: number } = {},
+  options: {
+    message_thread_id?: number;
+    reply_parameters?: { message_id: number };
+  } = {},
 ): Promise<void> {
   try {
     await api.sendMessage(chatId, text, {
@@ -558,7 +561,7 @@ export class TelegramChannel implements Channel {
   async sendMessage(
     jid: string,
     text: string,
-    threadId?: string,
+    replyToMessageId?: string,
   ): Promise<void> {
     if (!this.bot) {
       logger.warn('Telegram bot not initialized');
@@ -567,9 +570,16 @@ export class TelegramChannel implements Channel {
 
     try {
       const numericId = jid.replace(/^tg:/, '');
-      const options = threadId
-        ? { message_thread_id: parseInt(threadId, 10) }
-        : {};
+      const options: {
+        message_thread_id?: number;
+        reply_parameters?: { message_id: number };
+      } = {};
+
+      if (replyToMessageId) {
+        options.reply_parameters = {
+          message_id: parseInt(replyToMessageId, 10),
+        };
+      }
 
       // Telegram has a 4096 character limit per message — split if needed
       const MAX_LENGTH = 4096;
@@ -577,16 +587,18 @@ export class TelegramChannel implements Channel {
         await sendTelegramMessage(this.bot.api, numericId, text, options);
       } else {
         for (let i = 0; i < text.length; i += MAX_LENGTH) {
+          // Only reply on the first chunk
+          const chunkOptions = i === 0 ? options : {};
           await sendTelegramMessage(
             this.bot.api,
             numericId,
             text.slice(i, i + MAX_LENGTH),
-            options,
+            chunkOptions,
           );
         }
       }
       logger.info(
-        { jid, length: text.length, threadId },
+        { jid, length: text.length, replyToMessageId },
         'Telegram message sent',
       );
     } catch (err) {

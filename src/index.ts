@@ -260,6 +260,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
+  // Track which message triggered the response — first reply quotes it
+  let replyToMessageId: string | undefined =
+    missedMessages[missedMessages.length - 1]?.id;
+
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
@@ -271,7 +275,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
-        await channel.sendMessage(chatJid, text);
+        await channel.sendMessage(chatJid, text, replyToMessageId);
+        // Only the first message is a quoted reply
+        replyToMessageId = undefined;
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
