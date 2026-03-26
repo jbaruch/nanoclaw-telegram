@@ -19,6 +19,8 @@ const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
+// Reply-to message ID for the first outbound message (consumed after first use)
+let pendingReplyToMessageId: string | undefined = process.env.NANOCLAW_REPLY_TO_MESSAGE_ID || undefined;
 
 function writeIpcFile(dir: string, data: object): string {
   fs.mkdirSync(dir, { recursive: true });
@@ -55,6 +57,12 @@ server.tool(
       groupFolder,
       timestamp: new Date().toISOString(),
     };
+
+    // Attach reply-to on the first outbound message, then consume it
+    if (pendingReplyToMessageId) {
+      data.replyToMessageId = pendingReplyToMessageId;
+      pendingReplyToMessageId = undefined;
+    }
 
     writeIpcFile(MESSAGES_DIR, data);
 

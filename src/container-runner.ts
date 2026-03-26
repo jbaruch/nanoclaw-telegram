@@ -43,6 +43,7 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  replyToMessageId?: string;
 }
 
 export interface ContainerOutput {

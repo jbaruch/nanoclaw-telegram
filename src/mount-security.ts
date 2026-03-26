@@ -178,6 +178,10 @@ function findAllowedRoot(
   allowedRoots: AllowedRoot[],
 ): AllowedRoot | null {
   for (const root of allowedRoots) {
+    if (!root.path || typeof root.path !== 'string') {
+      console.warn('mount-security: skipping allowedRoot with missing or invalid path:', JSON.stringify(root));
+      continue;
+    }
     const expandedRoot = expandPath(root.path);
     const realRoot = getRealPath(expandedRoot);
 
@@ -284,6 +288,7 @@ export function validateMount(
     return {
       allowed: false,
       reason: `Path "${realPath}" is not under any allowed root. Allowed roots: ${allowlist.allowedRoots
+        .filter((r) => r.path)
         .map((r) => expandPath(r.path))
         .join(', ')}`,
     };
