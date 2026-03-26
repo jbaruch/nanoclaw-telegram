@@ -314,6 +314,43 @@ export function storeMessageDirect(msg: {
   );
 }
 
+/**
+ * Look up a single message by its platform message_id and chat_jid.
+ * Returns null if not found.
+ */
+export function getMessageById(
+  messageId: string,
+  chatJid: string,
+): NewMessage | null {
+  const row = db
+    .prepare(
+      `SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+       FROM messages
+       WHERE id = ? AND chat_jid = ?`,
+    )
+    .get(messageId, chatJid) as
+    | {
+        id: string;
+        chat_jid: string;
+        sender: string;
+        sender_name: string;
+        content: string;
+        timestamp: string;
+        is_from_me: number;
+      }
+    | undefined;
+  if (!row) return null;
+  return {
+    id: row.id,
+    chat_jid: row.chat_jid,
+    sender: row.sender,
+    sender_name: row.sender_name,
+    content: row.content,
+    timestamp: row.timestamp,
+    is_from_me: row.is_from_me === 1,
+  };
+}
+
 export function getNewMessages(
   jids: string[],
   lastTimestamp: string,
