@@ -4,6 +4,7 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -168,6 +169,16 @@ function buildVolumeMounts(
     containerPath: '/home/node/.claude',
     readonly: false,
   });
+
+  // Mount Tessl credentials if available (read-only)
+  const tesslDir = path.join(os.homedir(), '.tessl');
+  if (fs.existsSync(tesslDir)) {
+    mounts.push({
+      hostPath: tesslDir,
+      containerPath: '/home/node/.tessl',
+      readonly: true,
+    });
+  }
 
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC

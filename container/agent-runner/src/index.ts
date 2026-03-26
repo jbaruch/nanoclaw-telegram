@@ -437,6 +437,14 @@ async function runQuery(
               },
             }
           : {}),
+        ...(fs.existsSync('/home/node/.tessl/api-credentials.json')
+          ? {
+              tessl: {
+                command: 'tessl',
+                args: ['mcp', 'start'],
+              },
+            }
+          : {}),
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
