@@ -65,7 +65,7 @@ ARG TILE_VERSION=latest
 RUN --mount=type=secret,id=tessl_creds \
     mkdir -p "$HOME/.tessl" && \
     cp /run/secrets/tessl_creds "$HOME/.tessl/api-credentials.json" && \
-    tessl install jbaruch/nanoclaw-core jbaruch/nanoclaw-admin --yes --dangerously-ignore-security --agent claude-code && \
+    tessl install jbaruch/nanoclaw-core jbaruch/nanoclaw-admin jbaruch/reclaim-tripit-sync --yes --dangerously-ignore-security --agent claude-code && \
     rm -f "$HOME/.tessl/api-credentials.json" && \
     echo "Installed tiles:" && find . -name 'SKILL.md' -o -name 'RULES.md' | head -20
 
