@@ -370,6 +370,20 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
+  // Clean up stale _reply_to file from previous container runs.
+  // Scheduled tasks have no replyToMessageId — a leftover file would
+  // cause the MCP server to quote a random old message.
+  const replyToFile = path.join(
+    resolveGroupIpcPath(group.folder),
+    'input',
+    '_reply_to',
+  );
+  try {
+    fs.unlinkSync(replyToFile);
+  } catch {
+    /* file doesn't exist — fine */
+  }
+
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
