@@ -3,6 +3,9 @@
 
 set -e
 
+# BuildKit is required for --secret mounts (tessl tile installation)
+export DOCKER_BUILDKIT=1
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
