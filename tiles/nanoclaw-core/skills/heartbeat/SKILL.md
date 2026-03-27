@@ -13,9 +13,10 @@ You are running as a periodic health check. Invoke each sub-check skill below, c
 
 Invoke each of the following as skill calls and collect their results.
 
-1. **Unanswered messages** (`/check-unanswered`) — messages that received no bot reply within 5-15 minutes. Triage: expired, actionable, or unclear.
-2. **Calendar changes** (`/check-calendar`) — detect changed events and reschedule reminders
-3. **Email triage** (`/check-email`) — fetch and classify new emails with source calibration
+1. **Calendar changes** (`/check-calendar`) — detect changed events and reschedule reminders
+2. **Email triage** (`/check-email`) — fetch and classify new emails with source calibration
+
+Note: Unanswered message detection is handled by the external heartbeat on the host (which has direct DB access). The `/check-unanswered` skill is for triage only — invoke it manually when needed, not as part of the periodic heartbeat.
 
 ## Sub-check error handling
 
