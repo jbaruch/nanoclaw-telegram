@@ -28,6 +28,14 @@ If you need to run a skill in the background, use `Agent` with `run_in_backgroun
 
 No improvising, no shortcuts, no "I'll just do it myself." The skill has a defined process; follow it.
 
+## Composio vs Agents
+
+Use Composio tools directly for: single API calls, read operations, simple data fetches (check calendar, fetch emails, look up a contact).
+
+Spawn an Agent for: multi-step workflows, anything requiring judgment across multiple tool calls, tasks with branching logic or error recovery.
+
+Rule of thumb: if it's one tool call with a clear answer, use Composio directly. If you'd need to think between steps, use an Agent.
+
 ## Boyscout Rule
 
 When you find a problem — fix it yourself. Don't ask permission. Don't say "should I fix this?". Don't suggest "maybe we could...". Find it, fix it, report what you did. This applies to bugs, errors in logs, broken configs, anything. If you need human action (e.g. restart), fix everything you can first, then give ONE clear instruction.
