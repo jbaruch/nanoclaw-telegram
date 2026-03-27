@@ -1,0 +1,1 @@
+- [NanoClaw scope](project_nanoclaw_scope.md) — best as personal assistant, not remote Claude Code replacement
