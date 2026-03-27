@@ -1,27 +1,28 @@
 ---
 name: heartbeat
-description: Periodic health check orchestrator for NanoClaw. Invokes sub-checks (system health, unanswered messages, calendar, email), aggregates results, reports only failures. Use when running as a scheduled heartbeat task. Triggers on "heartbeat", "health check", "system status".
+description: Periodic health check orchestrator for NanoClaw. Invokes sub-checks (unanswered messages, calendar, email), aggregates results, reports only failures. Infrastructure checks (DB, logs, containers, disk) are handled by the external heartbeat on the host. Triggers on "heartbeat", "health check".
 ---
 
 # Heartbeat
 
 You are running as a periodic health check. Invoke each sub-check skill below, collect results, and ONLY message the user if something is wrong. Silent when healthy.
 
+**Note:** Infrastructure checks (stuck tasks, DB size, logs, sessions, IPC, disk, containers, OneCLI) are handled by the external heartbeat script on the host. This agent heartbeat covers only checks that need agent intelligence or API access.
+
 ## Checks to run
 
-Invoke each of the following as skill calls (slash-command skill invocations, not tool calls or MCP resources) and collect their results.
+Invoke each of the following as skill calls and collect their results.
 
-1. **System health** (`/check-system-health`) — stuck tasks, IPC errors, DB size, logs, session bloat, retry exhaustion, IPC close files, OneCLI health
-2. **Unanswered messages** (`/check-unanswered`) — messages that received no bot reply within 5-15 minutes
-3. **Calendar changes** (`/check-calendar`) — detect and reschedule reminders for changed events
-4. **Email triage** (`/check-email`) — fetch and classify new emails with source calibration
+1. **Unanswered messages** (`/check-unanswered`) — messages that received no bot reply within 5-15 minutes. Triage: expired, actionable, or unclear.
+2. **Calendar changes** (`/check-calendar`) — detect changed events and reschedule reminders
+3. **Email triage** (`/check-email`) — fetch and classify new emails with source calibration
 
 ## Sub-check error handling
 
 If a sub-check fails to respond, returns an error, or times out, treat that as a failure and include it in the consolidated report — do **not** silently skip it.
 
 ```
-• /check-system-health: sub-check failed to respond (timeout)
+• /check-email: sub-check failed to respond (timeout)
 ```
 
 Never suppress a sub-check error. A partial run should be reported, not hidden.
@@ -39,8 +40,6 @@ If ANY check returns issues (including sub-check errors), send a single consolid
 ```
 *Heartbeat*
 
-• Stuck tasks: 2 tasks overdue -> reset next_run (heartbeat, task-abc123)
-• Logs: nanoclaw.log was 67MB -> truncated to 1.2MB
 • New email from John Smith: "Re: conference schedule" -- Can you confirm...
 • Calendar changed: standup moved to 2pm -> reminder rescheduled
 ```

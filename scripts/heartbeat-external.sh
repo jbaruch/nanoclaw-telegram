@@ -160,7 +160,62 @@ if [[ "$onecli_status" != "200" ]]; then
   problem "OneCLI: health check failed (HTTP ${onecli_status})"
 fi
 
-# ── Check 7: Unanswered messages ─────────────────────────────────────────────
+# ── Check 7: Stuck scheduled tasks ───────────────────────────────────────────
+if [[ -f "$db_path" ]] && command -v sqlite3 &>/dev/null; then
+  stuck=$(sqlite3 "$db_path" "
+    SELECT COUNT(*) FROM scheduled_tasks
+    WHERE status='active'
+      AND next_run <= datetime('now', '-5 minutes');
+  " 2>/dev/null || echo 0)
+  if (( ${stuck:-0} > 0 )); then
+    # Auto-fix: reset next_run
+    sqlite3 "$db_path" "
+      UPDATE scheduled_tasks
+      SET next_run = datetime('now', '+1 minute')
+      WHERE status='active'
+        AND next_run <= datetime('now', '-5 minutes');
+    " 2>/dev/null
+    warn "Stuck tasks: ${stuck} task(s) overdue — reset next_run"
+  fi
+fi
+
+# ── Check 8: Session bloat + cleanup ─────────────────────────────────────────
+sessions_dir="$NANOCLAW_DIR/data/sessions"
+if [[ -d "$sessions_dir" ]]; then
+  sessions_total=$(du -sm "$sessions_dir" 2>/dev/null | awk '{print $1}')
+  if (( ${sessions_total:-0} > 500 )); then
+    warn "Sessions: ${sessions_total}MB total (above 500MB)"
+  fi
+  # Auto-cleanup: delete session transcripts older than 7 days, keep latest 5
+  cleaned=$(find "$sessions_dir" -path '*/.claude/projects/*/*.jsonl' -mtime +7 2>/dev/null | wc -l | tr -d ' ')
+  if (( cleaned > 0 )); then
+    find "$sessions_dir" -path '*/.claude/projects/*/*.jsonl' -mtime +7 -delete 2>/dev/null
+    # Also clean subagent dirs
+    find "$sessions_dir" -path '*/.claude/projects/*/subagents' -type d -empty -delete 2>/dev/null
+    warn "Sessions: cleaned ${cleaned} old session files"
+  fi
+fi
+
+# ── Check 9: Stuck IPC close files ───────────────────────────────────────────
+stuck_close=$(find "$NANOCLAW_DIR/data/ipc" -name '_close' -mmin +30 2>/dev/null | wc -l | tr -d ' ')
+if (( stuck_close > 0 )); then
+  # Auto-fix: delete stuck close sentinels
+  find "$NANOCLAW_DIR/data/ipc" -name '_close' -mmin +30 -delete 2>/dev/null
+  warn "IPC: deleted ${stuck_close} stuck _close file(s)"
+fi
+
+# ── Check 10: Retry exhaustion ───────────────────────────────────────────────
+log_file="$NANOCLAW_DIR/logs/nanoclaw.log"
+if [[ -f "$log_file" ]]; then
+  current_drops=$(grep -c 'Max retries exceeded' "$log_file" 2>/dev/null || echo 0)
+  prev_drops="${last_retry_drops:-$current_drops}"
+  new_drops=$(( current_drops - prev_drops ))
+  if (( new_drops > 0 )); then
+    warn "Retry exhaustion: ${new_drops} new dropped message(s)"
+  fi
+fi
+
+# ── Check 11: Unanswered messages ────────────────────────────────────────────
 if [[ -f "$db_path" ]] && command -v sqlite3 &>/dev/null; then
   unanswered=$(sqlite3 "$db_path" "
     SELECT COUNT(*) FROM messages m
@@ -194,6 +249,7 @@ if (( ${#filtered[@]} == 0 )); then
   {
     echo "last_db_size_bytes=$(stat_size "$db_path" 2>/dev/null || echo 0)"
     echo "last_run_epoch=$(date +%s)"
+    echo "last_retry_drops=$(grep -c 'Max retries exceeded' "$NANOCLAW_DIR/logs/nanoclaw.log" 2>/dev/null || echo 0)"
   } > "$STATE_FILE"
   exit 0
 fi
@@ -218,6 +274,7 @@ fi
 {
   echo "last_db_size_bytes=$(stat_size "$db_path" 2>/dev/null || echo 0)"
   echo "last_run_epoch=$(date +%s)"
+  echo "last_retry_drops=$(grep -c 'Max retries exceeded' "$NANOCLAW_DIR/logs/nanoclaw.log" 2>/dev/null || echo 0)"
 } > "$STATE_FILE"
 
 (( ${#PROBLEMS[@]} > 0 )) && exit 1 || exit 0
