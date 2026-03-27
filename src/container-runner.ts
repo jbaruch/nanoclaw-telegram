@@ -129,7 +129,10 @@ function buildVolumeMounts(
     );
   }
 
-  // Sync skills from container/skills/ into each group's .claude/skills/
+  // Sync skills from three sources into each group's .claude/skills/:
+  // 1. container/skills/ — built-in container skills (agent-browser, status, etc.)
+  // 2. tiles/*/skills/ — tile skills (heartbeat, format-message, etc.)
+  // 3. groups/{folder}/skills/ — AyeAye-created skills (staging area for promotion to tiles)
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
   const skillsDst = path.join(groupSessionsDir, 'skills');
   if (fs.existsSync(skillsSrc)) {
@@ -150,6 +153,19 @@ function buildVolumeMounts(
     if (!fs.existsSync(tileSkillsDir)) continue;
     for (const skillDir of fs.readdirSync(tileSkillsDir)) {
       const srcDir = path.join(tileSkillsDir, skillDir);
+      if (!fs.statSync(srcDir).isDirectory()) continue;
+      const dstDir = path.join(skillsDst, skillDir);
+      fs.cpSync(srcDir, dstDir, { recursive: true });
+    }
+  }
+
+  // Sync AyeAye-created skills from the group's skills/ directory.
+  // These are created at runtime and persist in the bind-mounted group folder.
+  // They override tile skills if names collide (AyeAye's version wins).
+  const groupSkillsDir = path.join(groupDir, 'skills');
+  if (fs.existsSync(groupSkillsDir)) {
+    for (const skillDir of fs.readdirSync(groupSkillsDir)) {
+      const srcDir = path.join(groupSkillsDir, skillDir);
       if (!fs.statSync(srcDir).isDirectory()) continue;
       const dstDir = path.join(skillsDst, skillDir);
       fs.cpSync(srcDir, dstDir, { recursive: true });

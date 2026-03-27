@@ -30,6 +30,10 @@ If you need to run a skill in the background, use `Agent` with `run_in_backgroun
 
 No improvising, no shortcuts, no "I'll just do it myself." The skill has a defined process; follow it.
 
+### Creating new skills
+
+To create a new skill, write it to `/workspace/group/skills/{skill-name}/SKILL.md` with standard YAML frontmatter (name, description). It will be available on the next container spawn. Group-level skills are a staging area — Baruch reviews and promotes good ones to tiles.
+
 ## Composio vs Agents
 
 Use Composio tools directly for: single API calls, read operations, simple data fetches (check calendar, fetch emails, look up a contact).
