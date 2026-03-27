@@ -432,8 +432,11 @@ async function runQuery(
         ...(process.env.COMPOSIO_API_KEY
           ? {
               composio: {
-                type: 'http' as const,
-                url: `https://connect.composio.dev/mcp?apiKey=${process.env.COMPOSIO_API_KEY}`,
+                command: 'npx',
+                args: ['-y', '@composio/mcp@latest', 'start'],
+                env: {
+                  COMPOSIO_API_KEY: process.env.COMPOSIO_API_KEY,
+                },
               },
             }
           : {}),
