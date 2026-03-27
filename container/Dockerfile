@@ -30,8 +30,8 @@ RUN apt-get update && apt-get install -y \
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install agent-browser, claude-code, and tessl globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code tessl
+# Install agent-browser, claude-code, tessl, and composio-mcp globally
+RUN npm install -g agent-browser @anthropic-ai/claude-code tessl @composio/mcp
 
 # Create app directory
 WORKDIR /app
