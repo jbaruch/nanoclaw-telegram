@@ -88,7 +88,38 @@ du -sh /workspace/project/data/sessions/ 2>/dev/null
 
 **Alert if:** total sessions > 500MB, or any single group > 100MB.
 
-**Report only:** identify which groups are bloated, suggest pruning.
+**Auto-fix:** For each group session directory, find and delete Claude Code session files (`.jsonl` in `projects/`) older than 7 days. These are conversation transcripts that grow without bound. Keep the latest 5 per group. Report bytes freed.
+
+```bash
+python3 -c "
+import os, glob, time
+
+sessions_base = '/workspace/project/data/sessions'
+cutoff = time.time() - 7 * 86400
+freed = 0
+for group_dir in glob.glob(f'{sessions_base}/*/.claude/projects/*'):
+    jsonls = sorted(glob.glob(f'{group_dir}/*.jsonl'), key=os.path.getmtime)
+    if len(jsonls) <= 5:
+        continue
+    for f in jsonls[:-5]:
+        if os.path.getmtime(f) < cutoff:
+            size = os.path.getsize(f)
+            os.unlink(f)
+            freed += size
+            # Also remove subagent dirs for this session
+            session_dir = f.rsplit('.', 1)[0]
+            if os.path.isdir(session_dir):
+                import shutil
+                freed += sum(os.path.getsize(os.path.join(dp, fn)) for dp, _, fns in os.walk(session_dir) for fn in fns)
+                shutil.rmtree(session_dir)
+if freed > 0:
+    print(f'Freed {freed // 1048576}MB from old sessions')
+else:
+    print('OK')
+"
+```
+
+**Verify:** Re-run `du -sh` on session directories to confirm reduction.
 
 ## 6. Retry exhaustion (dropped messages)
 
