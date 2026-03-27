@@ -105,6 +105,34 @@ async function downloadTelegramFile(bot: Bot, fileId: string): Promise<Buffer> {
 }
 
 /**
+ * Save a Telegram document to the group's workspace and return the container path.
+ */
+async function saveDocument(
+  bot: Bot,
+  fileId: string,
+  fileName: string,
+  groupFolder: string,
+): Promise<string | null> {
+  try {
+    const buffer = await downloadTelegramFile(bot, fileId);
+    const docsDir = path.join(GROUPS_DIR, groupFolder, 'documents');
+    fs.mkdirSync(docsDir, { recursive: true });
+    // Prefix with timestamp to avoid collisions
+    const safeName = `${Date.now()}-${fileName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    const filePath = path.join(docsDir, safeName);
+    fs.writeFileSync(filePath, buffer);
+    logger.info(
+      { groupFolder, fileName: safeName, size: buffer.length },
+      'Saved Telegram document',
+    );
+    return `/workspace/group/documents/${safeName}`;
+  } catch (err) {
+    logger.error({ err, fileName }, 'Failed to save Telegram document');
+    return null;
+  }
+}
+
+/**
  * Transcribe a voice message using OpenAI Whisper API.
  * Returns the transcript text, or null on failure.
  */
@@ -524,9 +552,61 @@ export class TelegramChannel implements Channel {
       });
     });
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
-    this.bot.on('message:document', (ctx) => {
-      const name = ctx.message.document?.file_name || 'file';
-      storeNonText(ctx, `[Document: ${name}]`);
+    this.bot.on('message:document', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
+
+      const fileName = ctx.message.document?.file_name || 'file';
+      const fileId = ctx.message.document?.file_id;
+      let content: string;
+
+      if (fileId) {
+        const containerPath = await saveDocument(
+          this.bot!,
+          fileId,
+          fileName,
+          group.folder,
+        );
+        content = containerPath
+          ? `[Document: ${containerPath}]${caption}`
+          : `[Document: ${fileName} - download failed]${caption}`;
+        if (containerPath) {
+          logger.info(
+            { chatJid, senderName, containerPath },
+            'Telegram document stored',
+          );
+        }
+      } else {
+        content = `[Document: ${fileName} - no file_id]${caption}`;
+      }
+
+      this.opts.onMessage(chatJid, {
+        id: ctx.message.message_id.toString(),
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content,
+        timestamp,
+        is_from_me: false,
+      });
     });
     this.bot.on('message:sticker', (ctx) => {
       const emoji = ctx.message.sticker?.emoji || '';

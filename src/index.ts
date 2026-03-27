@@ -71,6 +71,9 @@ let lastTimestamp = '';
 let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
+// Per-chat reply-to tracking: updated when follow-up messages are piped,
+// consumed by the output callback to quote-reply the latest message.
+const pendingReplyTo: Record<string, string | undefined> = {};
 let messageLoopRunning = false;
 
 const channels: Channel[] = [];
@@ -260,12 +263,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  // Track which message triggered the response — first reply quotes it
-  let replyToMessageId: string | undefined =
-    missedMessages[missedMessages.length - 1]?.id;
+  // Track which message triggered the response — first reply quotes it.
+  // Uses shared pendingReplyTo map so follow-up messages piped via
+  // queue.sendMessage() can update the reply target for the output callback.
+  pendingReplyTo[chatJid] = missedMessages[missedMessages.length - 1]?.id;
   logger.info(
     {
-      replyToMessageId,
+      replyToMessageId: pendingReplyTo[chatJid],
       messageIds: missedMessages.map((m) => m.id),
       group: group.name,
     },
@@ -287,7 +291,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
         logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
         if (text) {
-          await channel.sendMessage(chatJid, text, replyToMessageId);
+          const replyId = pendingReplyTo[chatJid];
+          await channel.sendMessage(chatJid, text, replyId);
           // Store bot response in DB so heartbeat can track answered messages
           storeMessage({
             id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -299,8 +304,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             is_from_me: true,
             is_bot_message: true,
           });
-          // Only the first message is a quoted reply
-          replyToMessageId = undefined;
+          // Consume after first reply — follow-up messages will set a new one
+          pendingReplyTo[chatJid] = undefined;
           outputSentToUser = true;
         }
         // Only reset idle timer on actual results, not session-update markers (result: null)
@@ -315,7 +320,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         hadError = true;
       }
     },
-    replyToMessageId,
+    pendingReplyTo[chatJid],
   );
 
   await channel.setTyping?.(chatJid, false);
@@ -503,9 +508,13 @@ async function startMessageLoop(): Promise<void> {
             allPending.length > 0 ? allPending : groupMessages;
           const formatted = formatMessages(messagesToSend, TIMEZONE);
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          const lastMsgId =
+            messagesToSend[messagesToSend.length - 1]?.id;
+          if (queue.sendMessage(chatJid, formatted, lastMsgId)) {
+            // Update shared reply-to so the output callback quotes this message
+            pendingReplyTo[chatJid] = lastMsgId;
             logger.debug(
-              { chatJid, count: messagesToSend.length },
+              { chatJid, count: messagesToSend.length, replyToMessageId: lastMsgId },
               'Piped messages to active container',
             );
             lastAgentTimestamp[chatJid] =

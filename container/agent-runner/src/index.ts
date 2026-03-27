@@ -276,6 +276,8 @@ function shouldClose(): boolean {
  * Drain all pending IPC input messages.
  * Returns messages found, or empty array.
  */
+const REPLY_TO_FILE = path.join(IPC_INPUT_DIR, '_reply_to');
+
 function drainIpcInput(): string[] {
   try {
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
@@ -284,6 +286,7 @@ function drainIpcInput(): string[] {
       .sort();
 
     const messages: string[] = [];
+    let latestReplyTo: string | undefined;
     for (const file of files) {
       const filePath = path.join(IPC_INPUT_DIR, file);
       try {
@@ -291,11 +294,18 @@ function drainIpcInput(): string[] {
         fs.unlinkSync(filePath);
         if (data.type === 'message' && data.text) {
           messages.push(data.text);
+          if (data.replyToMessageId) {
+            latestReplyTo = data.replyToMessageId;
+          }
         }
       } catch (err) {
         log(`Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`);
         try { fs.unlinkSync(filePath); } catch { /* ignore */ }
       }
+    }
+    // Write the latest replyToMessageId so the MCP server can pick it up
+    if (latestReplyTo) {
+      try { fs.writeFileSync(REPLY_TO_FILE, latestReplyTo); } catch { /* ignore */ }
     }
     return messages;
   } catch (err) {

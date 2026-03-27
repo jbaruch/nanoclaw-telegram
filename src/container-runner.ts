@@ -154,6 +154,17 @@ function buildVolumeMounts(
     );
   }
 
+  // Ensure blog-writer-persona symlink exists in session dir.
+  // The Dockerfile creates it, but the bind mount masks it at runtime.
+  const personaLink = path.join(groupSessionsDir, 'blog-writer-persona');
+  if (!fs.existsSync(personaLink)) {
+    try {
+      fs.symlinkSync('/workspace/extra/blogs/persona', personaLink);
+    } catch {
+      // Symlink may fail on some filesystems; non-fatal
+    }
+  }
+
   // Sync skills from container/skills/ into each group's .claude/skills/
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
   const skillsDst = path.join(groupSessionsDir, 'skills');

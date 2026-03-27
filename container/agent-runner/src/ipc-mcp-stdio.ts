@@ -19,8 +19,24 @@ const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
-// Reply-to message ID for the first outbound message (consumed after first use)
+// Reply-to message ID — updated by the agent-runner via IPC file for each new message
+const REPLY_TO_FILE = path.join(IPC_DIR, 'input', '_reply_to');
 let pendingReplyToMessageId: string | undefined = process.env.NANOCLAW_REPLY_TO_MESSAGE_ID || undefined;
+
+function consumeReplyToMessageId(): string | undefined {
+  // Check if the agent-runner wrote a fresh reply-to ID from a follow-up message
+  try {
+    if (fs.existsSync(REPLY_TO_FILE)) {
+      const id = fs.readFileSync(REPLY_TO_FILE, 'utf-8').trim();
+      fs.unlinkSync(REPLY_TO_FILE);
+      if (id) return id;
+    }
+  } catch { /* ignore */ }
+  // Fall back to the initial env var (consumed after first use)
+  const id = pendingReplyToMessageId;
+  pendingReplyToMessageId = undefined;
+  return id;
+}
 
 function writeIpcFile(dir: string, data: object): string {
   fs.mkdirSync(dir, { recursive: true });
@@ -58,10 +74,10 @@ server.tool(
       timestamp: new Date().toISOString(),
     };
 
-    // Attach reply-to on the first outbound message, then consume it
-    if (pendingReplyToMessageId) {
-      data.replyToMessageId = pendingReplyToMessageId;
-      pendingReplyToMessageId = undefined;
+    // Attach reply-to from the most recent incoming message
+    const replyTo = consumeReplyToMessageId();
+    if (replyTo) {
+      data.replyToMessageId = replyTo;
     }
 
     writeIpcFile(MESSAGES_DIR, data);

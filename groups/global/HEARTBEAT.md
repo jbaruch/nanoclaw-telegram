@@ -242,7 +242,13 @@ When a check fires, don't just report — diagnose, fix if possible, report the 
 - **DB size > 500MB**: report size, suggest archiving old messages
 - **Session memory > 500MB**: report which groups are bloated, suggest pruning
 - **OneCLI down**: report HTTP status, suggest `docker compose -p onecli up -d`
-- **Unanswered messages**: report which chats and messages. Investigate logs for why — container crash? Timeout? Error? Include the diagnosis.
+- **Unanswered messages**: For each unanswered message, investigate logs for why (container crash? timeout? error?), then evaluate the message content and decide:
+
+  1. **Expired / no longer actionable** — the request was time-sensitive and the window has passed (e.g. "what's my next meeting?" and the meeting already ended; "remind me in 5 minutes" from 20 min ago). Send a brief note: _"Пропустил: [summary of what was asked]. Уже не актуально — [what the answer would have been]."_
+
+  2. **Still actionable** — the task has no hard deadline or the deadline hasn't passed (research, write an email, find something, general questions). Just go do it: process the message as if it just arrived and send the response normally. Do NOT report it as an issue.
+
+  3. **Unclear** — can't determine if expired or not. Report it: include sender, chat, message content, log diagnosis, and note the ambiguity.
 - **Retry exhaustion (dropped messages)**: report count and grep the log for the specific group/JID that was dropped
 
 ### Output format for fixes
