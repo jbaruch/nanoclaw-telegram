@@ -70,9 +70,13 @@ if [[ "$(uname)" == "Darwin" ]]; then
     fi
   fi
 else
-  # Linux: check if node process is running
-  if ! pgrep -f 'dist/index.js' &>/dev/null; then
-    problem "NanoClaw: process not running"
+  # Linux/NAS: check if the orchestrator Docker container is running
+  if docker ps --filter "name=nanoclaw" --filter "status=running" -q 2>/dev/null | grep -q .; then
+    : # running
+  elif pgrep -f 'dist/index.js' &>/dev/null; then
+    : # running directly (non-Docker)
+  else
+    problem "NanoClaw: not running (neither container nor process found)"
   fi
 fi
 
@@ -152,12 +156,13 @@ elif (( ${disk_pct:-0} >= DISK_WARN_THRESHOLD )); then
   warn "Disk: ${disk_pct}% used"
 fi
 
-# ── Check 6: OneCLI health ───────────────────────────────────────────────────
-onecli_status=$(curl -sf --max-time 5 \
-  "http://localhost:10254/api/health" \
+# ── Check 6: Credential proxy health ─────────────────────────────────────────
+proxy_status=$(curl -sf --max-time 5 \
+  "http://localhost:3001/" \
   -o /dev/null -w '%{http_code}' 2>/dev/null || echo "000")
-if [[ "$onecli_status" != "200" ]]; then
-  problem "OneCLI: health check failed (HTTP ${onecli_status})"
+# Proxy returns 502 when no upstream — that means it's running
+if [[ "$proxy_status" == "000" ]]; then
+  warn "Credential proxy: not reachable on port 3001"
 fi
 
 # ── Check 7: Stuck scheduled tasks ───────────────────────────────────────────
