@@ -1,0 +1,30 @@
+services:
+  nanoclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    container_name: nanoclaw
+    restart: unless-stopped
+    volumes:
+      # Docker socket for spawning sibling agent containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persistent data directories
+      - ./store:/app/store
+      - ./data:/app/data
+      - ./groups:/app/groups
+      - ./logs:/app/logs
+      # Credentials (mounted, never baked into image)
+      - ./.env:/app/.env:ro
+    environment:
+      # Docker-out-of-Docker: mount paths must reference the HOST filesystem
+      - HOST_PROJECT_ROOT=/home/jbaruch/nanoclaw
+      # Host user UID/GID for agent container --user flag (NAS user is uid 999)
+      - HOST_UID=999
+      - HOST_GID=10
+      # Credential proxy binds to all interfaces so agent containers can reach it
+      - CREDENTIAL_PROXY_HOST=0.0.0.0
+      - TZ=America/Chicago
+      - NODE_ENV=production
+    ports:
+      # Credential proxy — agent containers reach it via host.docker.internal:3001
+      - "3001:3001"
