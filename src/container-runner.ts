@@ -230,12 +230,27 @@ function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // Pass Composio API key so the agent-runner can enable the Composio MCP server
-  const composioEnv = readEnvFile(['COMPOSIO_API_KEY']);
-  const composioKey =
-    process.env.COMPOSIO_API_KEY || composioEnv.COMPOSIO_API_KEY;
-  if (composioKey) {
-    args.push('-e', `COMPOSIO_API_KEY=${composioKey}`);
+  // Forward env vars that agent containers need (API keys for MCP servers, tools, etc.)
+  // These are read from .env or process.env and passed via -e. The credential proxy
+  // handles Anthropic auth separately — these are for non-Anthropic services.
+  const FORWARDED_ENV_VARS = [
+    'COMPOSIO_API_KEY',
+    'OPENAI_API_KEY',
+    'GITHUB_TOKEN',
+    'TRIPIT_ICAL_URL',
+    'TRIPIT_IGNORE_TRIPS',
+    'TRIPIT_IGNORE_KEYWORDS',
+    'RECLAIM_API_TOKEN',
+    'GOOGLE_CLIENT_ID',
+    'GOOGLE_CLIENT_SECRET',
+    'GOOGLE_REFRESH_TOKEN',
+  ];
+  const envFromFile = readEnvFile(FORWARDED_ENV_VARS);
+  for (const varName of FORWARDED_ENV_VARS) {
+    const value = process.env[varName] || envFromFile[varName];
+    if (value) {
+      args.push('-e', `${varName}=${value}`);
+    }
   }
 
   // Pass reply-to message ID so the first IPC send_message appears as a Telegram reply
