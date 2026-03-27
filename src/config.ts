@@ -34,19 +34,31 @@ export const SCHEDULER_POLL_INTERVAL = 60000;
 const PROJECT_ROOT = process.cwd();
 const HOME_DIR = process.env.HOME || os.homedir();
 
+// Docker-out-of-Docker: when the orchestrator runs inside a container,
+// mount paths (-v) must reference the HOST filesystem, not the container's.
+// Set HOST_PROJECT_ROOT in docker-compose.yml to the repo path on the host.
+// When running directly on the host (e.g., Mac), this defaults to cwd().
+export const HOST_PROJECT_ROOT =
+  process.env.HOST_PROJECT_ROOT || PROJECT_ROOT;
+
+// In DooD, process.getuid() returns the orchestrator container's uid (1000).
+// HOST_UID/HOST_GID env vars override this with the actual host user's uid/gid.
+export const HOST_UID = process.env.HOST_UID
+  ? parseInt(process.env.HOST_UID, 10)
+  : undefined;
+export const HOST_GID = process.env.HOST_GID
+  ? parseInt(process.env.HOST_GID, 10)
+  : undefined;
+
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
-export const MOUNT_ALLOWLIST_PATH = path.join(
-  HOME_DIR,
-  '.config',
-  'nanoclaw',
-  'mount-allowlist.json',
-);
-export const SENDER_ALLOWLIST_PATH = path.join(
-  HOME_DIR,
-  '.config',
-  'nanoclaw',
-  'sender-allowlist.json',
-);
+export const MOUNT_ALLOWLIST_PATH =
+  process.env.MOUNT_ALLOWLIST_PATH ||
+  path.join(HOME_DIR, '.config', 'nanoclaw', 'mount-allowlist.json');
+export const SENDER_ALLOWLIST_PATH =
+  process.env.SENDER_ALLOWLIST_PATH ||
+  path.join(HOME_DIR, '.config', 'nanoclaw', 'sender-allowlist.json');
+
+// Local paths for filesystem operations (mkdirSync, existsSync, etc.)
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');

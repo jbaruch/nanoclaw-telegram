@@ -4,7 +4,6 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 
 import {
@@ -14,6 +13,9 @@ import {
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   GROUPS_DIR,
+  HOST_GID,
+  HOST_PROJECT_ROOT,
+  HOST_UID,
   IDLE_TIMEOUT,
   TIMEZONE,
 } from './config.js';
@@ -60,57 +62,39 @@ interface VolumeMount {
   readonly: boolean;
 }
 
+/**
+ * Translate a local container path to a host path for docker -v arguments.
+ * In Docker-out-of-Docker, the orchestrator's filesystem (/app/...) differs
+ * from the host's (/home/jbaruch/nanoclaw/...). Mount paths must use host paths.
+ */
+function toHostPath(localPath: string): string {
+  const projectRoot = process.cwd();
+  if (HOST_PROJECT_ROOT === projectRoot) return localPath; // running directly on host
+  const rel = path.relative(projectRoot, localPath);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return localPath; // outside project
+  return path.join(HOST_PROJECT_ROOT, rel);
+}
+
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
-  const projectRoot = process.cwd();
   const groupDir = resolveGroupFolderPath(group.folder);
 
-  if (isMain) {
-    // Main gets the project root read-only. Writable paths the agent needs
-    // (group folder, IPC, .claude/) are mounted separately below.
-    // Read-only prevents the agent from modifying host application code
-    // (src/, dist/, package.json, etc.) which would bypass the sandbox
-    // entirely on next restart.
-    mounts.push({
-      hostPath: projectRoot,
-      containerPath: '/workspace/project',
-      readonly: true,
-    });
+  // Group folder mount (all groups get their own folder)
+  mounts.push({
+    hostPath: toHostPath(groupDir),
+    containerPath: '/workspace/group',
+    readonly: false,
+  });
 
-    // Shadow .env so the agent cannot read secrets from the mounted project root.
-    // Credentials are injected by the credential proxy, never exposed to containers.
-    const envFile = path.join(projectRoot, '.env');
-    if (fs.existsSync(envFile)) {
-      mounts.push({
-        hostPath: '/dev/null',
-        containerPath: '/workspace/project/.env',
-        readonly: true,
-      });
-    }
-
-    // Main also gets its group folder as the working directory
-    mounts.push({
-      hostPath: groupDir,
-      containerPath: '/workspace/group',
-      readonly: false,
-    });
-  } else {
-    // Other groups only get their own folder
-    mounts.push({
-      hostPath: groupDir,
-      containerPath: '/workspace/group',
-      readonly: false,
-    });
-
-    // Global memory directory (read-only for non-main)
-    // Only directory mounts are supported, not file mounts
+  // Global memory directory (read-only for non-main)
+  if (!isMain) {
     const globalDir = path.join(GROUPS_DIR, 'global');
     if (fs.existsSync(globalDir)) {
       mounts.push({
-        hostPath: globalDir,
+        hostPath: toHostPath(globalDir),
         containerPath: '/workspace/global',
         readonly: true,
       });
@@ -118,7 +102,6 @@ function buildVolumeMounts(
   }
 
   // Per-group Claude sessions directory (isolated from other groups)
-  // Each group gets their own .claude/ to prevent cross-group session access
   const groupSessionsDir = path.join(
     DATA_DIR,
     'sessions',
@@ -133,17 +116,10 @@ function buildVolumeMounts(
       JSON.stringify(
         {
           env: {
-            // Model: Opus 4.6 with 1M context
             CLAUDE_CODE_MODEL: 'claude-opus-4-6',
             CLAUDE_CODE_MAX_CONTEXT_WINDOW: '1000000',
-            // Enable agent swarms (subagent orchestration)
-            // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
             CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-            // Load CLAUDE.md from additional mounted directories
-            // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
             CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-            // Enable Claude's memory feature (persists user preferences between sessions)
-            // https://code.claude.com/docs/en/memory#manage-auto-memory
             CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
           },
         },
@@ -151,17 +127,6 @@ function buildVolumeMounts(
         2,
       ) + '\n',
     );
-  }
-
-  // Ensure blog-writer-persona symlink exists in session dir.
-  // The Dockerfile creates it, but the bind mount masks it at runtime.
-  const personaLink = path.join(groupSessionsDir, 'blog-writer-persona');
-  if (!fs.existsSync(personaLink)) {
-    try {
-      fs.symlinkSync('/workspace/extra/blogs/persona', personaLink);
-    } catch {
-      // Symlink may fail on some filesystems; non-fatal
-    }
   }
 
   // Sync skills from container/skills/ into each group's .claude/skills/
@@ -210,77 +175,23 @@ function buildVolumeMounts(
     );
   }
   mounts.push({
-    hostPath: groupSessionsDir,
+    hostPath: toHostPath(groupSessionsDir),
     containerPath: '/home/node/.claude',
     readonly: false,
   });
 
-  // Mount Tessl credentials if available (read-only)
-  const tesslDir = path.join(os.homedir(), '.tessl');
-  if (fs.existsSync(tesslDir)) {
-    mounts.push({
-      hostPath: tesslDir,
-      containerPath: '/home/node/.tessl',
-      readonly: true,
-    });
-  }
-
-  // Mount host ~/.claude (persona, rhetoric vault, etc.) as read-only
-  const hostClaudeDir = path.join(os.homedir(), '.claude');
-  if (fs.existsSync(hostClaudeDir)) {
-    mounts.push({
-      hostPath: hostClaudeDir,
-      containerPath: '/workspace/extra/host-claude',
-      readonly: true,
-    });
-  }
-
-  // Per-group IPC namespace: each group gets its own IPC directory
-  // This prevents cross-group privilege escalation via IPC
+  // Per-group IPC namespace
   const groupIpcDir = resolveGroupIpcPath(group.folder);
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
   mounts.push({
-    hostPath: groupIpcDir,
+    hostPath: toHostPath(groupIpcDir),
     containerPath: '/workspace/ipc',
     readonly: false,
   });
 
-  // Copy agent-runner source into a per-group writable location so agents
-  // can customize it (add tools, change behavior) without affecting other
-  // groups. Recompiled on container startup via entrypoint.sh.
-  const agentRunnerSrc = path.join(
-    projectRoot,
-    'container',
-    'agent-runner',
-    'src',
-  );
-  const groupAgentRunnerDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    'agent-runner-src',
-  );
-  if (fs.existsSync(agentRunnerSrc)) {
-    const srcIndex = path.join(agentRunnerSrc, 'index.ts');
-    const cachedIndex = path.join(groupAgentRunnerDir, 'index.ts');
-    const needsCopy =
-      !fs.existsSync(groupAgentRunnerDir) ||
-      !fs.existsSync(cachedIndex) ||
-      (fs.existsSync(srcIndex) &&
-        fs.statSync(srcIndex).mtimeMs > fs.statSync(cachedIndex).mtimeMs);
-    if (needsCopy) {
-      fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
-    }
-  }
-  mounts.push({
-    hostPath: groupAgentRunnerDir,
-    containerPath: '/app/src',
-    readonly: false,
-  });
-
-  // Additional mounts validated against external allowlist (tamper-proof from containers)
+  // Additional mounts validated against external allowlist
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
       group.containerConfig.additionalMounts,
@@ -337,12 +248,12 @@ function buildContainerArgs(
   args.push(...hostGatewayArgs());
 
   // Run as host user so bind-mounted files are accessible.
-  // Skip when running as root (uid 0), as the container's node user (uid 1000),
-  // or when getuid is unavailable (native Windows without WSL).
-  const hostUid = process.getuid?.();
-  const hostGid = process.getgid?.();
-  if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
-    args.push('--user', `${hostUid}:${hostGid}`);
+  // In DooD, process.getuid() returns the orchestrator container's uid (1000),
+  // not the actual host user. HOST_UID/HOST_GID override this.
+  const effectiveUid = HOST_UID ?? process.getuid?.();
+  const effectiveGid = HOST_GID ?? process.getgid?.();
+  if (effectiveUid != null && effectiveUid !== 0 && effectiveUid !== 1000) {
+    args.push('--user', `${effectiveUid}:${effectiveGid}`);
     args.push('-e', 'HOME=/home/node');
   }
 
