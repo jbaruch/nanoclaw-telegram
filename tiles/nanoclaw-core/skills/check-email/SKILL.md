@@ -42,12 +42,12 @@ Use `COMPOSIO_SEARCH_TOOLS` to find `GMAIL_FETCH_EMAILS`, then fetch recent emai
 - label_ids: ["INBOX"]
 - Do NOT include spam/trash
 
-Read `/workspace/group/heartbeat-state.json` to get `last_email_checked` (a messageId string). Only process emails NEWER than that ID (higher messageId = newer in Gmail). If no state file exists or the field is missing, process the latest 5 only.
+Read `/workspace/group/nanoclaw-state.json` to get `last_email_checked` (a messageId string). Only process emails NEWER than that ID (higher messageId = newer in Gmail). If no state file exists or the field is missing, process the latest 5 only.
 
 ```python
 import json, os
 
-STATE_FILE = "/workspace/group/heartbeat-state.json"
+STATE_FILE = "/workspace/group/nanoclaw-state.json"
 
 try:
     with open(STATE_FILE) as f:

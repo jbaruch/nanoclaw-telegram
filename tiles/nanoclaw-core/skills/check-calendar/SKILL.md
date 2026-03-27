@@ -7,9 +7,9 @@ description: Detect calendar changes and reschedule reminders. Compares current 
 
 ## Precondition
 
-Read `/workspace/group/calendar-state.json`. If it exists and `date` matches today, proceed. If the state file doesn't exist or is from a previous day, skip — morning brief handles initial scheduling at 8am.
+Read `/workspace/group/nanoclaw-state.json`. If it exists and `date` matches today, proceed. If the state file doesn't exist or is from a previous day, skip — morning brief handles initial scheduling at 8am.
 
-### Expected calendar-state.json schema
+### Expected nanoclaw-state.json calendar section
 
 ```json
 {
@@ -74,7 +74,7 @@ If calendar changed:
    ```
    Capture the returned `task_id` and store it as `reminder_task_id` for that event.
 
-3. **Update state:** Write the new event list (with updated `reminder_task_id` values) and today's date back to `/workspace/group/calendar-state.json`.
+3. **Update state:** Write the new event list (with updated `reminder_task_id` values) and today's date back to `/workspace/group/nanoclaw-state.json`.
 
 ## Output
 

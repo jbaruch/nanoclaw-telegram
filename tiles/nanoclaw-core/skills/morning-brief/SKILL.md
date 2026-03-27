@@ -11,7 +11,7 @@ description: "Morning briefing — fetches today's Google Calendar events and Ta
 3. Check closing CFPs (`/check-cfps`)
 4. Send a formatted Telegram briefing (including CFP deadlines if any)
 5. Schedule 15-minute reminders for timed events
-6. Save state to `/workspace/group/calendar-state.json`
+6. Save state to `/workspace/group/nanoclaw-state.json`
 
 ---
 
@@ -84,7 +84,7 @@ For each timed event (not all-day, not travel) that starts MORE than 20 minutes 
 
 ## Step 6: Save state
 
-Write to `/workspace/group/calendar-state.json`:
+Write to `/workspace/group/nanoclaw-state.json`:
 
 ```json
 {

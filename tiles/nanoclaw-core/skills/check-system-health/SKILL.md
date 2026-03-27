@@ -97,7 +97,7 @@ python3 -c "
 import subprocess, os, json
 
 log_file = '/workspace/project/logs/nanoclaw.log'
-state_file = '/workspace/group/heartbeat-state.json'
+state_file = '/workspace/group/nanoclaw-state.json'
 
 result = subprocess.run(['grep', '-c', 'Max retries exceeded', log_file],
     capture_output=True, text=True)
