@@ -18,10 +18,14 @@ echo "Image: ${IMAGE_NAME}:${TAG}"
 
 # Mount tessl credentials for private tile installation at build time.
 # Uses --mount=type=secret so credentials never land in a Docker layer.
+# Requires BuildKit (docker buildx). Falls back to no-secret build if unavailable.
 TESSL_CREDS="$HOME/.tessl/api-credentials.json"
-if [ -f "$TESSL_CREDS" ]; then
-  echo "Tessl credentials available — tiles will be installed"
+if [ -f "$TESSL_CREDS" ] && docker buildx version &>/dev/null; then
+  echo "Tessl credentials available (BuildKit) — tiles will be installed"
   TESSL_SECRET_ARG="--secret id=tessl_creds,src=$TESSL_CREDS"
+elif [ -f "$TESSL_CREDS" ]; then
+  echo "Tessl credentials available but BuildKit not found — tiles installed without secret mount"
+  TESSL_SECRET_ARG=""
 else
   echo "Warning: No tessl credentials — tiles will not be installed"
   TESSL_SECRET_ARG=""
