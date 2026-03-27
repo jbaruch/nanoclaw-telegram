@@ -13,10 +13,12 @@ WORKDIR /app
 
 # Copy package files for caching
 COPY package*.json ./
-RUN npm install --omit=dev
+RUN npm install --ignore-scripts
 
-# Copy built application
-COPY dist/ ./dist/
+# Copy source and build TypeScript
+COPY src/ ./src/
+COPY tsconfig.json ./
+RUN npx tsc
 
 # Copy container config (skills, tiles, build script, Dockerfile for agent image)
 COPY container/ ./container/
@@ -25,6 +27,9 @@ COPY tiles/ ./tiles/
 # Copy group templates (used by registerGroup to create CLAUDE.md for new groups)
 COPY groups/main/CLAUDE.md ./groups/main/CLAUDE.md
 COPY groups/global/CLAUDE.md ./groups/global/CLAUDE.md
+
+# Remove devDependencies after build
+RUN npm prune --omit=dev
 
 # Data directories (store/, data/, groups/, logs/) are bind-mounted at runtime.
 # The .env file is also mounted at runtime — never baked into the image.
