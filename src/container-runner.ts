@@ -28,6 +28,7 @@ import {
 import { OneCLI } from '@onecli-sh/sdk';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
+import { readEnvFile } from './env.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 
@@ -257,6 +258,13 @@ async function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Pass Composio API key so the agent-runner can enable the Composio MCP server
+  const composioEnv = readEnvFile(['COMPOSIO_API_KEY']);
+  const composioKey = process.env.COMPOSIO_API_KEY || composioEnv.COMPOSIO_API_KEY;
+  if (composioKey) {
+    args.push('-e', `COMPOSIO_API_KEY=${composioKey}`);
+  }
 
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
