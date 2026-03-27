@@ -5,12 +5,13 @@ description: "Morning briefing — fetches today's Google Calendar events and Ta
 
 # Morning Brief
 
-**Overview — five steps run in order:**
+**Overview — six steps run in order:**
 1. Fetch today's Google Calendar events
 2. Fetch Google Tasks (due today + overdue)
-3. Send a formatted Telegram briefing
-4. Schedule 15-minute reminders for timed events
-5. Save state to `/workspace/group/calendar-state.json`
+3. Check closing CFPs (`/check-cfps`)
+4. Send a formatted Telegram briefing (including CFP deadlines if any)
+5. Schedule 15-minute reminders for timed events
+6. Save state to `/workspace/group/calendar-state.json`
 
 ---
 
@@ -31,7 +32,13 @@ Use `COMPOSIO_SEARCH_TOOLS` to find Google Tasks tools (search "googletasks"). F
 
 If no Google Tasks connection, skip silently. If the fetch errors unexpectedly, skip silently and note the omission in the briefing footer.
 
-## Step 3: Send morning brief
+## Step 3: Check closing CFPs
+
+Invoke `/check-cfps` to find relevant CFPs closing within 7 days. Collect the results for inclusion in the briefing.
+
+If the check fails or returns nothing, skip the CFP section silently.
+
+## Step 4: Send morning brief
 
 Format in Telegram style (`*bold*` single asterisks, `•` bullets, no markdown headings):
 
@@ -47,7 +54,11 @@ Format in Telegram style (`*bold*` single asterisks, `•` bullets, no markdown 
 • ⚠️ Overdue: Fix CI pipeline (due Mar 25)
 • Write blog post draft
 
-_N событий, M задач_
+*📢 CFPs closing this week:*
+• Devoxx Belgium — closes in 2 days
+• AI Dev Summit — closes in 5 days
+
+_N событий, M задач, K CFPs_
 ```
 
 Rules:
@@ -58,7 +69,7 @@ Rules:
 
 **Error handling:** If `mcp__nanoclaw__send_message` fails, log the error and retry once. If it fails again, abort the remaining steps and surface the error.
 
-## Step 4: Schedule reminders for today's events
+## Step 5: Schedule reminders for today's events
 
 For each timed event (not all-day, not travel) that starts MORE than 20 minutes from now:
 - Calculate reminder time = event start minus 15 minutes (America/Chicago)
@@ -71,7 +82,7 @@ For each timed event (not all-day, not travel) that starts MORE than 20 minutes 
 
 **Error handling:** If `schedule_task` fails for an individual event, record `reminder_task_id: null` for that event in state and continue scheduling the remaining events. Do not abort the whole step.
 
-## Step 5: Save state
+## Step 6: Save state
 
 Write to `/workspace/group/calendar-state.json`:
 

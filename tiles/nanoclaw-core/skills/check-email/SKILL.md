@@ -5,7 +5,35 @@ description: Fetch recent emails, calibrate for source noise (automated senders 
 
 # Check Email
 
-**Workflow:** Fetch → Calibrate → Classify → Output
+**Workflow:** Load Preferences → Fetch → Calibrate → Classify → Output
+
+## Load Preferences
+
+Read `/workspace/group/email-preferences.json` if it exists. This file contains user feedback on past classifications:
+
+```json
+{
+  "always_important": [
+    {"sender": "sarah@jfrog.com", "reason": "direct colleague"},
+    {"domain": "devreluni.com", "reason": "conference organizer"}
+  ],
+  "always_ignore": [
+    {"sender": "noreply@github.com", "reason": "automated notifications"},
+    {"domain": "marketing.salesforce.com", "reason": "disguised marketing"}
+  ],
+  "patterns": [
+    {"rule": "subject contains 'CFP'", "action": "important", "reason": "conference submissions"},
+    {"rule": "sender ends with @linkedin.com", "action": "ignore", "reason": "LinkedIn noise"}
+  ]
+}
+```
+
+These override the general calibration rules:
+- `always_important` senders/domains skip calibration entirely — always flag
+- `always_ignore` senders/domains skip calibration entirely — always drop
+- `patterns` are applied during classification as additional rules
+
+If the file doesn't exist or is empty, proceed with default rules only.
 
 ## Fetch
 
@@ -99,3 +127,27 @@ Alert format:
 ```
 New email from [Name]: "[Subject]" -- [preview...]
 ```
+
+## Learning from Feedback
+
+The user will react to email alerts with simple feedback: "good fit", "bad fit", "this one was spam", "you missed one from X". When this happens:
+
+1. Read `/workspace/group/email-preferences.json` (create if missing)
+2. Analyze what went wrong (or right) and decide the appropriate rule
+3. Add the entry
+4. Confirm briefly what you learned
+
+**How to generalize from feedback:**
+
+Don't just record the specific email. Figure out WHY the classification was wrong and create a rule that prevents the same class of error:
+
+| Feedback | Wrong generalization | Right generalization |
+|---|---|---|
+| "bad fit" on a LinkedIn notification | Ignore this exact email | Add `linkedin.com` to `always_ignore` |
+| "bad fit" on a GitHub PR assignment | Ignore this PR | Add pattern: "GitHub notifications are not important unless user is @mentioned in body text" |
+| "good fit" on CFP email | Do nothing | Add pattern: "subject contains CFP → important" (reinforces a non-obvious signal) |
+| "you missed one from my boss" | Add boss's exact email | Add boss's email to `always_important` AND note the domain if it's a work domain not yet recognized |
+
+Only record "good fit" feedback if it reinforces a non-obvious pattern (like CFPs being important). If the default rules already covered it, don't clutter the file.
+
+The preferences file is the skill's long-term memory. It compounds over time as the user corrects the classifier.
