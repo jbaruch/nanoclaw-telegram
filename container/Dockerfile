@@ -56,7 +56,8 @@ RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/
 RUN mkdir -p "/Users/jbaruch/Library/CloudStorage/GoogleDrive-jbaruch@sadogursky.com/My Drive" \
     && ln -s /workspace/extra/blogs    "/Users/jbaruch/Library/CloudStorage/GoogleDrive-jbaruch@sadogursky.com/My Drive/Blogs" \
     && ln -s /workspace/extra/presentations "/Users/jbaruch/Library/CloudStorage/GoogleDrive-jbaruch@sadogursky.com/My Drive/Presentations" \
-    && ln -s /workspace/extra/travel   "/Users/jbaruch/Library/CloudStorage/GoogleDrive-jbaruch@sadogursky.com/My Drive/Travel"
+    && ln -s /workspace/extra/travel   "/Users/jbaruch/Library/CloudStorage/GoogleDrive-jbaruch@sadogursky.com/My Drive/Travel" \
+    && ln -s /workspace/extra/blogs/persona /home/node/.claude/blog-writer-persona
 
 # Create entrypoint script
 # Container input (prompt, group info) is passed via stdin JSON.
