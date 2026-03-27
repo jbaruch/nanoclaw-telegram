@@ -253,6 +253,7 @@ async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   agentIdentifier?: string,
+  replyToMessageId?: string,
 ): Promise<string[]> {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -261,9 +262,15 @@ async function buildContainerArgs(
 
   // Pass Composio API key so the agent-runner can enable the Composio MCP server
   const composioEnv = readEnvFile(['COMPOSIO_API_KEY']);
-  const composioKey = process.env.COMPOSIO_API_KEY || composioEnv.COMPOSIO_API_KEY;
+  const composioKey =
+    process.env.COMPOSIO_API_KEY || composioEnv.COMPOSIO_API_KEY;
   if (composioKey) {
     args.push('-e', `COMPOSIO_API_KEY=${composioKey}`);
+  }
+
+  // Pass reply-to message ID so the first IPC send_message appears as a Telegram reply
+  if (replyToMessageId) {
+    args.push('-e', `NANOCLAW_REPLY_TO_MESSAGE_ID=${replyToMessageId}`);
   }
 
   // OneCLI gateway handles credential injection — containers never see real secrets.
@@ -329,6 +336,7 @@ export async function runContainerAgent(
     mounts,
     containerName,
     agentIdentifier,
+    input.replyToMessageId,
   );
 
   logger.debug(
