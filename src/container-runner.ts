@@ -176,6 +176,40 @@ function buildVolumeMounts(
       fs.cpSync(srcDir, dstDir, { recursive: true });
     }
   }
+
+  // Sync tile skills into the same .claude/skills/ directory.
+  // nanoclaw-core: all groups. nanoclaw-admin: main channel only.
+  const tilesDir = path.join(process.cwd(), 'tiles');
+  const tilesToSync = ['nanoclaw-core', ...(isMain ? ['nanoclaw-admin'] : [])];
+  for (const tileName of tilesToSync) {
+    const tileSkillsDir = path.join(tilesDir, tileName, 'skills');
+    if (!fs.existsSync(tileSkillsDir)) continue;
+    for (const skillDir of fs.readdirSync(tileSkillsDir)) {
+      const srcDir = path.join(tileSkillsDir, skillDir);
+      if (!fs.statSync(srcDir).isDirectory()) continue;
+      const dstDir = path.join(skillsDst, skillDir);
+      fs.cpSync(srcDir, dstDir, { recursive: true });
+    }
+  }
+
+  // Aggregate tile rules into RULES.md for the agent-runner to load.
+  const rulesContent: string[] = [];
+  for (const tileName of tilesToSync) {
+    const tileRulesDir = path.join(tilesDir, tileName, 'rules');
+    if (!fs.existsSync(tileRulesDir)) continue;
+    for (const ruleFile of fs.readdirSync(tileRulesDir)) {
+      if (!ruleFile.endsWith('.md')) continue;
+      rulesContent.push(
+        fs.readFileSync(path.join(tileRulesDir, ruleFile), 'utf8'),
+      );
+    }
+  }
+  if (rulesContent.length > 0) {
+    fs.writeFileSync(
+      path.join(groupSessionsDir, 'RULES.md'),
+      rulesContent.join('\n\n---\n\n'),
+    );
+  }
   mounts.push({
     hostPath: groupSessionsDir,
     containerPath: '/home/node/.claude',

@@ -386,6 +386,16 @@ async function runQuery(
     globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
   }
 
+  // Load tile rules (aggregated by the host into ~/.claude/RULES.md).
+  // These apply to ALL groups including main (unlike globalClaudeMd which is non-main only).
+  const rulesPath = '/home/node/.claude/RULES.md';
+  if (fs.existsSync(rulesPath)) {
+    const rules = fs.readFileSync(rulesPath, 'utf-8');
+    globalClaudeMd = globalClaudeMd
+      ? `${globalClaudeMd}\n\n${rules}`
+      : rules;
+  }
+
   // Discover additional directories mounted at /workspace/extra/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
   const extraDirs: string[] = [];

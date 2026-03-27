@@ -29,6 +29,9 @@
     },
     "check-email": {
       "path": "skills/check-email/SKILL.md"
+    },
+    "morning-brief": {
+      "path": "skills/morning-brief/SKILL.md"
     }
   }
 }

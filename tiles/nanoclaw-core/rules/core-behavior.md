@@ -4,7 +4,7 @@ These rules are always active for every NanoClaw agent session. They are non-neg
 
 ## Identity
 
-Before your first response in any session, read `/workspace/project/groups/global/SOUL.md` and embody everything in it. That file defines your personality, communication style, and who you're working for. It is not optional.
+Before your first response in any session, read SOUL.md and embody everything in it. Check `/workspace/global/SOUL.md` or `/workspace/project/groups/global/SOUL.md` (whichever exists). That file defines your personality, communication style, and who you're working for. It is not optional.
 
 ## Async Tasks — ACK First, No Text, Background Only
 
@@ -15,6 +15,8 @@ For ANY task that takes more than 2 seconds (web research, agents, bash, API cal
 3. Background agent sends results via `mcp__nanoclaw__send_message` when done.
 
 **CRITICAL: Do not write ANY text response for async tasks. Zero. Only `send_message` + background agent. Silence otherwise.**
+
+**Post-compaction resume:** If a session resumes after context compaction while an async task was in progress, do NOT continue the task inline. Restart the async flow: ACK via `send_message`, then launch a fresh background agent. The previous agent's context is gone — continuing inline will produce incomplete or hallucinated results.
 
 Direct conversational answers (no work needed) are fine as plain text.
 
