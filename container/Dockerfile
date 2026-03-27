@@ -61,9 +61,10 @@ WORKDIR /opt/tessl-staging
 RUN tessl --version 2>/dev/null || true
 RUN echo '{"name":"nanoclaw","mode":"vendored","dependencies":{}}' > tessl.json \
     && mkdir -p .claude/skills
-RUN --mount=type=secret,id=tessl_key \
+ARG TILE_VERSION=latest
+RUN --mount=type=secret,id=tessl_creds \
     mkdir -p "$HOME/.tessl" && \
-    printf '{"accessToken":"%s"}' "$(cat /run/secrets/tessl_key)" > "$HOME/.tessl/api-credentials.json" && \
+    cp /run/secrets/tessl_creds "$HOME/.tessl/api-credentials.json" && \
     tessl install jbaruch/nanoclaw-core jbaruch/nanoclaw-admin --yes --dangerously-ignore-security --agent claude-code && \
     rm -f "$HOME/.tessl/api-credentials.json" && \
     echo "Installed tiles:" && find . -name 'SKILL.md' -o -name 'RULES.md' | head -20

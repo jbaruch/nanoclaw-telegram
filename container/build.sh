@@ -13,19 +13,18 @@ CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 echo "Building NanoClaw agent container image..."
 echo "Image: ${IMAGE_NAME}:${TAG}"
 
-# Get tessl API key for installing tiles at build time.
-# Uses --mount=type=secret so the key never lands in a Docker layer.
-TESSL_KEY="${TESSL_API_KEY:-$(tessl auth token 2>/dev/null || echo '')}"
-if [ -n "$TESSL_KEY" ]; then
-  echo "Tessl API key available — tiles will be installed"
-  TESSL_SECRET_ARG="--secret id=tessl_key,env=TESSL_API_KEY"
-  export TESSL_API_KEY="$TESSL_KEY"
+# Mount tessl credentials for private tile installation at build time.
+# Uses --mount=type=secret so credentials never land in a Docker layer.
+TESSL_CREDS="$HOME/.tessl/api-credentials.json"
+if [ -f "$TESSL_CREDS" ]; then
+  echo "Tessl credentials available — tiles will be installed"
+  TESSL_SECRET_ARG="--secret id=tessl_creds,src=$TESSL_CREDS"
 else
-  echo "Warning: No tessl API key — tiles will not be installed"
+  echo "Warning: No tessl credentials — tiles will not be installed"
   TESSL_SECRET_ARG=""
 fi
 
-${CONTAINER_RUNTIME} build ${TESSL_SECRET_ARG} -t "${IMAGE_NAME}:${TAG}" .
+${CONTAINER_RUNTIME} build ${TESSL_SECRET_ARG} --build-arg "TILE_VERSION=$(date +%s)" -t "${IMAGE_NAME}:${TAG}" .
 
 echo ""
 echo "Build complete!"
