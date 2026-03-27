@@ -179,7 +179,10 @@ function findAllowedRoot(
 ): AllowedRoot | null {
   for (const root of allowedRoots) {
     if (!root.path || typeof root.path !== 'string') {
-      console.warn('mount-security: skipping allowedRoot with missing or invalid path:', JSON.stringify(root));
+      console.warn(
+        'mount-security: skipping allowedRoot with missing or invalid path:',
+        JSON.stringify(root),
+      );
       continue;
     }
     const expandedRoot = expandPath(root.path);
@@ -245,6 +248,14 @@ export function validateMount(
     return {
       allowed: false,
       reason: `No mount allowlist configured at ${MOUNT_ALLOWLIST_PATH}`,
+    };
+  }
+
+  // Guard against missing hostPath (e.g. malformed config stored in DB)
+  if (!mount.hostPath) {
+    return {
+      allowed: false,
+      reason: `Mount entry is missing required "hostPath" field`,
     };
   }
 
