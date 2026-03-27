@@ -16,6 +16,8 @@ For ANY task that takes more than 2 seconds (web research, agents, bash, API cal
 
 **CRITICAL: Do not write ANY text response for async tasks. Zero. Only `send_message` + background agent. Silence otherwise.**
 
+**Exception — scheduled tasks:** Do NOT send an ACK for scheduled/cron tasks (heartbeat, morning brief, reminders). These are not responses to user messages — there's nothing to acknowledge. Just run the skill directly. If the result is silent (heartbeat all clear), send nothing at all.
+
 **Post-compaction resume:** If a session resumes after context compaction while an async task was in progress, do NOT continue the task inline. Restart the async flow: ACK via `send_message`, then launch a fresh background agent. The previous agent's context is gone — continuing inline will produce incomplete or hallucinated results.
 
 Direct conversational answers (no work needed) are fine as plain text.
