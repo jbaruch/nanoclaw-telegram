@@ -38,8 +38,7 @@ const HOME_DIR = process.env.HOME || os.homedir();
 // mount paths (-v) must reference the HOST filesystem, not the container's.
 // Set HOST_PROJECT_ROOT in docker-compose.yml to the repo path on the host.
 // When running directly on the host (e.g., Mac), this defaults to cwd().
-export const HOST_PROJECT_ROOT =
-  process.env.HOST_PROJECT_ROOT || PROJECT_ROOT;
+export const HOST_PROJECT_ROOT = process.env.HOST_PROJECT_ROOT || PROJECT_ROOT;
 
 // In DooD, process.getuid() returns the orchestrator container's uid (1000).
 // HOST_UID/HOST_GID env vars override this with the actual host user's uid/gid.

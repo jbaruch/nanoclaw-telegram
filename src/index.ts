@@ -162,7 +162,6 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     }
   }
 
-
   logger.info(
     { jid, name: group.name, folder: group.folder },
     'Group registered',
@@ -509,13 +508,16 @@ async function startMessageLoop(): Promise<void> {
             allPending.length > 0 ? allPending : groupMessages;
           const formatted = formatMessages(messagesToSend, TIMEZONE);
 
-          const lastMsgId =
-            messagesToSend[messagesToSend.length - 1]?.id;
+          const lastMsgId = messagesToSend[messagesToSend.length - 1]?.id;
           if (queue.sendMessage(chatJid, formatted, lastMsgId)) {
             // Update shared reply-to so the output callback quotes this message
             pendingReplyTo[chatJid] = lastMsgId;
             logger.debug(
-              { chatJid, count: messagesToSend.length, replyToMessageId: lastMsgId },
+              {
+                chatJid,
+                count: messagesToSend.length,
+                replyToMessageId: lastMsgId,
+              },
               'Piped messages to active container',
             );
             lastAgentTimestamp[chatJid] =

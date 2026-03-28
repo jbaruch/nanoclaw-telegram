@@ -37,7 +37,20 @@ cd .. && docker compose restart  # restart orchestrator to use new image
 1. Add tile name to `container/Dockerfile` in the `tessl install` line
 2. If the tile needs env vars, add them to `FORWARDED_ENV_VARS` in `src/container-runner.ts`
 3. Add env var values to `.env` on the NAS
-4. Push, pull on NAS, rebuild agent image, restart orchestrator
+4. Push, pull on NAS, rebuild agent image, restart orchestrator:
+   ```bash
+   ssh 192.168.10.32
+   cd ~/nanoclaw && git pull
+   cd container && ./build.sh
+   cd .. && docker compose restart
+   ```
+
+**Known issues with tessl tiles in Docker:**
+- Tessl creates skills as **symlinks** to vendored tiles in `.tessl/tiles/`. The entrypoint uses `cp -rL` to dereference them when copying to the bind-mounted `.claude/skills/`.
+- Tessl sets tile directories to **700 permissions**. The Dockerfile runs `chmod -R a+rX /opt/tessl-staging` to make them readable by any UID (needed because agent containers run as HOST_UID, not the image's node user).
+- If a tile appears missing after rebuild, check for **stale broken symlinks** in `data/sessions/telegram_swarm/.claude/skills/`. Delete them: `find data/sessions/telegram_swarm/.claude/skills/ -type l -delete`
+- Tessl requires **BuildKit** for secret mounts. buildx is installed on the NAS at `~/.docker/cli-plugins/docker-buildx`.
+- Tessl credentials at `~/.tessl/api-credentials.json` are mounted as a Docker secret during build — never baked into the image layer.
 
 ### Add env vars for agent containers
 
