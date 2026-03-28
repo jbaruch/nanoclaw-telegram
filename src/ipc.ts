@@ -92,6 +92,19 @@ export function startIpcWatcher(deps: IpcDeps): void {
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               if (data.type === 'message' && data.chatJid && data.text) {
+                // Strip <internal> tags — if nothing remains, skip silently
+                const cleanText = data.text
+                  .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+                  .trim();
+                if (!cleanText) {
+                  logger.debug(
+                    { sourceGroup },
+                    'IPC message suppressed (all internal)',
+                  );
+                  fs.unlinkSync(filePath);
+                  continue;
+                }
+
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
                 if (
@@ -101,14 +114,14 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   if (data.sender && data.chatJid.startsWith('tg:')) {
                     await sendPoolMessage(
                       data.chatJid,
-                      data.text,
+                      cleanText,
                       data.sender,
                       sourceGroup,
                     );
                   } else {
                     await deps.sendMessage(
                       data.chatJid,
-                      data.text,
+                      cleanText,
                       data.replyToMessageId,
                     );
                   }
@@ -118,7 +131,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     chat_jid: data.chatJid,
                     sender: data.sender || ASSISTANT_NAME,
                     sender_name: data.sender || ASSISTANT_NAME,
-                    content: data.text,
+                    content: cleanText,
                     timestamp: new Date().toISOString(),
                     is_from_me: true,
                     is_bot_message: true,
