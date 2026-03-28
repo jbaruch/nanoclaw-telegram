@@ -5,7 +5,8 @@ import { Api, Bot } from 'grammy';
 import OpenAI from 'openai';
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
-import { getMessageById } from '../db.js';
+import { createDraftStream, DraftStream } from '../draft-stream.js';
+import { getLatestMessage, getMessageById, storeReaction } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -48,6 +49,68 @@ async function sendTelegramMessage(
   }
 }
 
+const MAX_LENGTH = 4096;
+
+/**
+ * Split text into chunks that respect content boundaries.
+ * Priority: code block boundaries > double newline (paragraph) > single newline > space > hard cut.
+ */
+export function splitMessage(text: string): string[] {
+  if (text.length <= MAX_LENGTH) return [text];
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > MAX_LENGTH) {
+    let splitAt = -1;
+
+    // 1. Try to split at a code block boundary (``` on its own line)
+    const codeBlockPattern = /\n```\n/g;
+    let match;
+    while ((match = codeBlockPattern.exec(remaining)) !== null) {
+      const pos = match.index + match[0].length;
+      if (pos <= MAX_LENGTH && pos > splitAt) {
+        splitAt = pos;
+      }
+    }
+
+    // 2. Try to split at a paragraph boundary (double newline)
+    if (splitAt === -1) {
+      const lastParagraph = remaining.lastIndexOf('\n\n', MAX_LENGTH);
+      if (lastParagraph > MAX_LENGTH * 0.3) {
+        splitAt = lastParagraph + 2;
+      }
+    }
+
+    // 3. Try to split at a single newline
+    if (splitAt === -1) {
+      const lastNewline = remaining.lastIndexOf('\n', MAX_LENGTH);
+      if (lastNewline > MAX_LENGTH * 0.3) {
+        splitAt = lastNewline + 1;
+      }
+    }
+
+    // 4. Try to split at a space
+    if (splitAt === -1) {
+      const lastSpace = remaining.lastIndexOf(' ', MAX_LENGTH);
+      if (lastSpace > MAX_LENGTH * 0.3) {
+        splitAt = lastSpace + 1;
+      }
+    }
+
+    // 5. Hard cut (last resort)
+    if (splitAt === -1) {
+      splitAt = MAX_LENGTH;
+    }
+
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt);
+  }
+
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+
 /**
  * Truncate a string to a maximum length, appending "..." if truncated.
  */
@@ -62,7 +125,12 @@ function truncate(s: string, max = 120): string {
  * whose DB id doesn't match Telegram message_id).
  */
 function resolveReply(
-  replyMsg: { message_id: number; text?: string; caption?: string; from?: { first_name?: string } },
+  replyMsg: {
+    message_id: number;
+    text?: string;
+    caption?: string;
+    from?: { first_name?: string };
+  },
   chatJid: string,
 ): string {
   // Try DB lookup first
@@ -274,20 +342,12 @@ export async function sendPoolMessage(
   const api = poolApis[idx];
   try {
     const numericId = chatId.replace(/^tg:/, '');
-    const MAX_LENGTH = 4096;
-    if (text.length <= MAX_LENGTH) {
-      await sendTelegramMessage(api, numericId, text);
-    } else {
-      for (let i = 0; i < text.length; i += MAX_LENGTH) {
-        await sendTelegramMessage(
-          api,
-          numericId,
-          text.slice(i, i + MAX_LENGTH),
-        );
-      }
+    const chunks = splitMessage(text);
+    for (const chunk of chunks) {
+      await sendTelegramMessage(api, numericId, chunk);
     }
     logger.info(
-      { chatId, sender, poolIndex: idx, length: text.length },
+      { chatId, sender, poolIndex: idx, length: text.length, chunks: chunks.length },
       'Pool message sent',
     );
   } catch (err) {
@@ -634,6 +694,36 @@ export class TelegramChannel implements Channel {
     this.bot.on('message:location', (ctx) => storeNonText(ctx, '[Location]'));
     this.bot.on('message:contact', (ctx) => storeNonText(ctx, '[Contact]'));
 
+    // Handle emoji reactions
+    this.bot.on('message_reaction', (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const update = ctx.messageReaction;
+      const reactorId = update.user?.id?.toString() || '';
+      const reactorName =
+        update.user?.first_name || update.user?.username || 'Unknown';
+      const timestamp = new Date(update.date * 1000).toISOString();
+
+      for (const reaction of update.new_reaction || []) {
+        if (reaction.type === 'emoji') {
+          storeReaction({
+            message_id: update.message_id.toString(),
+            message_chat_jid: chatJid,
+            reactor_jid: `${reactorId}@telegram`,
+            reactor_name: reactorName,
+            emoji: reaction.emoji,
+            timestamp,
+          });
+          logger.info(
+            { chatJid, reactorName, emoji: reaction.emoji },
+            'Telegram reaction stored',
+          );
+        }
+      }
+    });
+
     // Handle errors gracefully
     this.bot.catch((err) => {
       logger.error({ err: err.message }, 'Telegram bot error');
@@ -680,24 +770,19 @@ export class TelegramChannel implements Channel {
         };
       }
 
-      // Telegram has a 4096 character limit per message — split if needed
-      const MAX_LENGTH = 4096;
-      if (text.length <= MAX_LENGTH) {
-        await sendTelegramMessage(this.bot.api, numericId, text, options);
-      } else {
-        for (let i = 0; i < text.length; i += MAX_LENGTH) {
-          // Only reply on the first chunk
-          const chunkOptions = i === 0 ? options : {};
-          await sendTelegramMessage(
-            this.bot.api,
-            numericId,
-            text.slice(i, i + MAX_LENGTH),
-            chunkOptions,
-          );
-        }
+      // Split respecting content boundaries (code blocks, paragraphs, etc.)
+      const chunks = splitMessage(text);
+      for (let i = 0; i < chunks.length; i++) {
+        const chunkOptions = i === 0 ? options : {};
+        await sendTelegramMessage(
+          this.bot.api,
+          numericId,
+          chunks[i],
+          chunkOptions,
+        );
       }
       logger.info(
-        { jid, length: text.length, replyToMessageId },
+        { jid, length: text.length, replyToMessageId, chunks: chunks.length },
         'Telegram message sent',
       );
     } catch (err) {
@@ -729,6 +814,57 @@ export class TelegramChannel implements Channel {
     } catch (err) {
       logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
     }
+  }
+
+  async sendReaction(
+    jid: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<void> {
+    if (!this.bot) return;
+    const numericId = jid.replace(/^tg:/, '');
+    const msgId = parseInt(messageId, 10);
+    try {
+      await this.bot.api.raw.setMessageReaction({
+        chat_id: numericId,
+        message_id: msgId,
+        reaction: emoji ? [{ type: 'emoji', emoji: emoji as any }] : [],
+      });
+      logger.info({ jid, messageId, emoji }, 'Telegram reaction sent');
+    } catch (err) {
+      logger.error(
+        { jid, messageId, emoji, err },
+        'Failed to send Telegram reaction',
+      );
+    }
+  }
+
+  async reactToLatestMessage(jid: string, emoji: string): Promise<void> {
+    const latest = getLatestMessage(jid);
+    if (!latest) {
+      logger.warn({ jid }, 'No messages found to react to');
+      return;
+    }
+    await this.sendReaction(jid, latest.id, emoji);
+  }
+
+  createDraftStream(jid: string): DraftStream {
+    const numericId = jid.replace(/^tg:/, '');
+    return createDraftStream({
+      sendMessage: async (text) => {
+        const msg = await this.bot!.api.sendMessage(numericId, text);
+        return msg.message_id;
+      },
+      editMessage: async (messageId, text) => {
+        await this.bot!.api.editMessageText(numericId, messageId, text);
+      },
+      deleteMessage: async (messageId) => {
+        await this.bot!.api.deleteMessage(numericId, messageId);
+      },
+      throttleMs: 1000,
+      maxLength: 4096,
+      minInitialChars: 30,
+    });
   }
 }
 

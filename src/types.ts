@@ -96,6 +96,12 @@ export interface Channel {
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
+  // Optional: send an emoji reaction to a message.
+  sendReaction?(jid: string, messageId: string, emoji: string): Promise<void>;
+  // Optional: react to the most recent message in a chat.
+  reactToLatestMessage?(jid: string, emoji: string): Promise<void>;
+  // Optional: create a draft stream for progressive message display.
+  createDraftStream?(jid: string): import('./draft-stream.js').DraftStream;
 }
 
 // Callback type that channels use to deliver inbound messages

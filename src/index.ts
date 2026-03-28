@@ -263,6 +263,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
+  // Progressive streaming: show live preview on edit-capable channels
+  const draftStream = channel.createDraftStream?.(chatJid);
+
   // Track which message triggered the response — first reply quotes it.
   // Uses shared pendingReplyTo map so follow-up messages piped via
   // queue.sendMessage() can update the reply target for the output callback.
@@ -281,6 +284,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     prompt,
     chatJid,
     async (result) => {
+      // Streaming preview — update draft with accumulated text
+      if (result.streamText && draftStream) {
+        const previewText = result.streamText
+          .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+          .trim();
+        if (previewText) draftStream.update(previewText);
+      }
+
       // Streaming output callback — called for each agent result
       if (result.result) {
         const raw =
@@ -291,8 +302,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
         logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
         if (text) {
-          const replyId = pendingReplyTo[chatJid];
-          await channel.sendMessage(chatJid, text, replyId);
+          if (draftStream) {
+            const ok = await draftStream.finish(text);
+            if (!ok) {
+              // Text exceeded maxLength — fall back to regular send
+              const replyId = pendingReplyTo[chatJid];
+              await channel.sendMessage(chatJid, text, replyId);
+            }
+          } else {
+            const replyId = pendingReplyTo[chatJid];
+            await channel.sendMessage(chatJid, text, replyId);
+          }
           // Store bot response in DB so heartbeat can track answered messages
           storeMessage({
             id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -326,6 +346,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
+
+  // Clean up draft stream if agent produced no output
+  if (!outputSentToUser && draftStream) {
+    await draftStream.cancel();
+  }
 
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
@@ -745,6 +770,15 @@ async function main(): Promise<void> {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text, replyToMessageId);
+    },
+    sendReaction: async (jid, messageId, emoji) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) return;
+      if (messageId) {
+        await channel.sendReaction?.(jid, messageId, emoji);
+      } else {
+        await channel.reactToLatestMessage?.(jid, emoji);
+      }
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

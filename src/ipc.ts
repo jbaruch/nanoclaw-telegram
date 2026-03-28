@@ -23,6 +23,11 @@ import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
+  sendReaction?: (
+    jid: string,
+    messageId: string | undefined,
+    emoji: string,
+  ) => Promise<void>;
   sendMessage: (
     jid: string,
     text: string,
@@ -105,7 +110,37 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 continue;
               }
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'message' && data.chatJid && data.text) {
+              if (
+                data.type === 'react_to_message' &&
+                data.chatJid &&
+                data.emoji &&
+                deps.sendReaction
+              ) {
+                const targetGroup = registeredGroups[data.chatJid];
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
+                  await deps.sendReaction(
+                    data.chatJid,
+                    data.messageId || undefined,
+                    data.emoji,
+                  );
+                  logger.info(
+                    {
+                      chatJid: data.chatJid,
+                      emoji: data.emoji,
+                      sourceGroup,
+                    },
+                    'IPC reaction sent',
+                  );
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC reaction attempt blocked',
+                  );
+                }
+              } else if (data.type === 'message' && data.chatJid && data.text) {
                 // Strip <internal> tags — if nothing remains, skip silently
                 const cleanText = data.text
                   .replace(/<internal>[\s\S]*?<\/internal>/g, '')

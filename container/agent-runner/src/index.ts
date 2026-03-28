@@ -37,6 +37,7 @@ interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  streamText?: string;
 }
 
 interface SessionEntry {
@@ -379,6 +380,11 @@ async function runQuery(
   let messageCount = 0;
   let resultCount = 0;
 
+  // Streaming preview: accumulate assistant text and emit throttled
+  let streamingTextAccum = '';
+  let lastStreamEmit = 0;
+  const STREAM_THROTTLE_MS = 300;
+
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
   let globalClaudeMd: string | undefined;
@@ -480,6 +486,22 @@ async function runQuery(
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
+      // Extract text content for streaming preview
+      const content = (message as { message?: { content?: Array<{ type: string; text?: string }> } }).message?.content;
+      if (content) {
+        const text = content
+          .filter((c) => c.type === 'text' && c.text)
+          .map((c) => c.text!)
+          .join('');
+        if (text) {
+          streamingTextAccum = text;
+          const now = Date.now();
+          if (now - lastStreamEmit >= STREAM_THROTTLE_MS) {
+            writeOutput({ status: 'success', result: null, streamText: streamingTextAccum, newSessionId });
+            lastStreamEmit = now;
+          }
+        }
+      }
     }
 
     if (message.type === 'system' && message.subtype === 'init') {
