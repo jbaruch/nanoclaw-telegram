@@ -1,6 +1,6 @@
 ---
 name: nightly-housekeeping
-description: Nightly maintenance tasks. Runs at 3am daily. Executes async background jobs that shouldn't run during the day — syncs, cleanups, and batch operations. Reports only failures or notable findings.
+description: Nightly maintenance automation skill that syncs TripIt calendar data to Reclaim, detects overlapping trips, and applies timezone corrections. Reports only failures or notable findings via Telegram; silence means success. Use when scheduled nightly maintenance is triggered, when the user requests a manual nightly run, or when overnight batch jobs, cron tasks, or a maintenance window should be executed.
 ---
 
 # Nightly Housekeeping
@@ -19,6 +19,8 @@ Report if:
 - Fatal error (report with context)
 
 Silence if no changes.
+
+**Error recovery:** If the skill invocation fails or times out, retry once. If it fails again, report the error via mcp__nanoclaw__send_message with the task name and any available error context, then continue to the next task.
 
 ---
 
