@@ -101,6 +101,17 @@ function buildVolumeMounts(
     });
   }
 
+  // Store directory (messages.db) — read-only access for all groups.
+  // Needed for heartbeat checks (unanswered messages, stuck tasks, DB size).
+  const storeDir = path.join(process.cwd(), 'store');
+  if (fs.existsSync(storeDir)) {
+    mounts.push({
+      hostPath: toHostPath(storeDir),
+      containerPath: '/workspace/store',
+      readonly: true,
+    });
+  }
+
   // Per-group Claude sessions directory (isolated from other groups)
   const groupSessionsDir = path.join(
     DATA_DIR,

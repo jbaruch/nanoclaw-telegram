@@ -13,10 +13,12 @@ You are running as a periodic health check. Invoke each sub-check skill below, c
 
 Invoke each of the following as skill calls and collect their results.
 
-1. **Calendar changes** (`/check-calendar`) — detect changed events and reschedule reminders
-2. **Email triage** (`/check-email`) — fetch and classify new emails with source calibration
+1. **System health** (`/check-system-health`) — stuck tasks, DB size, task failures (DB at /workspace/store/messages.db)
+2. **Unanswered messages** (`/check-unanswered`) — find and triage unanswered messages
+3. **Calendar changes** (`/check-calendar`) — detect changed events and reschedule reminders
+4. **Email triage** (`/check-email`) — fetch and classify new emails with source calibration
 
-Note: Unanswered message detection is handled by the external heartbeat on the host (which has direct DB access). The `/check-unanswered` skill is for triage only — invoke it manually when needed, not as part of the periodic heartbeat.
+Note: Host-level checks (Docker containers, disk space, orphaned containers) remain in the external heartbeat script.
 
 ## Sub-check error handling
 

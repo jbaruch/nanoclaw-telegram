@@ -1,15 +1,49 @@
 ---
 name: check-unanswered
-description: Triage unanswered messages detected by the external heartbeat. Expired requests get a brief acknowledgement, actionable ones get processed immediately, unclear ones get reported. Triggers on "check unanswered", "missed messages", "unreplied messages".
+description: Find and triage unanswered messages. Queries messages.db directly, then triages each — expired requests get acknowledged, actionable ones get processed, unclear ones get reported. Use as part of heartbeat or standalone. Triggers on "check unanswered", "missed messages", "unreplied messages".
 ---
 
 # Check Unanswered Messages
 
-Detection of unanswered messages is handled by the external heartbeat script on the host (it has direct access to messages.db). This skill handles triage when the heartbeat reports unanswered messages.
+## Detection
 
-## When invoked by heartbeat
+```bash
+python3 -c "
+import sqlite3, sys, os
+db_path = '/workspace/store/messages.db'
+if not os.path.exists(db_path):
+    print('ERROR: messages.db not found at ' + db_path)
+    sys.exit(1)
+try:
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute('''
+      SELECT m.id, m.chat_jid, m.sender_name, substr(m.content, 1, 80), m.timestamp
+      FROM messages m
+      WHERE m.is_from_me = 0
+        AND m.is_bot_message = 0
+        AND m.timestamp <= datetime('now', '-5 minutes')
+        AND m.timestamp >= datetime('now', '-24 hours')
+        AND NOT EXISTS (
+          SELECT 1 FROM messages r
+          WHERE r.chat_jid = m.chat_jid
+            AND r.timestamp > m.timestamp
+            AND r.is_bot_message = 1
+        )
+      ORDER BY m.timestamp DESC
+      LIMIT 10
+    ''').fetchall()
+    for r in rows: print(r)
+    print(f'total={len(rows)}')
+    conn.close()
+except sqlite3.Error as e:
+    print('ERROR: DB query failed: ' + str(e))
+    sys.exit(1)
+"
+```
 
-The heartbeat orchestrator calls this skill when `/check-unanswered` detects issues. Since the agent cannot access messages.db directly, check the conversation context and recent `send_message` history to identify what was missed.
+**If the script exits with an error:** report the failure and stop.
+
+**If total = 0:** all clear, return nothing.
 
 ## Triage
 
@@ -19,7 +53,7 @@ For each unanswered message, evaluate the content and decide:
 
 The request was time-sensitive and the window has passed (e.g., "what's my next meeting?" and the meeting already ended; "remind me in 5 minutes" from 20 min ago).
 
-**Action:** Send a brief note acknowledging you missed it and what the answer would have been. After sending, verify the acknowledgement was delivered via `mcp__nanoclaw__send_message`.
+**Action:** Send a brief note acknowledging you missed it and what the answer would have been.
 
 ### 2. Still actionable
 
