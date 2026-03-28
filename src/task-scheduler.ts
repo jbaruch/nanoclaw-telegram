@@ -187,8 +187,13 @@ async function runTask(
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
-          // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          // Strip <internal> tags — suppress entirely if nothing remains
+          const cleanResult = streamedOutput.result
+            .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+            .trim();
+          if (cleanResult) {
+            await deps.sendMessage(task.chat_jid, cleanResult);
+          }
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {
