@@ -12,7 +12,7 @@ chmod -R a-w /tmp/dist
 if [ -d /opt/tessl-staging/.claude/skills ]; then
   mkdir -p /home/node/.claude/skills
   find /home/node/.claude/skills -maxdepth 1 -type l ! -exec test -e {} \; -delete 2>/dev/null || true
-  cp -rLn /opt/tessl-staging/.claude/skills/* /home/node/.claude/skills/ 2>/dev/null || true
+  cp -rL /opt/tessl-staging/.claude/skills/* /home/node/.claude/skills/ 2>/dev/null || true
 fi
 
 # Copy tessl tile data (rules, docs) for reference
