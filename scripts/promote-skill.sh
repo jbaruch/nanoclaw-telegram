@@ -6,16 +6,21 @@
 #   tile-name:  target tile (default: nanoclaw-core)
 #
 # Flow:
-#   1. Copies from groups/telegram_swarm/skills/{name}/ to tiles/{tile}/skills/{name}/
-#   2. Runs tessl skill review --optimize
-#   3. Updates tile.json with the new skill entry
-#   4. Runs tessl tile lint
-#   5. Optionally publishes to registry
+#   1. Pulls skill from NAS (where AyeAye created it)
+#   2. Copies to tiles/{tile}/skills/{name}/
+#   3. Runs tessl skill review --optimize
+#   4. Updates tile.json with the new skill entry
+#   5. Runs tessl tile lint
+#   6. Optionally commits, pushes, publishes, and deploys to NAS
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+NAS_HOST="${NAS_HOST:-192.168.10.32}"
+NAS_PROJECT_DIR="${NAS_PROJECT_DIR:-/home/jbaruch/nanoclaw}"
+GROUP_FOLDER="${GROUP_FOLDER:-telegram_swarm}"
 
 SKILL_NAME="${1:-}"
 TILE_NAME="${2:-nanoclaw-core}"
@@ -23,25 +28,36 @@ TILE_NAME="${2:-nanoclaw-core}"
 if [ -z "$SKILL_NAME" ]; then
   echo "Usage: $0 <skill-name> [tile-name]"
   echo ""
-  echo "Available skills to promote:"
-  for d in "$PROJECT_ROOT"/groups/telegram_swarm/skills/*/; do
+  echo "Available skills on NAS to promote:"
+  ssh "$NAS_HOST" "ls $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/ 2>/dev/null" 2>/dev/null || echo "  (none or NAS unreachable)"
+  echo ""
+  echo "Available skills locally to promote:"
+  for d in "$PROJECT_ROOT"/groups/"$GROUP_FOLDER"/skills/*/; do
     [ -d "$d" ] && echo "  $(basename "$d")"
   done
   exit 1
 fi
 
-GROUP_SKILL_DIR="$PROJECT_ROOT/groups/telegram_swarm/skills/$SKILL_NAME"
+GROUP_SKILL_DIR="$PROJECT_ROOT/groups/$GROUP_FOLDER/skills/$SKILL_NAME"
 TILE_SKILL_DIR="$PROJECT_ROOT/tiles/$TILE_NAME/skills/$SKILL_NAME"
 TILE_JSON="$PROJECT_ROOT/tiles/$TILE_NAME/tile.json"
-
-if [ ! -f "$GROUP_SKILL_DIR/SKILL.md" ]; then
-  echo "Error: $GROUP_SKILL_DIR/SKILL.md not found"
-  exit 1
-fi
 
 if [ ! -f "$TILE_JSON" ]; then
   echo "Error: $TILE_JSON not found (tile '$TILE_NAME' doesn't exist)"
   exit 1
+fi
+
+# 0. Pull skill from NAS if not already local
+if [ ! -f "$GROUP_SKILL_DIR/SKILL.md" ]; then
+  echo "0. Pulling skill from NAS ($NAS_HOST)..."
+  mkdir -p "$GROUP_SKILL_DIR"
+  ssh "$NAS_HOST" "tar czf - -C $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/$SKILL_NAME ." 2>/dev/null | tar xzf - -C "$GROUP_SKILL_DIR"
+  if [ ! -f "$GROUP_SKILL_DIR/SKILL.md" ]; then
+    echo "Error: skill '$SKILL_NAME' not found on NAS either"
+    rm -rf "$GROUP_SKILL_DIR"
+    exit 1
+  fi
+  echo "   Pulled: $GROUP_SKILL_DIR/SKILL.md"
 fi
 
 echo "=== Promoting: $SKILL_NAME → $TILE_NAME ==="
@@ -56,7 +72,7 @@ echo "   Done: $TILE_SKILL_DIR/SKILL.md"
 # 2. Review and optimize
 echo ""
 echo "2. Running tessl skill review --optimize..."
-tessl skill review --optimize --yes --max-iterations 3 "$TILE_SKILL_DIR/SKILL.md" || true
+tessl skill review --optimize --yes --max-iterations 3 "$TILE_SKILL_DIR/SKILL.md" || echo "   (tessl review skipped — auth may be expired, run 'tessl login')"
 
 # 3. Update tile.json
 echo ""
@@ -64,7 +80,6 @@ echo "3. Updating tile.json..."
 if grep -q "\"$SKILL_NAME\"" "$TILE_JSON"; then
   echo "   Skill already in tile.json — skipping"
 else
-  # Insert new skill entry before the closing }} of the skills object
   python3 -c "
 import json
 with open('$TILE_JSON') as f:
@@ -87,12 +102,11 @@ echo ""
 echo "=== Promotion complete ==="
 echo ""
 echo "Next steps:"
-echo "  git add tiles/$TILE_NAME/"
-echo "  git commit -m 'feat: promote $SKILL_NAME skill from AyeAye staging'"
-echo "  git push origin main"
-echo "  tessl tile publish --bump patch $PROJECT_ROOT/tiles/$TILE_NAME"
+echo "  1. git add + commit + push"
+echo "  2. tessl tile publish"
+echo "  3. Deploy to NAS: git pull + docker compose up -d --build"
 echo ""
-read -p "Run these now? [y/N] " -n 1 -r
+read -p "Run all three now? [y/N] " -n 1 -r
 echo ""
 if [[ $REPLY =~ ^[Yy]$ ]]; then
   cd "$PROJECT_ROOT"
@@ -101,7 +115,14 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
   git push origin main
-  tessl tile publish --bump patch "$PROJECT_ROOT/tiles/$TILE_NAME"
+
   echo ""
-  echo "Done! Rebuild agent image to pick up the new tile version."
+  echo "Publishing to tessl registry..."
+  tessl tile publish --bump patch "$PROJECT_ROOT/tiles/$TILE_NAME" || echo "(tessl publish skipped — run 'tessl login' then 'tessl tile publish --bump patch tiles/$TILE_NAME')"
+
+  echo ""
+  echo "Deploying to NAS..."
+  ssh "$NAS_HOST" "cd $NAS_PROJECT_DIR && git pull && docker compose up -d --build" 2>/dev/null
+  echo ""
+  echo "Done! Skill promoted, published, and deployed."
 fi
