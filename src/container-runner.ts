@@ -146,6 +146,10 @@ function buildVolumeMounts(
   // - AyeAye-created skills (staging area) are synced here from the group folder.
   //   They override image skills if names collide (AyeAye's version wins).
   const skillsDst = path.join(groupSessionsDir, 'skills');
+  // Clear stale skills — deleted source skills would persist indefinitely
+  if (fs.existsSync(skillsDst)) {
+    fs.rmSync(skillsDst, { recursive: true, force: true });
+  }
   fs.mkdirSync(skillsDst, { recursive: true });
 
   // Sync AyeAye-created skills from the group's skills/ directory.

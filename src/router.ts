@@ -1,5 +1,8 @@
 import { Channel, NewMessage } from './types.js';
 import { formatLocalTime } from './timezone.js';
+import { logger } from './logger.js';
+
+const MAX_OUTBOUND_LENGTH = 50_000;
 
 export function escapeXml(s: string): string {
   if (!s) return '';
@@ -30,8 +33,15 @@ export function stripInternalTags(text: string): string {
 }
 
 export function formatOutbound(rawText: string): string {
-  const text = stripInternalTags(rawText);
+  let text = stripInternalTags(rawText);
   if (!text) return '';
+  if (text.length > MAX_OUTBOUND_LENGTH) {
+    logger.warn(
+      { originalLength: text.length },
+      'Truncating oversized outbound message',
+    );
+    text = text.slice(0, MAX_OUTBOUND_LENGTH) + '\n\n[Message truncated]';
+  }
   return text;
 }
 
