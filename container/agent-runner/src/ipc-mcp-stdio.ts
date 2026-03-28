@@ -94,10 +94,10 @@ server.tool(
 
 server.tool(
   'react_to_message',
-  'React to a message with an emoji. Use to acknowledge, approve, or express sentiment without sending a full text reply.',
+  'React to a message with an emoji. Use to acknowledge, approve, or express sentiment without sending a full text reply. Invalid emoji falls back to 👍.',
   {
     messageId: z.string().optional().describe('Message ID to react to. If omitted, reacts to the most recent message.'),
-    emoji: z.string().describe('The emoji to react with (e.g., "👍", "🔥", "✅", "❤️")'),
+    emoji: z.string().describe('Telegram reaction emoji. Use: 👍 👎 ❤ 🔥 🎉 🤔 🤯 👏 😁 😢 🤩 🙏 👌 ✅. Other emoji will fall back to 👍.'),
   },
   async (args) => {
     const data: Record<string, string | undefined> = {

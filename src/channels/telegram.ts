@@ -51,6 +51,17 @@ async function sendTelegramMessage(
 
 const MAX_LENGTH = 4096;
 
+// Telegram's allowed reaction emoji (as of Bot API 7.x)
+const TELEGRAM_ALLOWED_REACTIONS = new Set([
+  '👍', '👎', '❤', '🔥', '🥰', '👏', '😁', '🤔', '🤯', '😱', '🤬', '😢',
+  '🎉', '🤩', '🤮', '💩', '🙏', '👌', '🕊', '🤡', '🥱', '🥴', '😍', '🐳',
+  '❤‍🔥', '🌚', '🌭', '💯', '🤣', '⚡', '🍌', '🏆', '💔', '🤨', '😐', '🍓',
+  '🍾', '💋', '🖕', '😈', '😴', '😭', '🤓', '👻', '👨‍💻', '👀', '🎃', '🙈',
+  '😇', '😨', '🤝', '✍', '🤗', '🫡', '🎅', '🎄', '☃', '💅', '🤪', '🗿',
+  '🆒', '💘', '🙉', '🦄', '😘', '💊', '🙊', '😎', '👾', '🤷‍♂', '🤷',
+  '🤷‍♀', '😡', '🌈', '🔥', '✅', '❌',
+]);
+
 /**
  * Split text into chunks that respect content boundaries.
  * Priority: code block boundaries > double newline (paragraph) > single newline > space > hard cut.
@@ -830,11 +841,21 @@ export class TelegramChannel implements Channel {
     if (!this.bot) return;
     const numericId = jid.replace(/^tg:/, '');
     const msgId = parseInt(messageId, 10);
+    // Telegram only allows specific emoji as reactions
+    const validEmoji = TELEGRAM_ALLOWED_REACTIONS.has(emoji)
+      ? emoji
+      : '👍';
+    if (validEmoji !== emoji) {
+      logger.warn(
+        { jid, messageId, requested: emoji, using: validEmoji },
+        'Invalid Telegram reaction emoji, falling back to 👍',
+      );
+    }
     try {
       await this.bot.api.raw.setMessageReaction({
         chat_id: numericId,
         message_id: msgId,
-        reaction: emoji ? [{ type: 'emoji', emoji: emoji as any }] : [],
+        reaction: [{ type: 'emoji', emoji: validEmoji as any }],
       });
       // Store outbound reaction so unanswered-message checks see it
       storeReaction({
@@ -842,13 +863,13 @@ export class TelegramChannel implements Channel {
         message_chat_jid: jid,
         reactor_jid: 'bot@telegram',
         reactor_name: ASSISTANT_NAME,
-        emoji,
+        emoji: validEmoji,
         timestamp: new Date().toISOString(),
       });
-      logger.info({ jid, messageId, emoji }, 'Telegram reaction sent');
+      logger.info({ jid, messageId, emoji: validEmoji }, 'Telegram reaction sent');
     } catch (err) {
       logger.error(
-        { jid, messageId, emoji, err },
+        { jid, messageId, emoji: validEmoji, err },
         'Failed to send Telegram reaction',
       );
     }
