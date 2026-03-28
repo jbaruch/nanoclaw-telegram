@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
-CONFIG_FILE="${HOME}/Projects/nanoclaw/scripts/heartbeat-external.conf"
-STATE_FILE="${HOME}/Projects/nanoclaw/scripts/heartbeat-external.state"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${SCRIPT_DIR}/heartbeat-external.conf"
+STATE_FILE="${SCRIPT_DIR}/heartbeat-external.state"
 LOG_TAG="[$(date '+%Y-%m-%d %H:%M:%S')] heartbeat-external"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
