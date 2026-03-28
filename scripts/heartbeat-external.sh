@@ -227,8 +227,8 @@ if [[ -f "$db_path" ]] && command -v sqlite3 &>/dev/null; then
     SELECT COUNT(*) FROM messages m
     WHERE m.is_from_me = 0
       AND m.is_bot_message = 0
-      AND m.timestamp >= datetime('now', '-15 minutes')
       AND m.timestamp <= datetime('now', '-5 minutes')
+      AND m.timestamp >= datetime('now', '-24 hours')
       AND NOT EXISTS (
         SELECT 1 FROM messages r
         WHERE r.chat_jid = m.chat_jid
@@ -245,15 +245,16 @@ if [[ -f "$db_path" ]] && command -v sqlite3 &>/dev/null; then
       FROM messages m
       WHERE m.is_from_me = 0
         AND m.is_bot_message = 0
-        AND m.timestamp >= datetime('now', '-15 minutes')
         AND m.timestamp <= datetime('now', '-5 minutes')
+        AND m.timestamp >= datetime('now', '-24 hours')
         AND NOT EXISTS (
           SELECT 1 FROM messages r
           WHERE r.chat_jid = m.chat_jid
             AND r.timestamp > m.timestamp
             AND r.is_bot_message = 1
         )
-      ORDER BY m.timestamp ASC;
+      ORDER BY m.timestamp DESC
+      LIMIT 10;
     " 2>/dev/null)
 
     # Trigger AyeAye to triage via IPC input file
