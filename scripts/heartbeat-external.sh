@@ -221,51 +221,8 @@ if [[ -f "$log_file" ]]; then
   fi
 fi
 
-# ── Check 11: Unanswered messages ────────────────────────────────────────────
-if [[ -f "$db_path" ]] && command -v sqlite3 &>/dev/null; then
-  unanswered=$(sqlite3 "$db_path" "
-    SELECT COUNT(*) FROM messages m
-    WHERE m.is_from_me = 0
-      AND m.is_bot_message = 0
-      AND m.timestamp <= datetime('now', '-5 minutes')
-      AND m.timestamp >= datetime('now', '-24 hours')
-      AND NOT EXISTS (
-        SELECT 1 FROM messages r
-        WHERE r.chat_jid = m.chat_jid
-          AND r.timestamp > m.timestamp
-          AND r.is_bot_message = 1
-      );
-  " 2>/dev/null || echo 0)
-  if (( ${unanswered:-0} > 0 )); then
-    warn "Unanswered: ${unanswered} message(s) with no bot reply in 5-15 min"
-
-    # Get the actual message details for triage
-    unanswered_details=$(sqlite3 "$db_path" "
-      SELECT m.sender_name || ': ' || substr(m.content, 1, 100)
-      FROM messages m
-      WHERE m.is_from_me = 0
-        AND m.is_bot_message = 0
-        AND m.timestamp <= datetime('now', '-5 minutes')
-        AND m.timestamp >= datetime('now', '-24 hours')
-        AND NOT EXISTS (
-          SELECT 1 FROM messages r
-          WHERE r.chat_jid = m.chat_jid
-            AND r.timestamp > m.timestamp
-            AND r.is_bot_message = 1
-        )
-      ORDER BY m.timestamp DESC
-      LIMIT 10;
-    " 2>/dev/null)
-
-    # Trigger AyeAye to triage via IPC input file
-    ipc_input_dir="$NANOCLAW_DIR/data/ipc/telegram_swarm/input"
-    if [ -d "$ipc_input_dir" ]; then
-      cat > "${ipc_input_dir}/unanswered-$(date +%s).json" <<IPCEOF
-{"type":"message","text":"[SYSTEM] External heartbeat detected ${unanswered} unanswered message(s). Triage them using /check-unanswered skill. Details:\n${unanswered_details}"}
-IPCEOF
-    fi
-  fi
-fi
+# Unanswered messages: handled by the agent's /check-unanswered skill
+# (agent has direct DB access via /workspace/store/messages.db)
 
 # ── Report ───────────────────────────────────────────────────────────────────
 all_issues=("${PROBLEMS[@]+"${PROBLEMS[@]}"}" "${WARNINGS[@]+"${WARNINGS[@]}"}")
