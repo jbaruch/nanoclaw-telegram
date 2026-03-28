@@ -28,17 +28,19 @@ function getReplyToMessageId(): string | undefined {
   try {
     if (fs.existsSync(REPLY_TO_FILE)) {
       const id = fs.readFileSync(REPLY_TO_FILE, 'utf-8').trim();
+      fs.unlinkSync(REPLY_TO_FILE);
       if (id) {
-        // Update the cached ID but don't delete the file — background agents need it too
         pendingReplyToMessageId = id;
-        fs.unlinkSync(REPLY_TO_FILE);
         return id;
       }
     }
   } catch { /* ignore */ }
-  // Return the cached ID — NOT consumed. Every send_message in this session
-  // replies to the triggering message (ACK, background agent result, etc.)
-  return pendingReplyToMessageId;
+  // Consume after first use — the ACK gets the reply, background agent results don't.
+  // This prevents replying to the WRONG message when the user sends follow-ups
+  // while the background agent is still working.
+  const id = pendingReplyToMessageId;
+  pendingReplyToMessageId = undefined;
+  return id;
 }
 
 function writeIpcFile(dir: string, data: object): string {

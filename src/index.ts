@@ -303,8 +303,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             is_from_me: true,
             is_bot_message: true,
           });
-          // Keep replying to the same message throughout the session.
-          // Follow-up user messages will update pendingReplyTo to a new ID.
+          // Consume after first reply — prevents replying to the wrong message
+          // when user sends follow-ups while background agent is working.
+          pendingReplyTo[chatJid] = undefined;
           outputSentToUser = true;
         }
         // Only reset idle timer on actual results, not session-update markers (result: null)
