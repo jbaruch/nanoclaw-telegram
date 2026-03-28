@@ -38,7 +38,7 @@ vi.mock('grammy', () => ({
     errorHandler: Handler | null = null;
 
     api = {
-      sendMessage: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn().mockResolvedValue({ message_id: 999 }),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
     };
 
@@ -793,11 +793,12 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
 
-      currentBot().api.sendMessage.mockRejectedValueOnce(
+      // Both Markdown and plain text fail
+      currentBot().api.sendMessage.mockRejectedValue(
         new Error('Network error'),
       );
 
-      // Should not throw
+      // Should not throw — error is caught internally
       await expect(
         channel.sendMessage('tg:100200300', 'Will fail'),
       ).resolves.toBeUndefined();

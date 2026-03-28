@@ -32,7 +32,8 @@ export interface IpcDeps {
     jid: string,
     text: string,
     replyToMessageId?: string,
-  ) => Promise<void>;
+  ) => Promise<string | void>;
+  pinMessage?: (jid: string, messageId: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -168,11 +169,15 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       sourceGroup,
                     );
                   } else {
-                    await deps.sendMessage(
+                    const sentMsgId = await deps.sendMessage(
                       data.chatJid,
                       cleanText,
                       data.replyToMessageId,
                     );
+                    // Pin the message if requested
+                    if (data.pin && sentMsgId && deps.pinMessage) {
+                      await deps.pinMessage(data.chatJid, sentMsgId);
+                    }
                   }
                   // Store bot response so heartbeat can track answered messages
                   storeMessage({

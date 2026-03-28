@@ -36,16 +36,18 @@ async function sendTelegramMessage(
     message_thread_id?: number;
     reply_parameters?: { message_id: number };
   } = {},
-): Promise<void> {
+): Promise<number | undefined> {
   try {
-    await api.sendMessage(chatId, text, {
+    const msg = await api.sendMessage(chatId, text, {
       ...options,
       parse_mode: 'Markdown',
     });
+    return msg.message_id;
   } catch (err) {
     // Fallback: send as plain text if Markdown parsing fails
     logger.debug({ err }, 'Markdown send failed, falling back to plain text');
-    await api.sendMessage(chatId, text, options);
+    const msg = await api.sendMessage(chatId, text, options);
+    return msg.message_id;
   }
 }
 
@@ -53,13 +55,83 @@ const MAX_LENGTH = 4096;
 
 // Telegram's allowed reaction emoji (as of Bot API 7.x)
 const TELEGRAM_ALLOWED_REACTIONS = new Set([
-  '👍', '👎', '❤', '🔥', '🥰', '👏', '😁', '🤔', '🤯', '😱', '🤬', '😢',
-  '🎉', '🤩', '🤮', '💩', '🙏', '👌', '🕊', '🤡', '🥱', '🥴', '😍', '🐳',
-  '❤‍🔥', '🌚', '🌭', '💯', '🤣', '⚡', '🍌', '🏆', '💔', '🤨', '😐', '🍓',
-  '🍾', '💋', '🖕', '😈', '😴', '😭', '🤓', '👻', '👨‍💻', '👀', '🎃', '🙈',
-  '😇', '😨', '🤝', '✍', '🤗', '🫡', '🎅', '🎄', '☃', '💅', '🤪', '🗿',
-  '🆒', '💘', '🙉', '🦄', '😘', '💊', '🙊', '😎', '👾', '🤷‍♂', '🤷',
-  '🤷‍♀', '😡', '🌈', '🔥', '✅', '❌',
+  '👍',
+  '👎',
+  '❤',
+  '🔥',
+  '🥰',
+  '👏',
+  '😁',
+  '🤔',
+  '🤯',
+  '😱',
+  '🤬',
+  '😢',
+  '🎉',
+  '🤩',
+  '🤮',
+  '💩',
+  '🙏',
+  '👌',
+  '🕊',
+  '🤡',
+  '🥱',
+  '🥴',
+  '😍',
+  '🐳',
+  '❤‍🔥',
+  '🌚',
+  '🌭',
+  '💯',
+  '🤣',
+  '⚡',
+  '🍌',
+  '🏆',
+  '💔',
+  '🤨',
+  '😐',
+  '🍓',
+  '🍾',
+  '💋',
+  '🖕',
+  '😈',
+  '😴',
+  '😭',
+  '🤓',
+  '👻',
+  '👨‍💻',
+  '👀',
+  '🎃',
+  '🙈',
+  '😇',
+  '😨',
+  '🤝',
+  '✍',
+  '🤗',
+  '🫡',
+  '🎅',
+  '🎄',
+  '☃',
+  '💅',
+  '🤪',
+  '🗿',
+  '🆒',
+  '💘',
+  '🙉',
+  '🦄',
+  '😘',
+  '💊',
+  '🙊',
+  '😎',
+  '👾',
+  '🤷‍♂',
+  '🤷',
+  '🤷‍♀',
+  '😡',
+  '🌈',
+  '🔥',
+  '✅',
+  '❌',
 ]);
 
 /**
@@ -768,7 +840,7 @@ export class TelegramChannel implements Channel {
     jid: string,
     text: string,
     replyToMessageId?: string,
-  ): Promise<void> {
+  ): Promise<string | void> {
     if (!this.bot) {
       logger.warn('Telegram bot not initialized');
       return;
@@ -789,9 +861,10 @@ export class TelegramChannel implements Channel {
 
       // Split respecting content boundaries (code blocks, paragraphs, etc.)
       const chunks = splitMessage(text);
+      let lastMsgId: number | undefined;
       for (let i = 0; i < chunks.length; i++) {
         const chunkOptions = i === 0 ? options : {};
-        await sendTelegramMessage(
+        lastMsgId = await sendTelegramMessage(
           this.bot.api,
           numericId,
           chunks[i],
@@ -802,8 +875,20 @@ export class TelegramChannel implements Channel {
         { jid, length: text.length, replyToMessageId, chunks: chunks.length },
         'Telegram message sent',
       );
+      return lastMsgId?.toString();
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram message');
+    }
+  }
+
+  async pinMessage(jid: string, messageId: string): Promise<void> {
+    if (!this.bot) return;
+    try {
+      const numericId = jid.replace(/^tg:/, '');
+      await this.bot.api.pinChatMessage(numericId, parseInt(messageId, 10));
+      logger.info({ jid, messageId }, 'Telegram message pinned');
+    } catch (err) {
+      logger.error({ jid, messageId, err }, 'Failed to pin Telegram message');
     }
   }
 
@@ -842,9 +927,7 @@ export class TelegramChannel implements Channel {
     const numericId = jid.replace(/^tg:/, '');
     const msgId = parseInt(messageId, 10);
     // Telegram only allows specific emoji as reactions
-    const validEmoji = TELEGRAM_ALLOWED_REACTIONS.has(emoji)
-      ? emoji
-      : '👍';
+    const validEmoji = TELEGRAM_ALLOWED_REACTIONS.has(emoji) ? emoji : '👍';
     if (validEmoji !== emoji) {
       logger.warn(
         { jid, messageId, requested: emoji, using: validEmoji },
@@ -866,7 +949,10 @@ export class TelegramChannel implements Channel {
         emoji: validEmoji,
         timestamp: new Date().toISOString(),
       });
-      logger.info({ jid, messageId, emoji: validEmoji }, 'Telegram reaction sent');
+      logger.info(
+        { jid, messageId, emoji: validEmoji },
+        'Telegram reaction sent',
+      );
     } catch (err) {
       logger.error(
         { jid, messageId, emoji: validEmoji, err },

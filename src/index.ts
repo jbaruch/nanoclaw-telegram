@@ -780,6 +780,11 @@ async function main(): Promise<void> {
         await channel.reactToLatestMessage?.(jid, emoji);
       }
     },
+    pinMessage: async (jid, messageId) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) return;
+      await channel.pinMessage?.(jid, messageId);
+    },
     registeredGroups: () => registeredGroups,
     registerGroup,
     syncGroups: async (force: boolean) => {

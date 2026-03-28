@@ -88,7 +88,7 @@ export interface Channel {
     jid: string,
     text: string,
     replyToMessageId?: string,
-  ): Promise<void>;
+  ): Promise<string | void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
@@ -100,6 +100,8 @@ export interface Channel {
   sendReaction?(jid: string, messageId: string, emoji: string): Promise<void>;
   // Optional: react to the most recent message in a chat.
   reactToLatestMessage?(jid: string, emoji: string): Promise<void>;
+  // Optional: pin a message in the chat.
+  pinMessage?(jid: string, messageId: string): Promise<void>;
   // Optional: create a draft stream for progressive message display.
   createDraftStream?(jid: string): import('./draft-stream.js').DraftStream;
 }

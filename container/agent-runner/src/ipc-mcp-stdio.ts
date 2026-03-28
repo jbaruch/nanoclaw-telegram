@@ -69,9 +69,10 @@ server.tool(
     text: z.string().describe('The message text to send'),
     sender: z.string().optional().describe('Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.'),
     reply_to: z.string().optional().describe('Message ID to reply to (quote). Get this from the [id=...] tag in the message prompt. If omitted, auto-replies to the most recent incoming message (first call only).'),
+    pin: z.boolean().optional().describe('Pin this message in the chat after sending. Use for important messages like daily briefs.'),
   },
   async (args) => {
-    const data: Record<string, string | undefined> = {
+    const data: Record<string, string | boolean | undefined> = {
       type: 'message',
       chatJid,
       text: args.text,
@@ -86,9 +87,13 @@ server.tool(
       data.replyToMessageId = replyTo;
     }
 
+    if (args.pin) {
+      data.pin = true;
+    }
+
     writeIpcFile(MESSAGES_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: 'Message sent.' }] };
+    return { content: [{ type: 'text' as const, text: args.pin ? 'Message sent and pinned.' : 'Message sent.' }] };
   },
 );
 
