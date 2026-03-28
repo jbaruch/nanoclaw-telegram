@@ -129,35 +129,13 @@ function buildVolumeMounts(
     );
   }
 
-  // Sync skills from three sources into each group's .claude/skills/:
-  // 1. container/skills/ — built-in container skills (agent-browser, status, etc.)
-  // 2. tiles/*/skills/ — tile skills (heartbeat, format-message, etc.)
-  // 3. groups/{folder}/skills/ — AyeAye-created skills (staging area for promotion to tiles)
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
+  // Skills delivery:
+  // - Built-in skills (agent-browser, etc.) and tile skills (heartbeat, etc.)
+  //   are installed in the Docker image and copied by the entrypoint at startup.
+  // - AyeAye-created skills (staging area) are synced here from the group folder.
+  //   They override image skills if names collide (AyeAye's version wins).
   const skillsDst = path.join(groupSessionsDir, 'skills');
-  if (fs.existsSync(skillsSrc)) {
-    for (const skillDir of fs.readdirSync(skillsSrc)) {
-      const srcDir = path.join(skillsSrc, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      fs.cpSync(srcDir, dstDir, { recursive: true });
-    }
-  }
-
-  // Sync tile skills into the same .claude/skills/ directory.
-  // nanoclaw-core: all groups. nanoclaw-admin: main channel only.
-  const tilesDir = path.join(process.cwd(), 'tiles');
-  const tilesToSync = ['nanoclaw-core', ...(isMain ? ['nanoclaw-admin'] : [])];
-  for (const tileName of tilesToSync) {
-    const tileSkillsDir = path.join(tilesDir, tileName, 'skills');
-    if (!fs.existsSync(tileSkillsDir)) continue;
-    for (const skillDir of fs.readdirSync(tileSkillsDir)) {
-      const srcDir = path.join(tileSkillsDir, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      fs.cpSync(srcDir, dstDir, { recursive: true });
-    }
-  }
+  fs.mkdirSync(skillsDst, { recursive: true });
 
   // Sync AyeAye-created skills from the group's skills/ directory.
   // These are created at runtime and persist in the bind-mounted group folder.
@@ -172,7 +150,10 @@ function buildVolumeMounts(
     }
   }
 
-  // Aggregate tile rules into RULES.md for the agent-runner to load.
+  // Aggregate tile rules into RULES.md for the agent-runner to load via systemPrompt.append.
+  // Rules come from the local tiles/ directory (not tessl — those are for skills only).
+  const tilesDir = path.join(process.cwd(), 'tiles');
+  const tilesToSync = ['nanoclaw-core', ...(isMain ? ['nanoclaw-admin'] : [])];
   const rulesContent: string[] = [];
   for (const tileName of tilesToSync) {
     const tileRulesDir = path.join(tilesDir, tileName, 'rules');

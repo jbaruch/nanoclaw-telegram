@@ -69,6 +69,10 @@ RUN --mount=type=secret,id=tessl_creds \
     rm -f "$HOME/.tessl/api-credentials.json" && \
     echo "Installed tiles:" && find . -name 'SKILL.md' -o -name 'RULES.md' | head -20
 
+# Copy built-in container skills into staging alongside tessl tiles.
+# These are not tessl tiles but need the same delivery path.
+COPY skills/ /opt/tessl-staging/.claude/skills/
+
 # Ensure .claude directory exists for tile staging copy at runtime
 RUN mkdir -p /home/node/.claude
 
