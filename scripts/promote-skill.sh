@@ -123,6 +123,12 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
   echo ""
   echo "Deploying to NAS..."
   ssh "$NAS_HOST" "cd $NAS_PROJECT_DIR && git pull && docker compose up -d --build" 2>/dev/null
+
   echo ""
-  echo "Done! Skill promoted, published, and deployed."
+  echo "Cleaning up staging copy on NAS..."
+  ssh "$NAS_HOST" "rm -rf $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/$SKILL_NAME" 2>/dev/null && \
+    echo "   Deleted: groups/$GROUP_FOLDER/skills/$SKILL_NAME" || \
+    echo "   (cleanup skipped — remove manually if needed)"
+  echo ""
+  echo "Done! Skill promoted, published, deployed, staging cleaned."
 fi
