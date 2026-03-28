@@ -23,19 +23,22 @@ const isMain = process.env.NANOCLAW_IS_MAIN === '1';
 const REPLY_TO_FILE = path.join(IPC_DIR, 'input', '_reply_to');
 let pendingReplyToMessageId: string | undefined = process.env.NANOCLAW_REPLY_TO_MESSAGE_ID || undefined;
 
-function consumeReplyToMessageId(): string | undefined {
+function getReplyToMessageId(): string | undefined {
   // Check if the agent-runner wrote a fresh reply-to ID from a follow-up message
   try {
     if (fs.existsSync(REPLY_TO_FILE)) {
       const id = fs.readFileSync(REPLY_TO_FILE, 'utf-8').trim();
-      fs.unlinkSync(REPLY_TO_FILE);
-      if (id) return id;
+      if (id) {
+        // Update the cached ID but don't delete the file — background agents need it too
+        pendingReplyToMessageId = id;
+        fs.unlinkSync(REPLY_TO_FILE);
+        return id;
+      }
     }
   } catch { /* ignore */ }
-  // Fall back to the initial env var (consumed after first use)
-  const id = pendingReplyToMessageId;
-  pendingReplyToMessageId = undefined;
-  return id;
+  // Return the cached ID — NOT consumed. Every send_message in this session
+  // replies to the triggering message (ACK, background agent result, etc.)
+  return pendingReplyToMessageId;
 }
 
 function writeIpcFile(dir: string, data: object): string {
@@ -75,7 +78,7 @@ server.tool(
     };
 
     // Attach reply-to from the most recent incoming message
-    const replyTo = consumeReplyToMessageId();
+    const replyTo = getReplyToMessageId();
     if (replyTo) {
       data.replyToMessageId = replyTo;
     }

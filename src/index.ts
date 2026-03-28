@@ -303,8 +303,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             is_from_me: true,
             is_bot_message: true,
           });
-          // Consume after first reply — follow-up messages will set a new one
-          pendingReplyTo[chatJid] = undefined;
+          // Keep replying to the same message throughout the session.
+          // Follow-up user messages will update pendingReplyTo to a new ID.
           outputSentToUser = true;
         }
         // Only reset idle timer on actual results, not session-update markers (result: null)
