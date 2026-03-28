@@ -80,6 +80,23 @@ sqlite3 ~/nanoclaw/store/messages.db "UPDATE sessions SET session_id = NULL WHER
 cd ~/nanoclaw && docker compose restart
 ```
 
+### Nuke session (kill container + start fresh)
+
+To kill the running agent container and force a completely fresh session:
+
+```bash
+# Kill running agent containers for the swarm group
+ssh 192.168.10.32 "docker ps --filter name=nanoclaw-telegram-swarm -q | xargs -r docker kill"
+
+# Clear the stored session ID so next spawn doesn't resume
+ssh 192.168.10.32 "sqlite3 ~/nanoclaw/store/messages.db \"UPDATE sessions SET session_id = NULL WHERE group_folder = 'telegram_swarm'\""
+
+# Restart orchestrator
+ssh 192.168.10.32 "cd ~/nanoclaw && docker compose restart"
+```
+
+Next message to AyeAye starts a completely new session — no prior context, fresh RULES.md, fresh SOUL.md.
+
 ### View logs
 
 ```bash
@@ -149,6 +166,21 @@ sqlite3 ~/nanoclaw/store/messages.db "UPDATE scheduled_tasks SET prompt='new pro
 | `GOOGLE_CLIENT_ID` | GCP console | Agent containers (Calendar OOO blocks) |
 | `GOOGLE_CLIENT_SECRET` | GCP console | Agent containers (Calendar OOO blocks) |
 | `GOOGLE_REFRESH_TOKEN` | OAuth flow | Agent containers (Calendar OOO blocks) |
+
+## Agent Container Capabilities
+
+Installed in the agent image (`container/Dockerfile`):
+- **Claude Code** + Agent SDK
+- **Chromium** (agent-browser for web automation)
+- **poppler-utils** (`pdftotext` for PDF text extraction)
+- **Whisper** (voice transcription via OpenAI API, runs in orchestrator)
+- **Tessl** (tile skills, library docs MCP)
+- **Composio** (Google Calendar, Gmail, etc. via HTTP MCP)
+
+Media handling in orchestrator (`telegram.ts`):
+- **Photos**: downloaded to `/workspace/group/images/`, path passed to agent
+- **Documents/PDFs**: downloaded to `/workspace/group/documents/`, agent reads with `pdftotext` or `Read` tool
+- **Voice**: transcribed by Whisper, text passed to agent
 
 ## Docker Images
 
