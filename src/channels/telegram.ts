@@ -57,12 +57,26 @@ function truncate(s: string, max = 120): string {
 
 /**
  * Resolve a Telegram reply context: look up the replied-to message in the DB
- * and return a prefix string like `[Replying to "..."]`.
+ * and return a prefix string with the quoted content.
+ * Falls back to the reply message text if DB lookup fails (common for bot messages
+ * whose DB id doesn't match Telegram message_id).
  */
-function resolveReply(replyMsgId: number, chatJid: string): string {
-  const original = getMessageById(replyMsgId.toString(), chatJid);
-  if (!original) return '';
-  return `[Replying to "${truncate(original.content)}"]\n`;
+function resolveReply(
+  replyMsg: { message_id: number; text?: string; caption?: string; from?: { first_name?: string } },
+  chatJid: string,
+): string {
+  // Try DB lookup first
+  const original = getMessageById(replyMsg.message_id.toString(), chatJid);
+  if (original) {
+    return `[Replying to ${original.sender_name}: "${truncate(original.content, 200)}"]\n`;
+  }
+  // Fall back to the reply message text directly from Telegram
+  const text = replyMsg.text || replyMsg.caption;
+  if (text) {
+    const sender = replyMsg.from?.first_name || 'Unknown';
+    return `[Replying to ${sender}: "${truncate(text, 200)}"]\n`;
+  }
+  return '';
 }
 
 /**
@@ -389,11 +403,16 @@ export class TelegramChannel implements Channel {
         return;
       }
 
-      // Resolve reply context
+      // Resolve reply context — include quoted message content for the agent
       const replyTo = ctx.message.reply_to_message;
       if (replyTo) {
-        const prefix = resolveReply(replyTo.message_id, chatJid);
+        const prefix = resolveReply(replyTo, chatJid);
         if (prefix) content = prefix + content;
+      }
+
+      // Handle Telegram's quote feature (selected text excerpt)
+      if (ctx.message.quote?.text) {
+        content = `[Quoted: "${truncate(ctx.message.quote.text, 300)}"]\n${content}`;
       }
 
       // Resolve t.me/c message links
