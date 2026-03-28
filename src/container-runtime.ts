@@ -2,7 +2,7 @@
  * Container runtime abstraction for NanoClaw.
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 
@@ -57,12 +57,14 @@ export function readonlyMountArgs(
   return ['-v', `${hostPath}:${containerPath}:ro`];
 }
 
-/** Stop a container by name. Uses execFileSync to avoid shell injection. */
+/** Stop a container by name. Uses spawnSync with args array to avoid shell injection. */
 export function stopContainer(name: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
     throw new Error(`Invalid container name: ${name}`);
   }
-  execSync(`${CONTAINER_RUNTIME_BIN} stop -t 1 ${name}`, { stdio: 'pipe' });
+  spawnSync(CONTAINER_RUNTIME_BIN, ['stop', '-t', '1', name], {
+    stdio: 'pipe',
+  });
 }
 
 /** Ensure the container runtime is running, starting it if needed. */
@@ -108,10 +110,12 @@ export function ensureContainerRuntimeRunning(): void {
 /** Kill orphaned NanoClaw containers from previous runs. */
 export function cleanupOrphans(): void {
   try {
-    const output = execSync(
-      `${CONTAINER_RUNTIME_BIN} ps --filter name=nanoclaw- --format '{{.Names}}'`,
+    const result = spawnSync(
+      CONTAINER_RUNTIME_BIN,
+      ['ps', '--filter', 'name=nanoclaw-', '--format', '{{.Names}}'],
       { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
     );
+    const output = result.stdout;
     const orphans = output.trim().split('\n').filter(Boolean);
     for (const name of orphans) {
       try {

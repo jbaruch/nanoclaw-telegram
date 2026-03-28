@@ -1,6 +1,11 @@
 #!/bin/bash
 set -e
 
+# Limit git memory usage to prevent SIGBUS under container memory pressure
+git config --global pack.threads 1 2>/dev/null || true
+git config --global pack.deltaCacheSize 1m 2>/dev/null || true
+git config --global pack.windowMemory 100m 2>/dev/null || true
+
 # Compile agent-runner from (potentially customized) /app/src
 cd /app && npx tsc --outDir /tmp/dist 2>&1 >&2
 ln -s /app/node_modules /tmp/dist/node_modules

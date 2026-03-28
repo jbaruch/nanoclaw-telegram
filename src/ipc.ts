@@ -282,11 +282,12 @@ export async function processTaskIpc(
             break;
           }
         } else if (scheduleType === 'interval') {
+          const MIN_INTERVAL_MS = 60_000;
           const ms = parseInt(data.schedule_value, 10);
-          if (isNaN(ms) || ms <= 0) {
+          if (isNaN(ms) || ms < MIN_INTERVAL_MS) {
             logger.warn(
-              { scheduleValue: data.schedule_value },
-              'Invalid interval',
+              { scheduleValue: data.schedule_value, minMs: MIN_INTERVAL_MS },
+              'Invalid interval: must be at least 60s',
             );
             break;
           }
@@ -438,9 +439,20 @@ export async function processTaskIpc(
               break;
             }
           } else if (updatedTask.schedule_type === 'interval') {
+            const MIN_INTERVAL_MS = 60_000;
             const ms = parseInt(updatedTask.schedule_value, 10);
-            if (!isNaN(ms) && ms > 0) {
+            if (!isNaN(ms) && ms >= MIN_INTERVAL_MS) {
               updates.next_run = new Date(Date.now() + ms).toISOString();
+            } else if (!isNaN(ms)) {
+              logger.warn(
+                {
+                  taskId: data.taskId,
+                  value: updatedTask.schedule_value,
+                  minMs: MIN_INTERVAL_MS,
+                },
+                'Invalid interval in task update: must be at least 60s',
+              );
+              break;
             }
           }
         }
