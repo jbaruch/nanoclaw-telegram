@@ -361,6 +361,23 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+server.tool(
+  'nuke_session',
+  'Kill this container and start a fresh session on the next message. Use when context is corrupted, rules are stale, or user asks to start fresh. The current conversation will end immediately.',
+  {},
+  async () => {
+    const data = {
+      type: 'nuke_session',
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return { content: [{ type: 'text' as const, text: 'Session nuked. Container will be killed. Next message starts fresh.' }] };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

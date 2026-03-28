@@ -736,6 +736,18 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
+    nukeSession: (groupFolder: string) => {
+      // Kill the running container
+      queue.closeStdin(
+        Object.entries(registeredGroups).find(
+          ([, g]) => g.folder === groupFolder,
+        )?.[0] || '',
+      );
+      // Clear session so next spawn starts fresh
+      delete sessions[groupFolder];
+      setSession(groupFolder, '');
+      logger.info({ groupFolder }, 'Session nuked via IPC');
+    },
     onTasksChanged: () => {
       const tasks = getAllTasks();
       const taskRows = tasks.map((t) => ({

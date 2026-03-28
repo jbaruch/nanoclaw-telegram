@@ -39,6 +39,7 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   onTasksChanged: () => void;
+  nukeSession: (groupFolder: string) => void;
 }
 
 let ipcWatcherRunning = false;
@@ -499,6 +500,16 @@ export async function processTaskIpc(
           { data },
           'Invalid register_group request - missing required fields',
         );
+      }
+      break;
+
+    case 'nuke_session':
+      if (data.groupFolder) {
+        logger.info(
+          { groupFolder: data.groupFolder, sourceGroup },
+          'Session nuke requested via IPC',
+        );
+        deps.nukeSession(sourceGroup);
       }
       break;
 
