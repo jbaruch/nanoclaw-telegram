@@ -99,12 +99,15 @@ ssh 192.168.10.32 "tail -50 ~/nanoclaw/logs/nanoclaw.log"
 Runs on NAS host via cron every 15 min. Set up:
 
 ```bash
-ssh 192.168.10.32
-crontab -e
-# Add:
-*/15 * * * * /home/jbaruch/nanoclaw/scripts/heartbeat-external.sh >> /home/jbaruch/nanoclaw/logs/heartbeat.log 2>&1
-0 * * * * /home/jbaruch/nanoclaw/scripts/logrotate.sh /home/jbaruch/nanoclaw/logs
+# Requires sudo on the Ugreen NAS:
+echo '*/15 * * * * /home/jbaruch/nanoclaw/scripts/heartbeat-external.sh >> /home/jbaruch/nanoclaw/logs/heartbeat.log 2>&1
+0 * * * * /home/jbaruch/nanoclaw/scripts/logrotate.sh /home/jbaruch/nanoclaw/logs' | sudo crontab -u jbaruch -
+
+# Verify:
+sudo crontab -u jbaruch -l
 ```
+
+**Note:** `crontab -e` doesn't work over SSH (terminal type issue). Use the pipe method above.
 
 Config: `~/nanoclaw/scripts/heartbeat-external.conf` (not in git — contains bot token)
 
