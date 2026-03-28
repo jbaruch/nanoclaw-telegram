@@ -8,8 +8,10 @@ chmod -R a-w /tmp/dist
 
 # Copy tessl-staged tiles into bind-mounted .claude/
 # Use -L to dereference symlinks (tessl install creates symlinks to vendored tiles)
+# First remove any broken symlinks from previous runs (they block -n no-clobber)
 if [ -d /opt/tessl-staging/.claude/skills ]; then
   mkdir -p /home/node/.claude/skills
+  find /home/node/.claude/skills -maxdepth 1 -type l ! -exec test -e {} \; -delete 2>/dev/null || true
   cp -rLn /opt/tessl-staging/.claude/skills/* /home/node/.claude/skills/ 2>/dev/null || true
 fi
 
