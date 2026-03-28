@@ -64,10 +64,11 @@ const server = new McpServer({
 
 server.tool(
   'send_message',
-  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times.",
+  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times. Use reply_to with a message ID to quote-reply a specific message.",
   {
     text: z.string().describe('The message text to send'),
     sender: z.string().optional().describe('Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.'),
+    reply_to: z.string().optional().describe('Message ID to reply to (quote). Get this from the [id=...] tag in the message prompt. If omitted, auto-replies to the most recent incoming message (first call only).'),
   },
   async (args) => {
     const data: Record<string, string | undefined> = {
@@ -79,8 +80,8 @@ server.tool(
       timestamp: new Date().toISOString(),
     };
 
-    // Attach reply-to from the most recent incoming message
-    const replyTo = getReplyToMessageId();
+    // Use explicit reply_to if provided, otherwise auto-detect from pending
+    const replyTo = args.reply_to || getReplyToMessageId();
     if (replyTo) {
       data.replyToMessageId = replyTo;
     }

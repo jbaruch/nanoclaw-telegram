@@ -10,9 +10,10 @@ Before your first response in any session (including after context compaction), 
 
 For ANY task that takes more than 2 seconds (web research, agents, bash, API calls, file ops):
 
-1. **First tool call = `mcp__nanoclaw__send_message`**. One line acknowledgement. **No text output before this.**
-2. **Then background Agent** — `Agent` tool with `run_in_background: true`. Never block the main thread.
-3. Background agent sends results via `mcp__nanoclaw__send_message` when done.
+1. **Note the message ID** from the `<message id="...">` tag in the prompt — you'll need it for reply threading.
+2. **First tool call = `mcp__nanoclaw__send_message`** with `reply_to` set to that message ID. One line acknowledgement. **No text output before this.**
+3. **Then background Agent** — `Agent` tool with `run_in_background: true`. Include the message ID in the agent's prompt: "When done, send results via mcp__nanoclaw__send_message with reply_to='MESSAGE_ID'."
+4. Background agent sends results via `mcp__nanoclaw__send_message(text: "...", reply_to: "MESSAGE_ID")` — this ensures the result quotes the original message, not whatever the user sent in the meantime.
 
 **CRITICAL: Do not write ANY text response for async tasks. Zero. Only `send_message` + background agent. Silence otherwise.**
 
