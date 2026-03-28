@@ -347,7 +347,13 @@ export async function sendPoolMessage(
       await sendTelegramMessage(api, numericId, chunk);
     }
     logger.info(
-      { chatId, sender, poolIndex: idx, length: text.length, chunks: chunks.length },
+      {
+        chatId,
+        sender,
+        poolIndex: idx,
+        length: text.length,
+        chunks: chunks.length,
+      },
       'Pool message sent',
     );
   } catch (err) {
@@ -829,6 +835,15 @@ export class TelegramChannel implements Channel {
         chat_id: numericId,
         message_id: msgId,
         reaction: emoji ? [{ type: 'emoji', emoji: emoji as any }] : [],
+      });
+      // Store outbound reaction so unanswered-message checks see it
+      storeReaction({
+        message_id: messageId,
+        message_chat_jid: jid,
+        reactor_jid: 'bot@telegram',
+        reactor_name: ASSISTANT_NAME,
+        emoji,
+        timestamp: new Date().toISOString(),
       });
       logger.info({ jid, messageId, emoji }, 'Telegram reaction sent');
     } catch (err) {
