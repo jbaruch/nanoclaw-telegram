@@ -161,3 +161,21 @@ sqlite3 ~/nanoclaw/store/messages.db "UPDATE scheduled_tasks SET prompt='new pro
 ### Session stale / wrong behavior
 1. Clear session: see "Clear session" above
 2. Container will start fresh on next message
+
+## Upstream Merge Conflicts
+
+When running `/update-nanoclaw`, these files will always conflict because we've diverged from upstream:
+
+| File | Our change | Resolution |
+|------|-----------|------------|
+| `package.json` | Removed @onecli-sh/sdk, added grammy/openai | Keep our removals + upstream version bumps/dep changes |
+| `package-lock.json` | Different dep tree | Accept upstream, run `npm install` to regenerate |
+| `src/config.ts` | Added HOST_PROJECT_ROOT, HOST_UID/GID, CREDENTIAL_PROXY_PORT, removed ONECLI_URL | Keep our additions, accept upstream additions (e.g., MAX_MESSAGES_PER_PROMPT) |
+| `src/container-runner.test.ts` | Added HOST_PROJECT_ROOT/UID/GID mocks, credential proxy mock | Keep our mocks, accept upstream mock changes |
+| `src/index.ts` | Credential proxy startup, pendingReplyTo, removed OneCLI | Keep our proxy code, accept upstream features |
+
+**Quick resolution recipe:**
+
+For each conflicted file, the rule is: **keep our additions (credential proxy, HOST_*, pendingReplyTo), accept upstream additions (new features, version bumps, dep removals), drop anything that references OneCLI from either side.**
+
+After resolving: `npm run build && npm test` — both must pass before committing.
