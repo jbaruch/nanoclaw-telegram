@@ -79,7 +79,9 @@ COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # Set ownership to node user (non-root) for writable directories
-RUN chown -R node:node /workspace /opt/tessl-staging && chmod 777 /home/node
+RUN chown -R node:node /workspace /opt/tessl-staging && \
+    chmod -R a+rX /opt/tessl-staging && \
+    chmod 777 /home/node
 
 # Switch to non-root user (required for --dangerously-skip-permissions)
 USER node
