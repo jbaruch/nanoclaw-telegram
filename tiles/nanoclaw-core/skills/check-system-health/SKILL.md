@@ -1,6 +1,6 @@
 ---
 name: check-system-health
-description: Check NanoClaw system health from inside the agent — stuck tasks, DB size, task run failures. Uses /workspace/store/messages.db directly. Host-level checks (containers, disk, logs) are handled by the external heartbeat. Use as part of heartbeat or standalone. Triggers on "system health", "check tasks", "check database".
+description: Check NanoClaw system health — stuck tasks, DB size, task run failures. Uses /workspace/store/messages.db directly. Use as part of heartbeat or standalone. Triggers on "system health", "check tasks", "check database".
 ---
 
 # Check System Health
