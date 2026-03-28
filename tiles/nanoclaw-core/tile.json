@@ -32,6 +32,9 @@
     },
     "check-cfps": {
       "path": "skills/check-cfps/SKILL.md"
+    },
+    "nightly-housekeeping": {
+      "path": "skills/nightly-housekeeping/SKILL.md"
     }
   }
 }
