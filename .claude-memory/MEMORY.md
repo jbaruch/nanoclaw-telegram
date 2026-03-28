@@ -1,0 +1,4 @@
+- [NanoClaw scope](project_nanoclaw_scope.md) — best as personal assistant, not remote Claude Code replacement
+- [Baruch profile](user_baruch.md) — role, preferences, working style
+- [Architecture](project_architecture.md) — NAS deployment, tiles, mounts, credential proxy, skill delivery
+- [Working style feedback](feedback_working_style.md) — corrections and validated approaches
