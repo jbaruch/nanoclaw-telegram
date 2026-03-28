@@ -1,113 +1,69 @@
 ---
 name: check-cfps
-description: Find conference CFPs closing within the next 7 days for AI and Java topics. Uses developers.events JSON API and javaconferences.org. Filters for relevance, excludes Africa. Use as part of morning-brief or standalone. Triggers on "check cfps", "closing cfps", "conference deadlines", "upcoming cfp deadlines".
+description: Find open CFPs relevant to Baruch (Java/AI/developer conferences) using two structured data sources + web search, filtered by travel conflicts and no online conferences
 ---
 
 # Check CFPs
 
-Find conference Call for Papers closing within 7 days that are relevant to Baruch (AI, agents, agentic coding, Java).
+Fetches open CFPs from two authoritative sources plus web search. Filters out online conferences and travel conflicts.
 
-## Step 1: Fetch from developers.events
+## Step 1 — Fetch primary sources (in parallel)
 
-```bash
-curl -sf https://developers.events/all-cfps.json -o /tmp/all-cfps.json
+**Source A:** `https://developers.events/all-cfps.json`
+- Fetch the full JSON array
+- Each entry has: `link` (CFP URL), `until` (deadline string), `untilDate` (ms timestamp), `conf.name`, `conf.date` (array of ms timestamps), `conf.hyperlink`, `conf.location`
+- Keep only entries where `untilDate` > now (CFP still open)
+
+**Source B:** `https://javaconferences.org/conferences.json`
+- Fetch the JSON array (current + next year Java conferences)
+- Each entry has: `name`, `link` (website), `locationName`, `hybrid`, `date`, `cfpLink`, `cfpEndDate`
+- Keep only entries where `cfpLink` is non-empty and `cfpEndDate` > today
+
+## Step 2 — Web search for gaps
+
+Run these searches to catch AI/developer conferences not in the above sources:
+
+1. `AI developer conference CFP open 2026 "call for speakers" deadline`
+2. `developer conference CFP 2026 autumn fall open submissions`
+
+Add any new CFPs found that aren't already in the combined list.
+
+## Step 3 — Load travel schedule
+
+Read `/workspace/group/travel-schedule.json`. Array of trips with `start` and `end` (YYYY-MM-DD).
+
+A conference has a **travel conflict** if its dates overlap any trip: `conf_start <= trip_end AND conf_end >= trip_start`.
+
+## Step 4 — Filter
+
+Remove entries where:
+- **Online/virtual**: location contains "online", "virtual", "remote", or no city listed
+- **Travel conflict**: conference dates overlap a committed trip (per Step 3)
+- **CFP closed**: deadline already passed today
+- **Not relevant** (per `/workspace/group/cfp-relevance-config.md`): Web3/blockchain/crypto, pure .NET/PHP/Ruby/iOS-only, academic-only, meetups < 1 day, no CFP link
+- **Location exclusions** (per cfp-relevance-config.md): Nigeria, Kenya, South Africa, Ghana, Ethiopia, Tanzania, Uganda, Rwanda
+
+Deduplicate by conference name (case-insensitive).
+
+## Step 5 — Sort and format
+
+Sort by CFP deadline ascending (soonest first).
+
+Group into urgency tiers based on days until CFP deadline:
+- 🔴 **≤3 days** — act today
+- 🟡 **4–7 days**
+- 🟢 **8–31 days**
+- ⬜ **>31 days**
+
+Format each entry as:
+```
+• *[Conference Name]* — [City, Country], [Conference Date]
+  CFP closes [deadline] ([N days])
+  Submit: [URL]
 ```
 
-Validate that the file is non-empty and a valid JSON array; skip this source and continue with Step 2 if either check fails.
+If no open CFPs found: return nothing (output nothing / wrap in `<internal>`).
 
-Parse and filter using `jq`:
+## Output
 
-```bash
-NOW=$(date +%s%3N)
-PLUS7=$(( NOW + 7 * 86400000 ))
-
-jq --argjson now "$NOW" --argjson plus7 "$PLUS7" '
-  [.[] |
-    select(
-      .untilDate >= $now and
-      .untilDate <= $plus7 and
-      (.conf.status // "open") == "open" and
-      # exclude Africa
-      (.conf.location // "" | test("Nigeria|Kenya|South Africa|Ghana|Ethiopia|Tanzania|Uganda|Rwanda"; "i") | not)
-    ) |
-    {
-      name: .conf.name,
-      location: .conf.location,
-      conf_date: .conf.date,
-      deadline_ms: .untilDate,
-      cfp_link: .link,
-      conf_url: .conf.hyperlink
-    }
-  ] | sort_by(.deadline_ms)
-' /tmp/all-cfps.json > /tmp/cfps-filtered.json
-```
-
-Validate that `/tmp/cfps-filtered.json` is a valid JSON array before proceeding; log an error and skip if not.
-
-Then apply relevance filtering (see Relevance Rules below) to the entries in `/tmp/cfps-filtered.json`.
-
-## Step 2: Fetch from javaconferences.org
-
-Use `WebFetch` to get `https://javaconferences.org/`. The page renders an HTML table with columns: **Conference**, **Location**, **Date**, **CFP**, **CFP Deadline**.
-
-Parse with these selectors:
-- Table rows: `table tbody tr`
-- CFP link: `td:nth-child(4) a[href]`
-- CFP deadline text: `td:nth-child(5)` (format varies: `YYYY-MM-DD` or `Month DD, YYYY`)
-
-Keep only rows where:
-1. The CFP link cell is non-empty
-2. The parsed CFP deadline falls within the next 7 days
-
-**Deduplicate:** If a conference appears in both sources (fuzzy name match, e.g. lowercase + strip punctuation), keep the entry with the more specific deadline date.
-
-## Relevance Rules
-
-Keyword lists and category definitions are maintained in `/workspace/group/cfp-relevance-config.md` — update that file to change keywords without modifying this skill. Apply the rules defined there to decide whether each conference is relevant, included, or skipped.
-
-## Step 3: Format output
-
-For each relevant CFP, include:
-- Conference name
-- Location
-- Conference date(s)
-- CFP deadline (how many days left)
-- CFP submission link
-
-Sort by deadline (closest first).
-
-**Output format (Telegram):**
-
-```
-*📢 CFPs closing this week:*
-
-• *Devoxx Belgium* — Antwerp, Oct 6-10
-  CFP closes in 2 days (Mar 29)
-  Submit: https://sessionize.com/devoxx-be
-
-• *AI Dev Summit* — San Francisco, Jun 15-16
-  CFP closes in 5 days (Apr 1)
-  Submit: https://sessionize.com/ai-dev-summit
-```
-
-If no relevant CFPs found: return nothing (empty output, no message).
-
-## Step 4: Save state
-
-Write the list of found CFPs to `/workspace/group/cfp-state.json`:
-
-```json
-{
-  "checked_at": "ISO timestamp",
-  "cfps": [
-    {
-      "name": "Devoxx Belgium",
-      "deadline": "2026-03-29",
-      "link": "https://sessionize.com/devoxx-be",
-      "notified": true
-    }
-  ]
-}
-```
-
-On subsequent runs, don't re-notify about CFPs already in the state file with `notified: true`. Only notify about new CFPs or CFPs whose deadline moved closer (< 2 days left and not yet reminded at that threshold).
+Return the formatted, grouped list to the caller.
