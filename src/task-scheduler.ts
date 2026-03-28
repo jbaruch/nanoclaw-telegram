@@ -269,6 +269,15 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
+        // Pre-advance next_run before dispatch to prevent double-fire on crash.
+        const claimedNextRun = computeNextRun(currentTask);
+        if (claimedNextRun !== null) {
+          updateTask(currentTask.id, { next_run: claimedNextRun });
+        } else {
+          // once-task: mark completed before dispatch
+          updateTask(currentTask.id, { status: 'completed' });
+        }
+
         deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
           runTask(currentTask, deps),
         );
