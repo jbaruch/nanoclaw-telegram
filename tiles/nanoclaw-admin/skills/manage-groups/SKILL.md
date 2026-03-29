@@ -12,7 +12,7 @@ Available groups are provided in `/workspace/ipc/available_groups.json`:
 ```json
 {
   "groups": [
-    { "jid": "120363336345536173@g.us", "name": "Family Chat", "lastActivity": "2026-01-31T12:00:00.000Z", "isRegistered": false }
+    { "jid": "120363336345536173@g.us", "name": "Family Chat", "isRegistered": false }
   ],
   "lastSync": "2026-01-31T12:00:00.000Z"
 }
@@ -20,13 +20,11 @@ Available groups are provided in `/workspace/ipc/available_groups.json`:
 
 Groups are ordered by most recent activity. The list is synced daily.
 
-If a group the user mentions isn't in the list, request a fresh sync:
+If a group the user mentions isn't in the list, request a fresh sync and re-read `available_groups.json`:
 
 ```bash
 echo '{"type": "refresh_groups"}' > /workspace/ipc/tasks/refresh_$(date +%s).json
 ```
-
-Then wait a moment and re-read `available_groups.json`.
 
 **Fallback**: Query the SQLite database directly:
 
@@ -85,12 +83,10 @@ Non-obvious fields:
 4. Optionally create an initial `CLAUDE.md` for the group
 5. **Verify registration**: Read `/workspace/project/data/registered_groups.json` and confirm the new entry appears with the correct JID, name, and folder
 
-Folder naming convention — channel prefix with underscore separator:
+Folder naming convention — channel prefix + underscore + lowercase hyphenated name:
 - WhatsApp "Family Chat" → `whatsapp_family-chat`
 - Telegram "Dev Team" → `telegram_dev-team`
-- Discord "General" → `discord_general`
 - Slack "Engineering" → `slack_engineering`
-- Use lowercase, hyphens for the group name part
 
 ## Removing a Group
 
@@ -125,8 +121,7 @@ Modes:
 - **`drop`**: Messages from non-allowed senders are not stored at all
 
 Notes:
-- Your own messages (`is_from_me`) explicitly bypass the allowlist in trigger checks
-- Bot messages are filtered out by the database query before trigger evaluation
+- Your own messages (`is_from_me`) bypass the allowlist in trigger checks
 - If the config file doesn't exist or is invalid, all senders are allowed (fail-open)
 - The config file is on the host at `~/.config/nanoclaw/sender-allowlist.json`, not inside the container
 

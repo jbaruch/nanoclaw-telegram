@@ -21,17 +21,15 @@ Follow these steps in order:
 
 Each team member MUST be instructed to:
 
-1. *Share progress in the group* via `mcp__nanoclaw__send_message` with a `sender` parameter matching their exact role/character name (e.g., `sender: "Marine Biologist"` or `sender: "Alexander Hamilton"`). Use the same name consistently so the bot identity stays stable.
-2. *Also communicate with teammates* via `SendMessage` as normal for coordination.
-3. Keep group messages *short* — 2-4 sentences max per message. Break longer content into multiple `send_message` calls. No walls of text.
+1. *Share progress in the group* via `mcp__nanoclaw__send_message` with a `sender` parameter matching their exact role/character name. Use the same name consistently so the bot identity stays stable.
+2. *Coordinate with teammates* via `SendMessage` as normal.
+3. Keep group messages *short* — 2-4 sentences max per message. Break longer content into multiple `send_message` calls.
 4. NEVER use markdown formatting. Use ONLY WhatsApp/Telegram formatting: single *asterisks* for bold (NOT **double**), _underscores_ for italic, • for bullets, ```backticks``` for code. No ## headings, no `[links](url)`, no **double asterisks**.
 
-## Example team creation prompt
-
-Use a prompt like this when creating each teammate — substituting their actual name and role:
+Use a prompt like this when creating each teammate, substituting their actual name and role:
 
 ```
-You are the Marine Biologist. Share findings with the group via mcp__nanoclaw__send_message with sender set to "Marine Biologist". Follow all message rules: 2-4 sentences max, Telegram formatting only, no markdown. Coordinate with teammates via SendMessage.
+You are the Marine Biologist. Share findings with the group via mcp__nanoclaw__send_message with sender set to "Marine Biologist". Keep messages 2-4 sentences max, use Telegram formatting only (no markdown). Coordinate with teammates via SendMessage.
 ```
 
 ## Lead agent behavior

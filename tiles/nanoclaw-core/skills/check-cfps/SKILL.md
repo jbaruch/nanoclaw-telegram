@@ -1,6 +1,6 @@
 ---
 name: check-cfps
-description: Find open CFPs relevant to Baruch (Java/AI/developer conferences) using two structured data sources + web search, filtered by travel conflicts and no online conferences
+description: Finds open CFPs (call for papers, speaking opportunities, conference submissions, talk proposals) relevant to Baruch across Java/AI/developer conferences using two structured data sources plus web search, filtered by travel conflicts and excluding online/virtual events. Use when Baruch asks about upcoming conferences, call for papers, speaking opportunities, CFP deadlines, conference submissions, or where to submit a talk proposal.
 ---
 
 # Check CFPs
@@ -13,11 +13,15 @@ Fetches open CFPs from two authoritative sources plus web search. Filters out on
 - Fetch the full JSON array
 - Each entry has: `link` (CFP URL), `until` (deadline string), `untilDate` (ms timestamp), `conf.name`, `conf.date` (array of ms timestamps), `conf.hyperlink`, `conf.location`
 - Keep only entries where `untilDate` > now (CFP still open)
+- If the source is unreachable or returns a non-array/malformed response, log a warning and continue with Source B and web search
 
 **Source B:** `https://javaconferences.org/conferences.json`
 - Fetch the JSON array (current + next year Java conferences)
 - Each entry has: `name`, `link` (website), `locationName`, `hybrid`, `date`, `cfpLink`, `cfpEndDate`
 - Keep only entries where `cfpLink` is non-empty and `cfpEndDate` > today
+- If the source is unreachable or returns a non-array/malformed response, log a warning and continue with Source A results and web search
+
+If **both** sources fail, proceed with web search results only and note the data gap in the output.
 
 ## Step 2 — Web search for gaps
 
@@ -32,9 +36,13 @@ Add any new CFPs found that aren't already in the combined list.
 
 Read `/workspace/group/travel-schedule.json`. Array of trips with `start` and `end` (YYYY-MM-DD).
 
+If the file is missing or unreadable, skip travel conflict filtering and note in the output that conflict filtering was skipped.
+
 A conference has a **travel conflict** if its dates overlap any trip: `conf_start <= trip_end AND conf_end >= trip_start`.
 
 ## Step 4 — Filter
+
+The inline rules below are a summary of the authoritative criteria defined in `/workspace/group/cfp-relevance-config.md`. If any conflict exists between the inline rules and the config file, the config file takes precedence.
 
 Remove entries where:
 - **Online/virtual**: location contains "online", "virtual", "remote", or no city listed
@@ -66,4 +74,4 @@ If no open CFPs found: return nothing (output nothing / wrap in `<internal>`).
 
 ## Output
 
-Return the formatted, grouped list to the caller.
+Return the formatted, grouped list to the caller. If any data sources were unavailable or conflict filtering was skipped, include a brief note at the top of the output.
