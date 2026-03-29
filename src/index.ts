@@ -7,6 +7,8 @@ import {
   DEFAULT_TRIGGER,
   getTriggerPattern,
   GROUPS_DIR,
+  HOST_GID,
+  HOST_UID,
   IDLE_TIMEOUT,
   MAX_MESSAGES_PER_PROMPT,
   POLL_INTERVAL,
@@ -163,10 +165,33 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     }
   }
 
+  // Chown group folder to the container user so the agent can write to it.
+  // In DooD the orchestrator runs as root — files it creates are root-owned.
+  const effectiveUid = HOST_UID ?? process.getuid?.();
+  const effectiveGid = HOST_GID ?? process.getgid?.();
+  if (effectiveUid != null && effectiveUid !== 0) {
+    try {
+      chownRecursive(groupDir, effectiveUid, effectiveGid ?? effectiveUid);
+    } catch (err) {
+      logger.warn({ folder: group.folder, err }, 'Failed to chown group folder');
+    }
+  }
+
   logger.info(
     { jid, name: group.name, folder: group.folder },
     'Group registered',
   );
+}
+
+function chownRecursive(dir: string, uid: number, gid: number): void {
+  fs.chownSync(dir, uid, gid);
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+    fs.chownSync(fullPath, uid, gid);
+    if (entry.isDirectory()) {
+      chownRecursive(fullPath, uid, gid);
+    }
+  }
 }
 
 /**

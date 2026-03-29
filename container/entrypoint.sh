@@ -42,12 +42,22 @@ if [ -d /opt/tessl-staging/.claude/skills ]; then
   cp -rL /opt/tessl-staging/.claude/skills/* /home/node/.claude/skills/
 fi
 
-# Wire tessl rules chain into workspace
+# Wire tessl rules chain into workspace (first-time setup only).
+# May fail on permission issues for new groups — non-fatal, the group
+# folder gets proper ownership after the first successful run.
 if [ -f /home/node/.claude/AGENTS.md ] && [ ! -f /workspace/group/AGENTS.md ]; then
-  cp /home/node/.claude/AGENTS.md /workspace/group/AGENTS.md
+  if cp /home/node/.claude/AGENTS.md /workspace/group/AGENTS.md 2>&1; then
+    echo "[entrypoint] Copied AGENTS.md to workspace" >&2
+  else
+    echo "[entrypoint] WARNING: could not copy AGENTS.md to workspace (permissions)" >&2
+  fi
 fi
 if [ -d /home/node/.claude/.tessl ] && [ ! -d /workspace/group/.tessl ]; then
-  cp -rL /home/node/.claude/.tessl /workspace/group/.tessl
+  if cp -rL /home/node/.claude/.tessl /workspace/group/.tessl 2>&1; then
+    echo "[entrypoint] Copied .tessl to workspace" >&2
+  else
+    echo "[entrypoint] WARNING: could not copy .tessl to workspace (permissions)" >&2
+  fi
 fi
 
 # Read container input from stdin and run the agent
