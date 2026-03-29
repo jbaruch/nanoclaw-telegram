@@ -1,17 +1,21 @@
 #!/bin/bash
-# Promote an AyeAye-created skill from group staging to a tessl tile.
+# Promote AyeAye-created skills and rules from NAS staging to tessl tiles.
 #
-# Usage: ./scripts/promote-skill.sh <skill-name> [tile-name]
-#   skill-name: name of the skill directory in groups/telegram_swarm/skills/
-#   tile-name:  target tile (default: nanoclaw-core)
+# Usage:
+#   ./scripts/promote-skill.sh                    # promote ALL staging skills + rules
+#   ./scripts/promote-skill.sh skill-name         # promote one skill
+#   ./scripts/promote-skill.sh --rules-only       # promote only rules
 #
 # Flow:
-#   1. Pulls skill from NAS (where AyeAye created it)
-#   2. Copies to tiles/{tile}/skills/{name}/
-#   3. Runs tessl skill review --optimize
-#   4. Updates tile.json with the new skill entry
-#   5. Runs tessl tile lint
-#   6. Optionally commits, pushes, publishes, and deploys to NAS
+#   1. Pull skills/rules from NAS staging
+#   2. Copy to tiles/
+#   3. Run tessl skill review --optimize on each
+#   4. Update tile.json
+#   5. Lint
+#   6. Commit, push, publish, deploy
+#   7. Version bump commit
+#
+# Staging copies are NOT deleted — AyeAye keeps them as working copies.
 
 set -euo pipefail
 
@@ -21,114 +25,187 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 NAS_HOST="${NAS_HOST:-192.168.10.32}"
 NAS_PROJECT_DIR="${NAS_PROJECT_DIR:-/home/jbaruch/nanoclaw}"
 GROUP_FOLDER="${GROUP_FOLDER:-telegram_swarm}"
+TILE_NAME="${TILE_NAME:-nanoclaw-core}"
 
-SKILL_NAME="${1:-}"
-TILE_NAME="${2:-nanoclaw-core}"
-
-if [ -z "$SKILL_NAME" ]; then
-  echo "Usage: $0 <skill-name> [tile-name]"
-  echo ""
-  echo "Available skills on NAS to promote:"
-  ssh "$NAS_HOST" "ls $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/ 2>/dev/null" 2>/dev/null || echo "  (none or NAS unreachable)"
-  echo ""
-  echo "Available skills locally to promote:"
-  for d in "$PROJECT_ROOT"/groups/"$GROUP_FOLDER"/skills/*/; do
-    [ -d "$d" ] && echo "  $(basename "$d")"
-  done
-  exit 1
-fi
-
-GROUP_SKILL_DIR="$PROJECT_ROOT/groups/$GROUP_FOLDER/skills/$SKILL_NAME"
-TILE_SKILL_DIR="$PROJECT_ROOT/tiles/$TILE_NAME/skills/$SKILL_NAME"
-TILE_JSON="$PROJECT_ROOT/tiles/$TILE_NAME/tile.json"
+TILE_DIR="$PROJECT_ROOT/tiles/$TILE_NAME"
+TILE_JSON="$TILE_DIR/tile.json"
 
 if [ ! -f "$TILE_JSON" ]; then
-  echo "Error: $TILE_JSON not found (tile '$TILE_NAME' doesn't exist)"
+  echo "Error: $TILE_JSON not found"
   exit 1
 fi
 
-# 0. Pull skill from NAS if not already local
-if [ ! -f "$GROUP_SKILL_DIR/SKILL.md" ]; then
-  echo "0. Pulling skill from NAS ($NAS_HOST)..."
-  mkdir -p "$GROUP_SKILL_DIR"
-  ssh "$NAS_HOST" "tar czf - -C $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/$SKILL_NAME ." 2>/dev/null | tar xzf - -C "$GROUP_SKILL_DIR"
-  if [ ! -f "$GROUP_SKILL_DIR/SKILL.md" ]; then
-    echo "Error: skill '$SKILL_NAME' not found on NAS either"
-    rm -rf "$GROUP_SKILL_DIR"
-    exit 1
+# --- Helpers ---
+
+pull_skill() {
+  local name="$1"
+  local src="$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/$name"
+  local dst="$TILE_DIR/skills/$name"
+  mkdir -p "$dst"
+  ssh "$NAS_HOST" "tar czf - -C $src ." 2>/dev/null | tar xzf - -C "$dst"
+  if [ ! -f "$dst/SKILL.md" ]; then
+    echo "  ERROR: $name/SKILL.md not found on NAS"
+    rm -rf "$dst"
+    return 1
   fi
-  echo "   Pulled: $GROUP_SKILL_DIR/SKILL.md"
-fi
+  echo "  pulled: $name"
+}
 
-echo "=== Promoting: $SKILL_NAME → $TILE_NAME ==="
-echo ""
+pull_rule() {
+  local name="$1"
+  local src="$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/.tessl/tiles/local/$TILE_NAME/rules/$name.md"
+  local dst="$TILE_DIR/rules/$name.md"
+  mkdir -p "$TILE_DIR/rules"
+  ssh "$NAS_HOST" "cat $src" 2>/dev/null > "$dst"
+  if [ ! -s "$dst" ]; then
+    echo "  ERROR: $name.md not found or empty on NAS"
+    rm -f "$dst"
+    return 1
+  fi
+  echo "  pulled: $name"
+}
 
-# 1. Copy skill to tile
-echo "1. Copying to tile..."
-mkdir -p "$TILE_SKILL_DIR"
-cp -r "$GROUP_SKILL_DIR/"* "$TILE_SKILL_DIR/"
-echo "   Done: $TILE_SKILL_DIR/SKILL.md"
+optimize_skill() {
+  local path="$1"
+  local name=$(basename "$(dirname "$path")")
+  tessl skill review --optimize --yes --max-iterations 3 "$path" 2>&1 | grep -E "Score|No improvements|Changes applied" || echo "  ($name: tessl review skipped)"
+}
 
-# 2. Review and optimize
-echo ""
-echo "2. Running tessl skill review --optimize..."
-tessl skill review --optimize --yes --max-iterations 3 "$TILE_SKILL_DIR/SKILL.md" || echo "   (tessl review skipped — auth may be expired, run 'tessl login')"
-
-# 3. Update tile.json
-echo ""
-echo "3. Updating tile.json..."
-if grep -q "\"$SKILL_NAME\"" "$TILE_JSON"; then
-  echo "   Skill already in tile.json — skipping"
-else
+add_to_tile_json() {
+  local type="$1"  # "skills" or "rules"
+  local name="$2"
+  local path_key="$3"  # "path" for skills, "rules" for rules
+  local path_val="$4"
   python3 -c "
 import json
 with open('$TILE_JSON') as f:
     tile = json.load(f)
-tile['skills']['$SKILL_NAME'] = {'path': 'skills/$SKILL_NAME/SKILL.md'}
+section = tile.setdefault('$type', {})
+if '$name' not in section:
+    section['$name'] = {'$path_key': '$path_val'}
+    print('  added: $name')
+else:
+    print('  exists: $name')
 with open('$TILE_JSON', 'w') as f:
     json.dump(tile, f, indent=2)
     f.write('\n')
-print('   Added $SKILL_NAME to tile.json')
 "
+}
+
+# --- Determine what to promote ---
+
+MODE="${1:-all}"
+SKILLS_TO_PROMOTE=()
+PROMOTE_RULES=false
+
+if [ "$MODE" = "--rules-only" ]; then
+  PROMOTE_RULES=true
+elif [ "$MODE" = "all" ] || [ "$MODE" = "--all" ]; then
+  # Get all staging skills from NAS
+  mapfile -t SKILLS_TO_PROMOTE < <(ssh "$NAS_HOST" "ls $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/ 2>/dev/null" 2>/dev/null || true)
+  PROMOTE_RULES=true
+else
+  SKILLS_TO_PROMOTE=("$MODE")
 fi
 
-# 4. Lint
+echo "=== Promote to $TILE_NAME ==="
 echo ""
-echo "4. Running tessl tile lint..."
-tessl tile lint "$PROJECT_ROOT/tiles/$TILE_NAME"
 
-# 5. Publish prompt
+# --- 1. Pull from NAS ---
+
+PROMOTED_COUNT=0
+
+if [ ${#SKILLS_TO_PROMOTE[@]} -gt 0 ]; then
+  echo "1. Pulling ${#SKILLS_TO_PROMOTE[@]} skill(s) from NAS..."
+  for skill in "${SKILLS_TO_PROMOTE[@]}"; do
+    [ -z "$skill" ] && continue
+    pull_skill "$skill" && ((PROMOTED_COUNT++)) || true
+  done
+  echo ""
+fi
+
+if [ "$PROMOTE_RULES" = true ]; then
+  echo "1b. Pulling rules from NAS..."
+  RULES_ON_NAS=$(ssh "$NAS_HOST" "ls $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/.tessl/tiles/local/$TILE_NAME/rules/*.md 2>/dev/null | xargs -I{} basename {} .md" 2>/dev/null || true)
+  for rule in $RULES_ON_NAS; do
+    [ -z "$rule" ] && continue
+    pull_rule "$rule" && ((PROMOTED_COUNT++)) || true
+  done
+  echo ""
+fi
+
+if [ "$PROMOTED_COUNT" -eq 0 ]; then
+  echo "Nothing to promote."
+  exit 0
+fi
+
+# --- 2. Optimize ---
+
+echo "2. Running tessl skill review --optimize..."
+for skill_md in "$TILE_DIR"/skills/*/SKILL.md; do
+  [ -f "$skill_md" ] || continue
+  optimize_skill "$skill_md"
+done
 echo ""
-echo "=== Promotion complete ==="
+
+# --- 3. Update tile.json ---
+
+echo "3. Updating tile.json..."
+for skill_dir in "$TILE_DIR"/skills/*/; do
+  [ -d "$skill_dir" ] || continue
+  name=$(basename "$skill_dir")
+  add_to_tile_json "skills" "$name" "path" "skills/$name/SKILL.md"
+done
+for rule_file in "$TILE_DIR"/rules/*.md; do
+  [ -f "$rule_file" ] || continue
+  name=$(basename "$rule_file" .md)
+  add_to_tile_json "rules" "$name" "rules" "rules/$name.md"
+done
 echo ""
-echo "Next steps:"
-echo "  1. git add + commit + push"
-echo "  2. tessl tile publish"
-echo "  3. Deploy to NAS: git pull + docker compose up -d --build"
+
+# --- 4. Lint ---
+
+echo "4. Linting..."
+tessl tile lint "$TILE_DIR"
 echo ""
-read -p "Run all three now? [y/N] " -n 1 -r
+
+# --- 5. Commit, push, publish, deploy ---
+
+echo "=== Ready to ship ==="
 echo ""
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-  cd "$PROJECT_ROOT"
-  git add "tiles/$TILE_NAME/"
-  git commit -m "feat: promote $SKILL_NAME skill from AyeAye staging
+read -p "Commit, push, publish, and deploy? [y/N] " -n 1 -r
+echo ""
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+  echo "Stopped. Changes are in tiles/ — commit manually when ready."
+  exit 0
+fi
+
+cd "$PROJECT_ROOT"
+git add "tiles/$TILE_NAME/"
+git commit -m "feat: promote ${PROMOTED_COUNT} skill(s)/rule(s) from AyeAye staging
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
-  git push origin main
+git push origin main
 
-  echo ""
-  echo "Publishing to tessl registry..."
-  tessl tile publish --bump patch "$PROJECT_ROOT/tiles/$TILE_NAME" || echo "(tessl publish skipped — run 'tessl login' then 'tessl tile publish --bump patch tiles/$TILE_NAME')"
+echo ""
+echo "Publishing to tessl registry..."
+tessl tile publish --bump patch "$TILE_DIR" || {
+  echo "ERROR: tessl publish failed — run 'tessl login' and retry"
+  exit 1
+}
 
-  echo ""
-  echo "Deploying to NAS..."
-  ssh "$NAS_HOST" "cd $NAS_PROJECT_DIR && git pull && docker compose up -d --build" 2>/dev/null
+echo ""
+echo "Committing version bump..."
+git add "$TILE_JSON"
+git commit -m "chore: bump $TILE_NAME version after publish
 
-  echo ""
-  echo "Cleaning up staging copy on NAS..."
-  ssh "$NAS_HOST" "rm -rf $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/$SKILL_NAME" 2>/dev/null && \
-    echo "   Deleted: groups/$GROUP_FOLDER/skills/$SKILL_NAME" || \
-    echo "   (cleanup skipped — remove manually if needed)"
-  echo ""
-  echo "Done! Skill promoted, published, deployed, staging cleaned."
-fi
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
+git push origin main
+
+echo ""
+echo "Deploying to NAS..."
+ssh "$NAS_HOST" "cd $NAS_PROJECT_DIR && git pull && docker compose up -d --build" 2>/dev/null
+
+echo ""
+echo "Done! $PROMOTED_COUNT item(s) promoted, published, deployed."
+echo "Staging copies preserved on NAS."
