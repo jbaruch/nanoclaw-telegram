@@ -141,28 +141,42 @@ function buildVolumeMounts(
     );
   }
 
-  // Skills delivery:
-  // - Built-in skills (agent-browser, etc.) and tile skills (heartbeat, etc.)
-  //   are installed in the Docker image and copied by the entrypoint at startup.
-  // - AyeAye-created skills (staging area) are synced here from the group folder.
-  //   They override image skills if names collide (AyeAye's version wins).
+  // Skills delivery — all done host-side so the bind mount has everything
+  // before the container starts (entrypoint runs as non-root and can't write
+  // to root-owned bind mount directories).
   const skillsDst = path.join(groupSessionsDir, 'skills');
   // Clear stale skills — deleted source skills would persist indefinitely
   if (fs.existsSync(skillsDst)) {
     fs.rmSync(skillsDst, { recursive: true, force: true });
   }
   fs.mkdirSync(skillsDst, { recursive: true });
+  // Ensure writable by the container's non-root user (uid 999) so the
+  // entrypoint can copy tessl tile skills from the image staging area.
+  try {
+    fs.chmodSync(groupSessionsDir, 0o777);
+    fs.chmodSync(skillsDst, 0o777);
+  } catch {
+    /* ignore — directory may not exist in test environments */
+  }
 
-  // Sync AyeAye-created skills from the group's skills/ directory.
-  // These are created at runtime and persist in the bind-mounted group folder.
-  // They override tile skills if names collide (AyeAye's version wins).
+  // 1. Copy built-in container skills (agent-browser, status, etc.)
+  const builtinSkillsDir = path.join(process.cwd(), 'container', 'skills');
+  if (fs.existsSync(builtinSkillsDir)) {
+    for (const skillDir of fs.readdirSync(builtinSkillsDir)) {
+      const srcDir = path.join(builtinSkillsDir, skillDir);
+      if (!fs.statSync(srcDir).isDirectory()) continue;
+      fs.cpSync(srcDir, path.join(skillsDst, skillDir), { recursive: true });
+    }
+  }
+
+  // 2. Sync AyeAye-created skills from the group's skills/ directory.
+  //    These override built-in skills if names collide (AyeAye's version wins).
   const groupSkillsDir = path.join(groupDir, 'skills');
   if (fs.existsSync(groupSkillsDir)) {
     for (const skillDir of fs.readdirSync(groupSkillsDir)) {
       const srcDir = path.join(groupSkillsDir, skillDir);
       if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      fs.cpSync(srcDir, dstDir, { recursive: true });
+      fs.cpSync(srcDir, path.join(skillsDst, skillDir), { recursive: true });
     }
   }
 
