@@ -133,7 +133,8 @@ function buildVolumeMounts(
             CLAUDE_CODE_MAX_CONTEXT_WINDOW: '1000000',
             CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
             CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-            CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+            // Disable auto-memory for untrusted groups to prevent persistent injection
+            CLAUDE_CODE_DISABLE_AUTO_MEMORY: isMain || group.containerConfig?.trusted ? '0' : '1',
           },
         },
         null,
