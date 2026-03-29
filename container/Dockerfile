@@ -68,7 +68,11 @@ RUN --mount=type=secret,id=tessl_creds \
     cp /run/secrets/tessl_creds "$HOME/.tessl/api-credentials.json" && \
     tessl install jbaruch/nanoclaw-core jbaruch/nanoclaw-admin jbaruch/reclaim-tripit-sync --yes --dangerously-ignore-security --agent claude-code && \
     rm -f "$HOME/.tessl/api-credentials.json" && \
-    echo "Installed tiles:" && find . -name 'SKILL.md' -o -name 'RULES.md' | head -20
+    echo "Installed tiles:" && find . -name 'SKILL.md' -o -name 'RULES.md' | head -20 && \
+    echo "Verifying all tiles installed..." && \
+    test -f .tessl/tiles/jbaruch/nanoclaw-core/skills/heartbeat/SKILL.md || (echo "FATAL: nanoclaw-core tile missing — check tessl credentials" && exit 1) && \
+    test -f .tessl/tiles/jbaruch/nanoclaw-admin/skills/manage-groups/SKILL.md || (echo "FATAL: nanoclaw-admin tile missing — check tessl credentials" && exit 1) && \
+    echo "All tiles verified."
 
 # Copy built-in container skills into staging alongside tessl tiles.
 # These are not tessl tiles but need the same delivery path.
