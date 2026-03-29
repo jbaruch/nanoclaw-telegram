@@ -172,9 +172,13 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Tessl credentials for runtime tile installation (read-only)
-  const HOME_DIR = process.env.HOME || os.homedir();
-  const tesslCredsPath = path.join(HOME_DIR, '.tessl', 'api-credentials.json');
+  // Tessl credentials for runtime tile installation (read-only).
+  // In DooD, HOST_PROJECT_ROOT parent is the host user's home (/home/jbaruch).
+  // docker-compose mounts host's ~/.tessl/ into the orchestrator at the same path.
+  const hostHome = HOST_PROJECT_ROOT !== process.cwd()
+    ? path.dirname(HOST_PROJECT_ROOT)
+    : process.env.HOME || os.homedir();
+  const tesslCredsPath = path.join(hostHome, '.tessl', 'api-credentials.json');
   if (fs.existsSync(tesslCredsPath)) {
     mounts.push({
       hostPath: tesslCredsPath,
