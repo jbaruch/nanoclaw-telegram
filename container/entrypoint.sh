@@ -11,13 +11,18 @@ cd /app && npx tsc --outDir /tmp/dist 2>&1 >&2
 ln -s /app/node_modules /tmp/dist/node_modules
 chmod -R a-w /tmp/dist
 
+# Restore pre-cached tessl native binary (build downloaded as root, runtime is uid 999)
+if [ -d /opt/tessl-bin ] && [ ! -d "$HOME/.local/share/tessl/versions" ]; then
+  mkdir -p "$HOME/.local/share/tessl/versions"
+  cp -r /opt/tessl-bin/* "$HOME/.local/share/tessl/versions/" 2>/dev/null || true
+fi
+
 # Install tessl tiles at runtime (credentials mounted read-only from host)
-# This replaces the build-time staging approach — always gets latest tile versions.
 if [ -f /home/node/.tessl/api-credentials.json ]; then
   cd /home/node/.claude
   echo '{"name":"nanoclaw","mode":"vendored","dependencies":{}}' > tessl.json 2>/dev/null || true
   tessl install jbaruch/nanoclaw-core jbaruch/nanoclaw-admin jbaruch/reclaim-tripit-sync \
-    --yes --dangerously-ignore-security --agent claude-code 2>&1 | head -5 >&2 || true
+    --yes --dangerously-ignore-security --agent claude-code 2>&1 >&2 || echo "[entrypoint] tessl install failed" >&2
   cd /workspace/group
 fi
 

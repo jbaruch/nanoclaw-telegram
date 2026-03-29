@@ -59,8 +59,13 @@ WORKDIR /opt/tessl-staging
 RUN mkdir -p .claude/skills
 COPY skills/ /opt/tessl-staging/.claude/skills/
 
-# Pre-download the tessl native binary so entrypoint install is fast
-RUN tessl --version 2>/dev/null || true
+# Pre-download the tessl native binary to a shared location.
+# tessl caches to ~/.local/share/tessl/versions/ — but at runtime the container
+# runs as uid 999 (not root), so we download as root then move to a shared path.
+RUN tessl --version 2>/dev/null || true; \
+    mkdir -p /opt/tessl-bin && \
+    cp -r /root/.local/share/tessl/versions/* /opt/tessl-bin/ 2>/dev/null || true && \
+    chmod -R a+rX /opt/tessl-bin
 
 # Ensure .claude directory exists for tile staging copy at runtime
 RUN mkdir -p /home/node/.claude
