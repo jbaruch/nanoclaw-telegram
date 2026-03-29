@@ -17,8 +17,13 @@ if [ -d /opt/tessl-bin ] && [ ! -d "$HOME/.local/share/tessl/versions" ]; then
   cp -r /opt/tessl-bin/* "$HOME/.local/share/tessl/versions/" 2>/dev/null || true
 fi
 
-# Install tessl tiles at runtime (credentials mounted read-only from host)
-if [ -f /home/node/.tessl/api-credentials.json ]; then
+# Install tessl tiles at runtime.
+# Credentials mounted read-only at /tmp/tessl-credentials.json.
+# Copy to writable ~/.tessl/ (tessl writes cli.log there).
+if [ -f /tmp/tessl-credentials.json ]; then
+  mkdir -p "$HOME/.tessl"
+  cp /tmp/tessl-credentials.json "$HOME/.tessl/api-credentials.json"
+
   cd /home/node/.claude
   echo '{"name":"nanoclaw","mode":"vendored","dependencies":{}}' > tessl.json 2>/dev/null || true
   tessl install jbaruch/nanoclaw-core jbaruch/nanoclaw-admin jbaruch/reclaim-tripit-sync \
