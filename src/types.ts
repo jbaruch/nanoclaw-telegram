@@ -30,6 +30,7 @@ export interface AllowedRoot {
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
+  trusted?: boolean; // Trusted groups get limited credentials (e.g. voice transcription)
 }
 
 export interface RegisteredGroup {
@@ -103,7 +104,10 @@ export interface Channel {
   // Optional: pin a message in the chat.
   pinMessage?(jid: string, messageId: string): Promise<void>;
   // Optional: create a draft stream for progressive message display.
-  createDraftStream?(jid: string, replyToMessageId?: string): import('./draft-stream.js').DraftStream;
+  createDraftStream?(
+    jid: string,
+    replyToMessageId?: string,
+  ): import('./draft-stream.js').DraftStream;
 }
 
 // Callback type that channels use to deliver inbound messages

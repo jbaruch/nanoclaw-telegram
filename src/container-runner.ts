@@ -191,13 +191,16 @@ function buildVolumeMounts(
     HOST_PROJECT_ROOT !== process.cwd()
       ? path.dirname(HOST_PROJECT_ROOT)
       : process.env.HOME || os.homedir();
-  const tesslCredsPath = path.join(hostHome, '.tessl', 'api-credentials.json');
-  if (fs.existsSync(tesslCredsPath)) {
-    mounts.push({
-      hostPath: tesslCredsPath,
-      containerPath: '/tmp/tessl-credentials.json',
-      readonly: true,
-    });
+  // Tessl credentials: main and trusted groups only
+  if (isMain || group.containerConfig?.trusted) {
+    const tesslCredsPath = path.join(hostHome, '.tessl', 'api-credentials.json');
+    if (fs.existsSync(tesslCredsPath)) {
+      mounts.push({
+        hostPath: tesslCredsPath,
+        containerPath: '/tmp/tessl-credentials.json',
+        readonly: true,
+      });
+    }
   }
 
   // Per-group IPC namespace
@@ -239,6 +242,8 @@ function buildVolumeMounts(
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  group: RegisteredGroup,
+  isMain: boolean,
   replyToMessageId?: string,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
@@ -246,23 +251,37 @@ function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // Forward env vars that agent containers need (API keys for MCP servers, tools, etc.)
-  // These are read from .env or process.env and passed via -e. The credential proxy
-  // handles Anthropic auth separately — these are for non-Anthropic services.
-  const FORWARDED_ENV_VARS = [
+  // Credential tiers — controls what each group can access:
+  //   Main:    all credentials (full API access)
+  //   Trusted: limited credentials (voice transcription, no GitHub/Google/Composio)
+  //   Other:   no credentials (Anthropic via proxy only)
+  const isTrusted = group.containerConfig?.trusted === true;
+
+  // Main-only: full API access to external services
+  const MAIN_ONLY_VARS = [
     'COMPOSIO_API_KEY',
-    'OPENAI_API_KEY',
     'GITHUB_TOKEN',
-    'TRIPIT_ICAL_URL',
-    'TRIPIT_IGNORE_TRIPS',
-    'TRIPIT_IGNORE_KEYWORDS',
-    'RECLAIM_API_TOKEN',
     'GOOGLE_CLIENT_ID',
     'GOOGLE_CLIENT_SECRET',
     'GOOGLE_REFRESH_TOKEN',
+    'RECLAIM_API_TOKEN',
+    'TRIPIT_ICAL_URL',
+    'TRIPIT_IGNORE_TRIPS',
+    'TRIPIT_IGNORE_KEYWORDS',
   ];
-  const envFromFile = readEnvFile(FORWARDED_ENV_VARS);
-  for (const varName of FORWARDED_ENV_VARS) {
+
+  // Trusted: voice transcription
+  const TRUSTED_VARS = [
+    'OPENAI_API_KEY',
+  ];
+
+  const varsToForward = [
+    ...(isMain ? MAIN_ONLY_VARS : []),
+    ...(isMain || isTrusted ? TRUSTED_VARS : []),
+  ];
+
+  const envFromFile = readEnvFile([...MAIN_ONLY_VARS, ...TRUSTED_VARS]);
+  for (const varName of varsToForward) {
     const value = process.env[varName] || envFromFile[varName];
     if (value) {
       args.push('-e', `${varName}=${value}`);
@@ -348,6 +367,8 @@ export async function runContainerAgent(
   const containerArgs = buildContainerArgs(
     mounts,
     containerName,
+    group,
+    input.isMain,
     input.replyToMessageId,
   );
 
