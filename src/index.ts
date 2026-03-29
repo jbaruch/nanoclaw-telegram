@@ -266,7 +266,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Progressive streaming: show live preview on edit-capable channels.
   // The draft stream quotes the triggering message so edits stay visually linked.
   const replyTarget = missedMessages[missedMessages.length - 1]?.id;
-  const draftStream = channel.createDraftStream?.(chatJid, replyTarget);
+  let draftStream = channel.createDraftStream?.(chatJid, replyTarget);
 
   // Track which message triggered the response — first reply quotes it.
   // Uses shared pendingReplyTo map so follow-up messages piped via
@@ -306,6 +306,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         if (text) {
           if (draftStream) {
             const ok = await draftStream.finish(text);
+            // Consume the draft — next result must create a new message,
+            // not edit this one (container processes multiple messages).
+            draftStream = undefined;
             if (!ok) {
               const replyId = pendingReplyTo[chatJid];
               await channel.sendMessage(chatJid, text, replyId);
