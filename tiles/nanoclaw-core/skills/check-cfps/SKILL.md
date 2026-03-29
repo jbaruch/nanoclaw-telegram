@@ -5,7 +5,7 @@ description: Finds open CFPs relevant to Baruch across Java/AI/developer confere
 
 # Check CFPs (with State Management)
 
-This is the group-level staging version of the tessl `check-cfps` skill. It adds persistent state tracking on top of the tile's core logic.
+Fetches and filters open CFPs, applies AI-based relevance reasoning, and maintains persistent state across sessions.
 
 ## Step 1 — Run fetch-and-filter script
 
@@ -28,9 +28,10 @@ Parse the JSON output:
 
 For each CFP in the script output, reason about whether it's relevant to Baruch:
 
-**Keep:** Java, JVM, Kotlin, Spring, Devoxx/Voxxed/JBCNConf family, developer tools/DX, devrel, general developer conferences with known Java or AI tracks (QCon, KubeCon, FOSDEM, NDC, GOTO). For AI: **applied AI for software developers** — LLM/GenAI/agents in dev context, AI-assisted development, AI infrastructure for engineers.
-
-**Skip:** Pure Web3/blockchain/crypto/DeFi/NFT, pure .NET/PHP/Ruby/Swift/iOS-only (unless there's evidence of a Java or AI track), pure functional programming (Haskell, Erlang, Clojure, Lambda World, etc.), **platform engineering / DevOps / SRE / cloud infrastructure** (Fast Flow, DevOpsDays, platform engineering summits — Patrick Dubois territory, not Baruch's), academic-only research conferences, meetups (<1 day). For AI: **data science, data engineering, MLOps, analytics, BI, data pipelines** — Baruch is a developer/devrel, not a data scientist. If the primary audience is data engineers or data scientists rather than software developers, skip it.
+| Decision | Criteria |
+|----------|----------|
+| **Keep** | Java, JVM, Kotlin, Spring; Devoxx/Voxxed/JBCNConf family; developer tools/DX, devrel; general developer conferences with known Java or AI tracks (QCon, KubeCon, FOSDEM, NDC, GOTO); applied AI for software developers — LLM/GenAI/agents in dev context, AI-assisted development, AI infrastructure for engineers |
+| **Skip** | Pure Web3/blockchain/crypto/NFT; non-JVM single-language conferences (unless Java or AI track confirmed); pure functional programming conferences (Lambda World, etc.); platform engineering/DevOps/SRE/cloud infrastructure (DevOpsDays, Fast Flow); academic-only research; meetups (<1 day); data science/MLOps/analytics events (primary audience is data engineers, not software developers) |
 
 Use your judgment — "AI for developers" is in; "data2day", "DataEngConf", "MLOps Summit" style events are out. When unsure about a borderline AI conference, include and let Baruch decide.
 
@@ -69,24 +70,17 @@ Return the formatted, grouped list. Include a brief note at the top if any data 
 
 ## State Management
 
-The script handles state filtering automatically. When Baruch gives feedback about a conference, update `/workspace/group/cfp-state.json` directly:
+The script handles state filtering automatically. When Baruch gives feedback about a conference, update `/workspace/group/cfp-state.json` directly.
 
-**Conference slug format:** `{conference-name-slug}-{year}`
-- Normalize: lowercase, spaces and punctuation → hyphens, strip leading/trailing hyphens
-- Examples: `voxxed-days-luxembourg-2026`, `javazone-2026`, `devoxx-belgium-2026`
+**Slug format:** `{conference-name-slug}-{year}` — lowercase, spaces/punctuation → hyphens, strip leading/trailing hyphens.
 
-**Mark as sent:**
-- "отправил на [конференцию]" / "submitted to [conference]" → set status `sent`, update `updated` to today
-
-**Dismiss:**
-- "не интересно [конференция]" / "skip [conference]" → set status `dismissed`
-
-**Remind closer to deadline:**
-- "напомни за [N] дней до дедлайна [конференция]" → set status `remind`, set `remind_before_days: N`
-- "напомни о [конференция] через неделю" → set status `remind`, `remind_before_days: 7`
-
-**Undo:**
-- "покажи снова [конференция]" → remove entry from cfp-state.json
+| User input | Action |
+|-----------|--------|
+| "отправил на [конф]" / "submitted to [conf]" | `status: sent`, update `updated` to today |
+| "не интересно [конф]" / "skip [conf]" | `status: dismissed` |
+| "напомни за [N] дней до дедлайна [конф]" | `status: remind`, `remind_before_days: N` |
+| "напомни о [конф] через неделю" | `status: remind`, `remind_before_days: 7` |
+| "покажи снова [конф]" | remove entry from cfp-state.json |
 
 State format:
 ```json
@@ -102,6 +96,4 @@ State format:
 | Conference name | Slug |
 |----------------|------|
 | VoxxedDays Luxembourg 2026 | `voxxed-days-luxembourg-2026` |
-| JavaZone 2026 | `javazone-2026` |
 | Devoxx Belgium 2026 | `devoxx-belgium-2026` |
-| KubeCon EU 2026 | `kubecon-eu-2026` |

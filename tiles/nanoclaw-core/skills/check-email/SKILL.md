@@ -44,27 +44,7 @@ Use `COMPOSIO_SEARCH_TOOLS` to find `GMAIL_FETCH_EMAILS`, then fetch recent emai
 
 Read `/workspace/group/nanoclaw-state.json` to get `last_email_checked` (a messageId string). Only process emails NEWER than that ID (higher messageId = newer in Gmail). If no state file exists or the field is missing, process the latest 5 only.
 
-```python
-import json, os
-
-STATE_FILE = "/workspace/group/nanoclaw-state.json"
-
-try:
-    with open(STATE_FILE) as f:
-        state = json.load(f)
-    last_id = state.get("last_email_checked")
-except (FileNotFoundError, json.JSONDecodeError):
-    state = {}
-    last_id = None  # process latest 5 only
-```
-
-After processing, update `last_email_checked` with the newest messageId seen:
-
-```python
-state["last_email_checked"] = newest_message_id
-with open(STATE_FILE, "w") as f:
-    json.dump(state, f, indent=2)
-```
+After processing, update `last_email_checked` in `/workspace/group/nanoclaw-state.json` with the newest messageId seen.
 
 ### Error Handling
 
@@ -102,10 +82,9 @@ Classify as important if ALL of these hold:
 |---|---|
 | From | `Sarah Lee <sarah.lee@jfrog.com>` |
 | Subject | `Can you review the PR before EOD?` |
-| Body | `Hey, could you take a look at PR #482? We're trying to merge before the release tomorrow.` |
 | Labels | `INBOX` |
 
-Passes all criteria: real person at a known work domain, no unsubscribe link, plain-text body, genuine action request.
+Passes all criteria: real person, known work domain, no unsubscribe link, plain-text body, genuine action request.
 
 ```
 New email from [Sarah Lee]: "Can you review the PR before EOD?" -- Hey, could you take a look at PR #482? We're trying to merge bef...
@@ -135,11 +114,11 @@ When the user reacts with feedback ("good fit", "bad fit", "this one was spam", 
 3. Add the entry
 4. Confirm briefly what you learned
 
-| Feedback example | Rule to add |
+| Feedback | Rule to add |
 |---|---|
 | "bad fit" on a LinkedIn notification | Add `linkedin.com` to `always_ignore` |
-| "bad fit" on a GitHub PR assignment | Pattern: "GitHub notifications unimportant unless user is @mentioned in body" |
-| "good fit" on a CFP email | Pattern: "subject contains CFP → important" |
+| "bad fit" on a GitHub PR assignment | Pattern: ignore GitHub notifications unless user is @mentioned in body |
+| "good fit" on a CFP email | Pattern: subject contains CFP → important |
 | "you missed one from my boss" | Add boss's email to `always_important`; add domain too if unrecognized |
 
 Only record "good fit" feedback if it reinforces a non-obvious pattern. If default rules already covered it, don't clutter the file.

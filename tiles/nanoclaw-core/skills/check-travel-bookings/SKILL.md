@@ -1,6 +1,6 @@
 ---
 name: check-travel-bookings
-description: Checks upcoming trips for missing bookings (flights, hotels) using the TripIt ICS feed directly. Reports gaps for all upcoming trips — no date limit. Supports snooze state. Silent when all bookings are complete or snoozed.
+description: Checks upcoming trips for missing bookings (flights, hotels, accommodation) using the TripIt ICS feed directly. Reports gaps for all upcoming trips — no date limit. Supports snooze state. Silent when all bookings are complete or snoozed. Use when the user asks about upcoming travel plans, itinerary completeness, missing reservations, or TripIt trip status.
 ---
 
 # Check Travel Bookings
@@ -27,6 +27,12 @@ The script outputs JSON:
 
 If `gaps` is empty — stay silent. If gaps are present, format and send as Telegram message.
 
+## Error handling
+
+- If `/workspace/group/tripit-url.txt` is missing or empty — report that the TripIt URL file is not found and skip the run.
+- If the script exits with a non-zero exit code — report the error output to the user and do not attempt to parse the result.
+- If the script output is not valid JSON or is missing expected fields — report a parse error and show the raw output for diagnosis.
+
 ## Output format (when gaps found)
 
 ```
@@ -45,4 +51,4 @@ When Baruch snoozes or resolves a trip, update `/workspace/group/travel-booking-
 
 Slug format used by the script: `{normalized-summary}-{YYYY}-{MM}` (lowercase, spaces/punctuation → hyphens).
 
-
+After writing any update, verify the file contains valid JSON (e.g. by re-reading and parsing it) before confirming success.
