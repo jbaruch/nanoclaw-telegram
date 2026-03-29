@@ -164,27 +164,8 @@ function buildVolumeMounts(
     }
   }
 
-  // Aggregate tile rules into RULES.md for the agent-runner to load via systemPrompt.append.
-  // Rules come from the local tiles/ directory (not tessl — those are for skills only).
-  const tilesDir = path.join(process.cwd(), 'tiles');
-  const tilesToSync = ['nanoclaw-core', ...(isMain ? ['nanoclaw-admin'] : [])];
-  const rulesContent: string[] = [];
-  for (const tileName of tilesToSync) {
-    const tileRulesDir = path.join(tilesDir, tileName, 'rules');
-    if (!fs.existsSync(tileRulesDir)) continue;
-    for (const ruleFile of fs.readdirSync(tileRulesDir)) {
-      if (!ruleFile.endsWith('.md')) continue;
-      rulesContent.push(
-        fs.readFileSync(path.join(tileRulesDir, ruleFile), 'utf8'),
-      );
-    }
-  }
-  if (rulesContent.length > 0) {
-    fs.writeFileSync(
-      path.join(groupSessionsDir, 'RULES.md'),
-      rulesContent.join('\n\n---\n\n'),
-    );
-  }
+  // Rules are delivered by the tessl chain: CLAUDE.md → AGENTS.md → .tessl/RULES.md
+  // (installed at runtime by the entrypoint's `tessl install`)
   mounts.push({
     hostPath: toHostPath(groupSessionsDir),
     containerPath: '/home/node/.claude',

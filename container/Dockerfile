@@ -52,31 +52,15 @@ RUN npm run build
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
 
-# Install tessl tiles into a staging directory.
-# At runtime, /home/node/.claude is bind-mounted (masking image contents).
-# The entrypoint copies staged tiles into the bind mount on startup.
+# Stage built-in container skills (agent-browser, status, etc.)
+# These are not tessl tiles — they ship with the image.
+# Tessl tiles are installed at runtime by the entrypoint.
 WORKDIR /opt/tessl-staging
-# Pre-download the tessl native binary, then install tiles.
-# Write API key from secret into tessl credentials for private tile access.
-# The credentials file is overwritten after install to remove the key from the layer.
-RUN tessl --version 2>/dev/null || true
-RUN echo '{"name":"nanoclaw","mode":"vendored","dependencies":{}}' > tessl.json \
-    && mkdir -p .claude/skills
-ARG TILE_VERSION=latest
-RUN --mount=type=secret,id=tessl_creds \
-    mkdir -p "$HOME/.tessl" && \
-    cp /run/secrets/tessl_creds "$HOME/.tessl/api-credentials.json" && \
-    tessl install jbaruch/nanoclaw-core jbaruch/nanoclaw-admin jbaruch/reclaim-tripit-sync --yes --dangerously-ignore-security --agent claude-code && \
-    rm -f "$HOME/.tessl/api-credentials.json" && \
-    echo "Installed tiles:" && find . -name 'SKILL.md' -o -name 'RULES.md' | head -20 && \
-    echo "Verifying all tiles installed..." && \
-    test -f .tessl/tiles/jbaruch/nanoclaw-core/skills/heartbeat/SKILL.md || (echo "FATAL: nanoclaw-core tile missing — check tessl credentials" && exit 1) && \
-    test -f .tessl/tiles/jbaruch/nanoclaw-admin/skills/manage-groups/SKILL.md || (echo "FATAL: nanoclaw-admin tile missing — check tessl credentials" && exit 1) && \
-    echo "All tiles verified."
-
-# Copy built-in container skills into staging alongside tessl tiles.
-# These are not tessl tiles but need the same delivery path.
+RUN mkdir -p .claude/skills
 COPY skills/ /opt/tessl-staging/.claude/skills/
+
+# Pre-download the tessl native binary so entrypoint install is fast
+RUN tessl --version 2>/dev/null || true
 
 # Ensure .claude directory exists for tile staging copy at runtime
 RUN mkdir -p /home/node/.claude
