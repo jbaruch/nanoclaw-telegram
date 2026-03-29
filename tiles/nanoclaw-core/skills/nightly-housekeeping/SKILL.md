@@ -1,106 +1,42 @@
 ---
 name: nightly-housekeeping
-description: Nightly maintenance tasks — run TripIt→Reclaim sync, refresh TripIt travel schedule, and clean up stale state. Use when running nightly maintenance, scheduled tasks, overnight jobs, or cron jobs; or when the user mentions TripIt-Reclaim synchronization, calendar sync, or refreshing the travel schedule.
+description: Nightly maintenance — TripIt→Reclaim sync, travel schedule refresh, travel booking gaps, undated task cleanup.
 ---
 
-# Nightly Housekeeping
+You are AyeAye, Baruch's assistant. Run these nightly maintenance steps silently. Report only if something needs attention.
 
-Run silently at 3am. No output unless something fails.
+## Step 1: TripIt → Reclaim sync
+Invoke the `tessl__sync-tripit` skill to sync travel timezones from TripIt to Reclaim.
+- If changes detected → report (new timezones, OOO blocks created/deleted)
+- If no changes → stay silent
+- If overlapping trips → flag as warning
 
-## Step 1: TripIt→Reclaim sync
+## Step 2: Refresh travel schedule
+Run: `python3 /workspace/group/scripts/refresh-travel-schedule.py`
+This rebuilds `travel-schedule.json` from the TripIt ICS feed. Silent on success.
+Report only if script exits with error.
 
-Invoke the `sync-tripit` skill to sync timezone changes from TripIt to Reclaim:
+## Step 3: Travel bookings check
+Invoke the `check-travel-bookings` skill to find missing flights/hotels for upcoming trips.
+Report gaps; skip if all snoozed or complete.
 
+## Step 4: Check for undated tasks
+Use COMPOSIO_SEARCH_TOOLS to find Google Tasks tools, then fetch all tasks from "My Tasks" list with no due date (tasks where `due` is absent).
+
+For each undated task:
+- If the due date is **obvious from context** (e.g. title mentions a date, or it's a known deadline like tax day): set the date silently via GOOGLETASKS_PATCH_TASK.
+- If the due date is **not obvious**: add to `/workspace/group/morning-brief-pending.json` under `undated_tasks` array so it surfaces in tomorrow's morning brief.
+
+Format for morning-brief-pending.json:
+```json
+{
+  "undated_tasks": [
+    {"id": "task_id", "title": "Task title", "tasklist_id": "..."}
+  ],
+  "cleanup_items": []
+}
 ```
-Skill(skill: "sync-tripit")
-```
+Merge with existing file contents if file already exists — do not overwrite other fields.
 
-- If result is `noChanges: true` and no errors: stay silent
-- If changes detected: include summary in output (new timezones, OOO blocks)
-- If skill fails: alert with error message
-
-## Step 2: Refresh TripIt travel schedule
-
-Write the script below to `/workspace/group/scripts/refresh-travel-schedule.py`, then execute it:
-
-```bash
-python3 /workspace/group/scripts/refresh-travel-schedule.py
-```
-
-**Script contents** (`/workspace/group/scripts/refresh-travel-schedule.py`):
-
-```python
-import urllib.request, json, re, time
-from datetime import datetime, timezone
-
-url = open('/workspace/group/tripit-url.txt').read().strip()
-
-# Fetch with one retry on transient failure
-ics = None
-last_error = None
-for attempt in range(2):
-    try:
-        ics = urllib.request.urlopen(url).read().decode('utf-8')
-        break
-    except Exception as e:
-        last_error = e
-        if attempt == 0:
-            time.sleep(5)
-
-if ics is None:
-    raise RuntimeError(f'ICS fetch failed after 2 attempts: {last_error}')
-
-now = datetime.now(timezone.utc)
-events = []
-
-for component in ics.split('BEGIN:VEVENT')[1:]:
-    def get(field):
-        m = re.search(rf'{field}[^:]*:(.+)', component)
-        return m.group(1).strip() if m else ''
-
-    def parse_dt(s):
-        try:
-            return datetime.strptime(s.split('T')[0], '%Y%m%d').replace(tzinfo=timezone.utc)
-        except:
-            return None
-
-    start = parse_dt(get('DTSTART'))
-    end = parse_dt(get('DTEND'))
-    if not start or not end or end < now:
-        continue
-
-    events.append({
-        'summary': get('SUMMARY'),
-        'start': start.strftime('%Y-%m-%d'),
-        'end': end.strftime('%Y-%m-%d'),
-        'location': get('LOCATION')
-    })
-
-events.sort(key=lambda e: e['start'])
-
-output_path = '/workspace/group/travel-schedule.json'
-with open(output_path, 'w') as f:
-    json.dump(events, f, indent=2)
-
-# Validate written file
-with open(output_path) as f:
-    verified = json.load(f)
-assert isinstance(verified, list), 'travel-schedule.json is not a JSON array'
-assert all('summary' in e and 'start' in e and 'end' in e for e in verified), \
-    'travel-schedule.json contains events missing required fields'
-
-print(f'TripIt: {len(events)} upcoming events written and verified')
-```
-
-**Alert if:** fetch fails after retry (likely URL expired), produces 0 events, or post-write validation fails.
-
-## Output
-
-Silent on success. Alert only on failure or when sync reports changes:
-
-```
-*Nightly housekeeping* ⚠️
-
-• TripIt sync: [changes or error]
-• TripIt refresh failed: [error]
-```
+## Step 5: Silence
+If nothing to report, output nothing (wrap in `<internal>`).

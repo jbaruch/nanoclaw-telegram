@@ -1,87 +1,61 @@
 ---
 name: heartbeat
-description: Periodic health check orchestrator for NanoClaw. Runs ALL checks — system health, unanswered messages, calendar, email, disk, logs, sessions. The only external watchdog is a liveness check (is NanoClaw running?). Triggers on "heartbeat", "health check", "system status".
+description: Periodic health check — system, calendar, and email. Runs silently; reports only actionable items to Baruch.
 ---
 
-# Heartbeat
+You are AyeAye, Baruch's assistant. Run silently — report ONLY actionable items.
 
-You are running as a periodic health check. Invoke each sub-check below, run the inline checks, collect results, and ONLY message the user if something is wrong. Silent when healthy.
+## Step 0: Pending response check
+Read `/workspace/group/session-state.json`. If `pending_response` is non-null:
+- Send the pending response to Baruch now (message_id and preview are hints for context)
+- Clear `pending_response` to null in the file
+- Then continue with the rest of the heartbeat
 
-## Skill checks
+## Step 1: System checks
+Run: `python3 /workspace/group/scripts/heartbeat-checks.py`
+If `issues` array is non-empty → report. Otherwise silent.
 
-Invoke each of the following as skill calls and collect their results.
+## Step 2: Calendar check
+Use COMPOSIO_MULTI_EXECUTE_TOOL with GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS:
+- time_min: now (UTC)
+- time_max: 1 year from now
+- single_events: true
+Check for events updated in the last 30 minutes (new invites, cancellations, changes).
+Report: new calendar invites needing a response (responseStatus = needsAction).
 
-1. **System health** (`/check-system-health`) — stuck tasks, DB size, task failures (DB at /workspace/store/messages.db)
-2. **Unanswered messages** (`/check-unanswered`) — find and triage unanswered messages (DB at /workspace/store/messages.db)
-3. **Calendar changes** (`/check-calendar`) — detect changed events and reschedule reminders
-4. **Email triage** (`/check-email`) — fetch and classify new emails with source calibration
+## Step 3: Email check
+Use GMAIL_FETCH_EMAILS with `query: "is:unread in:inbox"`, max_results: 20, verbose: false.
+**Always open the full email** (GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID) when subject/preview is insufficient to classify — especially for reservations, financial emails, or anything with dates.
 
-## Inline checks
+### Report (surface to Baruch):
+- Software update notifications for tools he uses (Synergy, JetBrains, etc.)
+- Calendar invites / event notifications requiring action
+- Tax / financial deadlines and reminders
+- Banking and construction/mortgage emails (JPMorgan, construction draws)
+- Conference speaker action items (acceptance, guidelines, action required)
+- Personal requests or questions from known contacts
+- Interview/meeting requests from real people
+- Invoice/billing emails that may need expensing
 
-Run these directly (no sub-skill needed):
+### Do NOT report:
+- LinkedIn job alerts
+- Newsletters (Points Path, Simple Flying, Ground News, Tennessean, etc.)
+- Promotional emails (sales, discounts — unless it's a tool Baruch actively uses)
+- USPS Informed Delivery daily digest
+- Amazon order/shipping/delivery confirmations (unless unusual)
+- Review request emails (Carepod, Loox, etc.)
+- Social media notifications
+- Google Alerts (unless urgent news)
 
-### Disk space
-
-```bash
-df -h /workspace/group/ | awk 'NR==2 {print $5, $4}'
+### Ambiguous → cleanup:
+If unsure whether an email is actionable, add to `/workspace/group/morning-brief-pending.json` under `cleanup_items`:
+```json
+{"type": "email", "subject": "...", "sender": "...", "question": "Actionable?"}
 ```
+Do NOT report ambiguous items directly — queue them for morning cleanup.
 
-**Alert if:** usage > 80%. **Critical if:** > 95%.
+### Already reported:
+Skip emails already surfaced in a previous heartbeat this session. Compare against what was sent in recent messages to avoid duplicates.
 
-### Log growth
-
-```bash
-du -sh /workspace/group/logs/ 2>/dev/null
-find /workspace/group/logs/ -type f -size +50M 2>/dev/null
-```
-
-**Auto-fix:** Truncate files > 50MB to last 10k lines.
-
-### Session bloat
-
-```bash
-du -sh /home/node/.claude/projects/ 2>/dev/null
-find /home/node/.claude/projects/ -name '*.jsonl' -mtime +7 2>/dev/null | wc -l
-```
-
-**Auto-fix:** Delete session transcripts older than 7 days, keep latest 5 per group.
-
-### Stuck IPC close files
-
-```bash
-find /workspace/ipc/input -name '_close' -mmin +30 2>/dev/null
-```
-
-**Auto-fix:** Delete stuck `_close` files.
-
-### Orphaned containers (via bash)
-
-```bash
-docker ps -a --filter "name=nanoclaw-" --filter "status=exited" --format '{{.Names}}' 2>/dev/null | wc -l
-```
-
-**Alert if:** > 5 orphaned containers.
-
-## Sub-check error handling
-
-If a sub-check fails to respond, returns an error, or times out, treat that as a failure and include it in the consolidated report — do **not** silently skip it.
-
-## Output format
-
-If ALL checks pass: wrap your entire output in `<internal>` tags. Say nothing to the user.
-
-```
-<internal>Heartbeat: all clear.</internal>
-```
-
-If ANY check returns issues, send a single consolidated message with only the failures:
-
-```
-*Heartbeat*
-
-• Stuck tasks: 2 overdue -> reset
-• Disk: 87% used
-• New email from John: "Re: schedule" -- Can you confirm...
-```
-
-Keep it short. No preamble. No "I ran a health check and found..." — just the problems.
+## Step 4: Silence
+If nothing to report, output nothing. No "all clear", no acknowledgement.

@@ -1,124 +1,45 @@
 ---
 name: morning-brief
-description: "Morning briefing — fetches today's Google Calendar events and Tasks, sends a Telegram-formatted summary via mcp__nanoclaw__send_message, schedules 15-minute reminders for upcoming events, and saves state to disk. Runs daily at 8am as a scheduled task. Use when: \"morning brief\", \"daily briefing\", \"what's on today\", \"today's schedule\"."
+description: Daily morning briefing — today's calendar, overdue/due tasks, pending items. Pins to chat and schedules event reminders.
 ---
 
-# Morning Brief
-
-**Overview — six steps run in order:**
-1. Fetch today's Google Calendar events
-2. Fetch Google Tasks (due today + overdue)
-3. Check closing CFPs (`/check-cfps`)
-4. Send a formatted Telegram briefing (including CFP deadlines if any)
-5. Schedule 15-minute reminders for timed events
-6. Save state to `/workspace/group/nanoclaw-state.json`
-
-See **Error Policy** at the bottom for how failures at each step are handled.
-
----
+You are AyeAye, Baruch's assistant. Do ALL of these steps:
 
 ## Step 1: Fetch today's calendar
-
-Call `GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS` (discover via `COMPOSIO_SEARCH_TOOLS` if needed):
-
-```
-GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS(
-    time_min="<today>T00:00:00-05:00",   # today 00:00 America/Chicago
-    time_max="<today>T23:59:59-05:00",   # today 23:59 America/Chicago
-    single_events=true,
-    order_by="startTime"
-  )
-```
-
-Timezone offset: CDT (Mar–Nov) = `-05:00`; CST (Nov–Mar) = `-06:00`.
+Use COMPOSIO_SEARCH_TOOLS to find GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS, then call it:
+- time_min: today at 00:00:00 America/Chicago (March-November = CDT = -05:00, November-March = CST = -06:00)
+- time_max: today at 23:59:59 America/Chicago
+- single_events: true, order_by: startTime
 
 ## Step 2: Fetch Google Tasks
-
-Use `COMPOSIO_SEARCH_TOOLS(query="googletasks")` to find Google Tasks tools. Fetch all task lists, then for each list fetch tasks that are:
+Use COMPOSIO_SEARCH_TOOLS to find Google Tasks tools (search "googletasks"). Fetch all task lists, then for each list fetch tasks that are:
 - Due today (due date = today)
 - Overdue (due date before today, status != completed)
+If no Google Tasks connection, skip silently.
 
-## Step 3: Check closing CFPs
-
-Invoke `/check-cfps` to find relevant CFPs closing within 7 days. Collect the results for inclusion in the briefing.
+## Step 3: Check pending items
+Run: `python3 /workspace/group/scripts/morning-brief-fetch.py`
+Output includes `pending.undated_tasks` and `pending.cleanup_items` from morning-brief-pending.json.
+Note: calendar and tasks still require Composio (OAuth-protected) — script handles only the deterministic pending-file read.
 
 ## Step 4: Send morning brief
-
-Format in Telegram style (`*bold*` single asterisks, `•` bullets, no markdown headings):
-
-```
+Format in Telegram style (*bold* single asterisks, • bullets, no markdown headings):
 *Доброе утро! [weekday], [date]*
+*📅 Сегодня:* — timed events with local time. Skip: Travel, all-day "Home", week numbers.
+*✅ Задачи:* — overdue (with date) + due today. Skip section if no tasks.
+If `undated_tasks` present: add section *📋 Без даты:* — list task titles, ask to set dates.
+End with: _N событий, M задач_
+Send via mcp__nanoclaw__send_message with pin: true.
 
-*📅 Сегодня:*
-• 09:00 — Team Standup
-• 12:00 — Lunch with Sarah
-• 15:00 — PR Review
+## Step 5: Run brief-cleanup
+After sending the brief, invoke the brief-cleanup skill to send any pending `cleanup_items` as separate async messages. Do this every morning regardless — it's silent if nothing is pending.
 
-*✅ Задачи:*
-• ⚠️ Overdue: Fix CI pipeline (due Mar 25)
-• Write blog post draft
+## Step 6: Clear pending file
+After brief-cleanup runs, clear `morning-brief-pending.json` (set both arrays to `[]`).
 
-*📢 CFPs closing this week:*
-• Devoxx Belgium — closes in 2 days
-• AI Dev Summit — closes in 5 days
+## Step 7: Schedule reminders for today's events
+For each timed event >20 min away: schedule once task at start-15min (local ISO, NO Z suffix).
 
-_N событий, M задач, K CFPs_
-```
-
-Rules:
-- Skip: Travel events, all-day "Home" entries, week number entries
-- Flag tight connections or conflicts between events
-- If no tasks: skip the tasks section entirely
-- Send via `mcp__nanoclaw__send_message`
-
-## Step 5: Schedule reminders for today's events
-
-For each timed event (not all-day, not travel) that starts MORE than 20 minutes from now:
-- Calculate reminder time = event start minus 15 minutes (America/Chicago)
-- Format as local ISO: `<today>T08:45:00` (NO Z suffix, no timezone offset)
-- Schedule a `once` task:
-  - schedule_type: `once`
-  - schedule_value: the local time string
-  - context_mode: `isolated`
-  - prompt: `Send a reminder to Baruch: *[event title]* starts in 15 minutes at [time]. Use mcp__nanoclaw__send_message to deliver it.`
-
-## Step 6: Save state
-
-Write to `/workspace/group/nanoclaw-state.json`:
-
-```json
-{
-  "date": "YYYY-MM-DD",
-  "fetched_at": "ISO timestamp",
-  "events": [
-    {
-      "event_id": "...",
-      "title": "...",
-      "start": "ISO",
-      "end": "ISO",
-      "all_day": false,
-      "reminder_task_id": "task-xxx or null"
-    }
-  ]
-}
-```
-
-Only timed, non-travel events. `reminder_task_id` = task ID from schedule_task, or `null` if event is too soon (< 20 min) or scheduling failed.
-
-After writing, read the file back and confirm it parses as valid JSON containing the expected number of events.
-
-This state file is read by `/check-calendar` (heartbeat sub-check) to detect mid-day calendar changes and reschedule reminders.
-
----
-
-## Error Policy
-
-| Step | Failure | Action |
-|------|---------|--------|
-| 1 — Calendar fetch | Error or empty response | Send degraded briefing noting calendar unavailable; continue to Step 2 |
-| 2 — Tasks fetch | No connection | Skip silently |
-| 2 — Tasks fetch | Unexpected error | Skip silently; note omission in briefing footer |
-| 3 — CFPs check | Fails or returns nothing | Skip CFP section silently |
-| 4 — Send message | `mcp__nanoclaw__send_message` fails | Retry once; if still failing, abort remaining steps and surface the error |
-| 5 — Schedule reminder | `schedule_task` fails for one event | Set `reminder_task_id: null` for that event; continue scheduling the rest |
-| 6 — Write state | File missing, empty, or unparseable after write | Retry write once; if still failing, send a warning via `mcp__nanoclaw__send_message` |
+## Step 8: Save state
+Write to /workspace/group/calendar-state.json:
+{ "date", "fetched_at", "events": [{"event_id", "title", "start", "reminder_task_id"}] }

@@ -1,63 +1,54 @@
 ---
 name: check-cfps
-description: Finds open CFPs (call for papers, speaking opportunities, conference submissions, talk proposals) relevant to Baruch across Java/AI/developer conferences using two structured data sources plus web search, filtered by travel conflicts and excluding online/virtual events. Use when Baruch asks about upcoming conferences, call for papers, speaking opportunities, CFP deadlines, conference submissions, or where to submit a talk proposal.
+description: Finds open CFPs relevant to Baruch across Java/AI/developer conferences. Extends the tessl tile version with persistent CFP state (sent/dismissed/remind) from cfp-state.json. Use when Baruch asks about upcoming conferences, call for papers, speaking opportunities, CFP deadlines, or where to submit a talk proposal.
 ---
 
-# Check CFPs
+# Check CFPs (with State Management)
 
-Fetches open CFPs from two authoritative sources plus web search. Filters out online conferences and travel conflicts.
+This is the group-level staging version of the tessl `check-cfps` skill. It adds persistent state tracking on top of the tile's core logic.
 
-## Step 1 — Fetch primary sources (in parallel)
+## Step 1 — Run fetch-and-filter script
 
-**Source A:** `https://developers.events/all-cfps.json`
-- Fetch the full JSON array
-- Each entry has: `link` (CFP URL), `until` (deadline string), `untilDate` (ms timestamp), `conf.name`, `conf.date` (array of ms timestamps), `conf.hyperlink`, `conf.location`
-- Keep only entries where `untilDate` > now (CFP still open)
-- If the source is unreachable or returns a non-array/malformed response, log a warning and continue with Source B and web search
+Execute the deterministic pipeline (fetches sources, applies hard filters, checks state).
+Script does NOT filter by topic relevance — that's your job in Step 1b.
 
-**Source B:** `https://javaconferences.org/conferences.json`
-- Fetch the JSON array (current + next year Java conferences)
-- Each entry has: `name`, `link` (website), `locationName`, `hybrid`, `date`, `cfpLink`, `cfpEndDate`
-- Keep only entries where `cfpLink` is non-empty and `cfpEndDate` > today
-- If the source is unreachable or returns a non-array/malformed response, log a warning and continue with Source A results and web search
+```bash
+python3 /workspace/group/scripts/check-cfps-fetch.py
+```
 
-If **both** sources fail, proceed with web search results only and note the data gap in the output.
+Parse the JSON output:
+- `cfps` — filtered, sorted list of open CFPs with fields: `name`, `city`, `conf_date`, `cfp_url`, `deadline`, `days_left`, `slug`, `source`
+- `warnings` — data source failures or skipped checks to surface in output
+- `checked_at` — timestamp
+
+**Alert if:** script fails to run (report error and abort).
+**Note:** warnings about unreachable sources should be mentioned briefly at the top of output.
+
+## Step 1b — Relevance filter (AI reasoning)
+
+For each CFP in the script output, reason about whether it's relevant to Baruch:
+
+**Keep:** Java, JVM, Kotlin, Spring, Devoxx/Voxxed/JBCNConf family, developer tools/DX, devrel, general developer conferences with known Java or AI tracks (QCon, KubeCon, FOSDEM, NDC, GOTO). For AI: **applied AI for software developers** — LLM/GenAI/agents in dev context, AI-assisted development, AI infrastructure for engineers.
+
+**Skip:** Pure Web3/blockchain/crypto/DeFi/NFT, pure .NET/PHP/Ruby/Swift/iOS-only (unless there's evidence of a Java or AI track), pure functional programming (Haskell, Erlang, Clojure, Lambda World, etc.), **platform engineering / DevOps / SRE / cloud infrastructure** (Fast Flow, DevOpsDays, platform engineering summits — Patrick Dubois territory, not Baruch's), academic-only research conferences, meetups (<1 day). For AI: **data science, data engineering, MLOps, analytics, BI, data pipelines** — Baruch is a developer/devrel, not a data scientist. If the primary audience is data engineers or data scientists rather than software developers, skip it.
+
+Use your judgment — "AI for developers" is in; "data2day", "DataEngConf", "MLOps Summit" style events are out. When unsure about a borderline AI conference, include and let Baruch decide.
 
 ## Step 2 — Web search for gaps
 
-Run these searches to catch AI/developer conferences not in the above sources:
+Run these searches to catch AI/developer conferences not in the primary sources:
 
 1. `AI developer conference CFP open 2026 "call for speakers" deadline`
 2. `developer conference CFP 2026 autumn fall open submissions`
 
-Add any new CFPs found that aren't already in the combined list.
+Add new CFPs found that aren't already in the list (deduplicate by conference name).
+Apply hard filters (no online/virtual, no excluded locations) then the same relevance reasoning as Step 1b.
 
-## Step 3 — Load travel schedule
+## Step 3 — Sort and format
 
-Read `/workspace/group/travel-schedule.json`. Array of trips with `start` and `end` (YYYY-MM-DD).
+The script already returns results sorted by deadline. Merge in web search additions (also sorted).
 
-If the file is missing or unreadable, skip travel conflict filtering and note in the output that conflict filtering was skipped.
-
-A conference has a **travel conflict** if its dates overlap any trip: `conf_start <= trip_end AND conf_end >= trip_start`.
-
-## Step 4 — Filter
-
-The inline rules below are a summary of the authoritative criteria defined in `/workspace/group/cfp-relevance-config.md`. If any conflict exists between the inline rules and the config file, the config file takes precedence.
-
-Remove entries where:
-- **Online/virtual**: location contains "online", "virtual", "remote", or no city listed
-- **Travel conflict**: conference dates overlap a committed trip (per Step 3)
-- **CFP closed**: deadline already passed today
-- **Not relevant** (per `/workspace/group/cfp-relevance-config.md`): Web3/blockchain/crypto, pure .NET/PHP/Ruby/iOS-only, academic-only, meetups < 1 day, no CFP link
-- **Location exclusions** (per cfp-relevance-config.md): Nigeria, Kenya, South Africa, Ghana, Ethiopia, Tanzania, Uganda, Rwanda
-
-Deduplicate by conference name (case-insensitive).
-
-## Step 5 — Sort and format
-
-Sort by CFP deadline ascending (soonest first).
-
-Group into urgency tiers based on days until CFP deadline:
+Group into urgency tiers:
 - 🔴 **≤3 days** — act today
 - 🟡 **4–7 days**
 - 🟢 **8–31 days**
@@ -70,8 +61,47 @@ Format each entry as:
   Submit: [URL]
 ```
 
-If no open CFPs found: return nothing (output nothing / wrap in `<internal>`).
+If no open CFPs after filtering: return nothing (wrap in `<internal>`).
 
 ## Output
 
-Return the formatted, grouped list to the caller. If any data sources were unavailable or conflict filtering was skipped, include a brief note at the top of the output.
+Return the formatted, grouped list. Include a brief note at the top if any data sources were unavailable or conflict filtering was skipped.
+
+## State Management
+
+The script handles state filtering automatically. When Baruch gives feedback about a conference, update `/workspace/group/cfp-state.json` directly:
+
+**Conference slug format:** `{conference-name-slug}-{year}`
+- Normalize: lowercase, spaces and punctuation → hyphens, strip leading/trailing hyphens
+- Examples: `voxxed-days-luxembourg-2026`, `javazone-2026`, `devoxx-belgium-2026`
+
+**Mark as sent:**
+- "отправил на [конференцию]" / "submitted to [conference]" → set status `sent`, update `updated` to today
+
+**Dismiss:**
+- "не интересно [конференция]" / "skip [conference]" → set status `dismissed`
+
+**Remind closer to deadline:**
+- "напомни за [N] дней до дедлайна [конференция]" → set status `remind`, set `remind_before_days: N`
+- "напомни о [конференция] через неделю" → set status `remind`, `remind_before_days: 7`
+
+**Undo:**
+- "покажи снова [конференция]" → remove entry from cfp-state.json
+
+State format:
+```json
+{
+  "voxxed-lu-2026": { "status": "sent", "updated": "2026-03-28" },
+  "javazone-2026": { "status": "dismissed", "updated": "2026-03-29" },
+  "devoxx-be-2026": { "status": "remind", "remind_before_days": 7, "updated": "2026-03-28" }
+}
+```
+
+### Slug examples
+
+| Conference name | Slug |
+|----------------|------|
+| VoxxedDays Luxembourg 2026 | `voxxed-days-luxembourg-2026` |
+| JavaZone 2026 | `javazone-2026` |
+| Devoxx Belgium 2026 | `devoxx-belgium-2026` |
+| KubeCon EU 2026 | `kubecon-eu-2026` |

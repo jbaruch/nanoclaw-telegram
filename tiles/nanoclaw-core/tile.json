@@ -38,6 +38,12 @@
     },
     "check-system-health": {
       "path": "skills/check-system-health/SKILL.md"
+    },
+    "brief-cleanup": {
+      "path": "skills/brief-cleanup/SKILL.md"
+    },
+    "check-travel-bookings": {
+      "path": "skills/check-travel-bookings/SKILL.md"
     }
   }
 }
