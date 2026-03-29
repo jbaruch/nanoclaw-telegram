@@ -154,6 +154,18 @@ function buildVolumeMounts(
   }
   fs.mkdirSync(skillsDst, { recursive: true });
 
+  // Make the entire .claude dir writable by the container user (uid 999).
+  // The entrypoint runs as this user and needs to: run tessl install (writes
+  // symlinks to skills/, .tessl/ tiles, cli.log) and copy built-in skills.
+  const containerUid = HOST_UID ?? 1000;
+  const containerGid = HOST_GID ?? 1000;
+  try {
+    fs.chownSync(groupSessionsDir, containerUid, containerGid);
+    fs.chownSync(skillsDst, containerUid, containerGid);
+  } catch {
+    /* ignore in test environments */
+  }
+
   // Sync AyeAye-created skills from the group's skills/ directory.
   const groupSkillsDir = path.join(groupDir, 'skills');
   if (fs.existsSync(groupSkillsDir)) {
