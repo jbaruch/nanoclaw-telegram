@@ -205,6 +205,18 @@ function buildVolumeMounts(
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+  // Chown IPC dirs so container user can read/write/unlink files
+  const ipcUid = HOST_UID ?? 1000;
+  const ipcGid = HOST_GID ?? 1000;
+  if (ipcUid !== 0) {
+    try {
+      for (const sub of ['', 'messages', 'tasks', 'input']) {
+        fs.chownSync(path.join(groupIpcDir, sub), ipcUid, ipcGid);
+      }
+    } catch (err) {
+      logger.warn({ folder: group.folder, err }, 'Failed to chown IPC dirs');
+    }
+  }
   mounts.push({
     hostPath: toHostPath(groupIpcDir),
     containerPath: '/workspace/ipc',
