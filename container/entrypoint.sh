@@ -28,6 +28,15 @@ if [ -f /tmp/tessl-credentials.json ]; then
   echo '{"name":"nanoclaw","mode":"vendored","dependencies":{}}' > tessl.json 2>/dev/null || true
   tessl install jbaruch/nanoclaw-core jbaruch/nanoclaw-admin jbaruch/reclaim-tripit-sync \
     --yes --dangerously-ignore-security --agent claude-code 2>&1 >&2 || echo "[entrypoint] tessl install failed" >&2
+
+  # tessl installs to .tessl/tiles/ but SDK reads .claude/skills/.
+  # Symlink each tile skill into the skills directory.
+  for tile_dir in /home/node/.claude/.tessl/tiles/*/*/skills/*/; do
+    [ -d "$tile_dir" ] || continue
+    skill_name=$(basename "$tile_dir")
+    ln -sfn "$tile_dir" "/home/node/.claude/skills/tessl__${skill_name}" 2>/dev/null || true
+  done
+
   cd /workspace/group
 fi
 
