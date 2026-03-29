@@ -970,11 +970,17 @@ export class TelegramChannel implements Channel {
     await this.sendReaction(jid, latest.id, emoji);
   }
 
-  createDraftStream(jid: string): DraftStream {
+  createDraftStream(jid: string, replyToMessageId?: string): DraftStream {
     const numericId = jid.replace(/^tg:/, '');
     return createDraftStream({
       sendMessage: async (text) => {
-        const msg = await this.bot!.api.sendMessage(numericId, text);
+        const opts: Record<string, unknown> = {};
+        if (replyToMessageId) {
+          opts.reply_parameters = {
+            message_id: parseInt(replyToMessageId, 10),
+          };
+        }
+        const msg = await this.bot!.api.sendMessage(numericId, text, opts);
         return msg.message_id;
       },
       editMessage: async (messageId, text) => {
