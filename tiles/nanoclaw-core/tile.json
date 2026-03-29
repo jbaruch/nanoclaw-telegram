@@ -6,6 +6,15 @@
   "rules": {
     "core-behavior": {
       "rules": "rules/core-behavior.md"
+    },
+    "operational-principles": {
+      "rules": "rules/operational-principles.md"
+    },
+    "slack-formatting": {
+      "rules": "rules/slack-formatting.md"
+    },
+    "telegram-protocol": {
+      "rules": "rules/telegram-protocol.md"
     }
   },
   "skills": {
