@@ -193,7 +193,11 @@ function buildVolumeMounts(
       : process.env.HOME || os.homedir();
   // Tessl credentials: main and trusted groups only
   if (isMain || group.containerConfig?.trusted) {
-    const tesslCredsPath = path.join(hostHome, '.tessl', 'api-credentials.json');
+    const tesslCredsPath = path.join(
+      hostHome,
+      '.tessl',
+      'api-credentials.json',
+    );
     if (fs.existsSync(tesslCredsPath)) {
       mounts.push({
         hostPath: tesslCredsPath,
@@ -251,36 +255,28 @@ function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // Credential tiers — controls what each group can access:
-  //   Main:    all credentials (full API access)
-  //   Trusted: limited credentials (voice transcription, no GitHub/Google/Composio)
-  //   Other:   no credentials (Anthropic via proxy only)
+  // Credential tiers:
+  //   Main:    all credentials
+  //   Trusted: all credentials (same as main, just not admin-privileged)
+  //   Other:   nothing (Anthropic via proxy only)
   const isTrusted = group.containerConfig?.trusted === true;
 
-  // Main-only: full API access to external services
-  const MAIN_ONLY_VARS = [
+  const ALL_FORWARDED_VARS = [
     'COMPOSIO_API_KEY',
+    'OPENAI_API_KEY',
     'GITHUB_TOKEN',
-    'GOOGLE_CLIENT_ID',
-    'GOOGLE_CLIENT_SECRET',
-    'GOOGLE_REFRESH_TOKEN',
-    'RECLAIM_API_TOKEN',
     'TRIPIT_ICAL_URL',
     'TRIPIT_IGNORE_TRIPS',
     'TRIPIT_IGNORE_KEYWORDS',
+    'RECLAIM_API_TOKEN',
+    'GOOGLE_CLIENT_ID',
+    'GOOGLE_CLIENT_SECRET',
+    'GOOGLE_REFRESH_TOKEN',
   ];
 
-  // Trusted: voice transcription
-  const TRUSTED_VARS = [
-    'OPENAI_API_KEY',
-  ];
+  const varsToForward = isMain || isTrusted ? ALL_FORWARDED_VARS : [];
 
-  const varsToForward = [
-    ...(isMain ? MAIN_ONLY_VARS : []),
-    ...(isMain || isTrusted ? TRUSTED_VARS : []),
-  ];
-
-  const envFromFile = readEnvFile([...MAIN_ONLY_VARS, ...TRUSTED_VARS]);
+  const envFromFile = readEnvFile(ALL_FORWARDED_VARS);
   for (const varName of varsToForward) {
     const value = process.env[varName] || envFromFile[varName];
     if (value) {
