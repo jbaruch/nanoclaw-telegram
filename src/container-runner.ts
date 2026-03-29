@@ -4,6 +4,7 @@
  */
 import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -141,36 +142,19 @@ function buildVolumeMounts(
     );
   }
 
-  // Skills delivery — all done host-side so the bind mount has everything
-  // before the container starts (entrypoint runs as non-root and can't write
-  // to root-owned bind mount directories).
+  // Skills delivery:
+  // - Tessl tiles: installed at runtime by entrypoint via `tessl install`
+  //   (credentials mounted read-only from host ~/.tessl/)
+  // - Built-in skills: copied by entrypoint from /opt/tessl-staging/.claude/skills/
+  // - AyeAye-created skills: synced here from the group folder (override tiles if names collide)
   const skillsDst = path.join(groupSessionsDir, 'skills');
-  // Clear stale skills — deleted source skills would persist indefinitely
+  // Clear stale skills — ensures deleted skills don't persist
   if (fs.existsSync(skillsDst)) {
     fs.rmSync(skillsDst, { recursive: true, force: true });
   }
   fs.mkdirSync(skillsDst, { recursive: true });
-  // Ensure writable by the container's non-root user (uid 999) so the
-  // entrypoint can copy tessl tile skills from the image staging area.
-  try {
-    fs.chmodSync(groupSessionsDir, 0o777);
-    fs.chmodSync(skillsDst, 0o777);
-  } catch {
-    /* ignore — directory may not exist in test environments */
-  }
 
-  // 1. Copy built-in container skills (agent-browser, status, etc.)
-  const builtinSkillsDir = path.join(process.cwd(), 'container', 'skills');
-  if (fs.existsSync(builtinSkillsDir)) {
-    for (const skillDir of fs.readdirSync(builtinSkillsDir)) {
-      const srcDir = path.join(builtinSkillsDir, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      fs.cpSync(srcDir, path.join(skillsDst, skillDir), { recursive: true });
-    }
-  }
-
-  // 2. Sync AyeAye-created skills from the group's skills/ directory.
-  //    These override built-in skills if names collide (AyeAye's version wins).
+  // Sync AyeAye-created skills from the group's skills/ directory.
   const groupSkillsDir = path.join(groupDir, 'skills');
   if (fs.existsSync(groupSkillsDir)) {
     for (const skillDir of fs.readdirSync(groupSkillsDir)) {
@@ -206,6 +190,17 @@ function buildVolumeMounts(
     containerPath: '/home/node/.claude',
     readonly: false,
   });
+
+  // Tessl credentials for runtime tile installation (read-only)
+  const HOME_DIR = process.env.HOME || os.homedir();
+  const tesslCredsPath = path.join(HOME_DIR, '.tessl', 'api-credentials.json');
+  if (fs.existsSync(tesslCredsPath)) {
+    mounts.push({
+      hostPath: tesslCredsPath,
+      containerPath: '/home/node/.tessl/api-credentials.json',
+      readonly: true,
+    });
+  }
 
   // Per-group IPC namespace
   const groupIpcDir = resolveGroupIpcPath(group.folder);

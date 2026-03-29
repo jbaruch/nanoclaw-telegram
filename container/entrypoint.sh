@@ -11,30 +11,28 @@ cd /app && npx tsc --outDir /tmp/dist 2>&1 >&2
 ln -s /app/node_modules /tmp/dist/node_modules
 chmod -R a-w /tmp/dist
 
-# Copy tessl-staged tiles into bind-mounted .claude/
-# Use -L to dereference symlinks (tessl install creates symlinks to vendored tiles)
-# First remove any broken symlinks from previous runs (they block -n no-clobber)
+# Install tessl tiles at runtime (credentials mounted read-only from host)
+# This replaces the build-time staging approach — always gets latest tile versions.
+if [ -f /home/node/.tessl/api-credentials.json ]; then
+  cd /home/node/.claude
+  echo '{"name":"nanoclaw","mode":"vendored","dependencies":{}}' > tessl.json 2>/dev/null || true
+  tessl install jbaruch/nanoclaw-core jbaruch/nanoclaw-admin jbaruch/reclaim-tripit-sync \
+    --yes --dangerously-ignore-security --agent claude-code 2>&1 | head -5 >&2 || true
+  cd /workspace/group
+fi
+
+# Copy built-in container skills (agent-browser, status, etc.) from image staging
 if [ -d /opt/tessl-staging/.claude/skills ]; then
   mkdir -p /home/node/.claude/skills
-  find /home/node/.claude/skills -maxdepth 1 -type l ! -exec test -e {} \; -delete 2>/dev/null || true
   cp -rL /opt/tessl-staging/.claude/skills/* /home/node/.claude/skills/ 2>/dev/null || true
 fi
 
-# Copy tessl tile data (rules, docs) for reference
-if [ -d /opt/tessl-staging/.tessl ]; then
-  cp -rLn /opt/tessl-staging/.tessl /home/node/.tessl-tiles 2>/dev/null || true
-fi
-
 # Wire tessl rules chain into workspace (CLAUDE.md → AGENTS.md → .tessl/RULES.md)
-if [ -f /opt/tessl-staging/AGENTS.md ] && [ ! -f /workspace/group/AGENTS.md ]; then
-  cp /opt/tessl-staging/AGENTS.md /workspace/group/AGENTS.md 2>/dev/null || true
+if [ -f /home/node/.claude/AGENTS.md ] && [ ! -f /workspace/group/AGENTS.md ]; then
+  cp /home/node/.claude/AGENTS.md /workspace/group/AGENTS.md 2>/dev/null || true
 fi
-if [ -f /opt/tessl-staging/CLAUDE.md ] && ! grep -q "AGENTS.md" /workspace/group/CLAUDE.md 2>/dev/null; then
-  echo "" >> /workspace/group/CLAUDE.md
-  cat /opt/tessl-staging/CLAUDE.md >> /workspace/group/CLAUDE.md 2>/dev/null || true
-fi
-if [ -d /opt/tessl-staging/.tessl ] && [ ! -d /workspace/group/.tessl ]; then
-  cp -rL /opt/tessl-staging/.tessl /workspace/group/.tessl 2>/dev/null || true
+if [ -d /home/node/.claude/.tessl ] && [ ! -d /workspace/group/.tessl ]; then
+  cp -rL /home/node/.claude/.tessl /workspace/group/.tessl 2>/dev/null || true
 fi
 
 # Read container input from stdin and run the agent
