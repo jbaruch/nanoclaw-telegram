@@ -6,10 +6,8 @@ git config --global pack.threads 1 2>/dev/null || true
 git config --global pack.deltaCacheSize 1m 2>/dev/null || true
 git config --global pack.windowMemory 100m 2>/dev/null || true
 
-# Compile agent-runner from (potentially customized) /app/src
-cd /app && npx tsc --outDir /tmp/dist 2>&1 >&2
-ln -s /app/node_modules /tmp/dist/node_modules
-chmod -R a-w /tmp/dist
+# Agent-runner is pre-compiled at image build time (/app/dist/).
+# No runtime compilation needed — source is mounted read-only.
 
 # Restore pre-cached tessl native binary (build downloaded as root, runtime is uid 999)
 if [ -d /opt/tessl-bin ] && [ ! -d "$HOME/.local/share/tessl/versions" ]; then
@@ -56,4 +54,4 @@ fi
 
 # Read container input from stdin and run the agent
 cat > /tmp/input.json
-node /tmp/dist/index.js < /tmp/input.json
+node /app/dist/index.js < /tmp/input.json
