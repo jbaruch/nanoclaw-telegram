@@ -24,7 +24,7 @@ Skill(skill: "sync-tripit")
 Write the script below to `/workspace/group/scripts/refresh-travel-schedule.py`, then execute it:
 
 ```bash
-python /workspace/group/scripts/refresh-travel-schedule.py
+python3 /workspace/group/scripts/refresh-travel-schedule.py
 ```
 
 **Script contents** (`/workspace/group/scripts/refresh-travel-schedule.py`):
