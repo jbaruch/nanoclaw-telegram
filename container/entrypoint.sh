@@ -23,9 +23,11 @@ if [ -f /tmp/tessl-credentials.json ]; then
   cp /tmp/tessl-credentials.json "$HOME/.tessl/api-credentials.json"
 
   cd /home/node/.claude
-  echo '{"name":"nanoclaw","mode":"vendored","dependencies":{}}' > tessl.json 2>/dev/null || true
-  tessl install jbaruch/nanoclaw-core jbaruch/nanoclaw-admin jbaruch/reclaim-tripit-sync \
-    --yes --dangerously-ignore-security --agent claude-code 2>&1 >&2 || echo "[entrypoint] tessl install failed" >&2
+  # Write tessl.json with all three tiles — overwrite any stale persisted version
+  cat > tessl.json <<'TESSL_EOF'
+{"name":"nanoclaw","mode":"vendored","dependencies":{"jbaruch/nanoclaw-core":{},"jbaruch/nanoclaw-admin":{},"jbaruch/reclaim-tripit-sync":{}}}
+TESSL_EOF
+  tessl install --yes --dangerously-ignore-security --agent claude-code 2>&1 >&2 || echo "[entrypoint] tessl install failed" >&2
 
   # tessl installs to .tessl/tiles/ but SDK reads .claude/skills/.
   # Symlink each tile skill into the skills directory.
