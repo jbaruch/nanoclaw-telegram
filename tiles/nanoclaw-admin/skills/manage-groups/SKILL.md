@@ -29,7 +29,7 @@ echo '{"type": "refresh_groups"}' > /workspace/ipc/tasks/refresh_$(date +%s).jso
 **Fallback**: Query the SQLite database directly:
 
 ```bash
-sqlite3 /workspace/project/store/messages.db "
+sqlite3 /workspace/store/messages.db "
   SELECT jid, name, last_message_time
   FROM chats
   WHERE jid LIKE '%@g.us' AND jid != '__group_sync__'
@@ -40,7 +40,7 @@ sqlite3 /workspace/project/store/messages.db "
 
 ## Registered Groups Config
 
-Registered groups are stored in `/workspace/project/data/registered_groups.json`:
+Registered groups are stored in `/workspace/ipc/available_groups.json`:
 
 ```json
 {
@@ -79,9 +79,9 @@ Non-obvious fields:
    )
    ```
    Optionally include `containerConfig` for additional directory mounts (see [Advanced: Directory Mounts](#advanced-directory-mounts) below).
-3. The group folder is created automatically: `/workspace/project/groups/{folder-name}/`
+3. The group folder is created automatically: `/workspace/group/ (for the group being managed)`
 4. Optionally create an initial `CLAUDE.md` for the group
-5. **Verify registration**: Read `/workspace/project/data/registered_groups.json` and confirm the new entry appears with the correct JID, name, and folder
+5. **Verify registration**: Read `/workspace/ipc/available_groups.json` and confirm the new entry appears with the correct JID, name, and folder
 
 Folder naming convention — channel prefix + underscore + lowercase hyphenated name:
 - WhatsApp "Family Chat" → `whatsapp_family-chat`
@@ -90,15 +90,15 @@ Folder naming convention — channel prefix + underscore + lowercase hyphenated 
 
 ## Removing a Group
 
-1. Read `/workspace/project/data/registered_groups.json`
+1. Read `/workspace/ipc/available_groups.json`
 2. Remove the entry for that group
 3. Write the updated JSON back
-4. **Verify removal**: Re-read `/workspace/project/data/registered_groups.json` and confirm the entry no longer appears
+4. **Verify removal**: Re-read `/workspace/ipc/available_groups.json` and confirm the entry no longer appears
 5. The group folder and its files remain (don't delete them)
 
 ## Listing Groups
 
-Read `/workspace/project/data/registered_groups.json` and format it nicely.
+Read `/workspace/ipc/available_groups.json` and format it nicely.
 
 ---
 
@@ -127,7 +127,7 @@ Notes:
 
 ## Advanced: Directory Mounts
 
-Groups can have extra directories mounted. Add `containerConfig` to the `register_group` call or directly to the group's entry in `/workspace/project/data/registered_groups.json`:
+Groups can have extra directories mounted. Add `containerConfig` to the `register_group` call or directly to the group's entry in `/workspace/ipc/available_groups.json`:
 
 ```json
 {

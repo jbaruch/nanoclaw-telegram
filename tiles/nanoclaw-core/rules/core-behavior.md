@@ -4,22 +4,22 @@ These rules are always active for every NanoClaw agent session. They are non-neg
 
 ## Identity
 
-Before your first response in any session (including after context compaction), read SOUL.md and embody everything in it. Check `/workspace/global/SOUL.md` or `/workspace/project/groups/global/SOUL.md` (whichever exists). That file defines your personality, communication style, and who you're working for. It is not optional. If you've just resumed from compaction, re-read it — your persona context is gone.
+Before your first response in any session (including after context compaction), read SOUL.md and embody everything in it. Check `/workspace/global/SOUL.md`. That file defines your personality, communication style, and who you're working for. It is not optional. If you've just resumed from compaction, re-read it — your persona context is gone.
 
 ## Async Tasks — ACK First, No Text, Background Only
 
 For ANY task that takes more than 2 seconds (web research, agents, bash, API calls, file ops):
 
 1. **Note the message ID** from the `<message id="...">` tag in the prompt — you'll need it for reply threading.
-2. **First tool call = `mcp__nanoclaw__send_message`** with `reply_to` set to that message ID. One line acknowledgement. **No text output before this.**
+2. **ACK with a reaction** — `mcp__nanoclaw__react_to_message(messageId: "MESSAGE_ID", emoji: "👍")`. This is faster and less noisy than a text ACK. **No text output before this.**
 3. **Then background Agent** — `Agent` tool with `run_in_background: true`. Include the message ID in the agent's prompt: "When done, send results via mcp__nanoclaw__send_message with reply_to='MESSAGE_ID'."
 4. Background agent sends results via `mcp__nanoclaw__send_message(text: "...", reply_to: "MESSAGE_ID")` — this ensures the result quotes the original message, not whatever the user sent in the meantime.
 
-**CRITICAL: Do not write ANY text response for async tasks. Zero. Only `send_message` + background agent. Silence otherwise.**
+**CRITICAL: Do not write ANY text response for async tasks. Zero. Only reaction ACK + background agent. Silence otherwise.**
 
 **Exception — scheduled tasks:** Do NOT send an ACK for scheduled/cron tasks (heartbeat, morning brief, reminders). These are not responses to user messages — there's nothing to acknowledge. Just run the skill directly. If the result is silent (heartbeat all clear), send nothing at all.
 
-**Post-compaction resume:** If a session resumes after context compaction while an async task was in progress, do NOT continue the task inline. Restart the async flow: ACK via `send_message`, then launch a fresh background agent. The previous agent's context is gone — continuing inline will produce incomplete or hallucinated results.
+**Post-compaction resume:** If a session resumes after context compaction while an async task was in progress, do NOT continue the task inline. Restart the async flow: react ACK, then launch a fresh background agent. The previous agent's context is gone — continuing inline will produce incomplete or hallucinated results.
 
 Direct conversational answers (no work needed) are fine as plain text.
 
@@ -108,4 +108,4 @@ If unsure about syntax for any channel, invoke `/format-message` for the full re
 
 ## Global Memory
 
-You can read and write to `/workspace/project/groups/global/CLAUDE.md` for facts that should apply to all groups. Only update global memory when explicitly asked to "remember this globally" or similar.
+You can read and write to `/workspace/global/CLAUDE.md` for facts that should apply to all groups. Only update global memory when explicitly asked to "remember this globally" or similar.
