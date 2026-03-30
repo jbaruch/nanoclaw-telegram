@@ -194,11 +194,12 @@ async function runTask(
           if (cleanResult) {
             await deps.sendMessage(task.chat_jid, cleanResult);
           }
-          scheduleClose();
+          // Don't close here — agent may still be polling for host script results.
+          // Close only on final 'success' status below.
         }
         if (streamedOutput.status === 'success') {
           deps.queue.notifyIdle(task.chat_jid);
-          scheduleClose(); // Close promptly even when result is null (e.g. IPC-only tasks)
+          scheduleClose();
         }
         if (streamedOutput.status === 'error') {
           error = streamedOutput.error || 'Unknown error';
