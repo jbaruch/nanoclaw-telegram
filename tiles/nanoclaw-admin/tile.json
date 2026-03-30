@@ -41,6 +41,12 @@
     },
     "check-system-health": {
       "path": "skills/check-system-health/SKILL.md"
+    },
+    "check-cfps": {
+      "path": "skills/check-cfps/SKILL.md"
+    },
+    "check-unanswered": {
+      "path": "skills/check-unanswered/SKILL.md"
     }
   }
 }

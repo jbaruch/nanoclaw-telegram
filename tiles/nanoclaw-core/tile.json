@@ -20,12 +20,6 @@
   "skills": {
     "format-message": {
       "path": "skills/format-message/SKILL.md"
-    },
-    "check-unanswered": {
-      "path": "skills/check-unanswered/SKILL.md"
-    },
-    "check-cfps": {
-      "path": "skills/check-cfps/SKILL.md"
     }
   }
 }
