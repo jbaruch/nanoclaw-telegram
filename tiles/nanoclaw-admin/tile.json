@@ -6,6 +6,15 @@
   "rules": {
     "admin-context": {
       "rules": "rules/admin-context.md"
+    },
+    "operational-principles": {
+      "rules": "rules/operational-principles.md"
+    },
+    "slack-formatting": {
+      "rules": "rules/slack-formatting.md"
+    },
+    "core-behavior-full": {
+      "rules": "rules/core-behavior-full.md"
     }
   },
   "skills": {
