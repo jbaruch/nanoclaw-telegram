@@ -8,56 +8,24 @@ git config --global pack.windowMemory 100m
 
 # Agent-runner is pre-compiled at image build time (/app/dist/).
 
-# Restore pre-cached tessl native binary (build downloaded as root, runtime is uid 999)
-if [ -d /opt/tessl-bin ] && [ ! -d "$HOME/.local/share/tessl/versions" ]; then
-  mkdir -p "$HOME/.local/share/tessl/versions"
-  cp -r /opt/tessl-bin/* "$HOME/.local/share/tessl/versions/"
-fi
-
-# Install tessl tiles at runtime.
-if [ -f /tmp/tessl-credentials.json ]; then
-  mkdir -p "$HOME/.tessl"
-  cp /tmp/tessl-credentials.json "$HOME/.tessl/api-credentials.json"
-
-  cd /home/node/.claude
-  [ -f tessl.json ] || echo '{"name":"nanoclaw","mode":"vendored","dependencies":{}}' > tessl.json
-  tessl install jbaruch/nanoclaw-core jbaruch/nanoclaw-admin jbaruch/reclaim-tripit-sync \
-    --yes --dangerously-ignore-security --agent claude-code >&2
-
-  # Symlink tile skills into .claude/skills/ where the SDK discovers them
-  for tile_dir in /home/node/.claude/.tessl/tiles/*/*/skills/*/; do
-    [ -d "$tile_dir" ] || continue
-    skill_name=$(basename "$tile_dir")
-    ln -sfn "$tile_dir" "/home/node/.claude/skills/tessl__${skill_name}"
-  done
-
-  cd /workspace/group
-else
-  echo "[entrypoint] WARNING: no tessl credentials at /tmp/tessl-credentials.json — tiles not installed" >&2
-fi
-
-# Copy built-in container skills (agent-browser, status, etc.) from image staging
-if [ -d /opt/tessl-staging/.claude/skills ]; then
-  mkdir -p /home/node/.claude/skills
-  cp -rL /opt/tessl-staging/.claude/skills/* /home/node/.claude/skills/
-fi
-
-# Wire tessl rules chain into workspace (first-time setup only).
-# May fail on permission issues for new groups — non-fatal, the group
-# folder gets proper ownership after the first successful run.
-if [ -f /home/node/.claude/AGENTS.md ] && [ ! -f /workspace/group/AGENTS.md ]; then
-  if cp /home/node/.claude/AGENTS.md /workspace/group/AGENTS.md 2>&1; then
-    echo "[entrypoint] Copied AGENTS.md to workspace" >&2
-  else
-    echo "[entrypoint] WARNING: could not copy AGENTS.md to workspace (permissions)" >&2
-  fi
-fi
+# Wire tessl rules chain into workspace (first-time setup for new groups).
+# .tessl/ and skills/ are populated host-side by container-runner.
 if [ -d /home/node/.claude/.tessl ] && [ ! -d /workspace/group/.tessl ]; then
   if cp -rL /home/node/.claude/.tessl /workspace/group/.tessl 2>&1; then
     echo "[entrypoint] Copied .tessl to workspace" >&2
   else
     echo "[entrypoint] WARNING: could not copy .tessl to workspace (permissions)" >&2
   fi
+fi
+if [ -f /home/node/.claude/.tessl/RULES.md ] && [ ! -f /workspace/group/AGENTS.md ]; then
+  cat > /workspace/group/AGENTS.md << 'AGENTS_EOF'
+
+
+# Agent Rules <!-- managed by orchestrator -->
+
+@.tessl/RULES.md follow the [instructions](.tessl/RULES.md)
+AGENTS_EOF
+  echo "[entrypoint] Created AGENTS.md" >&2
 fi
 
 # Read container input from stdin and run the agent

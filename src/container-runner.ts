@@ -4,7 +4,6 @@
  */
 import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 
 import {
@@ -145,31 +144,99 @@ function buildVolumeMounts(
     );
   }
 
-  // Skills delivery:
-  // - Tessl tiles: installed at runtime by entrypoint via `tessl install`
-  //   (credentials mounted read-only from host ~/.tessl/)
-  // - Built-in skills: copied by entrypoint from /opt/tessl-staging/.claude/skills/
-  // - AyeAye-created skills: synced here from the group folder (override tiles if names collide)
+  // Tile delivery — all host-side, no tessl CLI in containers.
+  // Build .tessl structure and skills/ from tiles/ directory (checked into git).
+  // Main/trusted get all tiles. Others get nanoclaw-core only.
   const skillsDst = path.join(groupSessionsDir, 'skills');
-  // Clear stale skills — ensures deleted skills don't persist
   if (fs.existsSync(skillsDst)) {
     fs.rmSync(skillsDst, { recursive: true, force: true });
   }
   fs.mkdirSync(skillsDst, { recursive: true });
 
-  // Make the entire .claude dir writable by the container user (uid 999).
-  // The entrypoint runs as this user and needs to: run tessl install (writes
-  // symlinks to skills/, .tessl/ tiles, cli.log) and copy built-in skills.
-  const containerUid = HOST_UID ?? 1000;
-  const containerGid = HOST_GID ?? 1000;
-  try {
-    fs.chownSync(groupSessionsDir, containerUid, containerGid);
-    fs.chownSync(skillsDst, containerUid, containerGid);
-  } catch {
-    /* ignore in test environments */
+  const dstTessl = path.join(groupSessionsDir, '.tessl');
+  if (fs.existsSync(dstTessl)) {
+    fs.rmSync(dstTessl, { recursive: true, force: true });
   }
 
-  // Sync AyeAye-created skills from the group's skills/ directory.
+  const hostTilesDir = path.join(process.cwd(), 'tiles');
+  const tilesToInstall = isMain || group.containerConfig?.trusted
+    ? ['nanoclaw-core', 'nanoclaw-admin']
+    : ['nanoclaw-core'];
+
+  // Build .tessl/tiles/ structure and aggregate RULES.md
+  const rulesContent: string[] = [];
+  for (const tileName of tilesToInstall) {
+    const tileSrc = path.join(hostTilesDir, tileName);
+    if (!fs.existsSync(tileSrc)) continue;
+
+    // Determine the org/name from tile.json
+    let tileFullName = `jbaruch/${tileName}`;
+    const tileJsonPath = path.join(tileSrc, 'tile.json');
+    if (fs.existsSync(tileJsonPath)) {
+      try {
+        const tj = JSON.parse(fs.readFileSync(tileJsonPath, 'utf8'));
+        if (tj.name) tileFullName = tj.name;
+      } catch {
+        // use default
+      }
+    }
+    const [org, name] = tileFullName.includes('/')
+      ? tileFullName.split('/')
+      : ['local', tileFullName];
+
+    const dstTileDir = path.join(dstTessl, 'tiles', org, name);
+
+    // Copy rules
+    const rulesDir = path.join(tileSrc, 'rules');
+    if (fs.existsSync(rulesDir)) {
+      for (const ruleFile of fs.readdirSync(rulesDir)) {
+        if (!ruleFile.endsWith('.md')) continue;
+        const ruleSrc = path.join(rulesDir, ruleFile);
+        const ruleDst = path.join(dstTileDir, 'rules', ruleFile);
+        fs.mkdirSync(path.dirname(ruleDst), { recursive: true });
+        fs.cpSync(ruleSrc, ruleDst);
+        rulesContent.push(fs.readFileSync(ruleSrc, 'utf8'));
+      }
+    }
+
+    // Copy skills into .tessl/tiles/ AND .claude/skills/
+    const tileSkillsDir = path.join(tileSrc, 'skills');
+    if (fs.existsSync(tileSkillsDir)) {
+      for (const skillDir of fs.readdirSync(tileSkillsDir)) {
+        const skillSrc = path.join(tileSkillsDir, skillDir);
+        if (!fs.statSync(skillSrc).isDirectory()) continue;
+        // Into .tessl structure
+        fs.cpSync(skillSrc, path.join(dstTileDir, 'skills', skillDir), {
+          recursive: true,
+        });
+        // Into .claude/skills/ where SDK discovers them
+        fs.cpSync(skillSrc, path.join(skillsDst, `tessl__${skillDir}`), {
+          recursive: true,
+        });
+      }
+    }
+  }
+
+  // Write aggregated RULES.md
+  if (rulesContent.length > 0) {
+    fs.mkdirSync(dstTessl, { recursive: true });
+    fs.writeFileSync(
+      path.join(dstTessl, 'RULES.md'),
+      rulesContent.join('\n\n---\n\n'),
+    );
+  }
+
+  // Built-in container skills (agent-browser, status, etc.)
+  const builtinSkillsDir = path.join(process.cwd(), 'container', 'skills');
+  if (fs.existsSync(builtinSkillsDir)) {
+    for (const skillDir of fs.readdirSync(builtinSkillsDir)) {
+      const srcDir = path.join(builtinSkillsDir, skillDir);
+      if (!fs.statSync(srcDir).isDirectory()) continue;
+      fs.cpSync(srcDir, path.join(skillsDst, skillDir), { recursive: true });
+    }
+  }
+
+  // AyeAye-created skills (staging) — override tile skills if names collide
   const groupSkillsDir = path.join(groupDir, 'skills');
   if (fs.existsSync(groupSkillsDir)) {
     for (const skillDir of fs.readdirSync(groupSkillsDir)) {
@@ -178,84 +245,12 @@ function buildVolumeMounts(
       fs.cpSync(srcDir, path.join(skillsDst, skillDir), { recursive: true });
     }
   }
-
-  // For untrusted groups (no tessl creds), copy .tessl from any session
-  // that already has it (installed by a main/trusted group). This gives
-  // untrusted groups the rules and skills without tessl credentials.
-  if (!isMain && !group.containerConfig?.trusted) {
-    const dstTessl = path.join(groupSessionsDir, '.tessl');
-    if (!fs.existsSync(dstTessl)) {
-      const sessionsDir = path.join(DATA_DIR, 'sessions');
-      if (fs.existsSync(sessionsDir)) {
-        for (const sessionFolder of fs.readdirSync(sessionsDir)) {
-          if (sessionFolder === group.folder) continue;
-          const srcTessl = path.join(
-            sessionsDir,
-            sessionFolder,
-            '.claude',
-            '.tessl',
-          );
-          if (fs.existsSync(srcTessl)) {
-            fs.cpSync(srcTessl, dstTessl, { recursive: true });
-            // Copy tile skills into skills/
-            const tilesRoot = path.join(dstTessl, 'tiles');
-            if (fs.existsSync(tilesRoot)) {
-              for (const org of fs.readdirSync(tilesRoot)) {
-                const orgDir = path.join(tilesRoot, org);
-                if (!fs.statSync(orgDir).isDirectory()) continue;
-                for (const tile of fs.readdirSync(orgDir)) {
-                  const tileSkills = path.join(orgDir, tile, 'skills');
-                  if (!fs.existsSync(tileSkills)) continue;
-                  for (const skill of fs.readdirSync(tileSkills)) {
-                    const skillSrc = path.join(tileSkills, skill);
-                    if (!fs.statSync(skillSrc).isDirectory()) continue;
-                    fs.cpSync(
-                      skillSrc,
-                      path.join(skillsDst, `tessl__${skill}`),
-                      { recursive: true },
-                    );
-                  }
-                }
-              }
-            }
-            logger.info(
-              { folder: group.folder, from: sessionFolder },
-              'Copied .tessl from existing session',
-            );
-            break;
-          }
-        }
-      }
-    }
-  }
   mounts.push({
     hostPath: toHostPath(groupSessionsDir),
     containerPath: '/home/node/.claude',
     readonly: false,
   });
 
-  // Tessl credentials for runtime tile installation (read-only).
-  // In DooD, HOST_PROJECT_ROOT parent is the host user's home (/home/jbaruch).
-  // docker-compose mounts host's ~/.tessl/ into the orchestrator at the same path.
-  const hostHome =
-    HOST_PROJECT_ROOT !== process.cwd()
-      ? path.dirname(HOST_PROJECT_ROOT)
-      : process.env.HOME || os.homedir();
-  // Tessl credentials: main and trusted groups only (token has publish access)
-  if (isMain || group.containerConfig?.trusted) {
-    const tesslCredsPath = path.join(
-      hostHome,
-      '.tessl',
-      'api-credentials.json',
-    );
-    if (fs.existsSync(tesslCredsPath)) {
-      mounts.push({
-        hostPath: tesslCredsPath,
-        containerPath: '/tmp/tessl-credentials.json',
-        readonly: true,
-      });
-    }
-  }
 
   // Per-group IPC namespace
   const groupIpcDir = resolveGroupIpcPath(group.folder);

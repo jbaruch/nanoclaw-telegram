@@ -31,8 +31,9 @@ RUN apt-get update && apt-get install -y \
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install agent-browser, claude-code, tessl, and composio-mcp globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code tessl @composio/mcp
+# Install agent-browser, claude-code, and composio-mcp globally
+# (tessl is not needed — tiles are delivered host-side by the orchestrator)
+RUN npm install -g agent-browser @anthropic-ai/claude-code @composio/mcp
 
 # Create app directory
 WORKDIR /app
@@ -52,33 +53,15 @@ RUN npm run build
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
 
-# Stage built-in container skills (agent-browser, status, etc.)
-# These are not tessl tiles — they ship with the image.
-# Tessl tiles are installed at runtime by the entrypoint.
-WORKDIR /opt/tessl-staging
-RUN mkdir -p .claude/skills
-COPY skills/ /opt/tessl-staging/.claude/skills/
-
-# Pre-download the tessl native binary to a shared location.
-# tessl caches to ~/.local/share/tessl/versions/ — but at runtime the container
-# runs as uid 999 (not root), so we download as root then move to a shared path.
-RUN tessl --version 2>/dev/null || true; \
-    mkdir -p /opt/tessl-bin && \
-    cp -r /root/.local/share/tessl/versions/* /opt/tessl-bin/ 2>/dev/null || true && \
-    chmod -R a+rX /opt/tessl-bin
-
-# Ensure .claude directory exists for tile staging copy at runtime
+# Ensure .claude directory exists
 RUN mkdir -p /home/node/.claude
 
-WORKDIR /app
-
-# Copy entrypoint script (compiles agent-runner, copies tessl tiles, runs agent)
+# Copy entrypoint script
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # Set ownership to node user (non-root) for writable directories
-RUN chown -R node:node /workspace /opt/tessl-staging && \
-    chmod -R a+rX /opt/tessl-staging && \
+RUN chown -R node:node /workspace && \
     chmod 777 /home/node
 
 # Switch to non-root user (required for --dangerously-skip-permissions)

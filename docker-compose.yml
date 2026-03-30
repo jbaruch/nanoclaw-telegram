@@ -15,8 +15,6 @@ services:
       - ./logs:/app/logs
       # Credentials (mounted, never baked into image)
       - ./.env:/app/.env:ro
-      # Tessl credentials for runtime tile installation in agent containers
-      - /home/jbaruch/.tessl:/home/jbaruch/.tessl:ro
     environment:
       # Docker-out-of-Docker: mount paths must reference the HOST filesystem
       - HOST_PROJECT_ROOT=/home/jbaruch/nanoclaw
