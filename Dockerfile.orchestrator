@@ -26,9 +26,18 @@ COPY src/ ./src/
 COPY tsconfig.json ./
 RUN npx tsc
 
-# Copy container config (skills, tiles, build script, Dockerfile for agent image)
+# Copy container config (skills, build script, Dockerfile for agent image)
 COPY container/ ./container/
+
+# Install tessl CLI for pulling tiles from registry
+RUN npm install -g tessl && tessl --version
+
+# Tile sources (used as fallback and for promote script)
 COPY tiles/ ./tiles/
+
+# Create tessl workspace for registry installs
+RUN mkdir -p /app/tessl-workspace && \
+    echo '{"name":"nanoclaw-orchestrator","mode":"vendored","dependencies":{}}' > /app/tessl-workspace/tessl.json
 
 # Copy group templates (used by registerGroup to create CLAUDE.md for new groups)
 COPY groups/main/CLAUDE.md ./groups/main/CLAUDE.md

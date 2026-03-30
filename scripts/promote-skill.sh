@@ -192,7 +192,7 @@ echo "Deploying to NAS (tiles are delivered from git, not tessl registry)..."
 ssh "$NAS_HOST" "cd $NAS_PROJECT_DIR && git pull && docker compose up -d --build"
 
 echo ""
-echo "Publishing to tessl registry (optional — for public listing)..."
+echo "Publishing to tessl registry..."
 if tessl tile publish --bump patch "$TILE_DIR"; then
   git add "$TILE_JSON"
   git commit -m "chore: bump $TILE_NAME version after publish
@@ -200,8 +200,15 @@ if tessl tile publish --bump patch "$TILE_DIR"; then
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
   git push origin main
   ssh "$NAS_HOST" "cd $NAS_PROJECT_DIR && git pull"
+
+  echo ""
+  echo "Pulling tiles from registry into orchestrator..."
+  ssh "$NAS_HOST" "docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl install jbaruch/nanoclaw-core jbaruch/nanoclaw-admin jbaruch/reclaim-tripit-sync --yes --dangerously-ignore-security --agent claude-code 2>&1'" || {
+    echo "  ERROR: tessl install in orchestrator failed"
+    exit 1
+  }
 else
-  echo "  (tessl publish skipped — tiles already deployed via git)"
+  echo "  tessl publish failed — tiles deployed via git only"
 fi
 
 echo ""

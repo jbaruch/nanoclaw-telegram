@@ -15,6 +15,9 @@ services:
       - ./logs:/app/logs
       # Credentials (mounted, never baked into image)
       - ./.env:/app/.env:ro
+      # Tessl: credentials + persistent workspace for registry installs
+      - /home/jbaruch/.tessl:/root/.tessl
+      - ./data/tessl-workspace:/app/tessl-workspace
     environment:
       # Docker-out-of-Docker: mount paths must reference the HOST filesystem
       - HOST_PROJECT_ROOT=/home/jbaruch/nanoclaw

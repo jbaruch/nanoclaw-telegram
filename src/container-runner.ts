@@ -158,59 +158,57 @@ function buildVolumeMounts(
     fs.rmSync(dstTessl, { recursive: true, force: true });
   }
 
-  const hostTilesDir = path.join(process.cwd(), 'tiles');
-  const tilesToInstall = isMain || group.containerConfig?.trusted
-    ? ['nanoclaw-core', 'nanoclaw-admin']
-    : ['nanoclaw-core'];
+  // Tiles come from the tessl registry (installed by orchestrator).
+  // Main/trusted: all tiles. Others: nanoclaw-core only.
+  const allTiles = ['nanoclaw-core', 'nanoclaw-admin'];
+  const coreTiles = ['nanoclaw-core'];
+  const tilesToInstall =
+    isMain || group.containerConfig?.trusted ? allTiles : coreTiles;
 
-  // Build .tessl/tiles/ structure and aggregate RULES.md
+  const registryTiles = path.join(
+    process.cwd(),
+    'tessl-workspace',
+    '.tessl',
+    'tiles',
+    'jbaruch',
+  );
+
   const rulesContent: string[] = [];
   for (const tileName of tilesToInstall) {
-    const tileSrc = path.join(hostTilesDir, tileName);
-    if (!fs.existsSync(tileSrc)) continue;
-
-    // Determine the org/name from tile.json
-    let tileFullName = `jbaruch/${tileName}`;
-    const tileJsonPath = path.join(tileSrc, 'tile.json');
-    if (fs.existsSync(tileJsonPath)) {
-      try {
-        const tj = JSON.parse(fs.readFileSync(tileJsonPath, 'utf8'));
-        if (tj.name) tileFullName = tj.name;
-      } catch {
-        // use default
-      }
+    const tileSrc = path.join(registryTiles, tileName);
+    if (!fs.existsSync(tileSrc)) {
+      logger.warn(
+        { tileName, path: tileSrc },
+        'Tile not found — run tessl install in orchestrator',
+      );
+      continue;
     }
-    const [org, name] = tileFullName.includes('/')
-      ? tileFullName.split('/')
-      : ['local', tileFullName];
 
-    const dstTileDir = path.join(dstTessl, 'tiles', org, name);
+    const dstTileDir = path.join(dstTessl, 'tiles', 'jbaruch', tileName);
 
     // Copy rules
     const rulesDir = path.join(tileSrc, 'rules');
     if (fs.existsSync(rulesDir)) {
       for (const ruleFile of fs.readdirSync(rulesDir)) {
         if (!ruleFile.endsWith('.md')) continue;
-        const ruleSrc = path.join(rulesDir, ruleFile);
+        const ruleSrcFile = path.join(rulesDir, ruleFile);
         const ruleDst = path.join(dstTileDir, 'rules', ruleFile);
         fs.mkdirSync(path.dirname(ruleDst), { recursive: true });
-        fs.cpSync(ruleSrc, ruleDst);
-        rulesContent.push(fs.readFileSync(ruleSrc, 'utf8'));
+        fs.cpSync(ruleSrcFile, ruleDst);
+        rulesContent.push(fs.readFileSync(ruleSrcFile, 'utf8'));
       }
     }
 
-    // Copy skills into .tessl/tiles/ AND .claude/skills/
+    // Copy skills
     const tileSkillsDir = path.join(tileSrc, 'skills');
     if (fs.existsSync(tileSkillsDir)) {
       for (const skillDir of fs.readdirSync(tileSkillsDir)) {
-        const skillSrc = path.join(tileSkillsDir, skillDir);
-        if (!fs.statSync(skillSrc).isDirectory()) continue;
-        // Into .tessl structure
-        fs.cpSync(skillSrc, path.join(dstTileDir, 'skills', skillDir), {
+        const skillSrcDir = path.join(tileSkillsDir, skillDir);
+        if (!fs.statSync(skillSrcDir).isDirectory()) continue;
+        fs.cpSync(skillSrcDir, path.join(dstTileDir, 'skills', skillDir), {
           recursive: true,
         });
-        // Into .claude/skills/ where SDK discovers them
-        fs.cpSync(skillSrc, path.join(skillsDst, `tessl__${skillDir}`), {
+        fs.cpSync(skillSrcDir, path.join(skillsDst, `tessl__${skillDir}`), {
           recursive: true,
         });
       }
@@ -250,7 +248,6 @@ function buildVolumeMounts(
     containerPath: '/home/node/.claude',
     readonly: false,
   });
-
 
   // Per-group IPC namespace
   const groupIpcDir = resolveGroupIpcPath(group.folder);
