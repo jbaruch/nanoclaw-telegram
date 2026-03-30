@@ -19,11 +19,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-NAS_HOST="${NAS_HOST:-192.168.10.32}"
-NAS_PROJECT_DIR="${NAS_PROJECT_DIR:-/home/jbaruch/nanoclaw}"
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 GROUP_FOLDER="${GROUP_FOLDER:-telegram_swarm}"
 TILE_NAME="${TILE_NAME:-nanoclaw-core}"
 
@@ -44,16 +40,16 @@ pull_skill() {
 
   # Try skills/{name} first, then skills/tessl__{name} (runtime override path)
   local src="$skills_base/$name"
-  if ! ssh -n "$NAS_HOST" "test -d '$src'"; then
+  if ! nas "test -d '$src'"; then
     src="$skills_base/tessl__$name"
-    if ! ssh -n "$NAS_HOST" "test -d '$src'"; then
+    if ! nas "test -d '$src'"; then
       echo "  ERROR: $name not found in skills/ or skills/tessl__$name on NAS"
       return 1
     fi
   fi
 
   mkdir -p "$dst"
-  ssh -n "$NAS_HOST" "tar czf - -C $src ." | tar xzf - -C "$dst"
+  nas "tar czf - -C $src ." | tar xzf - -C "$dst"
   if [ ! -f "$dst/SKILL.md" ]; then
     echo "  ERROR: $name/SKILL.md not found on NAS"
     rm -rf "$dst"
@@ -67,7 +63,7 @@ pull_rule() {
   local src="$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/staging/$TILE_NAME/$name.md"
   local dst="$TILE_DIR/rules/$name.md"
   mkdir -p "$TILE_DIR/rules"
-  ssh -n "$NAS_HOST" "cat $src" > "$dst"
+  nas "cat $src" > "$dst"
   if [ ! -s "$dst" ]; then
     echo "  ERROR: $name.md not found or empty on NAS"
     rm -f "$dst"
@@ -122,7 +118,7 @@ elif [ "$MODE" = "all" ] || [ "$MODE" = "--all" ]; then
       SEEN_SKILLS[$skill_name]=1
       SKILLS_TO_PROMOTE+=("$skill_name")
     fi
-  done < <(ssh -n "$NAS_HOST" "ls $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/")
+  done < <(nas "ls $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/")
   PROMOTE_RULES=true
 else
   SKILLS_TO_PROMOTE=("$MODE")
@@ -149,7 +145,7 @@ fi
 if [ "$PROMOTE_RULES" = true ]; then
   echo "1b. Pulling rules from NAS..."
   STAGING_DIR="$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/staging/$TILE_NAME"
-  RULES_ON_NAS=$(ssh -n "$NAS_HOST" "if [ -d '$STAGING_DIR' ]; then for f in '$STAGING_DIR'/*.md; do [ -f \"\$f\" ] && basename \"\$f\" .md; done; fi")
+  RULES_ON_NAS=$(nas "if [ -d '$STAGING_DIR' ]; then for f in '$STAGING_DIR'/*.md; do [ -f \"\$f\" ] && basename \"\$f\" .md; done; fi")
   for rule in $RULES_ON_NAS; do
     [ -z "$rule" ] && continue
     if pull_rule "$rule"; then
@@ -216,7 +212,7 @@ git push origin main
 
 echo ""
 echo "Deploying to NAS (tiles are delivered from git, not tessl registry)..."
-ssh -n "$NAS_HOST" "cd $NAS_PROJECT_DIR && git pull && docker compose up -d --build"
+nas "cd $NAS_PROJECT_DIR && git pull && docker compose up -d --build"
 
 echo ""
 echo "Publishing to tessl registry..."
@@ -226,13 +222,13 @@ if tessl tile publish --bump patch "$TILE_DIR"; then
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
   git push origin main
-  ssh -n "$NAS_HOST" "cd $NAS_PROJECT_DIR && git pull"
+  nas "cd $NAS_PROJECT_DIR && git pull"
 
   echo ""
   echo "Pulling tiles from registry into orchestrator..."
   # IMPORTANT: install ALL tiles together — vendored mode removes tiles not in the install list
   ALL_TILES="jbaruch/nanoclaw-core jbaruch/nanoclaw-admin jbaruch/nanoclaw-untrusted jbaruch/reclaim-tripit-sync"
-  ssh -n "$NAS_HOST" "docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl install $ALL_TILES --yes --dangerously-ignore-security --agent claude-code 2>&1'" || {
+  nas "docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl install $ALL_TILES --yes --dangerously-ignore-security --agent claude-code 2>&1'" || {
     echo "  ERROR: tessl install in orchestrator failed"
     exit 1
   }
