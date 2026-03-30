@@ -205,7 +205,9 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 
   echo ""
   echo "Pulling tiles from registry into orchestrator..."
-  ssh "$NAS_HOST" "docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl install jbaruch/nanoclaw-core jbaruch/nanoclaw-admin jbaruch/reclaim-tripit-sync --yes --dangerously-ignore-security --agent claude-code 2>&1'" || {
+  # IMPORTANT: install ALL tiles together — vendored mode removes tiles not in the install list
+  ALL_TILES="jbaruch/nanoclaw-core jbaruch/nanoclaw-admin jbaruch/nanoclaw-untrusted jbaruch/reclaim-tripit-sync"
+  ssh "$NAS_HOST" "docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl install $ALL_TILES --yes --dangerously-ignore-security --agent claude-code 2>&1'" || {
     echo "  ERROR: tessl install in orchestrator failed"
     exit 1
   }
