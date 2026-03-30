@@ -731,9 +731,21 @@ export async function processTaskIpc(
                 { script: scriptName, sourceGroup, stdoutLen: stdout.length },
                 'Host script completed',
               );
+              logger.info(
+                { resultPath, requestId: data.requestId },
+                'Writing script result file',
+              );
               fs.writeFileSync(
                 resultPath,
                 JSON.stringify({ stdout, stderr: stderr || undefined }),
+              );
+              logger.info(
+                {
+                  resultPath,
+                  exists: fs.existsSync(resultPath),
+                  size: fs.statSync(resultPath).size,
+                },
+                'Script result file written',
               );
             }
             // Clean up temp script
