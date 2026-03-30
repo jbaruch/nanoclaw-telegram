@@ -1,3 +1,4 @@
+import { execFile } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -295,6 +296,8 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For run_host_script
+    requestId?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -603,6 +606,95 @@ export async function processTaskIpc(
           'Session nuke requested via IPC',
         );
         deps.nukeSession(sourceGroup);
+      }
+      break;
+
+    case 'run_host_script':
+      if (data.script && data.requestId) {
+        // Security: only allow .py scripts, no path traversal
+        const scriptName = path.basename(data.script);
+        if (scriptName !== data.script || !scriptName.endsWith('.py')) {
+          logger.warn(
+            { script: data.script, sourceGroup },
+            'Invalid host script name',
+          );
+          break;
+        }
+
+        const groupDir = path.resolve(
+          process.cwd(),
+          'groups',
+          sourceGroup,
+        );
+        const scriptPath = path.join(groupDir, 'scripts', scriptName);
+        if (!fs.existsSync(scriptPath)) {
+          logger.warn(
+            { scriptPath, sourceGroup },
+            'Host script not found',
+          );
+          // Write error result so the MCP tool doesn't hang
+          const errResultPath = path.join(
+            DATA_DIR,
+            'ipc',
+            sourceGroup,
+            'input',
+            `_script_result_${data.requestId}.json`,
+          );
+          fs.writeFileSync(
+            errResultPath,
+            JSON.stringify({ error: `Script not found: ${scriptName}` }),
+          );
+          break;
+        }
+
+        logger.info(
+          { script: scriptName, sourceGroup },
+          'Running host script',
+        );
+
+        // Run with all host env vars (credentials available on orchestrator)
+        const env = { ...process.env, WORKSPACE_GROUP: groupDir };
+        execFile(
+          'python3',
+          [scriptPath],
+          {
+            cwd: groupDir,
+            env,
+            timeout: 55_000,
+            maxBuffer: 1024 * 1024,
+          },
+          (error, stdout, stderr) => {
+            const resultPath = path.join(
+              DATA_DIR,
+              'ipc',
+              sourceGroup,
+              'input',
+              `_script_result_${data.requestId}.json`,
+            );
+            if (error) {
+              logger.error(
+                { script: scriptName, sourceGroup, error: error.message, stderr },
+                'Host script failed',
+              );
+              fs.writeFileSync(
+                resultPath,
+                JSON.stringify({
+                  error: error.message,
+                  stderr: stderr.slice(-500),
+                }),
+              );
+            } else {
+              logger.info(
+                { script: scriptName, sourceGroup, stdoutLen: stdout.length },
+                'Host script completed',
+              );
+              fs.writeFileSync(
+                resultPath,
+                JSON.stringify({ stdout, stderr: stderr || undefined }),
+              );
+            }
+          },
+        );
       }
       break;
 

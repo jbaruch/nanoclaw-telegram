@@ -410,6 +410,55 @@ server.tool(
   },
 );
 
+server.tool(
+  'run_host_script',
+  'Run a Python script on the host (orchestrator) with access to credentials the container does not have (TripIt, Reclaim, Google OAuth). Use for scripts that need external API access. The script runs in the group folder context. Returns the script stdout as JSON.',
+  {
+    script: z.string().describe('Script name (e.g. "refresh-travel-schedule.py", "check-travel-bookings.py"). Must exist in the group\'s scripts/ directory.'),
+  },
+  async (args) => {
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const data = {
+      type: 'run_host_script',
+      script: args.script,
+      groupFolder,
+      chatJid,
+      requestId,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    // Poll for result file
+    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
+    const timeoutMs = 60_000;
+    const pollMs = 500;
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+      if (fs.existsSync(resultPath)) {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        fs.unlinkSync(resultPath);
+        if (result.error) {
+          return {
+            content: [{ type: 'text' as const, text: `Script error: ${result.error}` }],
+            isError: true,
+          };
+        }
+        return {
+          content: [{ type: 'text' as const, text: result.stdout || '(no output)' }],
+        };
+      }
+      await new Promise(r => setTimeout(r, pollMs));
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'Script timed out after 60s' }],
+      isError: true,
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);
