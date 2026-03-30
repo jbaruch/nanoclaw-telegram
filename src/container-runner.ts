@@ -179,8 +179,55 @@ function buildVolumeMounts(
     }
   }
 
-  // Rules are delivered by the tessl chain: CLAUDE.md → AGENTS.md → .tessl/RULES.md
-  // (installed at runtime by the entrypoint's `tessl install`)
+  // For untrusted groups (no tessl creds), copy .tessl from any session
+  // that already has it (installed by a main/trusted group). This gives
+  // untrusted groups the rules and skills without tessl credentials.
+  if (!isMain && !group.containerConfig?.trusted) {
+    const dstTessl = path.join(groupSessionsDir, '.tessl');
+    if (!fs.existsSync(dstTessl)) {
+      const sessionsDir = path.join(DATA_DIR, 'sessions');
+      if (fs.existsSync(sessionsDir)) {
+        for (const sessionFolder of fs.readdirSync(sessionsDir)) {
+          if (sessionFolder === group.folder) continue;
+          const srcTessl = path.join(
+            sessionsDir,
+            sessionFolder,
+            '.claude',
+            '.tessl',
+          );
+          if (fs.existsSync(srcTessl)) {
+            fs.cpSync(srcTessl, dstTessl, { recursive: true });
+            // Copy tile skills into skills/
+            const tilesRoot = path.join(dstTessl, 'tiles');
+            if (fs.existsSync(tilesRoot)) {
+              for (const org of fs.readdirSync(tilesRoot)) {
+                const orgDir = path.join(tilesRoot, org);
+                if (!fs.statSync(orgDir).isDirectory()) continue;
+                for (const tile of fs.readdirSync(orgDir)) {
+                  const tileSkills = path.join(orgDir, tile, 'skills');
+                  if (!fs.existsSync(tileSkills)) continue;
+                  for (const skill of fs.readdirSync(tileSkills)) {
+                    const skillSrc = path.join(tileSkills, skill);
+                    if (!fs.statSync(skillSrc).isDirectory()) continue;
+                    fs.cpSync(
+                      skillSrc,
+                      path.join(skillsDst, `tessl__${skill}`),
+                      { recursive: true },
+                    );
+                  }
+                }
+              }
+            }
+            logger.info(
+              { folder: group.folder, from: sessionFolder },
+              'Copied .tessl from existing session',
+            );
+            break;
+          }
+        }
+      }
+    }
+  }
   mounts.push({
     hostPath: toHostPath(groupSessionsDir),
     containerPath: '/home/node/.claude',
@@ -194,8 +241,8 @@ function buildVolumeMounts(
     HOST_PROJECT_ROOT !== process.cwd()
       ? path.dirname(HOST_PROJECT_ROOT)
       : process.env.HOME || os.homedir();
-  // Tessl credentials: all groups (read-only, used for tile/rule installation only)
-  {
+  // Tessl credentials: main and trusted groups only (token has publish access)
+  if (isMain || group.containerConfig?.trusted) {
     const tesslCredsPath = path.join(
       hostHome,
       '.tessl',

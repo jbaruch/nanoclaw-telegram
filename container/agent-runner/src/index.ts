@@ -393,6 +393,7 @@ async function runQuery(
   }
 
   // Rules are loaded by the SDK via the tessl chain: CLAUDE.md → AGENTS.md → .tessl/RULES.md
+  // For untrusted groups, the orchestrator copies .tessl from a main group's session.
 
   // Discover additional directories mounted at /workspace/extra/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
