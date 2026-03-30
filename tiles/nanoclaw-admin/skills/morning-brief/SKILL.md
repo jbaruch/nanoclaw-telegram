@@ -91,7 +91,7 @@ After the brief is confirmed sent, invoke the brief-cleanup skill to send any pe
 After brief-cleanup runs, set both arrays in `morning-brief-pending.json` to `[]`.
 
 ## Step 8: Schedule reminders for today's events
-For each timed event >20 min away: use the resolved scheduler tool to schedule a once-off reminder at start−15 min (local ISO timestamp, **no Z suffix**). Pass event title and the calculated timestamp. If no scheduling tool is available, or a reminder fails for a specific event, skip that event and continue with the rest.
+For each timed event >20 min away — **excluding** all-day events, Travel events, "Home" events, week-number events, and any event where `jbaruch@sadogursky.com` (`self=true`) has `responseStatus="declined"` — use the resolved scheduler tool to schedule a once-off reminder at start−15 min (local ISO timestamp, **no Z suffix**). Pass event title and the calculated timestamp. If no scheduling tool is available, or a reminder fails for a specific event, skip that event and continue with the rest.
 
 ## Step 9: Save state
 Write to `/workspace/group/calendar-state.json`:

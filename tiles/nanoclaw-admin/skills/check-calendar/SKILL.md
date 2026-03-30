@@ -51,7 +51,7 @@ Use `COMPOSIO_SEARCH_TOOLS` to find `GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS`, 
 Compare the fetched events to the state file's `events` list (match by event_id). Check for:
 - New events added
 - Existing events changed time or title
-- Events removed
+- Events removed or declined (responseStatus changed to "declined")
 
 **If nothing changed:** return nothing (wrap output in `<internal>`).
 
@@ -64,7 +64,7 @@ If calendar changed:
    mcp__nanoclaw__cancel_task(task_id="task_7f3a9b")
    ```
 
-2. **Create new reminders:** For each timed event (not all-day, not Travel) starting more than 20 min from now, schedule a new `once` task 15 min before start (local time, no Z suffix):
+2. **Create new reminders:** For each timed event (not all-day, not Travel, not "Home", not week-number events) starting more than 20 min from now — **and where `jbaruch@sadogursky.com` (`self=true`) does NOT have `responseStatus="declined"`** — schedule a new `once` task 15 min before start (local time, no Z suffix):
    ```
    mcp__nanoclaw__create_task(
      scheduled_time="2024-06-10T08:45:00",   # local time, no Z suffix
