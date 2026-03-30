@@ -39,8 +39,19 @@ fi
 
 pull_skill() {
   local name="$1"
-  local src="$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/$name"
+  local skills_base="$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills"
   local dst="$TILE_DIR/skills/$name"
+
+  # Try skills/{name} first, then skills/tessl__{name} (runtime override path)
+  local src="$skills_base/$name"
+  if ! ssh -n "$NAS_HOST" "test -d '$src'"; then
+    src="$skills_base/tessl__$name"
+    if ! ssh -n "$NAS_HOST" "test -d '$src'"; then
+      echo "  ERROR: $name not found in skills/ or skills/tessl__$name on NAS"
+      return 1
+    fi
+  fi
+
   mkdir -p "$dst"
   ssh -n "$NAS_HOST" "tar czf - -C $src ." | tar xzf - -C "$dst"
   if [ ! -f "$dst/SKILL.md" ]; then
@@ -48,7 +59,7 @@ pull_skill() {
     rm -rf "$dst"
     return 1
   fi
-  echo "  pulled: $name"
+  echo "  pulled: $name (from $(basename $src))"
 }
 
 pull_rule() {
@@ -101,9 +112,16 @@ PROMOTE_RULES=false
 if [ "$MODE" = "--rules-only" ]; then
   PROMOTE_RULES=true
 elif [ "$MODE" = "all" ] || [ "$MODE" = "--all" ]; then
-  # Get all staging skills from NAS
+  # Get all staging skills from NAS (both skills/{name} and skills/tessl__{name})
+  declare -A SEEN_SKILLS
   while IFS= read -r line; do
-    [ -n "$line" ] && SKILLS_TO_PROMOTE+=("$line")
+    [ -n "$line" ] || continue
+    # Strip tessl__ prefix to get the canonical skill name
+    skill_name="${line#tessl__}"
+    if [ -z "${SEEN_SKILLS[$skill_name]+x}" ]; then
+      SEEN_SKILLS[$skill_name]=1
+      SKILLS_TO_PROMOTE+=("$skill_name")
+    fi
   done < <(ssh -n "$NAS_HOST" "ls $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/")
   PROMOTE_RULES=true
 else

@@ -45,9 +45,10 @@ This ensures that if the session is interrupted (context compaction, scheduled t
 
 New skills and rules you create go through a staging → promote → publish pipeline. Baruch runs the promote script on the host; your job is to put files in the right place.
 
-**Skills** → `/workspace/group/skills/{name}/SKILL.md`
-- Works immediately at runtime (container-runner loads these as overrides)
-- Also serves as staging — the promote script pulls from here
+**Skills** — two paths, both work:
+- `/workspace/group/skills/{name}/SKILL.md` — new skills (works at runtime + staging)
+- `/workspace/group/skills/tessl__{name}/SKILL.md` — patches to existing tile skills (overrides the tile version at runtime)
+- The promote script finds both, strips the `tessl__` prefix, and promotes to the tile
 - After promotion, Baruch runs `/verify-tiles` to clean up the staging copy
 
 **Rules** → `/workspace/group/staging/{tile-name}/{name}.md`
