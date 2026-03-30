@@ -278,23 +278,24 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      logger.debug(
-        { group: group.name },
-        'Idle timeout, closing container stdin',
-      );
-      queue.closeStdin(chatJid);
-    }, group.isMain || group.containerConfig?.trusted ? IDLE_TIMEOUT : 300_000);
+    idleTimer = setTimeout(
+      () => {
+        logger.debug(
+          { group: group.name },
+          'Idle timeout, closing container stdin',
+        );
+        queue.closeStdin(chatJid);
+      },
+      group.isMain || group.containerConfig?.trusted ? IDLE_TIMEOUT : 300_000,
+    );
   };
 
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
 
-  // Progressive streaming: show live preview on edit-capable channels.
-  // The draft stream quotes the triggering message so edits stay visually linked.
-  const replyTarget = missedMessages[missedMessages.length - 1]?.id;
-  let draftStream = channel.createDraftStream?.(chatJid, replyTarget);
+  // Progressive streaming disabled — causes message override bugs when
+  // multiple messages are piped to the same container.
 
   // Track which message triggered the response — first reply quotes it.
   // Uses shared pendingReplyTo map so follow-up messages piped via
@@ -314,14 +315,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     prompt,
     chatJid,
     async (result) => {
-      // Streaming preview — update draft with accumulated text
-      if (result.streamText && draftStream) {
-        const previewText = result.streamText
-          .replace(/<internal>[\s\S]*?<\/internal>/g, '')
-          .trim();
-        if (previewText) draftStream.update(previewText);
-      }
-
       // Streaming output callback — called for each agent result
       if (result.result) {
         const raw =
@@ -332,19 +325,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
         logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
         if (text) {
-          if (draftStream) {
-            const ok = await draftStream.finish(text);
-            // Consume the draft — next result must create a new message,
-            // not edit this one (container processes multiple messages).
-            draftStream = undefined;
-            if (!ok) {
-              const replyId = pendingReplyTo[chatJid];
-              await channel.sendMessage(chatJid, text, replyId);
-            }
-          } else {
-            const replyId = pendingReplyTo[chatJid];
-            await channel.sendMessage(chatJid, text, replyId);
-          }
+          const replyId = pendingReplyTo[chatJid];
+          await channel.sendMessage(chatJid, text, replyId);
           // Store bot response in DB so heartbeat can track answered messages
           storeMessage({
             id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -378,11 +360,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
-
-  // Clean up draft stream if agent produced no output
-  if (!outputSentToUser && draftStream) {
-    await draftStream.cancel();
-  }
 
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
