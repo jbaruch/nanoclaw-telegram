@@ -134,7 +134,8 @@ function buildVolumeMounts(
             CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
             CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
             // Disable auto-memory for untrusted groups to prevent persistent injection
-            CLAUDE_CODE_DISABLE_AUTO_MEMORY: isMain || group.containerConfig?.trusted ? '0' : '1',
+            CLAUDE_CODE_DISABLE_AUTO_MEMORY:
+              isMain || group.containerConfig?.trusted ? '0' : '1',
           },
         },
         null,
@@ -257,27 +258,18 @@ function buildContainerArgs(
   args.push('-e', `TZ=${TIMEZONE}`);
 
   // Credential tiers:
-  //   Main:    all credentials
-  //   Trusted: all credentials (same as main, just not admin-privileged)
-  //   Other:   nothing (Anthropic via proxy only)
+  //   Main/Trusted: Composio only (handles Gmail, Calendar, Tasks, GitHub via OAuth)
+  //   Other:        nothing (Anthropic via proxy only)
+  //
+  // All other credentials (GITHUB_TOKEN, GOOGLE_*, RECLAIM_*, TRIPIT_*, OPENAI_*)
+  // stay on the host. Scripts that need them run host-side via IPC.
   const isTrusted = group.containerConfig?.trusted === true;
 
-  const ALL_FORWARDED_VARS = [
-    'COMPOSIO_API_KEY',
-    'OPENAI_API_KEY',
-    'GITHUB_TOKEN',
-    'TRIPIT_ICAL_URL',
-    'TRIPIT_IGNORE_TRIPS',
-    'TRIPIT_IGNORE_KEYWORDS',
-    'RECLAIM_API_TOKEN',
-    'GOOGLE_CLIENT_ID',
-    'GOOGLE_CLIENT_SECRET',
-    'GOOGLE_REFRESH_TOKEN',
-  ];
+  const CONTAINER_VARS = ['COMPOSIO_API_KEY'];
 
-  const varsToForward = isMain || isTrusted ? ALL_FORWARDED_VARS : [];
+  const varsToForward = isMain || isTrusted ? CONTAINER_VARS : [];
 
-  const envFromFile = readEnvFile(ALL_FORWARDED_VARS);
+  const envFromFile = readEnvFile(CONTAINER_VARS);
   for (const varName of varsToForward) {
     const value = process.env[varName] || envFromFile[varName];
     if (value) {
