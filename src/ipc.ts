@@ -611,9 +611,13 @@ export async function processTaskIpc(
 
     case 'run_host_script':
       if (data.script && data.requestId) {
-        // Security: only allow .py scripts, no path traversal
+        // Security: only allow .py/.js/.mjs/.sh scripts, no path traversal
         const scriptName = path.basename(data.script);
-        if (scriptName !== data.script || !scriptName.endsWith('.py')) {
+        const allowedExts = ['.py', '.js', '.mjs', '.sh'];
+        if (
+          scriptName !== data.script ||
+          !allowedExts.some((ext) => scriptName.endsWith(ext))
+        ) {
           logger.warn(
             { script: data.script, sourceGroup },
             'Invalid host script name',
@@ -676,13 +680,20 @@ export async function processTaskIpc(
         const tmpScript = path.join(groupDir, `.tmp_host_${scriptName}`);
         fs.writeFileSync(tmpScript, patchedContent);
 
+        // Select runtime by extension
+        const runtime = scriptName.endsWith('.py')
+          ? 'python3'
+          : scriptName.endsWith('.sh')
+            ? 'bash'
+            : 'node';
+
         execFile(
-          'python3',
+          runtime,
           [tmpScript],
           {
             cwd: groupDir,
             env,
-            timeout: 55_000,
+            timeout: 120_000,
             maxBuffer: 1024 * 1024,
           },
           (error, stdout, stderr) => {

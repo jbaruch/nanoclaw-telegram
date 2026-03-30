@@ -29,8 +29,8 @@ RUN npx tsc
 # Copy container config (skills, build script, Dockerfile for agent image)
 COPY container/ ./container/
 
-# Install tessl CLI for pulling tiles from registry
-RUN npm install -g tessl && tessl --version
+# Install tessl CLI and host-side tools
+RUN npm install -g tessl jbaruch/reclaim-tripit-timezones-sync && tessl --version
 
 # Tile sources (used as fallback and for promote script)
 COPY tiles/ ./tiles/

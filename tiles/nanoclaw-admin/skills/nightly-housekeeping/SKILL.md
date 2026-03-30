@@ -6,10 +6,12 @@ description: Nightly maintenance skill for Baruch's personal assistant. Syncs tr
 You are AyeAye, Baruch's assistant. Run these nightly maintenance steps silently. Report only if something needs attention.
 
 ## Step 1: TripIt → Reclaim sync
-Invoke the `tessl__sync-tripit` skill (handles TripIt-to-Reclaim timezone syncing) to sync travel timezones from TripIt to Reclaim.
-- If changes detected → report (new timezones, OOO blocks created/deleted)
-- If no changes → stay silent
+Run via host: `mcp__nanoclaw__run_host_script(script: "sync-tripit.sh")`
+This syncs travel timezones from TripIt to Reclaim. Output is JSON.
+- If `noChanges: true` → stay silent
+- If changes detected → report (new timezones, OOO blocks)
 - If overlapping trips → flag as warning
+- If error → report and continue
 
 ## Step 2: Refresh travel schedule
 Run via host: `mcp__nanoclaw__run_host_script(script: "refresh-travel-schedule.py")`

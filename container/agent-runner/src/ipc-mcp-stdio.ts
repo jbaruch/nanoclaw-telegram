@@ -407,7 +407,7 @@ server.tool(
 
     // Poll for result file
     const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
-    const timeoutMs = 60_000;
+    const timeoutMs = 180_000;
     const pollMs = 500;
     const start = Date.now();
 
