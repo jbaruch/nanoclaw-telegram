@@ -729,7 +729,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.trigger,
     group.added_at,
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
-    group.requiresTrigger === undefined ? 1 : group.requiresTrigger ? 1 : 0,
+    group.requiresTrigger === undefined ? 0 : group.requiresTrigger ? 1 : 0,
     group.isMain ? 1 : 0,
   );
 }
