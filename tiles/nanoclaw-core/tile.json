@@ -9,6 +9,9 @@
     },
     "telegram-protocol": {
       "rules": "rules/telegram-protocol.md"
+    },
+    "language-matching": {
+      "rules": "rules/language-matching.md"
     }
   },
   "skills": {
