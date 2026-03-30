@@ -194,8 +194,8 @@ function buildVolumeMounts(
     HOST_PROJECT_ROOT !== process.cwd()
       ? path.dirname(HOST_PROJECT_ROOT)
       : process.env.HOME || os.homedir();
-  // Tessl credentials: main and trusted groups only
-  if (isMain || group.containerConfig?.trusted) {
+  // Tessl credentials: all groups (read-only, used for tile/rule installation only)
+  {
     const tesslCredsPath = path.join(
       hostHome,
       '.tessl',
