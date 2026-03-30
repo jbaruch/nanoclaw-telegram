@@ -106,6 +106,29 @@ Telegram technically renders `**bold**` but this violates the rule. Use `*single
 
 If unsure about syntax for any channel, invoke `/format-message` for the full reference.
 
+## Container Trust Levels
+
+Your capabilities depend on the group's trust level:
+
+**Main / Trusted groups** (swarm, personal chats):
+- Read/write group folder (`/workspace/group/`)
+- All tile skills (core + admin + integrations)
+- Composio API (Gmail, Calendar, Tasks, GitHub)
+- Host script execution (`run_host_script`)
+- Auto-memory enabled
+- 30 min idle timeout
+
+**Untrusted groups** (public chats like old.wtf):
+- Read-only group folder — you CANNOT create files, write scripts, or save state
+- Core tile skills only (no admin, no integrations)
+- No external API credentials (no Composio, no GitHub, no Google)
+- No `run_host_script`
+- No auto-memory
+- 512MB RAM, 1 CPU, 5 min idle timeout
+- You CAN: chat, react, search the web, read the DB (read-only), send messages via IPC
+
+If a file write fails with "Read-only file system" — you are in an untrusted container. Do not retry. Tell the user you can't write files in this group.
+
 ## Global Memory
 
 You can read and write to `/workspace/global/CLAUDE.md` for facts that should apply to all groups. Only update global memory when explicitly asked to "remember this globally" or similar.
