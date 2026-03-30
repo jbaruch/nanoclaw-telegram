@@ -24,9 +24,10 @@ export interface TelegramChannelOpts {
 }
 
 /**
- * Send a message with Telegram Markdown parse mode, falling back to plain text.
- * Claude's output naturally matches Telegram's Markdown v1 format:
- *   *bold*, _italic_, `code`, ```code blocks```, [links](url)
+ * Send a message with Telegram HTML parse mode, falling back to plain text.
+ * Supports: <b>bold</b>, <i>italic</i>, <s>strikethrough</s>, <u>underline</u>,
+ * <code>inline code</code>, <pre>code blocks</pre>, <blockquote>quotes</blockquote>,
+ * <a href="url">links</a>, <tg-spoiler>spoilers</tg-spoiler>
  */
 async function sendTelegramMessage(
   api: { sendMessage: Api['sendMessage'] },
@@ -40,12 +41,12 @@ async function sendTelegramMessage(
   try {
     const msg = await api.sendMessage(chatId, text, {
       ...options,
-      parse_mode: 'Markdown',
+      parse_mode: 'HTML',
     });
     return msg.message_id;
   } catch (err) {
-    // Fallback: send as plain text if Markdown parsing fails
-    logger.debug({ err }, 'Markdown send failed, falling back to plain text');
+    // Fallback: send as plain text if HTML parsing fails
+    logger.debug({ err }, 'HTML send failed, falling back to plain text');
     const msg = await api.sendMessage(chatId, text, options);
     return msg.message_id;
   }
@@ -487,8 +488,8 @@ export class TelegramChannel implements Channel {
           : (ctx.chat as any).title || 'Unknown';
 
       ctx.reply(
-        `Chat ID: \`tg:${chatId}\`\nName: ${chatName}\nType: ${chatType}`,
-        { parse_mode: 'Markdown' },
+        `Chat ID: <code>tg:${chatId}</code>\nName: ${chatName}\nType: ${chatType}`,
+        { parse_mode: 'HTML' },
       );
     });
 

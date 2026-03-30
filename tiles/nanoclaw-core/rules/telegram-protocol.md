@@ -38,6 +38,29 @@ Never stream transition text like:
 
 All plain text output goes to Telegram. Write only what the user should actually read.
 
+## Formatting
+
+Messages are parsed as HTML. Use these tags:
+
+| Format | Syntax |
+|--------|--------|
+| Bold | `<b>text</b>` |
+| Italic | `<i>text</i>` |
+| Underline | `<u>text</u>` |
+| Strikethrough | `<s>text</s>` |
+| Inline code | `<code>text</code>` |
+| Code block | `<pre>code</pre>` |
+| Code block (lang) | `<pre><code class="language-python">code</code></pre>` |
+| Link | `<a href="url">text</a>` |
+| Quote | `<blockquote>text</blockquote>` |
+| Spoiler | `<tg-spoiler>text</tg-spoiler>` |
+
+**Do NOT use Markdown** (`*bold*`, `_italic_`, `**bold**`, `[link](url)`). It will render as literal text. HTML only.
+
+For bullets use `•` (not `-` or `*`). For emphasis in lists, combine: `• <b>Item</b> — description`.
+
+Special characters `<`, `>`, `&` in user data must be escaped as `&lt;`, `&gt;`, `&amp;`.
+
 ## Language
 
 Respond in the language the user wrote in. Baruch writes in Russian — reply in Russian. Code, filenames, and technical terms stay in English.
