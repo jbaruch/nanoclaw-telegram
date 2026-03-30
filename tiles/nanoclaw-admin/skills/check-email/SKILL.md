@@ -28,10 +28,10 @@ Read `/workspace/group/email-preferences.json` if it exists. This file contains 
 }
 ```
 
-These override the general calibration rules:
-- `always_important` senders/domains skip calibration entirely — always flag
-- `always_ignore` senders/domains skip calibration entirely — always drop
-- `patterns` are applied during classification as additional rules
+These override all calibration and classification rules:
+- `always_important` — skip calibration, always flag
+- `always_ignore` — skip calibration, always drop
+- `patterns` — applied as additional rules during classification
 
 If the file doesn't exist or is empty, proceed with default rules only.
 
@@ -69,26 +69,12 @@ After processing, update `last_email_checked` in `/workspace/group/nanoclaw-stat
 
 ## Classification
 
-Classify as important if ALL of these hold:
-- Sender is a real person (not noreply@, not alerts@, not @*.sendgrid.net, not @*.mailchimp.com, not automated bulk senders)
+Classify as important only if ALL of the following hold (signals already down-ranked in calibration above should not pass):
+- Sender is a real person — not noreply@, alerts@, @*.sendgrid.net, @*.mailchimp.com, or other automated bulk senders
 - No unsubscribe link in body
-- Subject is genuine human communication (Re:, Fwd: from a human, contains "?", action words like "review", "approve", "can you", "please") — not generic urgency bait
+- Subject reflects genuine human communication — Re:/Fwd: from a human, contains "?", or uses action words like "review", "approve", "can you", "please" — not generic urgency bait
 - Sender domain matches known work contacts or is a previously unseen personal sender
-- Email is not in CATEGORY_PROMOTIONS or CATEGORY_UPDATES label
-
-## Worked Example
-
-| Field | Value |
-|---|---|
-| From | `Sarah Lee <sarah.lee@jfrog.com>` |
-| Subject | `Can you review the PR before EOD?` |
-| Labels | `INBOX` |
-
-Passes all criteria: real person, known work domain, no unsubscribe link, plain-text body, genuine action request.
-
-```
-New email from [Sarah Lee]: "Can you review the PR before EOD?" -- Hey, could you take a look at PR #482? We're trying to merge bef...
-```
+- Email is not labelled CATEGORY_PROMOTIONS or CATEGORY_UPDATES
 
 ## Output
 
@@ -105,14 +91,18 @@ Alert format:
 New email from [Name]: "[Subject]" -- [preview...]
 ```
 
+**Example output:**
+```
+New email from [Sarah Lee]: "Can you review the PR before EOD?" -- Hey, could you take a look at PR #482? We're trying to merge bef...
+```
+
 ## Learning from Feedback
 
 When the user reacts with feedback ("good fit", "bad fit", "this one was spam", "you missed one from X"):
 
 1. Read `/workspace/group/email-preferences.json` (create if missing)
-2. Decide the appropriate rule based on the error class, not just the specific email
-3. Add the entry
-4. Confirm briefly what you learned
+2. Derive a general rule from the error class, not just the specific email
+3. Add the entry and confirm briefly what you learned
 
 | Feedback | Rule to add |
 |---|---|
@@ -121,4 +111,4 @@ When the user reacts with feedback ("good fit", "bad fit", "this one was spam", 
 | "good fit" on a CFP email | Pattern: subject contains CFP → important |
 | "you missed one from my boss" | Add boss's email to `always_important`; add domain too if unrecognized |
 
-Only record "good fit" feedback if it reinforces a non-obvious pattern. If default rules already covered it, don't clutter the file.
+Only record "good fit" feedback if it reinforces a non-obvious pattern — if default rules already covered it, don't clutter the file.

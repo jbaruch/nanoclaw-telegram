@@ -5,15 +5,13 @@ description: Checks upcoming trips for missing bookings (flights, hotels, accomm
 
 # Check Travel Bookings
 
-**Run the script on the host and interpret its JSON output. Do not implement the detection logic yourself.**
+**Run the script at `/workspace/group/scripts/check-travel-bookings.py` and interpret its JSON output. Do not implement the detection logic yourself.**
 
 ## How to run
 
+```bash
+TRIPIT_ICAL_URL="$(cat /workspace/group/tripit-url.txt)" python3 /workspace/group/scripts/check-travel-bookings.py
 ```
-mcp__nanoclaw__run_host_script(script: "check-travel-bookings.py")
-```
-
-The script runs on the host with TripIt credentials (not available in the container).
 
 The script outputs JSON:
 ```json
@@ -31,7 +29,8 @@ If `gaps` is empty — stay silent. If gaps are present, format and send as Tele
 
 ## Error handling
 
-- If `run_host_script` returns an error — report it to the user and do not attempt to parse the result.
+- If `/workspace/group/tripit-url.txt` is missing or empty — report that the TripIt URL file is not found and skip the run.
+- If the script exits with a non-zero exit code — report the error output to the user and do not attempt to parse the result.
 - If the script output is not valid JSON or is missing expected fields — report a parse error and show the raw output for diagnosis.
 
 ## Output format (when gaps found)

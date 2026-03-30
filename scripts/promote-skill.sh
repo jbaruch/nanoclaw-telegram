@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Promote AyeAye-created skills and rules from NAS staging to tessl tiles.
 #
 # Usage:
@@ -102,7 +102,9 @@ if [ "$MODE" = "--rules-only" ]; then
   PROMOTE_RULES=true
 elif [ "$MODE" = "all" ] || [ "$MODE" = "--all" ]; then
   # Get all staging skills from NAS
-  mapfile -t SKILLS_TO_PROMOTE < <(ssh "$NAS_HOST" "ls $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/ 2>/dev/null" 2>/dev/null || true)
+  while IFS= read -r line; do
+    [ -n "$line" ] && SKILLS_TO_PROMOTE+=("$line")
+  done < <(ssh "$NAS_HOST" "ls $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/ 2>/dev/null" 2>/dev/null)
   PROMOTE_RULES=true
 else
   SKILLS_TO_PROMOTE=("$MODE")

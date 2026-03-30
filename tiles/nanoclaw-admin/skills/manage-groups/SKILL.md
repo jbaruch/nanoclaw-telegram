@@ -7,7 +7,7 @@ description: Add, remove, list, or configure NanoClaw groups and channels. Use w
 
 ## Finding Available Groups
 
-Available groups are provided in `/workspace/ipc/available_groups.json`:
+Available groups are provided in `/workspace/ipc/available_groups.json`. This file has two top-level keys: `groups` (the synced list of all discoverable groups) and a JID-keyed map of registered groups (see [Registered Groups Config](#registered-groups-config) below). The `groups` array looks like:
 
 ```json
 {
@@ -40,7 +40,7 @@ sqlite3 /workspace/store/messages.db "
 
 ## Registered Groups Config
 
-Registered groups are stored in `/workspace/ipc/available_groups.json`:
+Registered groups are also stored in `/workspace/ipc/available_groups.json`, as a JID-keyed dictionary at the top level (separate from the `groups` sync array above):
 
 ```json
 {
@@ -54,17 +54,9 @@ Registered groups are stored in `/workspace/ipc/available_groups.json`:
 ```
 
 Non-obvious fields:
-- **folder**: Channel-prefixed folder name under `groups/` for this group's files and memory (see naming convention below)
+- **folder**: Channel-prefixed folder name under `groups/` (see naming convention below)
 - **requiresTrigger**: Whether `@trigger` prefix is needed (default: `true`). Set to `false` for solo/personal chats where all messages should be processed
 - **isMain**: Whether this is the main control group (elevated privileges, no trigger required)
-
-## Trigger Behavior
-
-| Group type | Trigger required? |
-|---|---|
-| `isMain: true` | No — all messages processed automatically |
-| `requiresTrigger: false` | No — use for 1-on-1 or solo chats |
-| All others (default) | Yes — messages must start with `@AssistantName` |
 
 ## Adding a Group
 
@@ -79,7 +71,7 @@ Non-obvious fields:
    )
    ```
    Optionally include `containerConfig` for additional directory mounts (see [Advanced: Directory Mounts](#advanced-directory-mounts) below).
-3. The group folder is created automatically: `/workspace/group/ (for the group being managed)`
+3. The group folder is created automatically under `/workspace/group/`
 4. Optionally create an initial `CLAUDE.md` for the group
 5. **Verify registration**: Read `/workspace/ipc/available_groups.json` and confirm the new entry appears with the correct JID, name, and folder
 
@@ -98,7 +90,7 @@ Folder naming convention — channel prefix + underscore + lowercase hyphenated 
 
 ## Listing Groups
 
-Read `/workspace/ipc/available_groups.json` and format it nicely.
+Read `/workspace/ipc/available_groups.json` and format the registered JID-keyed entries nicely for the user.
 
 ---
 
@@ -117,7 +109,7 @@ After registering a group, consider configuring a sender allowlist to control wh
 ```
 
 Modes:
-- **`trigger`** (default): Everyone's messages are stored for context, but only allowed senders can trigger the assistant
+- **`trigger`** (default): Stores all messages for context, but only allowed senders can trigger the assistant
 - **`drop`**: Messages from non-allowed senders are not stored at all
 
 Notes:

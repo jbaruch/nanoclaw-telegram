@@ -7,7 +7,7 @@ description: Create a multi-agent team where each member posts to the group as a
 
 ## CRITICAL: Follow the user's prompt exactly
 
-Create *exactly* the team the user asked for — same number of agents, same roles, same names. Do NOT add extra agents, rename roles, or use generic names like "Researcher 1". If the user says "a marine biologist, a physicist, and Alexander Hamilton", create exactly those three agents with those exact names.
+Create *exactly* the team the user asked for — same number of agents, same roles, same names. Do NOT add extra agents, rename roles, or use generic names like "Researcher 1".
 
 ## Workflow sequence
 
