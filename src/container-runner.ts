@@ -199,7 +199,7 @@ function buildVolumeMounts(
       }
     }
 
-    // Copy skills
+    // Copy skills and their scripts
     const tileSkillsDir = path.join(tileSrc, 'skills');
     if (fs.existsSync(tileSkillsDir)) {
       for (const skillDir of fs.readdirSync(tileSkillsDir)) {
@@ -211,6 +211,18 @@ function buildVolumeMounts(
         fs.cpSync(skillSrcDir, path.join(skillsDst, `tessl__${skillDir}`), {
           recursive: true,
         });
+        // Copy bundled scripts to group's scripts/ dir (used by run_host_script)
+        const skillScriptsDir = path.join(skillSrcDir, 'scripts');
+        if (fs.existsSync(skillScriptsDir)) {
+          const groupScriptsDir = path.join(groupDir, 'scripts');
+          fs.mkdirSync(groupScriptsDir, { recursive: true });
+          for (const scriptFile of fs.readdirSync(skillScriptsDir)) {
+            fs.cpSync(
+              path.join(skillScriptsDir, scriptFile),
+              path.join(groupScriptsDir, scriptFile),
+            );
+          }
+        }
       }
     }
   }
