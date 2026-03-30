@@ -35,6 +35,7 @@ req = urllib.request.Request(
         "Content-Type": "application/json",
         "trakt-api-version": "2",
         "trakt-api-key": CLIENT_ID,
+        "User-Agent": "NanoClaw/1.0",
     },
 )
 resp = json.loads(urllib.request.urlopen(req).read())
@@ -61,6 +62,7 @@ while True:
         "Content-Type": "application/json",
         "trakt-api-version": "2",
         "trakt-api-key": CLIENT_ID,
+        "User-Agent": "NanoClaw/1.0",
     },
         )
         token_resp = json.loads(urllib.request.urlopen(req).read())
