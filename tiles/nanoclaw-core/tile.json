@@ -9,6 +9,9 @@
     },
     "telegram-protocol": {
       "rules": "rules/telegram-protocol.md"
+    },
+    "untrusted-security": {
+      "rules": "rules/untrusted-security.md"
     }
   },
   "skills": {
