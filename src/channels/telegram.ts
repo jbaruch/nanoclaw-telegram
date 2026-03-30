@@ -444,6 +444,20 @@ export async function sendPoolMessage(
   }
 }
 
+/**
+ * Build sender display name with @username if available.
+ * e.g. "JBáruch (@jbaruch)" or "Unknown" if no info.
+ */
+function buildSenderName(from?: {
+  first_name?: string;
+  username?: string;
+  id?: number;
+}): string {
+  const displayName =
+    from?.first_name || from?.username || from?.id?.toString() || 'Unknown';
+  return from?.username ? `${displayName} (@${from.username})` : displayName;
+}
+
 export class TelegramChannel implements Channel {
   name = 'telegram';
 
@@ -496,11 +510,7 @@ export class TelegramChannel implements Channel {
       const chatJid = `tg:${ctx.chat.id}`;
       let content = ctx.message.text;
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
-      const senderName =
-        ctx.from?.first_name ||
-        ctx.from?.username ||
-        ctx.from?.id.toString() ||
-        'Unknown';
+      const senderName = buildSenderName(ctx.from);
       const sender = ctx.from?.id.toString() || '';
       const msgId = ctx.message.message_id.toString();
       const threadId = ctx.message.message_thread_id;
@@ -592,11 +602,7 @@ export class TelegramChannel implements Channel {
       if (!group) return;
 
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
-      const senderName =
-        ctx.from?.first_name ||
-        ctx.from?.username ||
-        ctx.from?.id?.toString() ||
-        'Unknown';
+      const senderName = buildSenderName(ctx.from);
       const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
 
       const isGroup =
@@ -625,11 +631,7 @@ export class TelegramChannel implements Channel {
       if (!group) return;
 
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
-      const senderName =
-        ctx.from?.first_name ||
-        ctx.from?.username ||
-        ctx.from?.id?.toString() ||
-        'Unknown';
+      const senderName = buildSenderName(ctx.from);
       const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
@@ -673,11 +675,7 @@ export class TelegramChannel implements Channel {
       if (!group) return;
 
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
-      const senderName =
-        ctx.from?.first_name ||
-        ctx.from?.username ||
-        ctx.from?.id?.toString() ||
-        'Unknown';
+      const senderName = buildSenderName(ctx.from);
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
       this.opts.onChatMetadata(
@@ -726,11 +724,7 @@ export class TelegramChannel implements Channel {
       if (!group) return;
 
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
-      const senderName =
-        ctx.from?.first_name ||
-        ctx.from?.username ||
-        ctx.from?.id?.toString() ||
-        'Unknown';
+      const senderName = buildSenderName(ctx.from);
       const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';

@@ -270,7 +270,7 @@ describe('TelegramChannel', () => {
           id: '1',
           chat_jid: 'tg:100200300',
           sender: '99001',
-          sender_name: 'Alice',
+          sender_name: 'Alice (@alice_user)',
           content: 'Hello everyone',
           is_from_me: false,
         }),
@@ -330,7 +330,7 @@ describe('TelegramChannel', () => {
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
-        expect.objectContaining({ sender_name: 'Bob' }),
+        expect.objectContaining({ sender_name: 'Bob (@alice_user)' }),
       );
     });
 
@@ -345,7 +345,7 @@ describe('TelegramChannel', () => {
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
-        expect.objectContaining({ sender_name: 'alice_user' }),
+        expect.objectContaining({ sender_name: 'alice_user (@alice_user)' }),
       );
     });
 
@@ -389,7 +389,7 @@ describe('TelegramChannel', () => {
       expect(opts.onChatMetadata).toHaveBeenCalledWith(
         'tg:100200300',
         expect.any(String),
-        'Alice', // Private chats use sender name
+        'Alice (@alice_user)', // Private chats use sender name with username
         'telegram',
         false,
       );
