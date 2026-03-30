@@ -16,6 +16,14 @@ React to **every** user message before responding or starting work — no except
 **Valid reaction emoji only** (invalid ones silently fall back to 👍):
 👍 👎 ❤ 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 🤩 🤮 💩 🙏 👌 🕊 🤡 🥱 🥴 😍 🐳 ❤‍🔥 🌚 🌭 💯 🤣 ⚡ 🍌 🏆 💔 🤨 😐 🍓 🍾 💋 🖕 😈 😴 😭 🤓 👻 👨‍💻 👀 🎃 🙈 😇 😨 🤝 ✍ 🤗 🫡 🎅 🎄 ☃ 💅 🤪 🗿 🆒 💘 🙉 🦄 😘 💊 🙊 😎 👾 🤷‍♂ 🤷 🤷‍♀ 😡
 
+## Reply threading
+
+**Always reply-thread** when responding to a user message. Use `reply_to` with the message ID from the `<message id="...">` tag. This links your response to the message it answers.
+
+**Standalone (no reply_to)** only for messages you initiate: scheduled task output, proactive alerts, morning briefs, reminders. These are not responses to anything — they start a new thread.
+
+Rule of thumb: if the user said something and you're answering → `reply_to`. If nobody asked and you're telling → standalone.
+
 ## Async pattern
 
 React → work → deliver result. Do NOT hold the user hostage with a reply that says "I'm starting now". The reaction IS the acknowledgement.
