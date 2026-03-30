@@ -19,29 +19,6 @@ const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
-// Reply-to message ID — updated by the agent-runner via IPC file for each new message
-const REPLY_TO_FILE = path.join(IPC_DIR, 'input', '_reply_to');
-let pendingReplyToMessageId: string | undefined = process.env.NANOCLAW_REPLY_TO_MESSAGE_ID || undefined;
-
-function getReplyToMessageId(): string | undefined {
-  // Check if the agent-runner wrote a fresh reply-to ID from a follow-up message
-  try {
-    if (fs.existsSync(REPLY_TO_FILE)) {
-      const id = fs.readFileSync(REPLY_TO_FILE, 'utf-8').trim();
-      fs.unlinkSync(REPLY_TO_FILE);
-      if (id) {
-        pendingReplyToMessageId = id;
-        return id;
-      }
-    }
-  } catch { /* ignore */ }
-  // Consume after first use — the ACK gets the reply, background agent results don't.
-  // This prevents replying to the WRONG message when the user sends follow-ups
-  // while the background agent is still working.
-  const id = pendingReplyToMessageId;
-  pendingReplyToMessageId = undefined;
-  return id;
-}
 
 function writeIpcFile(dir: string, data: object): string {
   fs.mkdirSync(dir, { recursive: true });
