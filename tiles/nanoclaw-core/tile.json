@@ -21,38 +21,11 @@
     "format-message": {
       "path": "skills/format-message/SKILL.md"
     },
-    "schedule-task": {
-      "path": "skills/schedule-task/SKILL.md"
-    },
-    "heartbeat": {
-      "path": "skills/heartbeat/SKILL.md"
-    },
     "check-unanswered": {
       "path": "skills/check-unanswered/SKILL.md"
     },
-    "check-calendar": {
-      "path": "skills/check-calendar/SKILL.md"
-    },
-    "check-email": {
-      "path": "skills/check-email/SKILL.md"
-    },
-    "morning-brief": {
-      "path": "skills/morning-brief/SKILL.md"
-    },
     "check-cfps": {
       "path": "skills/check-cfps/SKILL.md"
-    },
-    "nightly-housekeeping": {
-      "path": "skills/nightly-housekeeping/SKILL.md"
-    },
-    "check-system-health": {
-      "path": "skills/check-system-health/SKILL.md"
-    },
-    "brief-cleanup": {
-      "path": "skills/brief-cleanup/SKILL.md"
-    },
-    "check-travel-bookings": {
-      "path": "skills/check-travel-bookings/SKILL.md"
     }
   }
 }

@@ -14,6 +14,33 @@
     },
     "create-agent-team": {
       "path": "skills/create-agent-team/SKILL.md"
+    },
+    "heartbeat": {
+      "path": "skills/heartbeat/SKILL.md"
+    },
+    "morning-brief": {
+      "path": "skills/morning-brief/SKILL.md"
+    },
+    "nightly-housekeeping": {
+      "path": "skills/nightly-housekeeping/SKILL.md"
+    },
+    "check-calendar": {
+      "path": "skills/check-calendar/SKILL.md"
+    },
+    "check-email": {
+      "path": "skills/check-email/SKILL.md"
+    },
+    "check-travel-bookings": {
+      "path": "skills/check-travel-bookings/SKILL.md"
+    },
+    "schedule-task": {
+      "path": "skills/schedule-task/SKILL.md"
+    },
+    "brief-cleanup": {
+      "path": "skills/brief-cleanup/SKILL.md"
+    },
+    "check-system-health": {
+      "path": "skills/check-system-health/SKILL.md"
     }
   }
 }
