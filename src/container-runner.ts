@@ -123,7 +123,8 @@ function buildVolumeMounts(
   );
   fs.mkdirSync(groupSessionsDir, { recursive: true });
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  if (!fs.existsSync(settingsFile)) {
+  // Always write — settings may have changed (model, memory, teams)
+  {
     fs.writeFileSync(
       settingsFile,
       JSON.stringify(
