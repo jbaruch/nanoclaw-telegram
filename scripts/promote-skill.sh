@@ -42,7 +42,7 @@ pull_skill() {
   local src="$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/$name"
   local dst="$TILE_DIR/skills/$name"
   mkdir -p "$dst"
-  ssh "$NAS_HOST" "tar czf - -C $src ." 2>/dev/null | tar xzf - -C "$dst"
+  ssh "$NAS_HOST" "tar czf - -C $src ." | tar xzf - -C "$dst"
   if [ ! -f "$dst/SKILL.md" ]; then
     echo "  ERROR: $name/SKILL.md not found on NAS"
     rm -rf "$dst"
@@ -53,10 +53,10 @@ pull_skill() {
 
 pull_rule() {
   local name="$1"
-  local src="$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/.tessl/tiles/local/$TILE_NAME/rules/$name.md"
+  local src="$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/staging/$TILE_NAME/$name.md"
   local dst="$TILE_DIR/rules/$name.md"
   mkdir -p "$TILE_DIR/rules"
-  ssh "$NAS_HOST" "cat $src" 2>/dev/null > "$dst"
+  ssh "$NAS_HOST" "cat $src" > "$dst"
   if [ ! -s "$dst" ]; then
     echo "  ERROR: $name.md not found or empty on NAS"
     rm -f "$dst"
@@ -121,17 +121,22 @@ if [ ${#SKILLS_TO_PROMOTE[@]} -gt 0 ]; then
   echo "1. Pulling ${#SKILLS_TO_PROMOTE[@]} skill(s) from NAS..."
   for skill in "${SKILLS_TO_PROMOTE[@]}"; do
     [ -z "$skill" ] && continue
-    pull_skill "$skill" && ((PROMOTED_COUNT++)) || true
+    if pull_skill "$skill"; then
+      ((++PROMOTED_COUNT))
+    fi
   done
   echo ""
 fi
 
 if [ "$PROMOTE_RULES" = true ]; then
   echo "1b. Pulling rules from NAS..."
-  RULES_ON_NAS=$(ssh "$NAS_HOST" "ls $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/.tessl/tiles/local/$TILE_NAME/rules/*.md 2>/dev/null | xargs -I{} basename {} .md" 2>/dev/null || true)
+  STAGING_DIR="$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/staging/$TILE_NAME"
+  RULES_ON_NAS=$(ssh "$NAS_HOST" "if [ -d '$STAGING_DIR' ]; then for f in '$STAGING_DIR'/*.md; do [ -f \"\$f\" ] && basename \"\$f\" .md; done; fi")
   for rule in $RULES_ON_NAS; do
     [ -z "$rule" ] && continue
-    pull_rule "$rule" && ((PROMOTED_COUNT++)) || true
+    if pull_rule "$rule"; then
+      ((++PROMOTED_COUNT))
+    fi
   done
   echo ""
 fi

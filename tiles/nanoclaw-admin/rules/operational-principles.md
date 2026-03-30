@@ -40,3 +40,21 @@ React to every message immediately. Then, before doing any work:
 4. Clear `pending_response` to null in `session-state.json`
 
 This ensures that if the session is interrupted (context compaction, scheduled task), the heartbeat will pick up and deliver the response. File: `/workspace/group/session-state.json`.
+
+## Staging for Promotion
+
+New skills and rules you create go through a staging → promote → publish pipeline. Baruch runs the promote script on the host; your job is to put files in the right place.
+
+**Skills** → `/workspace/group/skills/{name}/SKILL.md`
+- Works immediately at runtime (container-runner loads these as overrides)
+- Also serves as staging — the promote script pulls from here
+- After promotion, Baruch runs `/verify-tiles` to clean up the staging copy
+
+**Rules** → `/workspace/group/staging/{tile-name}/{name}.md`
+- No runtime effect — purely staging for the promote script
+- Organize by target tile:
+  - `staging/nanoclaw-core/` — shared behavior (loaded in every container)
+  - `staging/nanoclaw-admin/` — admin/operational (main channel only)
+  - `staging/nanoclaw-untrusted/` — security rules (untrusted groups only)
+
+Do NOT put rules in `/workspace/group/staging/` without a tile subdirectory — the promote script won't find them.
