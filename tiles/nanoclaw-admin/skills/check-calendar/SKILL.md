@@ -22,22 +22,10 @@ Read `/workspace/group/nanoclaw-state.json`. If it exists and `date` matches tod
       "end": "2024-06-10T09:30:00",
       "all_day": false,
       "reminder_task_id": "task_7f3a9b"
-    },
-    {
-      "event_id": "def456uvw",
-      "title": "Lunch with Sarah",
-      "start": "2024-06-10T12:00:00",
-      "end": "2024-06-10T13:00:00",
-      "all_day": false,
-      "reminder_task_id": null
     }
   ]
 }
 ```
-
-- `date`: ISO date string for today (`YYYY-MM-DD`).
-- `event_id`: Google Calendar event ID (used as the match key during comparison).
-- `reminder_task_id`: The task ID returned when the reminder was scheduled, or `null` if no reminder was created (e.g. all-day or Travel events).
 
 ## Fetch current events
 
@@ -45,6 +33,8 @@ Use `COMPOSIO_SEARCH_TOOLS` to find `GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS`, 
 - time_min/time_max = today in America/Chicago
 - single_events = true
 - order_by = startTime
+
+**On failure:** If the calendar API call times out or returns an error, abort the check and return nothing (wrap output in `<internal>`). Do not modify the state file.
 
 ## Compare
 
@@ -63,6 +53,7 @@ If calendar changed:
    ```
    mcp__nanoclaw__cancel_task(task_id="task_7f3a9b")
    ```
+   Verify the call succeeded before continuing. If cancellation fails for a task, log the failure in output but continue processing remaining cancellations.
 
 2. **Create new reminders:** For each timed event (not all-day, not Travel, not "Home", not week-number events) starting more than 20 min from now — **and where `jbaruch@sadogursky.com` (`self=true`) does NOT have `responseStatus="declined"`** — schedule a new `once` task 15 min before start (local time, no Z suffix):
    ```
@@ -72,9 +63,9 @@ If calendar changed:
      message="Reminder: Team Standup in 15 minutes"
    )
    ```
-   Capture the returned `task_id` and store it as `reminder_task_id` for that event.
+   Verify the returned `task_id` is non-null before storing it. If the MCP tool returns an error or a null `task_id`, log the failure and leave `reminder_task_id` as `null` for that event rather than storing a bad value.
 
-3. **Update state:** Write the new event list (with updated `reminder_task_id` values) and today's date back to `/workspace/group/nanoclaw-state.json`.
+3. **Update state:** Write the new event list (with updated `reminder_task_id` values) and today's date back to `/workspace/group/nanoclaw-state.json`. If the write fails, include a warning in the output so the next run is aware the state may be stale.
 
 ## Output
 
