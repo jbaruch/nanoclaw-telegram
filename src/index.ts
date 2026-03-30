@@ -173,7 +173,10 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     try {
       chownRecursive(groupDir, effectiveUid, effectiveGid ?? effectiveUid);
     } catch (err) {
-      logger.warn({ folder: group.folder, err }, 'Failed to chown group folder');
+      logger.warn(
+        { folder: group.folder, err },
+        'Failed to chown group folder',
+      );
     }
   }
 
@@ -281,7 +284,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         'Idle timeout, closing container stdin',
       );
       queue.closeStdin(chatJid);
-    }, IDLE_TIMEOUT);
+    }, group.isMain || group.containerConfig?.trusted ? IDLE_TIMEOUT : 300_000);
   };
 
   await channel.setTyping?.(chatJid, true);

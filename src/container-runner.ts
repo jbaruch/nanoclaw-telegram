@@ -83,11 +83,11 @@ function buildVolumeMounts(
   const mounts: VolumeMount[] = [];
   const groupDir = resolveGroupFolderPath(group.folder);
 
-  // Group folder mount (all groups get their own folder)
+  // Group folder mount. Untrusted groups get read-only (disk exhaustion protection).
   mounts.push({
     hostPath: toHostPath(groupDir),
     containerPath: '/workspace/group',
-    readonly: false,
+    readonly: !isMain && !group.containerConfig?.trusted,
   });
 
   // Global memory directory (SOUL.md, shared CLAUDE.md).
@@ -293,6 +293,22 @@ function buildContainerArgs(
   replyToMessageId?: string,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+
+  // Resource limits for untrusted containers
+  if (!isMain && !group.containerConfig?.trusted) {
+    args.push(
+      '--memory',
+      '512m', // 512MB RAM hard limit
+      '--memory-swap',
+      '512m', // no swap
+      '--cpus',
+      '1', // 1 CPU core
+      '--pids-limit',
+      '256', // prevent fork bombs
+    );
+    // Group folder is read-only for untrusted (set above).
+    // Agent can read CLAUDE.md/skills but can't write 7GB of numbers.
+  }
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
@@ -523,7 +539,13 @@ export async function runContainerAgent(
 
     let timedOut = false;
     let hadStreamingOutput = false;
-    const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
+    // Untrusted containers get shorter timeout (5 min vs 30 min default)
+    const UNTRUSTED_TIMEOUT = 300_000;
+    const defaultTimeout =
+      input.isMain || group.containerConfig?.trusted
+        ? CONTAINER_TIMEOUT
+        : UNTRUSTED_TIMEOUT;
+    const configTimeout = group.containerConfig?.timeout || defaultTimeout;
     // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
     // graceful _close sentinel has time to trigger before the hard kill fires.
     const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
