@@ -74,6 +74,9 @@
     },
     "task-tz-sync": {
       "path": "skills/task-tz-sync/SKILL.md"
+    },
+    "verify-tiles": {
+      "path": "skills/verify-tiles/SKILL.md"
     }
   }
 }
