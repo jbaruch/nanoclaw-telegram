@@ -81,10 +81,9 @@ server.tool(
       timestamp: new Date().toISOString(),
     };
 
-    // Use explicit reply_to if provided, otherwise auto-detect from pending
-    const replyTo = args.reply_to || getReplyToMessageId();
-    if (replyTo) {
-      data.replyToMessageId = replyTo;
+    // Only reply-thread when explicitly requested
+    if (args.reply_to) {
+      data.replyToMessageId = args.reply_to;
     }
 
     if (args.pin) {
