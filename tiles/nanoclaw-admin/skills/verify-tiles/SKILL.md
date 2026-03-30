@@ -27,22 +27,26 @@ for skill in $(ls /workspace/group/skills/); do
 done
 ```
 
-## Step 3: Remove promoted staging skill copies
+## Step 3: Semantic comparison and cleanup of promoted staging skills
 
-For skills marked PROMOTED — the staging copy is stale and overriding the optimized tile version. Verify the tile version has expected content, then delete the staging copy:
+For skills marked PROMOTED — read both the staging and tile versions in full, then reason about whether the tile faithfully implements the staging version.
 
-```bash
-for skill in <PROMOTED_SKILLS>; do
-  tile="/home/node/.claude/skills/tessl__${skill}"
-  # Verify tile has YAML frontmatter and reasonable length (>10 lines)
-  if head -1 "$tile/skill.md" 2>/dev/null | grep -q '^---' && [ "$(wc -l < "$tile/skill.md")" -gt 10 ]; then
-    rm -rf "/workspace/group/skills/${skill}"
-    echo "Removed stale staging copy: $skill"
-  else
-    echo "SKIPPED: $skill — tile version failed validation"
-  fi
-done
-```
+For each PROMOTED skill:
+
+1. Read `/workspace/group/skills/<skill>/SKILL.md` and `/home/node/.claude/skills/tessl__<skill>/SKILL.md`.
+
+2. Semantically compare using this checklist — a single **No** = **MISMATCH**:
+   - [ ] All major sections present?
+   - [ ] All key rules and steps preserved (rewording/reformatting OK)?
+   - [ ] No logic altered, removed, or omitted?
+
+3. **MATCH** → delete staging copy and report:
+   ```bash
+   rm -rf /workspace/group/skills/<skill>
+   # "Removed stale staging copy: <skill> (content verified)"
+   ```
+
+4. **MISMATCH** → keep staging copy as-is and report which sections or rules differ, so Baruch can investigate and re-promote.
 
 **Do NOT remove** skills marked STAGING ONLY — those are works in progress that haven't been promoted yet.
 
@@ -72,7 +76,8 @@ Report everything that was cleaned. Format:
 Tile verification:
 • Removed N stale staging skill copies (list names)
 • Kept M staging-only skills (list names)
-• Removed K staging rule files (list paths)
+• Kept K staging skills due to MISMATCH (list names + discrepancies)
+• Removed J staging rule files (list paths)
 • Total tile skills: X installed
 ```
 
