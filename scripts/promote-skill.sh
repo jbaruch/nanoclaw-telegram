@@ -188,24 +188,22 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 git push origin main
 
 echo ""
-echo "Publishing to tessl registry..."
-tessl tile publish --bump patch "$TILE_DIR" || {
-  echo "ERROR: tessl publish failed — run 'tessl login' and retry"
-  exit 1
-}
+echo "Deploying to NAS (tiles are delivered from git, not tessl registry)..."
+ssh "$NAS_HOST" "cd $NAS_PROJECT_DIR && git pull && docker compose up -d --build"
 
 echo ""
-echo "Committing version bump..."
-git add "$TILE_JSON"
-git commit -m "chore: bump $TILE_NAME version after publish
+echo "Publishing to tessl registry (optional — for public listing)..."
+if tessl tile publish --bump patch "$TILE_DIR"; then
+  git add "$TILE_JSON"
+  git commit -m "chore: bump $TILE_NAME version after publish
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
-git push origin main
+  git push origin main
+  ssh "$NAS_HOST" "cd $NAS_PROJECT_DIR && git pull"
+else
+  echo "  (tessl publish skipped — tiles already deployed via git)"
+fi
 
 echo ""
-echo "Deploying to NAS..."
-ssh "$NAS_HOST" "cd $NAS_PROJECT_DIR && git pull && docker compose up -d --build" 2>/dev/null
-
-echo ""
-echo "Done! $PROMOTED_COUNT item(s) promoted, published, deployed."
+echo "Done! $PROMOTED_COUNT item(s) promoted and deployed."
 echo "Staging copies preserved on NAS."
