@@ -655,6 +655,10 @@ export async function processTaskIpc(
           'GOOGLE_CLIENT_SECRET',
           'GOOGLE_REFRESH_TOKEN',
           'OPENAI_API_KEY',
+          'TRAKT_CLIENT_ID',
+          'TRAKT_CLIENT_SECRET',
+          'TRAKT_ACCESS_TOKEN',
+          'TRAKT_REFRESH_TOKEN',
         ]);
         const env = {
           ...process.env,
