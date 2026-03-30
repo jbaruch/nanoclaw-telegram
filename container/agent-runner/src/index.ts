@@ -283,7 +283,7 @@ function drainIpcInput(): string[] {
   try {
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
     const files = fs.readdirSync(IPC_INPUT_DIR)
-      .filter(f => f.endsWith('.json'))
+      .filter(f => f.endsWith('.json') && !f.startsWith('_script_result_'))
       .sort();
 
     const messages: string[] = [];
