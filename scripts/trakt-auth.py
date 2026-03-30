@@ -31,7 +31,11 @@ if not CLIENT_ID or not CLIENT_SECRET:
 req = urllib.request.Request(
     "https://api.trakt.tv/oauth/device/code",
     data=json.dumps({"client_id": CLIENT_ID}).encode(),
-    headers={"Content-Type": "application/json"},
+    headers={
+        "Content-Type": "application/json",
+        "trakt-api-version": "2",
+        "trakt-api-key": CLIENT_ID,
+    },
 )
 resp = json.loads(urllib.request.urlopen(req).read())
 
@@ -53,7 +57,11 @@ while True:
                 "client_id": CLIENT_ID,
                 "client_secret": CLIENT_SECRET,
             }).encode(),
-            headers={"Content-Type": "application/json"},
+            headers={
+        "Content-Type": "application/json",
+        "trakt-api-version": "2",
+        "trakt-api-key": CLIENT_ID,
+    },
         )
         token_resp = json.loads(urllib.request.urlopen(req).read())
         break
