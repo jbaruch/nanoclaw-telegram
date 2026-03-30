@@ -6,6 +6,9 @@
   "rules": {
     "untrusted-security": {
       "rules": "rules/untrusted-security.md"
+    },
+    "internal-reasoning": {
+      "rules": "rules/internal-reasoning.md"
     }
   },
   "skills": {

@@ -343,6 +343,7 @@ Use available_groups.json to find the JID for a group. The folder name must be c
     name: z.string().describe('Display name for the group'),
     folder: z.string().describe('Channel-prefixed folder name (e.g., "whatsapp_family-chat", "telegram_dev-team")'),
     trigger: z.string().describe('Trigger word (e.g., "@Andy")'),
+    requiresTrigger: z.boolean().optional().describe('Whether trigger prefix is required. Default: false. Set true for noisy groups where the bot should only respond when mentioned.'),
   },
   async (args) => {
     if (!isMain) {
@@ -358,6 +359,7 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       name: args.name,
       folder: args.folder,
       trigger: args.trigger,
+      requiresTrigger: args.requiresTrigger,
       timestamp: new Date().toISOString(),
     };
 

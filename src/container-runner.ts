@@ -862,10 +862,22 @@ export function writeGroupsSnapshot(
   const visibleGroups = isMain ? groups : [];
 
   const groupsFile = path.join(groupIpcDir, 'available_groups.json');
+
+  // Preserve JID-keyed entries that agents may have written
+  let existing: Record<string, unknown> = {};
+  if (fs.existsSync(groupsFile)) {
+    try {
+      existing = JSON.parse(fs.readFileSync(groupsFile, 'utf-8'));
+    } catch {
+      existing = {};
+    }
+  }
+
   fs.writeFileSync(
     groupsFile,
     JSON.stringify(
       {
+        ...existing,
         groups: visibleGroups,
         lastSync: new Date().toISOString(),
       },
