@@ -621,17 +621,10 @@ export async function processTaskIpc(
           break;
         }
 
-        const groupDir = path.resolve(
-          process.cwd(),
-          'groups',
-          sourceGroup,
-        );
+        const groupDir = path.resolve(process.cwd(), 'groups', sourceGroup);
         const scriptPath = path.join(groupDir, 'scripts', scriptName);
         if (!fs.existsSync(scriptPath)) {
-          logger.warn(
-            { scriptPath, sourceGroup },
-            'Host script not found',
-          );
+          logger.warn({ scriptPath, sourceGroup }, 'Host script not found');
           // Write error result so the MCP tool doesn't hang
           const errResultPath = path.join(
             DATA_DIR,
@@ -647,16 +640,41 @@ export async function processTaskIpc(
           break;
         }
 
-        logger.info(
-          { script: scriptName, sourceGroup },
-          'Running host script',
-        );
+        logger.info({ script: scriptName, sourceGroup }, 'Running host script');
 
-        // Run with all host env vars (credentials available on orchestrator)
-        const env = { ...process.env, WORKSPACE_GROUP: groupDir };
+        // Run with all host env vars (credentials available on orchestrator).
+        // Scripts hardcode /workspace/group/ paths. Create a per-execution
+        // wrapper that patches those paths to the real group directory.
+        const { readEnvFile: readEnv } = await import('./env.js');
+        const allEnvVars = readEnv([
+          'TRIPIT_ICAL_URL',
+          'TRIPIT_IGNORE_TRIPS',
+          'TRIPIT_IGNORE_KEYWORDS',
+          'RECLAIM_API_TOKEN',
+          'GOOGLE_CLIENT_ID',
+          'GOOGLE_CLIENT_SECRET',
+          'GOOGLE_REFRESH_TOKEN',
+          'OPENAI_API_KEY',
+        ]);
+        const env = {
+          ...process.env,
+          ...Object.fromEntries(
+            Object.entries(allEnvVars).filter(([, v]) => v),
+          ),
+        };
+
+        // Read the script, replace /workspace/group with the real path
+        const scriptContent = fs.readFileSync(scriptPath, 'utf-8');
+        const patchedContent = scriptContent.replace(
+          /\/workspace\/group/g,
+          groupDir,
+        );
+        const tmpScript = path.join(groupDir, `.tmp_host_${scriptName}`);
+        fs.writeFileSync(tmpScript, patchedContent);
+
         execFile(
           'python3',
-          [scriptPath],
+          [tmpScript],
           {
             cwd: groupDir,
             env,
@@ -673,7 +691,12 @@ export async function processTaskIpc(
             );
             if (error) {
               logger.error(
-                { script: scriptName, sourceGroup, error: error.message, stderr },
+                {
+                  script: scriptName,
+                  sourceGroup,
+                  error: error.message,
+                  stderr,
+                },
                 'Host script failed',
               );
               fs.writeFileSync(
@@ -683,6 +706,11 @@ export async function processTaskIpc(
                   stderr: stderr.slice(-500),
                 }),
               );
+              try {
+                fs.unlinkSync(tmpScript);
+              } catch {
+                /* best effort */
+              }
             } else {
               logger.info(
                 { script: scriptName, sourceGroup, stdoutLen: stdout.length },
@@ -692,6 +720,12 @@ export async function processTaskIpc(
                 resultPath,
                 JSON.stringify({ stdout, stderr: stderr || undefined }),
               );
+            }
+            // Clean up temp script
+            try {
+              fs.unlinkSync(tmpScript);
+            } catch {
+              /* best effort */
             }
           },
         );
