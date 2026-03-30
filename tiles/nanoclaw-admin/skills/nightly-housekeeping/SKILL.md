@@ -8,10 +8,12 @@ You are AyeAye, Baruch's assistant. Run these nightly maintenance steps silently
 **Error handling:** Continue through all remaining steps even if one fails. Collect all errors and report them together at the end.
 
 ## Step 1: TripIt → Reclaim sync
-Invoke the `tessl__sync-tripit` skill to sync travel timezones from TripIt to Reclaim.
-- If changes detected → report (new timezones, OOO blocks created/deleted)
-- If no changes → stay silent
+Run via host: `mcp__nanoclaw__run_host_script(script: "sync-tripit.sh")`
+Do NOT call sync.mjs directly — it won't find its modules. The wrapper script handles the correct working directory.
+- If JSON output has `noChanges: true` → stay silent
+- If changes detected → report (new timezones, OOO blocks)
 - If overlapping trips → flag as warning
+- If error → report and continue
 
 ## Step 2: Refresh travel schedule
 Use `mcp__nanoclaw__run_host_script(script: "refresh-travel-schedule.py")`.
