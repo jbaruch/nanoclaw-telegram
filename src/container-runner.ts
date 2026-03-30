@@ -176,19 +176,13 @@ function buildVolumeMounts(
     'tiles',
     'jbaruch',
   );
-  const gitTiles = path.join(process.cwd(), 'tiles');
-
   const rulesContent: string[] = [];
   for (const tileName of tilesToInstall) {
-    // Prefer registry, fall back to git (for tiles that can't be published, e.g. rules-only)
-    let tileSrc = path.join(registryTiles, tileName);
-    if (!fs.existsSync(tileSrc)) {
-      tileSrc = path.join(gitTiles, tileName);
-    }
+    const tileSrc = path.join(registryTiles, tileName);
     if (!fs.existsSync(tileSrc)) {
       logger.warn(
-        { tileName },
-        'Tile not found in registry or git',
+        { tileName, path: tileSrc },
+        'Tile not found — run tessl install in orchestrator',
       );
       continue;
     }

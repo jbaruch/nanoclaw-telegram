@@ -8,5 +8,9 @@
       "rules": "rules/untrusted-security.md"
     }
   },
-  "skills": {}
+  "skills": {
+    "whoami": {
+      "path": "skills/whoami/SKILL.md"
+    }
+  }
 }
