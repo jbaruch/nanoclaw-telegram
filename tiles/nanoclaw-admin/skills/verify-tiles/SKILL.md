@@ -19,7 +19,8 @@ For each skill in staging, check if a `tessl__` version exists in `.claude/skill
 
 ```bash
 for skill in $(ls /workspace/group/skills/); do
-  if [ -d "/home/node/.claude/skills/tessl__${skill}" ]; then
+  tile_name="${skill#tessl__}"
+  if [ -d "/home/node/.claude/skills/tessl__${tile_name}" ]; then
     echo "PROMOTED: $skill (tile version exists, staging overrides it)"
   else
     echo "STAGING ONLY: $skill (no tile version — keep)"
@@ -33,20 +34,21 @@ For skills marked PROMOTED — read both the staging and tile versions in full, 
 
 For each PROMOTED skill:
 
-1. Read `/workspace/group/skills/<skill>/SKILL.md` and `/home/node/.claude/skills/tessl__<skill>/SKILL.md`.
+1. Read the full text of the staging skill:
+   `/workspace/group/skills/<skill>/SKILL.md`
 
-2. Semantically compare using this checklist — a single **No** = **MISMATCH**:
-   - [ ] All major sections present?
-   - [ ] All key rules and steps preserved (rewording/reformatting OK)?
-   - [ ] No logic altered, removed, or omitted?
+2. Read the full text of the tile skill — strip the `tessl__` prefix from the staging name first:
+   `/home/node/.claude/skills/tessl__<skill-without-tessl-prefix>/SKILL.md`
 
-3. **MATCH** → delete staging copy and report:
-   ```bash
-   rm -rf /workspace/group/skills/<skill>
-   # "Removed stale staging copy: <skill> (content verified)"
-   ```
+3. Semantically compare them — reason about whether the tile faithfully preserves all major sections, key rules, and logic. Small reformatting or rewording for clarity is fine; missing steps, removed rules, or altered logic is a **MISMATCH**.
 
-4. **MISMATCH** → keep staging copy as-is and report which sections or rules differ, so Baruch can investigate and re-promote.
+4. If the tile faithfully matches the staging intent (**MATCH**):
+   - Delete the staging copy: `rm -rf /workspace/group/skills/<skill>`
+   - Report: "Removed stale staging copy: <skill> (content verified)"
+
+5. If the tile does NOT faithfully match the staging intent (**MISMATCH**):
+   - Keep the staging copy as-is — do not delete it.
+   - Report the discrepancy clearly: which sections or rules are missing or altered in the tile version, so Baruch can investigate and re-promote if needed.
 
 **Do NOT remove** skills marked STAGING ONLY — those are works in progress that haven't been promoted yet.
 
