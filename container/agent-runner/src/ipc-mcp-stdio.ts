@@ -102,7 +102,7 @@ server.tool(
   'React to a message with an emoji. Use to acknowledge, approve, or express sentiment without sending a full text reply. Invalid emoji falls back to 👍.',
   {
     messageId: z.string().optional().describe('Message ID to react to. If omitted, reacts to the most recent message.'),
-    emoji: z.string().describe('Telegram reaction emoji. Use: 👍 👎 ❤ 🔥 🎉 🤔 🤯 👏 😁 😢 🤩 🙏 👌 ✅. Other emoji will fall back to 👍.'),
+    emoji: z.string().describe('Telegram reaction emoji. 73 supported: 👍👎❤🔥🥰👏😁🤔🤯😱🤬😢🎉🤩🤮💩🙏👌🕊🤡🥱🥴😍🐳❤‍🔥🌚🌭💯🤣⚡🍌🏆💔🤨😐🍓🍾💋🖕😈😴😭🤓👻👨‍💻👀🎃🙈😇😨🤝✍🤗🫡🎅🎄☃💅🤪🗿🆒💘🙉🦄😘💊🙊😎👾🤷‍♂🤷🤷‍♀😡. Invalid falls back to 👍.'),
   },
   async (args) => {
     const data: Record<string, string | undefined> = {

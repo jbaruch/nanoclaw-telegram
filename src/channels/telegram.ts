@@ -129,10 +129,6 @@ const TELEGRAM_ALLOWED_REACTIONS = new Set([
   '🤷',
   '🤷‍♀',
   '😡',
-  '🌈',
-  '🔥',
-  '✅',
-  '❌',
 ]);
 
 /**

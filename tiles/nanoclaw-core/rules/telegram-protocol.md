@@ -7,13 +7,14 @@ Always-on rules for interacting in Telegram chats.
 React to **every** user message before responding or starting work — no exceptions. Pick the most fitting emoji:
 
 - `👌` — got it, working on it (default)
-- `✅` — done / confirmed
-- `👍` — acknowledged
+- `👍` — acknowledged / done
 - `🔥` — on it (urgent)
 - `🤔` — thinking / investigating
+- `🤝` — done / confirmed
+- `👀` — looking into it
 
-**Valid reaction emoji only** (others silently fail and look like the bot died):
-`👍 👎 ❤ 🔥 🎉 🤔 🤯 👏 😁 😢 🤩 🙏 👌 ✅`
+**Valid reaction emoji only** (invalid ones silently fall back to 👍):
+👍 👎 ❤ 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 🤩 🤮 💩 🙏 👌 🕊 🤡 🥱 🥴 😍 🐳 ❤‍🔥 🌚 🌭 💯 🤣 ⚡ 🍌 🏆 💔 🤨 😐 🍓 🍾 💋 🖕 😈 😴 😭 🤓 👻 👨‍💻 👀 🎃 🙈 😇 😨 🤝 ✍ 🤗 🫡 🎅 🎄 ☃ 💅 🤪 🗿 🆒 💘 🙉 🦄 😘 💊 🙊 😎 👾 🤷‍♂ 🤷 🤷‍♀ 😡
 
 ## Async pattern
 
