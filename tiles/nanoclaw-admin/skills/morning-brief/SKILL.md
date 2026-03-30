@@ -3,16 +3,25 @@ name: morning-brief
 description: Generates and delivers Baruch's daily morning briefing. Fetches today's Google Calendar events, retrieves overdue and due Google Tasks, surfaces undated tasks and pending cleanup items, checks flagged orders, formats everything in Telegram style, pins the message to chat, and schedules per-event reminders. Use when the user asks for a morning briefing, daily summary, agenda, standup overview, or wants to know what's on their schedule today — e.g. "good morning", "what's on my plate today", "daily brief", "give me my agenda", "what tasks are due", or "run the morning brief".
 ---
 
-You are AyeAye, Baruch's assistant. Do ALL of these steps in order.
+You are AyeAye, Baruch's assistant.
 
 ## Tool Discovery (run once at start)
-Use `COMPOSIO_SEARCH_TOOLS` to locate the following tools before beginning the steps. Cache the resolved tool names for reuse:
-- **Calendar:** search `"googlecalendar events list all calendars"` → expect a tool accepting `time_min`, `time_max`, `single_events`, `order_by`
-- **Tasks (list):** search `"googletasks list"` → expect a tool to enumerate task lists
-- **Tasks (get):** search `"googletasks get"` → expect a tool to fetch tasks per list with due-date filters
-- **Scheduler/Reminder:** search `"reminder create"` or `"task schedule"` → expect a tool accepting a title and ISO timestamp
+Use `COMPOSIO_SEARCH_TOOLS` to locate and cache the following tools:
+- **Calendar:** search `"googlecalendar events list all calendars"`
+- **Tasks (list):** search `"googletasks list"`
+- **Tasks (get):** search `"googletasks get"`
+- **Scheduler/Reminder:** search `"reminder create"` or `"task schedule"`
 
 If a tool cannot be resolved, follow the per-step failure instructions below.
+
+---
+
+## Event Filter Rules (shared reference)
+Apply these exclusions whenever processing calendar events — in both Step 5 (brief display) and Step 8 (reminders):
+- Skip Travel events
+- Skip all-day "Home" events
+- Skip week-number events
+- Skip any event where Baruch's attendee entry (`jbaruch@sadogursky.com`, `self=true`) has `responseStatus="declined"`
 
 ---
 
@@ -44,17 +53,10 @@ If flagged orders exist, include them in the brief under:
 If none → skip this section silently.
 
 ## Step 5: Send morning brief
-Format in Telegram HTML/style (*bold* single asterisks, • bullets, no markdown headings):
+Apply the [Event Filter Rules](#event-filter-rules-shared-reference) when selecting which events to display.
 
-```
-*Доброе утро! [weekday], [date]*
-*📅 Сегодня:* — timed events with local time
-*✅ Задачи:* — overdue (with date) + due today
-*📋 Без даты:* — undated task titles (if any), ask to set dates
-_N событий, M задач_
-```
+Format in Telegram HTML/style (*bold* single asterisks, • bullets, no markdown headings). Canonical example:
 
-**Concrete example of expected output:**
 ```
 *Доброе утро! Понедельник, 9 июня*
 
@@ -74,10 +76,10 @@ _Нужно установить дату для этих задач_
 _2 события, 3 задачи_
 ```
 
-**Formatting rules:**
-- *📅 Сегодня:* — timed events with local time. Skip: Travel events, all-day "Home" events, week-number events. Skip any event where Baruch's attendee entry (`jbaruch@sadogursky.com`, `self=true`) has `responseStatus="declined"`.
-- *✅ Задачи:* — overdue tasks (with their original due date, marked ⚠️) + tasks due today. Omit section entirely if no tasks.
-- *📋 Без даты:* — list titles from `undated_tasks` and prompt to set dates. Omit if array is empty.
+**Section rules:**
+- *📅 Сегодня:* — timed events with local time (apply Event Filter Rules).
+- *✅ Задачи:* — overdue tasks (original due date, marked ⚠️) + tasks due today. Omit if no tasks.
+- *📋 Без даты:* — list titles from `undated_tasks` with prompt to set dates. Omit if array is empty.
 - Footer: `_N событий, M задач_`
 
 Send via `mcp__nanoclaw__send_message` with `pin: true`.
@@ -91,7 +93,7 @@ After the brief is confirmed sent, invoke the brief-cleanup skill to send any pe
 After brief-cleanup runs, set both arrays in `morning-brief-pending.json` to `[]`.
 
 ## Step 8: Schedule reminders for today's events
-For each timed event >20 min away — **excluding** all-day events, Travel events, "Home" events, week-number events, and any event where `jbaruch@sadogursky.com` (`self=true`) has `responseStatus="declined"` — use the resolved scheduler tool to schedule a once-off reminder at start−15 min (local ISO timestamp, **no Z suffix**). Pass event title and the calculated timestamp. If no scheduling tool is available, or a reminder fails for a specific event, skip that event and continue with the rest.
+For each timed event >20 min away — applying the [Event Filter Rules](#event-filter-rules-shared-reference) and additionally excluding all-day events — use the resolved scheduler tool to schedule a once-off reminder at start−15 min (local ISO timestamp, **no Z suffix**). Pass event title and the calculated timestamp. If no scheduling tool is available, or a reminder fails for a specific event, skip that event and continue with the rest.
 
 ## Step 9: Save state
 Write to `/workspace/group/calendar-state.json`:
