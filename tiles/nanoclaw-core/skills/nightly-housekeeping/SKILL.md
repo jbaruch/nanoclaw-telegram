@@ -12,9 +12,9 @@ Invoke the `tessl__sync-tripit` skill (handles TripIt-to-Reclaim timezone syncin
 - If overlapping trips → flag as warning
 
 ## Step 2: Refresh travel schedule
-Run: `python3 /workspace/group/scripts/refresh-travel-schedule.py`
+Run via host: `mcp__nanoclaw__run_host_script(script: "refresh-travel-schedule.py")`
 This rebuilds `travel-schedule.json` from the TripIt ICS feed. Silent on success.
-If the script exits with an error: report the error message and continue to the remaining steps (do not abort the nightly run). Do not retry automatically.
+If the script returns an error: report it and continue to the remaining steps.
 
 ## Step 3: Travel bookings check
 Invoke the `check-travel-bookings` skill (surfaces missing flight/hotel gaps for upcoming trips) to find missing flights/hotels for upcoming trips.
