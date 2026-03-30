@@ -214,12 +214,5 @@ else
 fi
 
 echo ""
-echo "Cleaning promoted staging copies on NAS..."
-for skill in "${SKILLS_TO_PROMOTE[@]}"; do
-  [ -z "$skill" ] && continue
-  ssh "$NAS_HOST" "docker exec nanoclaw rm -rf $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/$skill" 2>/dev/null && \
-    echo "  removed staging: $skill"
-done
-
-echo ""
-echo "Done! $PROMOTED_COUNT item(s) promoted, deployed, staging cleaned."
+echo "Done! $PROMOTED_COUNT item(s) promoted and deployed."
+echo "Tell AyeAye to run /verify-tiles to clean up staging copies."
