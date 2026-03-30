@@ -163,7 +163,7 @@ function buildVolumeMounts(
   const trustedTiles = [
     'nanoclaw-core',
     'nanoclaw-admin',
-    'reclaim-tripit-sync',
+    // reclaim-tripit-sync removed — sync runs host-side via run_host_script
   ];
   const untrustedTiles = ['nanoclaw-core', 'nanoclaw-untrusted'];
   const tilesToInstall =
