@@ -212,6 +212,8 @@ export function getAvailableGroups(): import('./container-runner.js').AvailableG
       name: c.name,
       lastActivity: c.last_message_time,
       isRegistered: registeredJids.has(c.jid),
+      containerConfig: registeredGroups[c.jid]?.containerConfig,
+      requiresTrigger: registeredGroups[c.jid]?.requiresTrigger,
     }));
 }
 
@@ -227,8 +229,20 @@ export function _setRegisteredGroups(
  * Called by the GroupQueue when it's this group's turn.
  */
 async function processGroupMessages(chatJid: string): Promise<boolean> {
-  const group = registeredGroups[chatJid];
+  let group = registeredGroups[chatJid];
   if (!group) return true;
+
+  // Race condition safety net: if containerConfig is absent, re-read from DB.
+  // This can happen when a group was just registered via IPC and the in-memory
+  // map update hasn't propagated yet (or was registered before this process started).
+  if (group && !group.containerConfig) {
+    const freshGroups = getAllRegisteredGroups();
+    const freshGroup = freshGroups[chatJid];
+    if (freshGroup?.containerConfig) {
+      registeredGroups[chatJid] = freshGroup;
+      group = freshGroup;
+    }
+  }
 
   const channel = findChannel(channels, chatJid);
   if (!channel) {
