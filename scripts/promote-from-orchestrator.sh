@@ -12,8 +12,9 @@ GROUP_FOLDER="${1:?group folder required}"
 TILE_NAME="${2:?tile name required}"
 MODE="${3:-all}"
 
+REPO_DIR="/app/repo"
 GROUPS_DIR="/app/groups"
-TILES_DIR="/app/tiles"
+TILES_DIR="$REPO_DIR/tiles"
 TILE_DIR="$TILES_DIR/$TILE_NAME"
 SKILLS_SRC="$GROUPS_DIR/$GROUP_FOLDER/skills"
 RULES_SRC="$GROUPS_DIR/$GROUP_FOLDER/staging/$TILE_NAME"
@@ -103,7 +104,7 @@ echo "Linting..."
 tessl tile lint "$TILE_DIR" || { echo "ERROR: lint failed"; exit 1; }
 
 # --- Git commit + push ---
-cd /app
+cd "$REPO_DIR"
 TOKEN=$(grep GITHUB_TOKEN /app/.env | cut -d= -f2)
 git config user.email "nanoclaw@ayeaye.bot"
 git config user.name "AyeAye"
