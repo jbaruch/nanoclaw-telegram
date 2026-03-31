@@ -21,6 +21,9 @@
     },
     "trusted-memory-paths": {
       "rules": "rules/trusted-memory-paths.md"
+    },
+    "trusted-shared-memory": {
+      "rules": "rules/trusted-shared-memory.md"
     }
   },
   "skills": {
