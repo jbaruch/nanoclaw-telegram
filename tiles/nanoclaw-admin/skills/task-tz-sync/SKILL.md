@@ -7,10 +7,50 @@ description: Detects Baruch's current timezone from travel schedule and reschedu
 
 ## Step 1: Determine current timezone
 
-Read `/workspace/group/travel-schedule.json`.
+### Primary: Flighty Google Calendar
 
-Find the active trip segment:
-- Look for entries with `"type": "Trip"` where today's date (YYYY-MM-DD) falls within `start` (inclusive) and `end` (inclusive).
+Query Google Calendar using `GOOGLECALENDAR_EVENTS_LIST` with:
+- `calendar_id`: `c_d158e24aa6c8dcd13b4657344fa2246cacd9d9a248aa7979fa6c1858070dc18d@group.calendar.google.com`
+- `time_min`: start of today in UTC (e.g. `2025-06-10T00:00:00Z`)
+- `time_max`: end of today in UTC (e.g. `2025-06-10T23:59:59Z`)
+- `single_events`: true
+
+Flighty events are flight segments with titles like `"DL73 AMS → ATL"` and have precise `dateTime` start/end with timezone info.
+
+**Extract airport codes** from each event title (format: `FLIGHT# AAA → BBB`). Parse departure airport (AAA) and arrival airport (BBB).
+
+**Airport → IANA timezone mapping:**
+
+| Airport code(s) | IANA timezone |
+|---|---|
+| AMS | `Europe/Amsterdam` |
+| ATL, DTW, BOS, JFK, LGA, EWR | `America/New_York` |
+| BNA, AUS, MSP | `America/Chicago` |
+| LHR, LGW, STN, EDI | `Europe/London` |
+| FRA, MUC | `Europe/Berlin` |
+| CDG | `Europe/Paris` |
+| KRK | `Europe/Warsaw` |
+| CPH | `Europe/Copenhagen` |
+| ARN | `Europe/Stockholm` |
+| OPO, LIS | `Europe/Lisbon` |
+| YYZ | `America/Toronto` |
+| TLV | `Asia/Jerusalem` |
+| ATH, CHQ | `Europe/Athens` |
+
+**Algorithm for determining timezone from Flighty events** (get current UTC time, sort events by start time):
+
+1. **In-flight:** start ≤ now ≤ end → use **arrival airport's** timezone.
+2. **Pre-departure:** now < first flight's start → use **departure airport's** timezone of the first flight.
+3. **Post-arrival:** now > last flight's end → use **arrival airport's** timezone of the last flight.
+4. **Layover:** now is between a completed flight's end and the next flight's start → use **arrival airport's** timezone of the completed flight.
+
+If the event's `end.timeZone` field is provided, prefer it over the mapping table for arrival timezone.
+
+### Fallback: travel-schedule.json
+
+If no Flighty events are found for today, fall back to `/workspace/group/travel-schedule.json`:
+
+- Look for entries with `"type": "Trip"` where today (YYYY-MM-DD) falls within `start`–`end` (inclusive).
 - If multiple Trip entries overlap today, prefer the one whose `start` is closest to today.
 - Map the trip's `location` field to an IANA timezone:
 
@@ -34,58 +74,40 @@ Find the active trip segment:
 
 - If no active Trip entry found → use `America/Chicago` (Baruch's home timezone).
 
-Store this as `new_tz`.
+Store the determined timezone as `new_tz`.
 
 ## Step 2: Compare with stored timezone
 
 Read `/workspace/group/task-tz-state.json`.
 
-If `current_tz` equals `new_tz` → no change. Exit completely silently (wrap output in `<internal>`).
-
-If `current_tz` differs from `new_tz` → proceed to Step 3.
+- `current_tz` equals `new_tz` → no change. Exit completely silently (wrap output in `<internal>`).
+- `current_tz` differs from `new_tz` → proceed to Step 3.
 
 ## Step 3: Reschedule follow-me tasks
 
-For each entry in `follow_me_tasks` array from `task-tz-state.json`:
-
-You have `local_hour` and `local_minute` — the desired local time in any timezone.
-
-Calculate the UTC equivalent in the new timezone using standard UTC offset rules, accounting for DST. US and EU DST transitions occur on different dates — use the specific timezone's actual rules:
-
-| Timezone | Standard offset | DST offset | DST start | DST end |
-|---|---|---|---|---|
-| `America/Chicago` | UTC−6 (CST) | UTC−5 (CDT) | 2nd Sun Mar | 1st Sun Nov |
-| `America/New_York` | UTC−5 (EST) | UTC−4 (EDT) | 2nd Sun Mar | 1st Sun Nov |
-| `Europe/London` | UTC+0 (GMT) | UTC+1 (BST) | Last Sun Mar | Last Sun Oct |
-| `Europe/Amsterdam` | UTC+1 (CET) | UTC+2 (CEST) | Last Sun Mar | Last Sun Oct |
-| `Europe/Berlin` / `Europe/Warsaw` | UTC+1 (CET) | UTC+2 (CEST) | Last Sun Mar | Last Sun Oct |
-| `Europe/Lisbon` | UTC+0 (WET) | UTC+1 (WEST) | Last Sun Mar | Last Sun Oct |
-| `Europe/Copenhagen` / `Europe/Stockholm` | UTC+1 (CET) | UTC+2 (CEST) | Last Sun Mar | Last Sun Oct |
-| `Europe/Athens` | UTC+2 (EET) | UTC+3 (EEST) | Last Sun Mar | Last Sun Oct |
-| `Asia/Jerusalem` | UTC+2 (IST) | UTC+3 (IDT) | — | — |
+For each entry in `follow_me_tasks` from `task-tz-state.json`, use `local_hour` and `local_minute` to calculate the UTC equivalent in `new_tz`. Use your knowledge of IANA timezone UTC offsets, accounting for DST based on the current date.
 
 Example calculations:
-- morning-brief at 7am, moving to `Europe/Amsterdam` (UTC+2 in summer): 7am − 2h = 5am UTC → cron `0 5 * * *`
-- nightly-housekeeping at 3am, `Europe/Amsterdam` (UTC+2): 3am − 2h = 1am UTC → cron `0 1 * * *`
-- If UTC hour goes negative (e.g. 3am CDT = UTC−5): 3 + 5 = 8am UTC → cron `0 8 * * *`
+- 7am `Europe/Amsterdam` (UTC+2 in summer): 7 − 2 = **5am UTC** → `0 5 * * *`
+- 3am `Europe/Amsterdam` (UTC+2): 3 − 2 = **1am UTC** → `0 1 * * *`
+- 3am `America/Chicago` CDT (UTC−5): 3 + 5 = **8am UTC** → `0 8 * * *`
 
 Call `mcp__nanoclaw__update_task` with:
 - `task_id`: the task's ID
-- `schedule_type`: "cron"
+- `schedule_type`: `"cron"`
 - `schedule_value`: the new cron string (e.g. `"0 5 * * *"`)
 
 ## Step 4: Update state file
 
 Write `/workspace/group/task-tz-state.json` with:
 - `current_tz`: set to `new_tz`
-- `last_checked`: current UTC timestamp in ISO 8601 format
-- `follow_me_tasks`: keep the same array (do not modify task IDs or local times)
+- `last_checked`: current UTC timestamp (ISO 8601)
+- `follow_me_tasks`: keep the same array unchanged (do not modify task IDs, local times, or `last_run_date` fields)
 
 ## Step 5: Report change
 
-Send a proactive message to Baruch via `mcp__nanoclaw__send_message` (no `reply_to` — this is a proactive notification):
+Send a proactive message via `mcp__nanoclaw__send_message` (no `reply_to`):
 
-Format (Telegram HTML):
 ```
 📍 Timezone changed: <b>OLD_TZ → NEW_TZ</b>
 
@@ -94,11 +116,11 @@ Rescheduled follow-me tasks:
 • <code>nightly-housekeeping</code>: 3am local = HH:MM UTC → cron <code>0 HH * * *</code>
 ```
 
-Replace OLD_TZ, NEW_TZ, and HH:MM with actual values. Use plain timezone names (e.g. "America/Chicago", "Europe/Amsterdam").
+Replace OLD_TZ, NEW_TZ, and HH:MM with actual values. Use plain timezone names (e.g. `America/Chicago`, `Europe/Amsterdam`).
 
 ## Step 6: New task classification (advisory)
 
-When creating a new recurring scheduled task that represents a personal rhythm (morning routines, nightly maintenance, daily check-ins), add it to the `follow_me_tasks` array in `/workspace/group/task-tz-state.json` with:
+When creating a new recurring scheduled task representing a personal rhythm (morning routines, nightly maintenance, daily check-ins), add it to `follow_me_tasks` in `/workspace/group/task-tz-state.json`:
 ```json
 {
   "task_id": "task-XXXX",
@@ -108,4 +130,4 @@ When creating a new recurring scheduled task that represents a personal rhythm (
 }
 ```
 
-Tasks tied to external deadlines or other people's timezones should NOT be added to `follow_me_tasks`.
+Tasks tied to external deadlines or other people's timezones should **not** be added to `follow_me_tasks`.

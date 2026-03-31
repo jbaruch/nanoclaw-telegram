@@ -40,7 +40,7 @@ sqlite3 /workspace/store/messages.db "
 
 ## Registered Groups Config
 
-Registered groups are also stored in `/workspace/ipc/available_groups.json`, as a JID-keyed dictionary at the top level (separate from the `groups` sync array above):
+Registered groups are stored in `/workspace/ipc/available_groups.json` as a JID-keyed dictionary at the top level (separate from the `groups` sync array):
 
 ```json
 {
@@ -54,7 +54,6 @@ Registered groups are also stored in `/workspace/ipc/available_groups.json`, as 
 ```
 
 Non-obvious fields:
-- **folder**: Channel-prefixed folder name under `groups/` (see naming convention below)
 - **requiresTrigger**: Whether `@trigger` prefix is needed (default: `true`). Set to `false` for solo/personal chats where all messages should be processed
 - **isMain**: Whether this is the main control group (elevated privileges, no trigger required)
 
@@ -67,13 +66,23 @@ Non-obvious fields:
      jid="120363336345536173@g.us",
      name="Family Chat",
      folder="whatsapp_family-chat",
-     trigger="@Andy"
+     trigger="@Andy",
+     requiresTrigger=false,       # omit if trigger is needed
+     containerConfig={"trusted": true}  # pass for trusted groups
    )
    ```
-   Optionally include `containerConfig` for additional directory mounts (see [Advanced: Directory Mounts](#advanced-directory-mounts) below).
+   **Trust level** via `containerConfig`:
+   - **"trusted"** → `containerConfig={"trusted": true}` — full access (files, Composio, host scripts)
+   - **"untrusted"** → omit `containerConfig` entirely — read-only files, no Composio, no host scripts
+   - If unsure → ask. Never assume trust level.
+
+   Optionally add directory mounts to `containerConfig` (see [Advanced: Directory Mounts](#advanced-directory-mounts) below).
 3. The group folder is created automatically under `/workspace/group/`
 4. Optionally create an initial `CLAUDE.md` for the group
 5. **Verify registration**: Read `/workspace/ipc/available_groups.json` and confirm the new entry appears with the correct JID, name, and folder
+
+> ⚠️ **Known bug**: `register_group` only writes to the SQLite DB; the spawn system reads trust level from `available_groups.json`. These are out of sync.
+> **Workaround**: After calling `register_group`, manually add the JID-keyed entry to `/workspace/ipc/available_groups.json` with the appropriate `"containerConfig"` (e.g. `{"trusted": true}`). This file is the authoritative source for the spawner.
 
 Folder naming convention — channel prefix + underscore + lowercase hyphenated name:
 - WhatsApp "Family Chat" → `whatsapp_family-chat`
@@ -115,7 +124,6 @@ Modes:
 Notes:
 - Your own messages (`is_from_me`) bypass the allowlist in trigger checks
 - If the config file doesn't exist or is invalid, all senders are allowed (fail-open)
-- The config file is on the host at `~/.config/nanoclaw/sender-allowlist.json`, not inside the container
 
 ## Advanced: Directory Mounts
 
@@ -129,6 +137,7 @@ Groups can have extra directories mounted. Add `containerConfig` to the `registe
     "trigger": "@Andy",
     "added_at": "2026-01-31T12:00:00Z",
     "containerConfig": {
+      "trusted": true,
       "additionalMounts": [
         { "hostPath": "~/projects/webapp", "containerPath": "webapp", "readonly": false }
       ]

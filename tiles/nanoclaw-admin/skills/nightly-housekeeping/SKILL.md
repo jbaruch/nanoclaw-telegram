@@ -73,7 +73,7 @@ Keep entries concise (one line each). This file is read on container startup to 
 
 After archiving yesterday (Sunday), roll up the previous week:
 1. Read `/workspace/group/memory/weekly/YYYY-WNN.md` (previous week). Extract top 5–10 highlights (key decisions, significant events, features built).
-2. Append to `/workspace/group/memory/highlights.md` under `## Week YYYY-WNN (Mon DD – Sun DD)` with one-line bullets.
+2. Append to `/workspace/trusted/highlights.md` under `## Week YYYY-WNN (Mon DD – Sun DD)` with one-line bullets.
 3. Read `highlights.md` back to confirm the new section was appended and existing content preserved.
 4. Delete the previous week's weekly file.
 
@@ -83,5 +83,16 @@ Invoke the `check-watchlist` skill to check if any tracked upcoming shows have b
 - If a show released → the skill notifies Baruch automatically and updates watchlist.json
 - If nothing released → stay silent
 
-## Step 10: Silence
+## Step 10: Mark as run
+Read `/workspace/group/task-tz-state.json`. Find the entry in `follow_me_tasks` where `name == "nightly-housekeeping"`. Set its `last_run_date` to today's local date (YYYY-MM-DD in `current_tz`). Write the file back, preserving all other fields.
+
+## Step 10b: Backup to git
+Run the backup sync script via bash:
+```
+bash /workspace/group/scripts/backup-to-git.sh
+```
+Then call `mcp__nanoclaw__github_backup` with message `"nightly backup: YYYY-MM-DD"` (today's date).
+Silent on success. Report only if the script or backup call returns an error.
+
+## Step 11: Silence
 If nothing to report, output nothing (wrap in `<internal>`).

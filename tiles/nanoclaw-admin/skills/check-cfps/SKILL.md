@@ -10,7 +10,6 @@ Fetches and filters open CFPs, applies AI-based relevance reasoning, and maintai
 ## Step 1 — Run fetch-and-filter script
 
 Execute the deterministic pipeline (fetches sources, applies hard filters, checks state).
-Script does NOT filter by topic relevance — that's your job in Step 1b.
 
 ```bash
 python3 /workspace/group/scripts/check-cfps-fetch.py
@@ -37,10 +36,10 @@ Use your judgment — "AI for developers" is in; "data2day", "DataEngConf", "MLO
 
 ## Step 2 — Web search for gaps
 
-Run these searches to catch AI/developer conferences not in the primary sources:
+Run these searches to catch AI/developer conferences not in the primary sources (substitute the current and next calendar year as appropriate):
 
-1. `AI developer conference CFP open 2026 "call for speakers" deadline`
-2. `developer conference CFP 2026 autumn fall open submissions`
+1. `AI developer conference CFP open [year] "call for speakers" deadline`
+2. `developer conference CFP [year] autumn fall open submissions`
 
 Add new CFPs found that aren't already in the list (deduplicate by conference name).
 Apply hard filters (no online/virtual, no excluded locations) then the same relevance reasoning as Step 1b.
@@ -74,6 +73,57 @@ The script handles state filtering automatically. When Baruch gives feedback abo
 
 **Slug format:** `{conference-name-slug}-{year}` — lowercase, spaces/punctuation → hyphens, strip leading/trailing hyphens.
 
+### Writing discovered CFPs to state
+
+After Steps 1b and 2, **write every relevant CFP** (kept after relevance filter) to `cfp-state.json`. This is what feeds the morning brief CFP section — without it, CFPs never appear in the brief.
+
+Rules:
+- If the slug already has a user action (`dismissed`/`sent`/`remind`) → preserve it, do NOT overwrite
+- If the slug doesn't exist yet → write a new `"open"` entry with full data
+
+### State format
+
+All statuses in a single file — rich entry preferred:
+
+```json
+{
+  "all-things-open-2026": {
+    "status": "open",
+    "name": "All Things Open 2026",
+    "city": "Raleigh, NC, USA",
+    "conf_date": "Oct 18–20",
+    "deadline": "2026-03-31",
+    "cfp_url": "https://allthingsopen.org/call-for-papers",
+    "updated": "2026-03-31"
+  },
+  "devoxx-be-2026": {
+    "status": "remind",
+    "remind_before_days": 7,
+    "name": "Devoxx Belgium 2026",
+    "city": "Antwerp",
+    "conf_date": "Nov 3–7",
+    "deadline": "2026-06-30",
+    "cfp_url": "https://...",
+    "updated": "2026-03-28"
+  },
+  "voxxed-lu-2026": {
+    "status": "sent",
+    "name": "VoxxedDays Luxembourg 2026",
+    "city": "Luxembourg",
+    "conf_date": "Jun 20",
+    "deadline": "2026-04-15",
+    "cfp_url": "https://...",
+    "updated": "2026-03-28"
+  },
+  "javazone-2026": {
+    "status": "dismissed",
+    "updated": "2026-03-29"
+  }
+}
+```
+
+### User feedback actions
+
 | User input | Action |
 |-----------|--------|
 | "отправил на [конф]" / "submitted to [conf]" | `status: sent`, update `updated` to today |
@@ -81,15 +131,6 @@ The script handles state filtering automatically. When Baruch gives feedback abo
 | "напомни за [N] дней до дедлайна [конф]" | `status: remind`, `remind_before_days: N` |
 | "напомни о [конф] через неделю" | `status: remind`, `remind_before_days: 7` |
 | "покажи снова [конф]" | remove entry from cfp-state.json |
-
-State format:
-```json
-{
-  "voxxed-lu-2026": { "status": "sent", "updated": "2026-03-28" },
-  "javazone-2026": { "status": "dismissed", "updated": "2026-03-29" },
-  "devoxx-be-2026": { "status": "remind", "remind_before_days": 7, "updated": "2026-03-28" }
-}
-```
 
 ### Slug examples
 
