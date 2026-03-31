@@ -359,9 +359,9 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       };
     }
 
-    const containerConfig = (args.trusted || args.additionalMounts)
+    const containerConfig = (args.trusted !== undefined || args.additionalMounts)
       ? {
-          ...(args.trusted ? { trusted: args.trusted } : {}),
+          ...(args.trusted !== undefined ? { trusted: args.trusted } : {}),
           ...(args.additionalMounts ? { additionalMounts: args.additionalMounts } : {}),
         }
       : undefined;
