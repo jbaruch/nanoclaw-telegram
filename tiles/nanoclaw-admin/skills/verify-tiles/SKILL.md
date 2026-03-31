@@ -1,102 +1,60 @@
 ---
 name: verify-tiles
-description: Promotes staged skills/rules then verifies tile installation. Compares local skill files against registry originals, removes stale staging copies. Use when skills seem outdated, a skill is not updating, you're seeing the wrong version of a skill, there are skill override issues, or after Baruch promotes skills or rules.
+description: Verifies tile installation after promotion — compares installed tiles against staging, removes stale staging copies if content matches, reports mismatches. Runs in a fresh container after promote-tiles nukes the old one. Use after promotion or when skill versions seem wrong.
 ---
 
-# Promote & Verify Tile Installation
+# Verify Tile Installation
 
-## Step 1: Promote staged skills and rules
+## Step 1: Compare staging skills against installed tiles
 
-Call `mcp__nanoclaw__promote_staging` for each tile that has staged content.
-
-Check what's staged:
-
-```bash
-ls /workspace/group/skills/ 2>/dev/null
-find /workspace/group/staging -type f -name "*.md" 2>/dev/null
-```
-
-For each tile that has staged content, call:
-- `mcp__nanoclaw__promote_staging(tileName: "nanoclaw-admin")` — if admin skills or rules are staged
-- `mcp__nanoclaw__promote_staging(tileName: "nanoclaw-core")` — if core skills or rules are staged
-
-If nothing is staged, skip to Step 2.
-
-## Step 2: List staging skills
+For each skill in `/workspace/group/skills/`, find the corresponding installed version:
 
 ```bash
 ls /workspace/group/skills/ 2>/dev/null
 ```
 
-## Step 3: Compare each staging skill against its tile version
+For each `tessl__<name>` directory found:
+1. Read staging: `/workspace/group/skills/tessl__<name>/SKILL.md`
+2. Read installed tile: `/home/node/.claude/.tessl/tiles/jbaruch/nanoclaw-admin/skills/<name>/SKILL.md` (or `nanoclaw-core/...`)
+3. Compare — small wording differences are OK; missing steps, removed rules, or logic changes = **MISMATCH**
 
-For each skill in staging, check if a `tessl__` version exists in `.claude/skills/`:
+## Step 2: Act on comparison result
 
+**If MATCH** (staging content is faithfully in the tile):
 ```bash
-for skill in $(ls /workspace/group/skills/); do
-  tile_name="${skill#tessl__}"
-  if [ -d "/home/node/.claude/skills/tessl__${tile_name}" ]; then
-    echo "PROMOTED: $skill (tile version exists, staging overrides it)"
-  else
-    echo "STAGING ONLY: $skill (no tile version — keep)"
-  fi
-done
+rm -rf /workspace/group/skills/tessl__<name>
 ```
+Note: "Removed stale staging: <name>"
 
-## Step 4: Semantic comparison and cleanup of promoted staging skills
+**If MISMATCH** (tile differs from staging):
+- Keep the staging copy
+- Note the discrepancy (which steps or rules differ)
 
-For skills marked PROMOTED — read both the staging and tile versions in full, then reason about whether the tile faithfully implements the staging version.
+**If no installed tile found** (skill not promoted yet):
+- Keep the staging copy — it's a work in progress
 
-For each PROMOTED skill:
-
-1. Read the full text of the staging skill:
-   `/workspace/group/skills/<skill>/SKILL.md`
-
-2. Read the full text of the tile skill — strip the `tessl__` prefix from the staging name first:
-   `/home/node/.claude/skills/tessl__<skill-without-tessl-prefix>/SKILL.md`
-
-3. Semantically compare them — reason about whether the tile faithfully preserves all major sections, key rules, and logic. Small reformatting or rewording for clarity is fine; missing steps, removed rules, or altered logic is a **MISMATCH**.
-
-4. If the tile faithfully matches the staging intent (**MATCH**):
-   - Delete the staging copy: `rm -rf /workspace/group/skills/<skill>`
-   - Report: "Removed stale staging copy: <skill> (content verified)"
-
-5. If the tile does NOT faithfully match the staging intent (**MISMATCH**):
-   - Keep the staging copy as-is — do not delete it.
-   - Report the discrepancy clearly: which sections or rules are missing or altered in the tile version, so Baruch can investigate and re-promote if needed.
-
-**Do NOT remove** skills marked STAGING ONLY — those are works in progress that haven't been promoted yet.
-
-## Step 5: Check staging rules directories
-
-Rules live in `/workspace/group/staging/` under tile subdirectories. When verify-tiles runs, promotion is assumed to have already happened — staging rule files are stale and should be removed.
+## Step 3: Check staging rules
 
 ```bash
 find /workspace/group/staging -type f -name "*.md" 2>/dev/null
 ```
 
-Remove each found file, then clean up any empty directories:
-
+For each rule file found — it was already promoted (promote_staging handles rules). Remove it:
 ```bash
-while IFS= read -r file; do
-  rm "$file" && echo "Removed: $file"
-done < <(find /workspace/group/staging -type f -name "*.md" 2>/dev/null)
-
+find /workspace/group/staging -type f -name "*.md" -delete 2>/dev/null
 find /workspace/group/staging -type d -empty -delete 2>/dev/null
 ```
 
-## Step 6: Report
+## Step 4: Report
 
-Report everything that was cleaned. Format:
+Send report via `mcp__nanoclaw__send_message`:
 
 ```
-Tile verification:
-• Promoted: X skills/rules (list)
-• Removed N stale staging skill copies (list names)
-• Kept M staging-only skills (list names)
-• Kept K staging skills due to MISMATCH (list names + discrepancies)
-• Removed J staging rule files (list paths)
-• Total tile skills: X installed
+✅ Tile verification complete:
+• Removed N stale staging copies: [names]
+• Kept M staging-only skills (not yet promoted): [names]
+• MISMATCH on K skills (kept): [names + what differs]
+• Removed J rule files from staging
 ```
 
-If staging was already empty on all counts — report that cleanly.
+If staging was already empty — just say so briefly.

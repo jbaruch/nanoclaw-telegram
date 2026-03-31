@@ -1,17 +1,18 @@
 ---
 name: check-unanswered
-description: Scans a Telegram-backed SQLite message store for user messages that have received neither a bot text reply nor a bot reaction, returning a list of unanswered threads with sender, content, and timestamp. Use when the user asks to find unanswered messages, check for pending replies, audit response coverage, review missed messages, or identify unresponded threads in the message history.
+description: Scans a Telegram-backed SQLite message store for user messages that have received no bot text reply, returning a list of unanswered threads with sender, content, and timestamp. Use when the user asks to find unanswered messages, check for pending replies, audit response coverage, review missed messages, or identify unresponded threads in the message history.
 ---
 
 # Check Unanswered Messages
 
-Find user messages since last check that have no text reply AND no bot reaction.
+Find user messages since last check that have no text reply from the bot.
 
 ## Logic
 
 A message is considered answered if:
 1. There is a text reply from the bot (`is_from_me=1`) in the same chat with a later timestamp
-2. OR there is a reaction from the bot in the `reactions` table (`reactor_jid = 'bot@telegram'` on that message)
+
+**Bot reactions do NOT count as answers.** A reaction is an ACK — it confirms the message was seen, not that it was responded to. Only an actual text reply constitutes an answer.
 
 ## Current chat detection
 
@@ -23,11 +24,11 @@ Use that `chat_jid` to scope all queries.
 
 ## Schema validation
 
-Before executing, confirm the `reactions` table exists:
+Before executing, confirm the `reactions` table exists (used only to verify schema integrity, not for answer detection):
 ```sql
 SELECT name FROM sqlite_master WHERE type='table' AND name='reactions'
 ```
-If the `reactions` table is missing, skip the reaction sub-query and log a warning — do **not** advance the cursor, as the answer-detection logic would be incomplete.
+If the `reactions` table is missing, log a warning but continue — answer detection only requires the `messages` table.
 
 ## Code
 
@@ -53,15 +54,13 @@ except sqlite3.OperationalError as e:
     raise RuntimeError(f"Could not open message DB: {e}")
 
 try:
-    # Confirm reactions table exists before proceeding
+    # Schema integrity check
     has_reactions = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='reactions'"
     ).fetchone()
     if not has_reactions:
-        raise RuntimeError(
-            "reactions table not found in DB schema — cannot safely determine answer status. "
-            "Cursor not advanced."
-        )
+        import sys
+        print("WARNING: reactions table not found — proceeding with text-reply-only detection", file=sys.stderr)
 
     # Detect current chat from most recent bot message
     row = conn.execute(
@@ -89,11 +88,6 @@ try:
                   WHERE r.chat_jid = m.chat_jid
                     AND r.is_from_me = 1
                     AND r.timestamp > m.timestamp
-                )
-                AND NOT EXISTS (
-                  SELECT 1 FROM reactions rx
-                  WHERE rx.message_id = m.id
-                    AND rx.reactor_jid = 'bot@telegram'
                 )
               ORDER BY m.timestamp ASC
             ''', (current_chat, last_ts)).fetchall()
