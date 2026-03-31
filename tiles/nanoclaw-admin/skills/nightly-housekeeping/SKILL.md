@@ -77,6 +77,24 @@ After archiving yesterday (Sunday), roll up the previous week:
 3. Read `highlights.md` back to confirm the new section was appended and existing content preserved.
 4. Delete the previous week's weekly file.
 
+## Step 8c: Archive trusted daily memory
+
+1. Determine yesterday's date. If `/workspace/trusted/memory/daily/YYYY-MM-DD.md` doesn't exist → skip silently.
+2. Read the file (entries from all trusted groups, each prefixed with `[source]`).
+3. Determine the ISO week file: `/workspace/trusted/memory/weekly/YYYY-WNN.md`. Create with a `# Trusted Weekly Memory — YYYY-WNN` header if it doesn't exist.
+4. Append a dated section (`## YYYY-MM-DD`) with all entries from yesterday's trusted daily file.
+5. Read the weekly file back to confirm the section was appended before proceeding.
+6. Delete yesterday's trusted daily file.
+
+### Week boundary (every Monday)
+
+After archiving yesterday (Sunday), roll up the previous trusted week:
+1. Read `/workspace/trusted/memory/weekly/YYYY-WNN.md` (previous week).
+2. Extract top highlights across all sources.
+3. Append to `/workspace/trusted/highlights.md` under `## Week YYYY-WNN (Mon DD – Sun DD)` with one-line bullets, preserving source attribution `[chat-name]`.
+4. Read `highlights.md` back to confirm the new section was appended and existing content preserved.
+5. Delete the previous week's trusted weekly file.
+
 ## Step 9: Check watchlist
 
 Invoke the `check-watchlist` skill to check if any tracked upcoming shows have been released.
