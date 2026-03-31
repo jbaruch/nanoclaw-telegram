@@ -904,7 +904,11 @@ export async function processTaskIpc(
           (error, stdout, stderr) => {
             if (error) {
               logger.error(
-                { sourceGroup, error: error.message, stderr: stderr.slice(-500) },
+                {
+                  sourceGroup,
+                  error: error.message,
+                  stderr: stderr.slice(-500),
+                },
                 'promote_staging failed',
               );
               fs.writeFileSync(
