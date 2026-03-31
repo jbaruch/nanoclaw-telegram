@@ -15,6 +15,9 @@
     },
     "core-behavior-full": {
       "rules": "rules/core-behavior-full.md"
+    },
+    "skill-tile-placement": {
+      "rules": "rules/skill-tile-placement.md"
     }
   },
   "skills": {
