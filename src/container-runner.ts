@@ -842,6 +842,8 @@ export interface AvailableGroup {
   name: string;
   lastActivity: string;
   isRegistered: boolean;
+  containerConfig?: import('./types.js').RegisteredGroup['containerConfig'];
+  requiresTrigger?: boolean;
 }
 
 /**
