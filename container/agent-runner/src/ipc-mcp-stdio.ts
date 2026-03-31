@@ -346,10 +346,10 @@ Use available_groups.json to find the JID for a group. The folder name must be c
     requiresTrigger: z.boolean().optional().describe('Whether trigger prefix is required. Default: false. Set true for noisy groups where the bot should only respond when mentioned.'),
     trusted: z.boolean().optional().describe('Whether the group gets a trusted container (read-write filesystem, admin tiles, longer timeout). Default: false. Set true for personal/friends groups.'),
     additionalMounts: z.array(z.object({
-      hostPath: z.string().describe('Absolute path on the host'),
-      containerPath: z.string().describe('Mount name inside /workspace/extra/'),
-      readonly: z.boolean().optional().describe('Mount as read-only. Default: false.'),
-    })).optional().describe('Extra volume mounts for the container.'),
+      hostPath: z.string().describe('Path on the host (supports "~" expansion; does not need to be absolute).'),
+      containerPath: z.string().optional().describe('Optional mount name inside /workspace/extra/. When omitted, the host derives it from basename(hostPath).'),
+      readonly: z.boolean().optional().describe('Mount as read-only (default). Set to false to request read-write access.'),
+    })).optional().describe('Extra volume mounts for the container, passed through to the host.'),
   },
   async (args) => {
     if (!isMain) {
