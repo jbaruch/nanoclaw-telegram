@@ -12,6 +12,15 @@
     },
     "language-matching": {
       "rules": "rules/language-matching.md"
+    },
+    "default-silence": {
+      "rules": "rules/default-silence.md"
+    },
+    "staging-process": {
+      "rules": "rules/staging-process.md"
+    },
+    "trusted-memory-paths": {
+      "rules": "rules/trusted-memory-paths.md"
     }
   },
   "skills": {
