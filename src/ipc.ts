@@ -799,13 +799,34 @@ export async function processTaskIpc(
           'Running github_backup',
         );
 
+        // Read GitHub token for push auth
+        const { readEnvFile: readBackupEnv } = await import('./env.js');
+        const backupEnvVars = readBackupEnv(['GITHUB_TOKEN']);
+        const ghToken = backupEnvVars.GITHUB_TOKEN;
+
         execFile(
           'bash',
           [
             '-c',
             `cd "${backupDir}" && git add -A && git diff --cached --quiet && echo '{"stdout":"Nothing to commit."}' || (git commit -m "${commitMsg.replace(/"/g, '\\"')}" && git push && echo '{"stdout":"Committed and pushed."}')`,
           ],
-          { timeout: 60_000, maxBuffer: 1024 * 1024 },
+          {
+            timeout: 60_000,
+            maxBuffer: 1024 * 1024,
+            env: {
+              ...process.env,
+              ...(ghToken
+                ? {
+                    GIT_ASKPASS: 'echo',
+                    GIT_TERMINAL_PROMPT: '0',
+                    GITHUB_TOKEN: ghToken,
+                    GIT_CONFIG_COUNT: '1',
+                    GIT_CONFIG_KEY_0: 'url.https://x-access-token:' + ghToken + '@github.com/.insteadOf',
+                    GIT_CONFIG_VALUE_0: 'https://github.com/',
+                  }
+                : {}),
+            },
+          },
           (error, stdout, stderr) => {
             if (error) {
               logger.error(
