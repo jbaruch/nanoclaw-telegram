@@ -46,6 +46,9 @@ COPY groups/global/CLAUDE.md ./groups/global/CLAUDE.md
 # Remove devDependencies after build
 RUN npm prune --omit=dev
 
+# Git safe.directory for bind-mounted repos (backup-repo owned by host user)
+RUN git config --global --add safe.directory '*'
+
 # Data directories (store/, data/, groups/, logs/) are bind-mounted at runtime.
 # The .env file is also mounted at runtime — never baked into the image.
 
