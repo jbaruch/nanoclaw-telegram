@@ -57,7 +57,7 @@ Compare the fetched events to the state file's `events` list (match by event_id)
 - Existing events changed time or title
 - Events removed or declined (responseStatus changed to "declined")
 
-**If nothing changed:** return nothing (wrap output in `<internal>`).
+**If nothing changed:** proceed to the UTC Reminder Verification step below (return nothing if that also finds nothing).
 
 ## Reschedule
 
@@ -79,6 +79,31 @@ If calendar changed:
    Capture the returned `task_id` and store it as `reminder_task_id` for that event.
 
 3. **Update state:** Write the new event list (with updated `reminder_task_id` values) and today's date back to `/workspace/group/calendar-state.json`.
+
+## UTC Reminder Verification
+
+Run this step every time (even when calendar has no changes). It ensures reminders are correct for the current timezone — handles travel timezone shifts.
+
+1. Read `/workspace/group/scheduled-reminders.json`. If it doesn't exist or is empty, skip.
+
+2. Determine current timezone:
+   - First: look for `<context timezone="...">` tag in the current prompt
+   - Fallback: read `current_tz` from `/workspace/group/nanoclaw-state.json`
+   - Default: `America/Chicago`
+
+3. Call `mcp__nanoclaw__list_tasks` to get all active scheduled tasks.
+
+4. For each reminder in `scheduled-reminders.json`:
+   - Compute `expected_fire_utc = utc_time - reminder_offset_min` (subtract offset in minutes from the UTC event time)
+   - Convert `expected_fire_utc` to current local timezone → `expected_fire_local` (no Z suffix)
+   - Find the task by `task_id` in the list_tasks output
+   - If task not found OR `|task.fire_time - expected_fire_local| > 2 minutes`:
+     a. Cancel the old task: `mcp__nanoclaw__cancel_task(task_id=old_task_id)`
+     b. Schedule a new task at `expected_fire_local` (local time, no Z suffix)
+     c. Update `task_id` in `scheduled-reminders.json` with the new task ID
+     d. Save updated `scheduled-reminders.json`
+
+5. If any reminders were rescheduled, wrap a brief note in `<internal>` tags (no user-visible output unless something went wrong).
 
 ## Output
 
