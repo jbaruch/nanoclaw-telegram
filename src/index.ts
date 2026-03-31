@@ -232,18 +232,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let group = registeredGroups[chatJid];
   if (!group) return true;
 
-  // Race condition safety net: if containerConfig is absent, re-read from DB.
-  // This can happen when a group was just registered via IPC and the in-memory
-  // map update hasn't propagated yet (or was registered before this process started).
-  if (group && !group.containerConfig) {
-    const freshGroups = getAllRegisteredGroups();
-    const freshGroup = freshGroups[chatJid];
-    if (freshGroup?.containerConfig) {
-      registeredGroups[chatJid] = freshGroup;
-      group = freshGroup;
-    }
-  }
-
   const channel = findChannel(channels, chatJid);
   if (!channel) {
     logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
