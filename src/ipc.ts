@@ -296,8 +296,9 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
-    // For run_host_script
+    // For run_host_script / github_backup
     requestId?: string;
+    message?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -761,6 +762,75 @@ export async function processTaskIpc(
               fs.unlinkSync(tmpScript);
             } catch {
               /* best effort */
+            }
+          },
+        );
+      }
+      break;
+
+    case 'github_backup':
+      if (data.requestId) {
+        const backupDir = path.join(
+          process.cwd(),
+          'groups',
+          sourceGroup,
+          'backup-repo',
+        );
+        const resultPath = path.join(
+          DATA_DIR,
+          'ipc',
+          sourceGroup,
+          'input',
+          `_script_result_${data.requestId}.json`,
+        );
+
+        if (!fs.existsSync(backupDir)) {
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({ error: `backup-repo not found at ${backupDir}` }),
+          );
+          break;
+        }
+
+        const commitMsg =
+          data.message || `backup: ${new Date().toISOString().split('T')[0]}`;
+        logger.info(
+          { sourceGroup, backupDir, commitMsg },
+          'Running github_backup',
+        );
+
+        execFile(
+          'bash',
+          [
+            '-c',
+            `cd "${backupDir}" && git add -A && git diff --cached --quiet && echo '{"stdout":"Nothing to commit."}' || (git commit -m "${commitMsg.replace(/"/g, '\\"')}" && git push && echo '{"stdout":"Committed and pushed."}')`,
+          ],
+          { timeout: 60_000, maxBuffer: 1024 * 1024 },
+          (error, stdout, stderr) => {
+            if (error) {
+              logger.error(
+                { sourceGroup, error: error.message, stderr },
+                'github_backup failed',
+              );
+              fs.writeFileSync(
+                resultPath,
+                JSON.stringify({
+                  error: error.message,
+                  stderr: stderr.slice(-500),
+                }),
+              );
+            } else {
+              // stdout is the JSON echo from the bash script
+              try {
+                const parsed = JSON.parse(stdout.trim().split('\n').pop()!);
+                fs.writeFileSync(resultPath, JSON.stringify(parsed));
+              } catch {
+                fs.writeFileSync(
+                  resultPath,
+                  JSON.stringify({ stdout: stdout.trim() }),
+                );
+              }
+              logger.info({ sourceGroup }, 'github_backup completed');
             }
           },
         );

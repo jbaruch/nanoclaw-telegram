@@ -102,6 +102,18 @@ function buildVolumeMounts(
     });
   }
 
+  // Shared trusted directory — writable space for trusted containers.
+  if (isMain || group.containerConfig?.trusted) {
+    const trustedDir = path.join(process.cwd(), 'trusted');
+    if (fs.existsSync(trustedDir)) {
+      mounts.push({
+        hostPath: toHostPath(trustedDir),
+        containerPath: '/workspace/trusted',
+        readonly: false,
+      });
+    }
+  }
+
   // Store directory (messages.db) — read-only access for all groups.
   // Needed for heartbeat checks (unanswered messages, stuck tasks, DB size).
   const storeDir = path.join(process.cwd(), 'store');
