@@ -1,19 +1,34 @@
 ---
 name: verify-tiles
-description: Checks that tile skills from the tessl registry are correctly installed by comparing local skill files against registry originals, and removes stale staging copies that would override them. Use when skills seem outdated, a skill is not updating, you're seeing the wrong version of a skill, there are skill override issues, or after Baruch promotes skills or rules.
+description: Promotes staged skills/rules then verifies tile installation. Compares local skill files against registry originals, removes stale staging copies. Use when skills seem outdated, a skill is not updating, you're seeing the wrong version of a skill, there are skill override issues, or after Baruch promotes skills or rules.
 ---
 
-# Verify Tile Installation
+# Promote & Verify Tile Installation
 
-Check that skills and rules from the tessl registry are correctly installed and not being overridden by stale staging copies.
+## Step 1: Promote staged skills and rules
 
-## Step 1: List staging skills
+Call `mcp__nanoclaw__promote_staging` for each tile that has staged content.
+
+Check what's staged:
+
+```bash
+ls /workspace/group/skills/ 2>/dev/null
+find /workspace/group/staging -type f -name "*.md" 2>/dev/null
+```
+
+For each tile that has staged content, call:
+- `mcp__nanoclaw__promote_staging(tileName: "nanoclaw-admin")` — if admin skills or rules are staged
+- `mcp__nanoclaw__promote_staging(tileName: "nanoclaw-core")` — if core skills or rules are staged
+
+If nothing is staged, skip to Step 2.
+
+## Step 2: List staging skills
 
 ```bash
 ls /workspace/group/skills/ 2>/dev/null
 ```
 
-## Step 2: Compare each staging skill against its tile version
+## Step 3: Compare each staging skill against its tile version
 
 For each skill in staging, check if a `tessl__` version exists in `.claude/skills/`:
 
@@ -28,7 +43,7 @@ for skill in $(ls /workspace/group/skills/); do
 done
 ```
 
-## Step 3: Semantic comparison and cleanup of promoted staging skills
+## Step 4: Semantic comparison and cleanup of promoted staging skills
 
 For skills marked PROMOTED — read both the staging and tile versions in full, then reason about whether the tile faithfully implements the staging version.
 
@@ -52,7 +67,7 @@ For each PROMOTED skill:
 
 **Do NOT remove** skills marked STAGING ONLY — those are works in progress that haven't been promoted yet.
 
-## Step 4: Check staging rules directories
+## Step 5: Check staging rules directories
 
 Rules live in `/workspace/group/staging/` under tile subdirectories. When verify-tiles runs, promotion is assumed to have already happened — staging rule files are stale and should be removed.
 
@@ -70,12 +85,13 @@ done < <(find /workspace/group/staging -type f -name "*.md" 2>/dev/null)
 find /workspace/group/staging -type d -empty -delete 2>/dev/null
 ```
 
-## Step 5: Report
+## Step 6: Report
 
 Report everything that was cleaned. Format:
 
 ```
 Tile verification:
+• Promoted: X skills/rules (list)
 • Removed N stale staging skill copies (list names)
 • Kept M staging-only skills (list names)
 • Kept K staging skills due to MISMATCH (list names + discrepancies)
