@@ -15,6 +15,8 @@ services:
       - ./logs:/app/logs
       # Credentials (mounted, never baked into image)
       - ./.env:/app/.env:ro
+      # Shared trusted directory (mounted into trusted + main agent containers)
+      - ./trusted:/app/trusted
       # Tessl: credentials + persistent workspace for registry installs
       - /home/jbaruch/.tessl:/root/.tessl
       - ./data/tessl-workspace:/app/tessl-workspace
