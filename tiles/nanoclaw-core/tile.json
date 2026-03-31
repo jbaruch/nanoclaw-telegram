@@ -29,6 +29,9 @@
   "skills": {
     "format-message": {
       "path": "skills/format-message/SKILL.md"
+    },
+    "verify-tiles": {
+      "path": "skills/verify-tiles/SKILL.md"
     }
   }
 }
