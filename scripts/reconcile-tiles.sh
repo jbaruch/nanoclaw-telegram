@@ -14,9 +14,14 @@ echo "=== Tile Reconciliation ==="
 echo ""
 
 # Write the comparison script to a temp file and execute remotely
+TILE_OWNER_VAL=$(grep TILE_OWNER "$PROJECT_ROOT/.env" 2>/dev/null | cut -d= -f2)
+TILE_OWNER_VAL="${TILE_OWNER_VAL:-nanoclaw}"
+
 REMOTE_SCRIPT=$(cat <<'ENDSCRIPT'
+TILE_OWNER=$(grep TILE_OWNER /app/.env 2>/dev/null | cut -d= -f2)
+TILE_OWNER="${TILE_OWNER:-nanoclaw}"
 for tile in nanoclaw-admin nanoclaw-core nanoclaw-untrusted; do
-  base="/app/tessl-workspace/.tessl/tiles/jbaruch/$tile"
+  base="/app/tessl-workspace/.tessl/tiles/$TILE_OWNER/$tile"
   git_base="/app/tiles/$tile"
 
   for f in $base/rules/*.md; do
@@ -84,7 +89,7 @@ echo ""
 echo "Tile versions:"
 for tile in nanoclaw-admin nanoclaw-core nanoclaw-untrusted; do
   LOCAL=$(python3 -c "import json; print(json.load(open('tiles/$tile/tile.json'))['version'])")
-  INSTALLED=$(nas "docker exec nanoclaw cat /app/tessl-workspace/.tessl/tiles/jbaruch/$tile/tile.json" | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
+  INSTALLED=$(nas "docker exec nanoclaw cat /app/tessl-workspace/.tessl/tiles/${TILE_OWNER_VAL}/$tile/tile.json" | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
   if [ "$LOCAL" = "$INSTALLED" ]; then
     echo "  $tile: $LOCAL (in sync)"
   else

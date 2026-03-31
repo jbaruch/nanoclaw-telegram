@@ -227,7 +227,9 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
   echo ""
   echo "Pulling tiles from registry into orchestrator..."
   # IMPORTANT: install ALL tiles together — vendored mode removes tiles not in the install list
-  ALL_TILES="jbaruch/nanoclaw-core jbaruch/nanoclaw-admin jbaruch/nanoclaw-untrusted jbaruch/reclaim-tripit-sync"
+  TILE_OWNER_VAL=$(grep TILE_OWNER "$PROJECT_ROOT/.env" 2>/dev/null | cut -d= -f2)
+  TILE_OWNER_VAL="${TILE_OWNER_VAL:-nanoclaw}"
+  ALL_TILES=$(ls "$PROJECT_ROOT/tiles/" | while read t; do echo "$TILE_OWNER_VAL/$t"; done | tr '\n' ' ')
   nas "docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl install $ALL_TILES --yes --dangerously-ignore-security --agent claude-code 2>&1'" || {
     echo "  ERROR: tessl install in orchestrator failed"
     exit 1

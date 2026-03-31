@@ -12,6 +12,7 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'TZ',
   'TELEGRAM_BOT_POOL',
+  'TILE_OWNER',
 ]);
 
 export const ASSISTANT_NAME =
@@ -103,6 +104,10 @@ export function getTriggerPattern(trigger?: string): RegExp {
 }
 
 export const TRIGGER_PATTERN = buildTriggerPattern(DEFAULT_TRIGGER);
+
+// Tile owner namespace for tessl registry (e.g., "jbaruch" → "jbaruch/nanoclaw-core")
+export const TILE_OWNER =
+  process.env.TILE_OWNER || envConfig.TILE_OWNER || 'nanoclaw';
 
 // Timezone for scheduled tasks, message formatting, etc.
 // Validates each candidate is a real IANA identifier before accepting.

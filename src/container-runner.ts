@@ -17,6 +17,7 @@ import {
   HOST_PROJECT_ROOT,
   HOST_UID,
   IDLE_TIMEOUT,
+  TILE_OWNER,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -66,7 +67,7 @@ interface VolumeMount {
 /**
  * Translate a local container path to a host path for docker -v arguments.
  * In Docker-out-of-Docker, the orchestrator's filesystem (/app/...) differs
- * from the host's (/home/jbaruch/nanoclaw/...). Mount paths must use host paths.
+ * from the host's (HOST_PROJECT_ROOT/...). Mount paths must use host paths.
  */
 function toHostPath(localPath: string): string {
   const projectRoot = process.cwd();
@@ -186,7 +187,7 @@ function buildVolumeMounts(
     'tessl-workspace',
     '.tessl',
     'tiles',
-    'jbaruch',
+    TILE_OWNER,
   );
   const rulesContent: string[] = [];
   for (const tileName of tilesToInstall) {
@@ -199,7 +200,7 @@ function buildVolumeMounts(
       continue;
     }
 
-    const dstTileDir = path.join(dstTessl, 'tiles', 'jbaruch', tileName);
+    const dstTileDir = path.join(dstTessl, 'tiles', TILE_OWNER, tileName);
 
     // Copy rules
     const rulesDir = path.join(tileSrc, 'rules');

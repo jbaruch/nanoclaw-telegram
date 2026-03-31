@@ -20,14 +20,14 @@ services:
       # Shared trusted directory (mounted into trusted + main agent containers)
       - ./trusted:/app/trusted
       # Tessl: credentials + persistent workspace for registry installs
-      - /home/jbaruch/.tessl:/root/.tessl
+      - ${HOME}/.tessl:/root/.tessl
       - ./data/tessl-workspace:/app/tessl-workspace
     environment:
       # Docker-out-of-Docker: mount paths must reference the HOST filesystem
-      - HOST_PROJECT_ROOT=/home/jbaruch/nanoclaw
-      # Host user UID/GID for agent container --user flag (NAS user is uid 999)
-      - HOST_UID=999
-      - HOST_GID=10
+      - HOST_PROJECT_ROOT=${HOST_PROJECT_ROOT:-.}
+      # Host user UID/GID for agent container --user flag
+      - HOST_UID=${HOST_UID:-1000}
+      - HOST_GID=${HOST_GID:-1000}
       # Credential proxy binds to all interfaces so agent containers can reach it
       - CREDENTIAL_PROXY_HOST=0.0.0.0
       - TZ=America/Chicago

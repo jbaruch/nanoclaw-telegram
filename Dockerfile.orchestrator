@@ -30,7 +30,7 @@ RUN npx tsc
 COPY container/ ./container/
 
 # Install tessl CLI and host-side tools
-RUN npm install -g tessl jbaruch/reclaim-tripit-timezones-sync && tessl --version
+RUN npm install -g tessl && tessl --version
 
 # Scripts (promote-from-orchestrator, etc.)
 COPY scripts/ ./scripts/

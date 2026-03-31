@@ -18,6 +18,7 @@ vi.mock('./config.js', () => ({
   HOST_UID: undefined,
   HOST_GID: undefined,
   IDLE_TIMEOUT: 1800000, // 30min
+  TILE_OWNER: 'test',
   TIMEZONE: 'America/Los_Angeles',
 }));
 

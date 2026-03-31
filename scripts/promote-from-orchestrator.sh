@@ -106,15 +106,21 @@ tessl tile lint "$TILE_DIR" || { echo "ERROR: lint failed"; exit 1; }
 # --- Git commit + push ---
 cd "$REPO_DIR"
 TOKEN=$(grep GITHUB_TOKEN /app/.env | cut -d= -f2)
-git config user.email "nanoclaw@ayeaye.bot"
-git config user.name "AyeAye"
+TILE_OWNER=$(grep TILE_OWNER /app/.env | cut -d= -f2)
+TILE_OWNER="${TILE_OWNER:-nanoclaw}"
+ASSISTANT=$(grep ASSISTANT_NAME /app/.env | cut -d= -f2)
+ASSISTANT="${ASSISTANT:-Agent}"
+REPO_URL=$(cd "$REPO_DIR" && git config --get remote.origin.url | sed "s|https://.*@|https://x-access-token:${TOKEN}@|; s|https://github|https://x-access-token:${TOKEN}@github|")
+
+git config user.email "nanoclaw@bot.local"
+git config user.name "$ASSISTANT"
 git add "tiles/$TILE_NAME/"
 if git diff --cached --quiet; then
   echo "No changes to commit."
 else
-  git commit -m "feat: promote $PROMOTED item(s) to $TILE_NAME from AyeAye staging"
-  git remote set-url origin "https://x-access-token:${TOKEN}@github.com/jbaruch/nanoclaw.git" 2>/dev/null || \
-    git remote add origin "https://x-access-token:${TOKEN}@github.com/jbaruch/nanoclaw.git" 2>/dev/null || true
+  git commit -m "feat: promote $PROMOTED item(s) to $TILE_NAME from $ASSISTANT staging"
+  git remote set-url origin "$REPO_URL" 2>/dev/null || \
+    git remote add origin "$REPO_URL" 2>/dev/null || true
   git push origin main
 fi
 
@@ -129,7 +135,9 @@ tessl tile publish --bump patch "$TILE_DIR" || echo "WARN: publish failed (tiles
 # --- Install tiles ---
 echo "Installing tiles from registry..."
 cd /app/tessl-workspace
-tessl install jbaruch/nanoclaw-core jbaruch/nanoclaw-admin jbaruch/nanoclaw-untrusted jbaruch/reclaim-tripit-sync \
+# Build tile list from tiles/ directory
+TILE_LIST=$(ls /app/repo/tiles/ 2>/dev/null | while read t; do echo "$TILE_OWNER/$t"; done | tr '\n' ' ')
+tessl install $TILE_LIST \
   --yes --dangerously-ignore-security --agent claude-code 2>&1 || echo "WARN: tile install had issues"
 
 echo "Done! $PROMOTED item(s) promoted."

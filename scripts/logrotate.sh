@@ -3,7 +3,8 @@
 # Keeps last 5 rotated copies, compresses old ones
 set -euo pipefail
 
-LOGS_DIR="${1:-/Users/jbaruch/Projects/nanoclaw/logs}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOGS_DIR="${1:-$(cd "$SCRIPT_DIR/.." && pwd)/logs}"
 MAX_SIZE_MB=10
 KEEP=5
 
