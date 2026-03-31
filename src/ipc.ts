@@ -296,9 +296,11 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
-    // For run_host_script / github_backup
+    // For run_host_script / github_backup / promote_staging
     requestId?: string;
     message?: string;
+    tileName?: string;
+    skillName?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -821,7 +823,10 @@ export async function processTaskIpc(
                     GIT_TERMINAL_PROMPT: '0',
                     GITHUB_TOKEN: ghToken,
                     GIT_CONFIG_COUNT: '1',
-                    GIT_CONFIG_KEY_0: 'url.https://x-access-token:' + ghToken + '@github.com/.insteadOf',
+                    GIT_CONFIG_KEY_0:
+                      'url.https://x-access-token:' +
+                      ghToken +
+                      '@github.com/.insteadOf',
                     GIT_CONFIG_VALUE_0: 'https://github.com/',
                   }
                 : {}),
@@ -852,6 +857,69 @@ export async function processTaskIpc(
                 );
               }
               logger.info({ sourceGroup }, 'github_backup completed');
+            }
+          },
+        );
+      }
+      break;
+
+    case 'promote_staging':
+      if (data.requestId && data.tileName && data.skillName) {
+        if (!isMain) {
+          logger.warn({ sourceGroup }, 'Unauthorized promote_staging attempt');
+          break;
+        }
+
+        const promoteResultPath = path.join(
+          DATA_DIR,
+          'ipc',
+          sourceGroup,
+          'input',
+          `_script_result_${data.requestId}.json`,
+        );
+
+        const promoteScript = path.join(
+          process.cwd(),
+          'scripts',
+          'promote-from-orchestrator.sh',
+        );
+
+        if (!fs.existsSync(promoteScript)) {
+          fs.writeFileSync(
+            promoteResultPath,
+            JSON.stringify({ error: 'promote-from-orchestrator.sh not found' }),
+          );
+          break;
+        }
+
+        logger.info(
+          { sourceGroup, tileName: data.tileName, skillName: data.skillName },
+          'Running promote_staging',
+        );
+
+        execFile(
+          'bash',
+          [promoteScript, sourceGroup, data.tileName, data.skillName],
+          { timeout: 300_000, maxBuffer: 5 * 1024 * 1024 },
+          (error, stdout, stderr) => {
+            if (error) {
+              logger.error(
+                { sourceGroup, error: error.message, stderr: stderr.slice(-500) },
+                'promote_staging failed',
+              );
+              fs.writeFileSync(
+                promoteResultPath,
+                JSON.stringify({
+                  error: error.message,
+                  stderr: stderr.slice(-500),
+                }),
+              );
+            } else {
+              logger.info({ sourceGroup }, 'promote_staging completed');
+              fs.writeFileSync(
+                promoteResultPath,
+                JSON.stringify({ stdout: stdout.trim() }),
+              );
             }
           },
         );

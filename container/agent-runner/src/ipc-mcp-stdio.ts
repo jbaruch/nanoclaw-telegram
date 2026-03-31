@@ -500,6 +500,63 @@ server.tool(
   },
 );
 
+server.tool(
+  'promote_staging',
+  'Promote staged skills and rules to tessl tiles. Runs the full pipeline: copy from staging, lint, git commit+push, publish to registry, install. Main group only.',
+  {
+    tileName: z.string().describe('Target tile: "nanoclaw-admin", "nanoclaw-core", or "nanoclaw-untrusted"'),
+    skillName: z.string().optional().describe('Specific skill to promote. Omit for all staging items. Use "--rules-only" to promote only rules.'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the main group can promote tiles.' }],
+        isError: true,
+      };
+    }
+
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const data = {
+      type: 'promote_staging',
+      groupFolder,
+      tileName: args.tileName,
+      skillName: args.skillName || 'all',
+      requestId,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    // Poll for result (promotion can take a while — tessl publish, git push)
+    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
+    const timeoutMs = 300_000;
+    const pollMs = 1000;
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+      if (fs.existsSync(resultPath)) {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        fs.unlinkSync(resultPath);
+        if (result.error) {
+          return {
+            content: [{ type: 'text' as const, text: `Promotion failed: ${result.error}` }],
+            isError: true,
+          };
+        }
+        return {
+          content: [{ type: 'text' as const, text: result.stdout || 'Promotion complete.' }],
+        };
+      }
+      await new Promise(r => setTimeout(r, pollMs));
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'Promotion timed out after 5 minutes.' }],
+      isError: true,
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);
