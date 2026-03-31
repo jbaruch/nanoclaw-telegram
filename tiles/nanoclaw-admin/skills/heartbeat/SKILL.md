@@ -19,8 +19,23 @@ Read `/workspace/group/task-tz-state.json`. For each entry in `follow_me_tasks`:
 
 Run silently. Only surface output if the invoked skill itself has something to report.
 
+## Step 0.7: Unanswered message check
+Invoke `Skill(skill: "tessl__check-unanswered")`.
+
+For each unanswered message returned:
+1. React to it with 👌 via `mcp__nanoclaw__react_to_message(messageId: "<id>", emoji: "👌")`
+2. **Use judgment to respond based on context** — don't just report, actually reply to the message thread. Consider:
+   - **Still actionable:** time-sensitive request/question where it's not too late → apologize for delay, act on it or respond to the content directly
+   - **Trivial/casual:** joke, "lol", "nice", casual comment → brief acknowledgement, no big deal
+   - **Too late to act:** time-sensitive thing that has already passed → acknowledge the miss honestly, no point in acting now
+   - **Informational/rhetorical:** statement that didn't need a response → can skip or give brief "noted"
+3. Reply using `mcp__nanoclaw__send_message` with `reply_to: "<id>"` so the response threads correctly
+4. Use common sense about urgency, tone, and whether action is still possible
+
+Run silently if no unanswered messages found.
+
 ## Step 0: Pending response check
-Read `/workspace/group/group/session-state.json`. If `pending_response` is non-null:
+Read `/workspace/group/session-state.json`. If `pending_response` is non-null:
 - Send the pending response to Baruch now (message_id and preview are hints for context)
 - Clear `pending_response` to null in the file
 - Then continue with the rest of the heartbeat
