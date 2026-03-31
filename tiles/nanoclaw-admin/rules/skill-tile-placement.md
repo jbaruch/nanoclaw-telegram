@@ -24,3 +24,5 @@ Ask: "Does an untrusted group container need this?" → core.
 Ask: "Does this require admin/host access or is it main-channel-specific?" → admin.
 
 **Never put admin-only skills in nanoclaw-core.** They'll be available to untrusted containers.
+
+**Always check before calling promote_staging — wrong tile = security/functionality issue.**
