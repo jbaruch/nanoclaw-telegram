@@ -105,7 +105,38 @@ After the brief is confirmed sent, invoke the brief-cleanup skill to send any pe
 After brief-cleanup runs, set both arrays in `morning-brief-pending.json` to `[]`.
 
 ## Step 8: Schedule reminders for today's events
-For each timed event >20 min away — per the [Event Filter Rules](#event-filter-rules-shared-reference), additionally excluding all-day events — use the resolved scheduler tool to schedule a once-off reminder at start−15 min (local ISO timestamp, **no Z suffix**). Pass event title and the calculated timestamp. If no scheduling tool is available, or a reminder fails for a specific event, skip that event and continue.
+
+For each timed event — per the [Event Filter Rules](#event-filter-rules-shared-reference), additionally excluding all-day events, and only events starting more than 20 min from now:
+
+### 8a: Read existing reminders
+Read `/workspace/group/scheduled-reminders.json`. If the file doesn't exist, treat as `{"reminders": []}`.
+
+### 8b: Deduplicate
+Before scheduling a reminder for an event, check if `event_id` already exists in `scheduled-reminders.json`. If found — skip scheduling for that event (the reminder is already registered).
+
+### 8c: Schedule new reminders
+For events not already in `scheduled-reminders.json`, schedule a once-off reminder:
+- Fire time = event start − 15 min, expressed as a **local ISO timestamp (no Z suffix)** for the scheduler
+- Pass event title and the calculated timestamp
+
+If no scheduling tool is available, or a reminder fails for a specific event, skip that event and continue.
+
+### 8d: Write to scheduled-reminders.json
+For each newly scheduled reminder, append an entry to the `reminders` array in `/workspace/group/scheduled-reminders.json`:
+
+```json
+{
+  "event_id": "<google_calendar_event_id>",
+  "title": "<event title>",
+  "utc_time": "<event start in UTC, ISO 8601 with Z suffix, e.g. 2026-04-01T14:30:00Z>",
+  "reminder_offset_min": 15,
+  "task_id": "<task ID returned by schedule_task>"
+}
+```
+
+**UTC conversion:** Convert the event's local start time to UTC before storing. The event data from Google Calendar includes timezone info; derive UTC from that. Store in `utc_time` with a `Z` suffix.
+
+Write the updated file back to `/workspace/group/scheduled-reminders.json`.
 
 ## Step 9: Save state
 Write to `/workspace/group/calendar-state.json`:
