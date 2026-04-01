@@ -485,3 +485,54 @@ Yesterday's Dockerfile refactoring (removing personal packages for the public fo
 This is exactly the scenario the three-tier architecture is designed for — and the first real test of the  merge strategy.
 
 *Updated: 2026-04-01.*
+
+
+---
+
+## 2026-04-01 — CFP Calibration: Teaching the Bot What's Worth Applying To
+
+The CFP checker has been running for a while, but the signal-to-noise ratio wasn't great. Too many conferences I'd never submit to, not enough context about *why* a CFP is worth flagging.
+
+The fix: a `bot_notes` + `baruch_notes` feedback loop. The bot researches each CFP and adds its reasoning to `cfp-state.json`. Baruch confirms or dismisses with a note. Over time, expired CFPs become ground truth — the bot can see what I actually submitted to vs. dismissed, and calibrate accordingly.
+
+The key insight: I don't need a machine-learning model here. The data is already there in the state file. What I need is for the bot to *read it before suggesting new CFPs* and notice patterns: which conference tiers I like, which topics resonate, which venues I've attended before.
+
+Expired CFPs are the best signal. They're labeled with what I did (submitted, dismissed, ignored) and the bot's original reasoning. That's a training set.
+
+---
+
+## 2026-04-01 — Sessionize MCP Tool: The Slug Problem
+
+Built a new MCP tool: `sessionize_get_event`. Pass it a Sessionize event slug, get back normalized event data: CFP dates, conference dates, location, website. The host handles the API key.
+
+The problem: `cfp-state.json` uses internal slugs (like `wearedevelopers-world-congress-na-2026`) that the bot generates from the conference name. Sessionize has its own URL slugs (like `devoxx-be-2026`) that don't map deterministically. You can't derive one from the other.
+
+The fix: add a `sessionize_slug` field to `cfp-state.json` entries when a Sessionize URL is found during check-cfps research. Then on subsequent runs, if `sessionize_slug` exists, call the tool for deadline verification. Graceful degradation — works with whatever we have.
+
+First real test: `kotlinconf-2025` worked. Most other slugs returned 404 until I started storing them from actual Sessionize URLs found during research. The tool is useless without the right slug; the right slug has to come from the web.
+
+---
+
+## 2026-04-01 — Container Uptime Tracking
+
+The container has a birthday: `/.dockerenv` is created at spawn time. `stat -c '%Y' /.dockerenv` gives the epoch timestamp. Stored as `container_started` in `session-state.json`.
+
+Now `/status` shows how old the container is. Heartbeat warns at 14+ days. The threshold isn't about memory — it's about stale tool caches. MCP tool lists are loaded at spawn time and don't refresh on session resume. If Baruch adds a new tool to the server, the container needs a nuke to see it.
+
+The 14-day warning is a nudge: "this container is getting old, consider nuking for a fresh start." Not a hard cutoff. More of a hygiene reminder.
+
+The Sessionize MCP tool discovery itself was the motivation — spent way too long wondering why the tool wasn't visible before realizing the container just hadn't been rebuilt with the new tool list.
+
+---
+
+## 2026-04-01 — Heartbeat Auto-Updating CFP Submission Status
+
+When a CFP confirmation email arrives (from Sessionize, Sched, or similar), the heartbeat should silently update `cfp-state.json` — no message to Baruch. He submitted; he knows. The confirmation is noise.
+
+The exception: acceptance or rejection. That's when you speak up.
+
+This is the same pattern as package deliveries vs. signature-required deliveries. Standard flow → silent. Deviation from expected → flag.
+
+The tricky part is detecting "confirmation" vs. "acceptance." Subject lines vary wildly. Heuristics: "submission received", "we got your talk", "CFP submission confirmed" → silent update. "Your talk has been accepted", "Unfortunately, we could not include" → immediate alert.
+
+Not implemented yet — waiting on the Sessionize speaker API response to see if there's a better programmatic way to track submission status. But the heartbeat email classification already has the hooks to route CFP-related emails into this flow.
