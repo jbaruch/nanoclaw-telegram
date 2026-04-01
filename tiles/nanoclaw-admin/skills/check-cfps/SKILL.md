@@ -28,12 +28,32 @@ Parse the JSON output:
 
 For each CFP in the script output, reason about whether it's relevant to Baruch:
 
-| Decision | Criteria |
-|----------|----------|
-| **Keep** | Java, JVM, Kotlin, Spring; Devoxx/Voxxed/JBCNConf family; developer tools/DX, devrel; general developer conferences with known Java or AI tracks (QCon, KubeCon, FOSDEM, NDC, GOTO); applied AI for software developers — LLM/GenAI/agents in dev context, AI-assisted development, AI infrastructure for engineers |
-| **Skip** | Pure Web3/blockchain/crypto/NFT; non-JVM single-language conferences (unless Java or AI track confirmed); pure functional programming conferences (Lambda World, etc.); platform engineering/DevOps/SRE/cloud infrastructure (DevOpsDays, Fast Flow); academic-only research; meetups (<1 day); data science/MLOps/analytics events (primary audience is data engineers, not software developers) |
+**The core question for every conference:** "Could Baruch realistically submit a talk about Java/JVM/Kotlin/Spring, developer tools/DevRel, or AI-for-developers here, and would it land with the audience?"
 
-Use your judgment — "AI for developers" is in; "data2day", "DataEngConf", "MLOps Summit" style events are out. When unsure about a borderline AI conference, include and let Baruch decide.
+Apply this reasoning — not keyword matching, not a default fallback. Arrive at a confident YES or NO.
+
+**Confident YES — always keep:**
+- Java, JVM, Kotlin, Spring, Jakarta EE conferences
+- Devoxx / Voxxed / JBCNConf family — always
+- Developer tools, DX, DevRel conferences
+- General developer conferences with known Java or AI-for-developers tracks: QCon, KubeCon, FOSDEM (Java/dev tracks only), NDC, GOTO, JavaOne, Oracle Code
+- AI conferences where the **primary audience is software developers** integrating LLMs/GenAI into applications — e.g. AI Engineer World's Fair, GitHub Universe, developer-focused AI summits
+
+**Confident NO — always skip:**
+- Single-language non-JVM conferences: Elixir, Go, Rust, Python, Ruby, PHP, .NET-only — SKIP unless Java or AI-for-developers track is explicitly confirmed
+- Mobile / iOS / Android conferences
+- Linux kernel / sysadmin / ops conferences (AlmaLinux, SREcon, etc.)
+- Blockchain / crypto / Web3 / DeFi / NFT
+- Data science / MLOps / analytics / AI research — where the audience is data engineers or ML researchers, not software developers (DataEngConf, MLOps Summit, NeurIPS, ICML, etc.)
+- Pure functional programming conferences (Lambda World, LambdaDays, etc.)
+- Platform engineering / DevOps / SRE / cloud infra (DevOpsDays, KubeCon SRE tracks, Fast Flow)
+- Academic-only research conferences
+- Meetups or 1-day local events
+- French-language-only or highly regional events with no international English track
+
+**Reasoning for ambiguous AI conferences:** Ask yourself — is the speaker lineup typically ML engineers and data scientists (Python/PyTorch/TensorFlow), or software developers building on top of AI APIs? If it's the former → skip. If developers building AI-powered apps → keep.
+
+**No fallback default.** Think it through and make a call. Both false positives (irrelevant confs Baruch has to dismiss) and false negatives (missing good confs) are bad — use judgment to avoid both.
 
 ## Step 2 — Web search for gaps
 
@@ -80,7 +100,7 @@ After Steps 1b and 2, **write every relevant CFP** (kept after relevance filter)
 
 Rules:
 - If the slug already has a user action (`dismissed`/`sent`/`remind`) → preserve it, do NOT overwrite
-- If the slug doesn't exist yet → write a new `"open"` entry with full data:
+- If the slug doesn't exist yet → write a new `"open"` entry with full data including a `bot_notes` field explaining why you included it:
 
 ```json
 {
@@ -91,10 +111,25 @@ Rules:
     "conf_date": "Oct 18–20",
     "deadline": "2026-03-31",
     "cfp_url": "https://allthingsopen.org/call-for-papers",
-    "updated": "2026-03-31"
+    "updated": "2026-03-31",
+    "bot_notes": "General open-source dev conf with broad audience; typically has Java/JVM content"
   }
 }
 ```
+
+### Calibration notes
+
+When Baruch dismisses a conference (`status: dismissed`), record his reason in `baruch_notes` if he gave one:
+```json
+"baruch_notes": "too Python-heavy, wrong audience"
+```
+
+When a CFP deadline expires while `status` is still `"open"`, ask Baruch if he submitted or not — his answer calibrates the filter (did we correctly surface it? was it relevant?). Record the outcome:
+```json
+"baruch_notes": "submitted" | "didn't submit — wrong audience" | "missed deadline"
+```
+
+These notes are never shown to Baruch unless he asks — they're for internal calibration only.
 
 ### User feedback actions
 

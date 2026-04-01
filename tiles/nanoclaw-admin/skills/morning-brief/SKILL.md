@@ -16,6 +16,19 @@ Use `COMPOSIO_SEARCH_TOOLS` to locate and cache the following tools:
 
 ---
 
+## Step 0: Read current timezone
+
+Read `/workspace/group/task-tz-state.json`. Extract `current_tz` (e.g. `"Europe/Amsterdam"`).
+
+Use this timezone for ALL time operations in this skill:
+- Calendar event window (Step 1)
+- Displaying event times (Step 5)
+- Reminder fire times (Step 8c)
+
+If the file doesn't exist or `current_tz` is missing, default to `America/Chicago`.
+
+---
+
 ## Event Filter Rules (shared reference)
 Apply these exclusions whenever processing calendar events — in both Step 5 (brief display) and Step 8 (reminders):
 - Skip Travel events
@@ -27,8 +40,8 @@ Apply these exclusions whenever processing calendar events — in both Step 5 (b
 
 ## Step 1: Fetch today's calendar
 Call the resolved calendar tool:
-- `time_min`: today at 00:00:00 America/Chicago
-- `time_max`: today at 23:59:59 America/Chicago
+- `time_min`: today at 00:00:00 in `current_tz` (convert to UTC offset, e.g. `2026-04-01T00:00:00+02:00` for Amsterdam)
+- `time_max`: today at 23:59:59 in `current_tz`
 - `single_events`: true, `order_by`: startTime
 
 ## Step 2: Fetch Google Tasks
@@ -41,19 +54,16 @@ Run: `python3 /workspace/group/scripts/morning-brief-fetch.py`
 Output includes `pending.undated_tasks` and `pending.cleanup_items` from `morning-brief-pending.json`.
 
 ## Step 4a: Check urgent CFPs
-Read `/workspace/group/cfp-state.json` if it exists. Collect entries where ALL of:
-- Entry has a `deadline` field (rich-format entry written by check-cfps)
-- `deadline` is within 7 days from today (including today)
-- `status` is not `"dismissed"` and not `"sent"`
+Run: `python3 /workspace/group/scripts/morning-brief-cfp.py`
 
-Skip entries that only have `status` + `updated` (legacy status-only entries — they have no deadline data).
+Outputs a JSON array of CFPs with deadlines within 7 days. Each entry has: `name`, `city`, `conf_date`, `deadline`, `cfp_url`, `days_until`.
 
-If any urgent CFPs found, include in the brief under:
+If the array is non-empty, include in the brief under:
 `📢 <b>CFP дедлайны:</b>` — one bullet per CFP:
 `• 🔴 <b>Name</b> — City, ConfDate · дедлайн: <b>DeadlineDate</b> · <a href="cfp_url">Submit</a>`
 
-Color marker by days until deadline: ≤ 1 day → 🔴, 2–3 days → 🟡, 4–7 days → 🟢.
-If no urgent CFPs or file doesn't exist → skip this section silently.
+Color marker by days_until: 0–1 → 🔴, 2–3 → 🟡, 4–7 → 🟢.
+If empty array or script fails → skip this section silently.
 
 ## Step 4: Check flagged orders
 Read `/workspace/group/orders-db.json`. Collect all orders where `flagged: true`.
@@ -64,6 +74,8 @@ If none → skip this section silently.
 
 ## Step 5: Send morning brief
 Select events using the [Event Filter Rules](#event-filter-rules-shared-reference).
+
+Display all event times in `current_tz` local time (not Chicago time).
 
 Format in Telegram HTML/style (*bold* single asterisks, • bullets, no markdown headings). Canonical example:
 
@@ -87,7 +99,7 @@ _2 события, 3 задачи_
 ```
 
 **Section rules:**
-- *📅 Сегодня:* — timed events with local time.
+- *📅 Сегодня:* — timed events with local time in `current_tz`.
 - *✅ Задачи:* — overdue tasks (original due date, marked ⚠️) + tasks due today. Omit if no tasks.
 - *📋 Без даты:* — list titles from `undated_tasks` with prompt to set dates. Omit if array is empty.
 - *📢 CFP дедлайны:* — CFPs closing within 7 days (from Step 4a). Omit if none.
@@ -115,9 +127,34 @@ Read `/workspace/group/scheduled-reminders.json`. If the file doesn't exist, tre
 Before scheduling a reminder for an event, check if `event_id` already exists in `scheduled-reminders.json`. If found — skip scheduling for that event (the reminder is already registered).
 
 ### 8c: Schedule new reminders
-For events not already in `scheduled-reminders.json`, schedule a once-off reminder:
-- Fire time = event start − 15 min, expressed as a **local ISO timestamp (no Z suffix)** for the scheduler
-- Pass event title and the calculated timestamp
+For events not already in `scheduled-reminders.json`, schedule a once-off reminder.
+
+**CRITICAL — timezone conversion is mandatory. This step has caused real bugs (e.g. Amsterdam keynote reminders firing after the event was over). Follow exactly:**
+
+1. Get the event start time from the Google Calendar response. It may be in local timezone (e.g. `2026-04-01T09:50:00+02:00`) or UTC. Convert to UTC first.
+2. Subtract 15 minutes (in UTC). Example: `09:50 Amsterdam = 07:50 UTC` → `07:50 UTC − 15 min = 07:35 UTC`.
+3. **Convert that UTC time to America/Chicago local time.** CDT = UTC−5 (Mar–Nov), CST = UTC−6 (Nov–Mar). Example: `07:35 UTC → 02:35 CDT`. Do NOT pass the UTC time or Amsterdam time — the scheduler interprets the value as Chicago local time and will fire at the wrong moment.
+4. Format as `"YYYY-MM-DDTHH:MM:SS"` with **no Z suffix** and pass as `schedule_value`.
+
+**Worked example (travel scenario):**
+- Event: keynote at 09:50 Amsterdam time (UTC+2) = `07:50 UTC`
+- Reminder offset: −15 min → `07:35 UTC`
+- Chicago CDT (UTC−5): `07:35 − 5h = 02:35 CDT`
+- Correct `schedule_value`: `"2026-04-01T02:35:00"` ← Chicago local, no Z
+- WRONG (caused the bug): `"2026-04-01T07:35:00"` ← this is UTC, scheduler fires at 12:35 UTC = 14:35 Amsterdam, event already over
+
+Use Python's `datetime` with `pytz` or `zoneinfo` to do this conversion reliably — do not compute UTC offsets by hand.
+
+```python
+from datetime import datetime, timezone, timedelta
+import zoneinfo
+
+chicago = zoneinfo.ZoneInfo("America/Chicago")
+event_utc = datetime(2026, 4, 1, 7, 50, tzinfo=timezone.utc)  # event start in UTC
+reminder_utc = event_utc - timedelta(minutes=15)               # subtract offset
+reminder_chicago = reminder_utc.astimezone(chicago)            # convert to Chicago
+schedule_value = reminder_chicago.strftime("%Y-%m-%dT%H:%M:%S")  # no Z, no offset
+```
 
 If no scheduling tool is available, or a reminder fails for a specific event, skip that event and continue.
 

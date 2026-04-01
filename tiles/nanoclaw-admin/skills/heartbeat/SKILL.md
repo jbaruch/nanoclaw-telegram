@@ -44,6 +44,12 @@ Read `/workspace/group/session-state.json`. If `pending_response` is non-null:
 Run: `python3 /workspace/group/scripts/heartbeat-checks.py`
 If `issues` array is non-empty → report. Otherwise silent.
 
+Also check container age: read `container_started` from `/workspace/group/session-state.json`, compute age in days. If age ≥ 14 days → add to report:
+```
+⚠️ <b>Container age:</b> N days — consider nuking for a fresh start
+```
+Silent if < 14 days.
+
 ## Step 2: Calendar check
 Use COMPOSIO_MULTI_EXECUTE_TOOL with GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS:
 - time_min: now (UTC)
@@ -63,6 +69,7 @@ Surface emails that require Baruch's attention or awareness; silently skip routi
 - **Action required:** calendar invites, interview/meeting requests from real people, personal requests or questions from known contacts
 - **Financial / deadlines:** tax reminders, banking alerts (JPMorgan, construction draws/mortgage), invoice/billing emails that may need expensing
 - **Tools & work:** software update notifications for tools Baruch actively uses (e.g., Synergy, JetBrains), conference speaker action items (acceptance, guidelines, action required)
+- **CFP submissions:** emails confirming a CFP submission was received (e.g. "Your submission to X has been received", "Talk submitted", "Proposal received") → silently update `/workspace/group/cfp-state.json` entry to `status: "sent"` (match by conference name), do NOT report to Baruch unless the slug is not found in state
 
 ### Do NOT report:
 - Newsletters, digests, and promotional emails — unless the promotion is for a tool Baruch actively uses

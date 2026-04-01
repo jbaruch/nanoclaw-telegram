@@ -85,17 +85,24 @@ Read `/workspace/group/task-tz-state.json`.
 
 ## Step 3: Reschedule follow-me tasks
 
-For each entry in `follow_me_tasks` from `task-tz-state.json`, use `local_hour` and `local_minute` to calculate the UTC equivalent in `new_tz`. Use your knowledge of IANA timezone UTC offsets, accounting for DST based on the current date.
+For each entry in `follow_me_tasks` from `task-tz-state.json`, use `local_hour` and `local_minute` to calculate the correct cron value.
 
-Example calculations:
-- 7am `Europe/Amsterdam` (UTC+2 in summer): 7 − 2 = **5am UTC** → `0 5 * * *`
-- 3am `Europe/Amsterdam` (UTC+2): 3 − 2 = **1am UTC** → `0 1 * * *`
-- 3am `America/Chicago` CDT (UTC−5): 3 + 5 = **8am UTC** → `0 8 * * *`
+**CRITICAL: The task scheduler uses America/Chicago local time.** The cron hour must be expressed in America/Chicago — NOT UTC.
+
+Two-step conversion:
+1. Convert local time in `new_tz` → UTC: `utc_hour = local_hour − tz_offset`
+2. Convert UTC → America/Chicago: `chi_hour = utc_hour + chi_offset` where `chi_offset = −5` (CDT, Mar–Nov) or `−6` (CST, Nov–Mar). Handle wraparound: if `chi_hour < 0`, add 24.
+
+Example calculations (April = CDT = UTC−5):
+- 7am `Europe/Amsterdam` (UTC+2): 7 − 2 = 5am UTC → 5 − 5 = **0 (midnight CDT)** → `0 0 * * *`
+- 3am `Europe/Amsterdam` (UTC+2): 3 − 2 = 1am UTC → 1 − 5 = −4 → +24 = **20 (8pm CDT)** → `0 20 * * *`
+- 7am `America/Chicago` CDT (UTC−5): already local → **7am CDT** → `0 7 * * *`
+- 3am `America/Chicago` CDT (UTC−5): already local → **3am CDT** → `0 3 * * *`
 
 Call `mcp__nanoclaw__update_task` with:
 - `task_id`: the task's ID
 - `schedule_type`: `"cron"`
-- `schedule_value`: the new cron string (e.g. `"0 5 * * *"`)
+- `schedule_value`: the cron string using America/Chicago hour (e.g. `"0 0 * * *"`)
 
 ## Step 4: Update state file
 
@@ -112,8 +119,8 @@ Send a proactive message via `mcp__nanoclaw__send_message` (no `reply_to`):
 📍 Timezone changed: <b>OLD_TZ → NEW_TZ</b>
 
 Rescheduled follow-me tasks:
-• <code>morning-brief</code>: 7am local = HH:MM UTC → cron <code>0 HH * * *</code>
-• <code>nightly-housekeeping</code>: 3am local = HH:MM UTC → cron <code>0 HH * * *</code>
+• <code>morning-brief</code>: 7am local = HH:MM UTC = HH:MM CDT → cron <code>0 HH * * *</code>
+• <code>nightly-housekeeping</code>: 3am local = HH:MM UTC = HH:MM CDT → cron <code>0 HH * * *</code>
 ```
 
 Replace OLD_TZ, NEW_TZ, and HH:MM with actual values. Use plain timezone names (e.g. `America/Chicago`, `Europe/Amsterdam`).

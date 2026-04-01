@@ -97,6 +97,19 @@ After archiving yesterday (Sunday), roll up the previous trusted week:
 4. Read `highlights.md` back to confirm the new section was appended and existing content preserved.
 5. Delete the previous week's trusted weekly file.
 
+## Step 8d: Process daily_discoveries
+
+1. Read `/workspace/trusted/memory/daily_discoveries.md`. If the file doesn't exist → skip silently.
+2. Scan for entries that do NOT have `✓ processed` marker.
+3. For each unprocessed entry:
+   - If **Promote to: RUNBOOK.md** → append the knowledge to the appropriate section of `/workspace/trusted/RUNBOOK.md` (or add a new section if no fitting section exists). Mark entry with `✓ processed`.
+   - If **Promote to: MEMORY.md** → append a new fact/index entry to `/workspace/trusted/MEMORY.md`. Mark entry with `✓ processed`.
+   - If **Promote to: unsure** → use judgment: if it's an operational workflow/location/tool-usage fact → RUNBOOK.md; if it's a behavioral preference or feedback → MEMORY.md. Mark entry with `✓ processed`.
+4. Write the updated `daily_discoveries.md` back with all processed markers in place.
+5. Read it back to confirm markers were saved.
+6. If promoted content was written to RUNBOOK.md or MEMORY.md, read those files back to confirm the additions are present.
+7. Silent on success (no report needed unless a file write failed).
+
 ## Step 9: Check watchlist
 
 Invoke the `check-watchlist` skill to check if any tracked upcoming shows have been released.
