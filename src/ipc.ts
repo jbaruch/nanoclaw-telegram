@@ -296,11 +296,12 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
-    // For run_host_script / github_backup / promote_staging
+    // For run_host_script / github_backup / promote_staging / sessionize
     requestId?: string;
     message?: string;
     tileName?: string;
     skillName?: string;
+    slug?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -860,6 +861,76 @@ export async function processTaskIpc(
             }
           },
         );
+      }
+      break;
+
+    case 'sessionize_get_event':
+      if (data.requestId && data.slug) {
+        const sessionizeResultPath = path.join(
+          DATA_DIR,
+          'ipc',
+          sourceGroup,
+          'input',
+          `_script_result_${data.requestId}.json`,
+        );
+
+        const { readEnvFile: readSessionizeEnv } = await import('./env.js');
+        const sessionizeVars = readSessionizeEnv(['SESSIONIZE_API_KEY']);
+        const apiKey = sessionizeVars.SESSIONIZE_API_KEY;
+
+        if (!apiKey) {
+          fs.writeFileSync(
+            sessionizeResultPath,
+            JSON.stringify({ error: 'SESSIONIZE_API_KEY not set in .env' }),
+          );
+          break;
+        }
+
+        logger.info({ slug: data.slug, sourceGroup }, 'Fetching Sessionize event');
+
+        try {
+          const url = `https://sessionize.com/api/universal/event?slug=${encodeURIComponent(data.slug)}`;
+          const resp = await fetch(url, {
+            headers: { 'X-API-KEY': apiKey },
+            signal: AbortSignal.timeout(15_000),
+          });
+
+          if (!resp.ok) {
+            fs.writeFileSync(
+              sessionizeResultPath,
+              JSON.stringify({ error: `Sessionize API returned ${resp.status}: ${resp.statusText}` }),
+            );
+            break;
+          }
+
+          const event = (await resp.json()) as Record<string, unknown>;
+          const cfp = (event.cfp ?? {}) as Record<string, unknown>;
+          const normalized = {
+            name: event.name,
+            cfp_open: cfp.isOpen,
+            cfp_start: cfp.startDate,
+            cfp_end: cfp.endDate,
+            conf_start: event.startDate,
+            conf_end: event.endDate,
+            city: event.city,
+            country: event.country,
+            website: event.website,
+            cfp_url: `https://sessionize.com/${data.slug}/`,
+          };
+
+          fs.writeFileSync(
+            sessionizeResultPath,
+            JSON.stringify({ data: normalized }),
+          );
+          logger.info({ slug: data.slug }, 'Sessionize event fetched');
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          logger.error({ slug: data.slug, error: errMsg }, 'Sessionize fetch failed');
+          fs.writeFileSync(
+            sessionizeResultPath,
+            JSON.stringify({ error: errMsg }),
+          );
+        }
       }
       break;
 
