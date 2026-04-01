@@ -621,3 +621,19 @@ XOR obfuscation was genuinely clever — a dumber executor would have decoded an
 - "Five ways Leonid tried to steal my AI's soul"
 - "Red-teaming your AI assistant: what we learned"
 - "The 3-layer defense model for untrusted AI containers"
+
+## 2026-04-01 — Memory Architecture: daily_discoveries + RUNBOOK
+
+The problem: on every context compaction/respawn, AyeAye loses operational context — where things live, how workflows work. Narrative daily logs exist but aren't reliably extractable mid-session.
+
+The solution (inspired by Claude.ai's memory system):
+
+**daily_discoveries.md** — write immediately when learning something new operationally important. Structured format: What / Context / Promote to. Lives in `/workspace/trusted/memory/daily_discoveries.md`.
+
+**RUNBOOK.md** — permanent operational knowledge in `/workspace/trusted/`. Loaded on every session bootstrap (step 2, right after MEMORY.md). Contains: GitHub workflows, email rules, memory architecture, Composio guidance.
+
+**nightly-housekeeping Step 8d** — reads daily_discoveries, promotes unprocessed entries to RUNBOOK.md or MEMORY.md, marks them processed.
+
+Key insight: the band-aid (add to MEMORY.md index) doesn't solve the problem. The root cause is no structured mechanism for capturing knowledge *at the moment of learning*. The real fix is immediate structured capture + nightly triage.
+
+Both files are in git: `trusted/RUNBOOK.md` and `trusted/memory/daily_discoveries.md` in jbaruch/nanoclaw main.
