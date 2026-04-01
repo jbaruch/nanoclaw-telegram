@@ -18,6 +18,9 @@
     },
     "skill-tile-placement": {
       "rules": "rules/skill-tile-placement.md"
+    },
+    "daily-discoveries-rule": {
+      "rules": "rules/daily-discoveries-rule.md"
     }
   },
   "skills": {
@@ -83,9 +86,6 @@
     },
     "promote-tiles": {
       "path": "skills/promote-tiles/SKILL.md"
-    },
-    "status": {
-      "path": "skills/status/SKILL.md"
     },
     "soul-searching": {
       "path": "skills/soul-searching/SKILL.md"

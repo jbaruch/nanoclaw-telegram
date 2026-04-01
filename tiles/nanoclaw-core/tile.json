@@ -24,9 +24,6 @@
     },
     "trusted-shared-memory": {
       "rules": "rules/trusted-shared-memory.md"
-    },
-    "daily-discoveries-rule": {
-      "rules": "rules/daily-discoveries-rule.md"
     }
   },
   "skills": {
@@ -35,21 +32,6 @@
     },
     "status": {
       "path": "skills/status/SKILL.md"
-    },
-    "check-cfps": {
-      "path": "skills/check-cfps/SKILL.md"
-    },
-    "heartbeat": {
-      "path": "skills/heartbeat/SKILL.md"
-    },
-    "morning-brief": {
-      "path": "skills/morning-brief/SKILL.md"
-    },
-    "nightly-housekeeping": {
-      "path": "skills/nightly-housekeeping/SKILL.md"
-    },
-    "task-tz-sync": {
-      "path": "skills/task-tz-sync/SKILL.md"
     }
   }
 }
