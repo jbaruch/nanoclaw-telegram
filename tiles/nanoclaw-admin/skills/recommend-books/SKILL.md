@@ -27,43 +27,34 @@ Read `/workspace/group/books-library.csv`. Key fields:
 
 Derive all counts and current state directly from the CSV — do not rely on hardcoded stats.
 
-**Positive signals** (from "Finished" books):
-- Favorite authors (by count)
-- Preferred genres and subgenres (by count)
-- Themes and styles from Description/Summary: action thrillers, sci-fi military, cozy Scottish crime, monster/creature action, epic fantasy, spy fiction, cozy mystery, etc.
-- Series he's completing — strong signal of sustained interest
+**From "Finished" books — build preference profile:**
+- Favorite authors (by finished count)
+- Preferred genres and subgenres (by finished count)
+- Themes and styles from Description/Summary
+- Series he's completing (strong signal of sustained interest)
 
-**Negative signals** (the main indicator of what didn't work):
-- `Read Status = "Reading"` — **strongest negative signal**. Identify all such books from the CSV at runtime. Avoid recommending the same author, genre, or style as any currently-in-progress title.
-- Unread books bought before 2024 = bought, never started, forgot — mild negative. Pattern: mostly business/self-help (7 Habits, Hooked, High Performance Habits) → this entire genre is low priority
-- Never recommend something from a genre that has multiple abandoned/long-forgotten books
+**Filtering rules — apply before generating any recommendations:**
+- `Read Status = "Reading"` → **strongest exclusion signal**: skip any author, genre, or style matching an in-progress book
+- `Purchase Date` before 2024 + `Read Status = "Unread"` → identify dominant genres of these books at runtime; treat those genres as low priority
+- Genre with multiple abandoned/long-forgotten unread titles → exclude entirely
 
 ## Step 3: Check new releases (web search required)
 
 My training cutoff is stale — always search the web for new books from top authors before recommending.
 
-Derive the top authors list from the CSV (highest "Finished" count). The following are illustrative examples of likely high-priority authors — confirm against the CSV at runtime:
-- Jeremy Robinson, Craig Alanson, JD Kirk, Daniel Silva, Jason Anspach + Nick Cole
-- John Scalzi, Harlan Coben, Brandon Sanderson, Nelson DeMille, James S.A. Corey
-- Any author Baruch specifically mentions
+Derive the top authors list from the CSV (highest "Finished" count), plus any author Baruch specifically mentions.
 
 For each top author, search: `"[Author name]" new book 2025 OR 2026 audiobook`
 
-Cross-reference results against books-library.csv — if new book is already in library, skip. If it's not in library and fits his taste → recommend it (flag as "not yet in your library, available on Audible").
+Cross-reference results against books-library.csv — if the new book is already in the library, skip. If it's not in the library and fits his taste → recommend it (flag as "not yet in your library, available on Audible").
 
 ## Step 4: Generate recommendations
 
-**If "what to read next" / unread queue:**
-- Filter `Read Status = Unread`
-- Prioritize: continuing an in-progress series > high-rated (≥4.3) > matching favorite genres
-- Flag series continuations clearly: "Book 5 of [Series] — you've finished 1-4"
-
-**If "something like X":**
-- Find books by same author, same genre/subgenre, or same series style
-- Check both Finished (for comparison) and Unread (for suggestions)
-
-**If general recommendation:**
-- Mix: 1-2 unread books that match top genres, 1 wildcard from a less-explored genre with high rating
+| Request type | Logic |
+|---|---|
+| "What to read next" / unread queue | Filter `Read Status = Unread`. Priority: continuing an in-progress series > high-rated (≥4.3) > matching favorite genres. Flag series continuations: "Book 5 of [Series] — you've finished 1-4" |
+| "Something like X" | Find books by same author, same genre/subgenre, or same series style. Check both Finished (for comparison) and Unread (for suggestions) |
+| General recommendation | Mix: 1-2 unread books matching top genres + 1 wildcard from a less-explored genre with high rating |
 
 ## Step 5: Format response
 
@@ -72,7 +63,6 @@ Keep it tight — 3-5 recommendations max. For each, write a **targeted pitch**,
 - Flag relevant facts: series length, whether finished, narrator quality if notable
 - Be honest about weaknesses ("первые 2 книги медленные", "автор ещё не закончил серию")
 
-Example format:
 ```
 *[Title]* — [Author]
 [1-2 sentence targeted pitch tied to Baruch's taste]

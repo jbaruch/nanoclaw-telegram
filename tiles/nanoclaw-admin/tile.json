@@ -7,11 +7,14 @@
     "admin-context": {
       "rules": "rules/admin-context.md"
     },
-    "slack-formatting": {
-      "rules": "rules/slack-formatting.md"
-    },
     "skill-tile-placement": {
       "rules": "rules/skill-tile-placement.md"
+    },
+    "composio-preamble": {
+      "rules": "rules/composio-preamble.md"
+    },
+    "event-filter-rules": {
+      "rules": "rules/event-filter-rules.md"
     }
   },
   "skills": {
@@ -45,9 +48,6 @@
     "brief-cleanup": {
       "path": "skills/brief-cleanup/SKILL.md"
     },
-    "check-system-health": {
-      "path": "skills/check-system-health/SKILL.md"
-    },
     "check-cfps": {
       "path": "skills/check-cfps/SKILL.md"
     },
@@ -74,6 +74,15 @@
     },
     "soul-searching": {
       "path": "skills/soul-searching/SKILL.md"
+    },
+    "promote-tiles": {
+      "path": "skills/promote-tiles/SKILL.md"
+    },
+    "verify-tiles": {
+      "path": "skills/verify-tiles/SKILL.md"
+    },
+    "scheduler-timezone": {
+      "path": "skills/scheduler-timezone/SKILL.md"
     }
   }
 }

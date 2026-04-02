@@ -7,33 +7,10 @@ description: Scans a Telegram-backed SQLite message store for user messages that
 
 Find user messages since last check that have no text reply from the bot.
 
-## Logic
-
-A message is considered answered if:
-1. There is a text reply from the bot (`is_from_me=1`) in the same chat with a later timestamp
-
-**Bot reactions do NOT count as answers.** A reaction is an ACK — it confirms the message was seen, not that it was responded to. Only an actual text reply constitutes an answer.
-
-## Current chat detection
-
-Detect which chat this heartbeat is running for by finding the most recent bot message:
-```sql
-SELECT chat_jid FROM messages WHERE is_from_me=1 ORDER BY timestamp DESC LIMIT 1
-```
-Use that `chat_jid` to scope all queries.
-
-## Schema validation
-
-Before executing, confirm the `reactions` table exists (used only to verify schema integrity, not for answer detection):
-```sql
-SELECT name FROM sqlite_master WHERE type='table' AND name='reactions'
-```
-If the `reactions` table is missing, log a warning but continue — answer detection only requires the `messages` table.
-
 ## Code
 
 ```python
-import sqlite3, json, os
+import sqlite3, json, os, sys
 
 STATE_FILE = '/workspace/group/nanoclaw-state.json'
 DB = '/workspace/store/messages.db'
@@ -54,15 +31,13 @@ except sqlite3.OperationalError as e:
     raise RuntimeError(f"Could not open message DB: {e}")
 
 try:
-    # Schema integrity check
     has_reactions = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='reactions'"
     ).fetchone()
     if not has_reactions:
-        import sys
         print("WARNING: reactions table not found — proceeding with text-reply-only detection", file=sys.stderr)
 
-    # Detect current chat from most recent bot message
+    # Detect current chat from the most recent bot message, then scope all queries to it
     row = conn.execute(
         "SELECT chat_jid FROM messages WHERE is_from_me=1 ORDER BY timestamp DESC LIMIT 1"
     ).fetchone()
@@ -72,11 +47,11 @@ try:
     else:
         current_chat = row[0]
 
-        # Per-chat timestamp cursor (avoids cross-chat ID collision bug)
         cursors = state.get('unanswered_cursors', {})
         last_ts = cursors.get(current_chat, '1970-01-01T00:00:00.000Z')
 
         try:
+            # A message is answered if any later is_from_me=1 message exists in the same chat
             rows = conn.execute('''
               SELECT m.id, m.sender_name, m.content, m.timestamp
               FROM messages m
@@ -120,3 +95,21 @@ finally:
 ## Output
 
 Return `unanswered` list to caller. If empty, return nothing.
+
+Each entry in `unanswered` is a tuple of `(id, sender_name, content, timestamp)`, where `id` is the message row ID, `sender_name` is the display name of the user, `content` is the raw message text, and `timestamp` is an ISO-8601 string.
+
+## Validation
+
+After retrieving results, confirm no returned message has a later bot reply in the same chat by running:
+
+```sql
+SELECT m.id, m.timestamp, r.timestamp AS bot_reply_ts
+FROM messages m
+JOIN messages r ON r.chat_jid = m.chat_jid
+                AND r.is_from_me = 1
+                AND r.timestamp > m.timestamp
+WHERE m.id IN (<comma-separated ids from unanswered>)
+LIMIT 10;
+```
+
+This query should return zero rows. Any match indicates the main query missed a reply and the result set should be discarded for investigation.

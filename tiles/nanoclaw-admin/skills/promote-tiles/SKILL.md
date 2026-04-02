@@ -1,6 +1,6 @@
 ---
 name: promote-tiles
-description: "Promotes staged skills and rules to tiles, then schedules nuke (20 min) and verify (21 min) so verify runs in a fresh container after tessl review+optimize completes. Use when promoting skills or rules via /promote-tiles."
+description: "Promotes staged skills and rules to tiles, then schedules nuke (20 min) and verify (21 min) so verify runs in a fresh container after tessl review+optimize completes. Use when the user wants to promote, deploy, or push staged skills or rules to tiles, or invokes /promote-tiles."
 ---
 
 # Promote Tiles
@@ -12,11 +12,18 @@ ls /workspace/group/skills/ 2>/dev/null
 find /workspace/group/staging -type f -name "*.md" 2>/dev/null
 ```
 
-For each staged skill in `/workspace/group/skills/`, determine which tile it belongs to:
-- Requires Composio/Google APIs/external credentials, or is main-channel-only → **nanoclaw-admin**
-- Needs no external APIs, useful to all containers → **nanoclaw-core**
+**If nothing is staged**, stop immediately and send a message indicating there is nothing staged to promote. Do not proceed to the remaining steps.
 
-When in doubt → **nanoclaw-admin**. See the skill-tile-placement rule.
+## Staging paths
+
+**Skills** — two paths, both work:
+- `/workspace/group/skills/{name}/SKILL.md` — new skills (works at runtime + staging)
+- `/workspace/group/skills/tessl__{name}/SKILL.md` — patches to existing tile skills
+
+**Rules** → `/workspace/group/staging/{tile-name}/{name}.md`
+- `staging/nanoclaw-core/`, `staging/nanoclaw-trusted/`, `staging/nanoclaw-admin/`, `staging/nanoclaw-untrusted/`
+
+For each staged item, determine which tile it belongs to by consulting the `skill-tile-placement` skill: `Skill(skill: 'tessl__skill-tile-placement')`. When in doubt → **nanoclaw-admin**.
 
 ## Step 2: Promote staged content
 
@@ -25,6 +32,8 @@ Call `mcp__nanoclaw__promote_staging` for each tile that has staged content:
 - `mcp__nanoclaw__promote_staging(tileName: "nanoclaw-core")` — if core skills or rules are staged
 
 If a specific skill was requested, pass `skillName` as well.
+
+**Validate the result**: Check the return value of each `promote_staging` call for errors. If any call indicates failure, stop and report the error via `mcp__nanoclaw__send_message` before proceeding. Do **not** schedule the nuke or verify tasks if promotion failed.
 
 ## Step 3: Send promotion result
 

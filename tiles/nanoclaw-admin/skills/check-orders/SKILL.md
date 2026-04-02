@@ -11,7 +11,7 @@ Read `/workspace/group/orders-db.json`. Note the `last_checked` timestamp — yo
 
 ## Step 2: Fetch order-related emails from Gmail
 
-Use COMPOSIO_SEARCH_TOOLS to find GMAIL_FETCH_EMAILS, then run all queries below (`max_results: 20`, `include_spam_trash: false`):
+Discover Gmail tool per `composio-preamble` rule, then run all queries below (`max_results: 20`, `include_spam_trash: false`):
 
 | # | Query |
 |---|-------|

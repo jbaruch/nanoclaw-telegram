@@ -3,7 +3,7 @@ name: heartbeat
 description: Periodic silent health check across system, calendar, and email for Baruch. Use when performing a scheduled heartbeat run, when Baruch asks about system status, disk usage, CPU load, upcoming calendar events, calendar conflicts, email alerts, unread emails, or wants a daily summary. Checks system health via a diagnostic script, scans Google Calendar for new invites or changes in the last 30 minutes, and flags high-priority unread emails (financial, banking, tax deadlines, software updates, conference action items, personal requests). Runs silently — reports only actionable items; queues ambiguous emails for morning cleanup; writes a memory log entry only when something is reported.
 ---
 
-You are AyeAye, Baruch's assistant. Run silently — report ONLY actionable items.
+You are AyeAye, Baruch's assistant. **Global silence rule: run every step silently — report ONLY actionable items. Never output "all clear", acknowledgements, or status confirmations when there is nothing to report.**
 
 ## Step 0.5: Timezone sync
 Invoke the `task-tz-sync` skill. It runs silently if no timezone change is detected; sends a notification to Baruch if his timezone has changed and tasks were rescheduled.
@@ -17,7 +17,7 @@ Read `/workspace/group/task-tz-state.json`. For each entry in `follow_me_tasks`:
    - `nightly-housekeeping` → `Skill(skill: "tessl__nightly-housekeeping")`
 4. The invoked skill updates `last_run_date` itself — do NOT update it here
 
-Run silently. Only surface output if the invoked skill itself has something to report.
+Only surface output if the invoked skill itself has something to report.
 
 ## Step 0.7: Unanswered message check
 Invoke `Skill(skill: "tessl__check-unanswered")`.
@@ -31,8 +31,6 @@ For each unanswered message returned:
    - **Informational/rhetorical:** statement that didn't need a response → can skip or give brief "noted"
 3. Reply using `mcp__nanoclaw__send_message` with `reply_to: "<id>"` so the response threads correctly
 4. Use common sense about urgency, tone, and whether action is still possible
-
-Run silently if no unanswered messages found.
 
 ## Step 0: Pending response check
 Read `/workspace/group/session-state.json`. If `pending_response` is non-null:
@@ -62,33 +60,33 @@ Report: new calendar invites needing a response (responseStatus = needsAction).
 Use GMAIL_FETCH_EMAILS with `query: "is:unread in:inbox"`, max_results: 20, verbose: false.
 **Always open the full email** (GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID) when subject/preview is insufficient to classify — especially for reservations, financial emails, or anything with dates.
 
-### Classification overview
-Surface emails that require Baruch's attention or awareness; silently skip routine noise; queue anything uncertain for morning cleanup. Details below.
+### Email classification
 
-### Report (surface to Baruch):
-- **Action required:** calendar invites, interview/meeting requests from real people, personal requests or questions from known contacts
-- **Financial / deadlines:** tax reminders, banking alerts (JPMorgan, construction draws/mortgage), invoice/billing emails that may need expensing
-- **Tools & work:** software update notifications for tools Baruch actively uses (e.g., Synergy, JetBrains), conference speaker action items (acceptance, guidelines, action required)
-- **CFP submissions:** emails confirming a CFP submission was received (e.g. "Your submission to X has been received", "Talk submitted", "Proposal received") → silently update `/workspace/group/cfp-state.json` entry to `status: "sent"` (match by conference name), do NOT report to Baruch unless the slug is not found in state
+**Surface to Baruch:**
+- Action required: calendar invites, interview/meeting requests from real people, personal requests or questions from known contacts
+- Financial / deadlines: tax reminders, banking alerts, invoices/billing that may need expensing
+- Tools & work: software updates for tools Baruch actively uses; conference speaker action items (acceptance, guidelines, action required)
+- CFP submissions: silently update `/workspace/group/cfp-state.json` entry to `status: "sent"` (match by conference name); report only if slug not found in state
 
-### Do NOT report:
-- Newsletters, digests, and promotional emails — unless the promotion is for a tool Baruch actively uses
-- Known noise senders (LinkedIn alerts, Points Path, Simple Flying, Ground News, Tennessean, USPS Informed Delivery) — treat as silent unless flagged urgent
-- Routine order/shipping/delivery confirmations — unless something is unusual
-- Review requests, social media notifications, Google Alerts — unless urgent news
+**Silent — skip without reporting:**
 
-### Ambiguous → cleanup:
-If unsure whether an email is actionable, add to `/workspace/group/morning-brief-pending.json` under `cleanup_items`:
+| Category | Skip unless… |
+|---|---|
+| Newsletters, digests, promos | Promo is for a tool Baruch actively uses |
+| LinkedIn, Points Path, Simple Flying, Ground News, Tennessean, USPS Informed Delivery | Flagged urgent |
+| Order / shipping / delivery confirmations | Something unusual |
+| Review requests, social media notifications, Google Alerts | Urgent news |
+
+**Ambiguous → queue for morning cleanup:**
+If unsure whether an email is actionable, append to `/workspace/group/morning-brief-pending.json` under `cleanup_items`:
 ```json
 {"type": "email", "subject": "...", "sender": "...", "question": "Actionable?"}
 ```
-Do NOT report ambiguous items directly — queue them for morning cleanup.
 
-### Already reported:
-Skip emails already surfaced in a previous heartbeat this session. Compare against what was sent in recent messages to avoid duplicates.
+**Already reported:** Skip emails already surfaced in a previous heartbeat this session — compare against recent messages to avoid duplicates.
 
 ## Step 4: Update daily memory log
-If anything was reported to Baruch this heartbeat (email, calendar, system issue), append a brief entry to `/workspace/group/memory/daily/YYYY-MM-DD.md` (today's date in America/Chicago or current local time):
+If anything was reported this heartbeat (email, calendar, system issue), append a brief entry to `/workspace/group/memory/daily/YYYY-MM-DD.md` (today's date in `current_tz`):
 ```
 - HH:MM UTC — [what was reported, one line]
 ```
@@ -118,4 +116,4 @@ The script checks messages from the last 30 minutes for forbidden internal-monol
 **If no violations:** skip entirely — silent.
 
 ## Step 5: Silence
-If nothing to report, output nothing. No "all clear", no acknowledgement.
+If nothing to report, output nothing.

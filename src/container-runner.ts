@@ -174,11 +174,7 @@ function buildVolumeMounts(
 
   // Tiles come from the tessl registry (installed by orchestrator).
   // Main/trusted: all tiles. Others: nanoclaw-core only.
-  const trustedTiles = [
-    'nanoclaw-core',
-    'nanoclaw-admin',
-    // reclaim-tripit-sync removed — sync runs host-side via run_host_script
-  ];
+  const trustedTiles = ['nanoclaw-core', 'nanoclaw-admin', 'nanoclaw-trusted'];
   const untrustedTiles = ['nanoclaw-core', 'nanoclaw-untrusted'];
   const tilesToInstall =
     isMain || group.containerConfig?.trusted ? trustedTiles : untrustedTiles;

@@ -886,7 +886,10 @@ export async function processTaskIpc(
           break;
         }
 
-        logger.info({ slug: data.slug, sourceGroup }, 'Fetching Sessionize event');
+        logger.info(
+          { slug: data.slug, sourceGroup },
+          'Fetching Sessionize event',
+        );
 
         try {
           const url = `https://sessionize.com/api/universal/event?slug=${encodeURIComponent(data.slug)}`;
@@ -898,7 +901,9 @@ export async function processTaskIpc(
           if (!resp.ok) {
             fs.writeFileSync(
               sessionizeResultPath,
-              JSON.stringify({ error: `Sessionize API returned ${resp.status}: ${resp.statusText}` }),
+              JSON.stringify({
+                error: `Sessionize API returned ${resp.status}: ${resp.statusText}`,
+              }),
             );
             break;
           }
@@ -925,7 +930,10 @@ export async function processTaskIpc(
           logger.info({ slug: data.slug }, 'Sessionize event fetched');
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
-          logger.error({ slug: data.slug, error: errMsg }, 'Sessionize fetch failed');
+          logger.error(
+            { slug: data.slug, error: errMsg },
+            'Sessionize fetch failed',
+          );
           fs.writeFileSync(
             sessionizeResultPath,
             JSON.stringify({ error: errMsg }),

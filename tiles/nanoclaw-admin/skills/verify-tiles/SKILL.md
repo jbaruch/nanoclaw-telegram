@@ -1,6 +1,6 @@
 ---
 name: verify-tiles
-description: Verifies tile installation after promotion — compares installed tiles against staging, removes stale staging copies if content matches, reports mismatches. Runs in a fresh container after promote-tiles nukes the old one. Use after promotion or when skill versions seem wrong.
+description: Verifies tile installation after promotion — compares installed tiles against staging, removes stale staging copies if content matches, reports mismatches. Runs in a fresh container after tile promotion. Use after promoting tiles, deploying skill updates, or when installed skill versions appear incorrect or out of date.
 ---
 
 # Verify Tile Installation
@@ -15,8 +15,23 @@ ls /workspace/group/skills/ 2>/dev/null
 
 For each `tessl__<name>` directory found:
 1. Read staging: `/workspace/group/skills/tessl__<name>/SKILL.md`
-2. Read installed tile: `/home/node/.claude/.tessl/tiles/jbaruch/nanoclaw-admin/skills/<name>/SKILL.md` (or `nanoclaw-core/...`)
-3. Compare — small wording differences are OK; missing steps, removed rules, or logic changes = **MISMATCH**
+2. Read installed tile: find it under `/home/node/.claude/.tessl/tiles/*/` (check nanoclaw-admin, nanoclaw-core, nanoclaw-trusted)
+3. Compare using `diff` to detect meaningful changes:
+
+```bash
+diff /workspace/group/skills/tessl__<name>/SKILL.md \
+     /home/node/.claude/.tessl/tiles/<bucket>/tessl__<name>/SKILL.md
+```
+
+**Comparison criteria:**
+- **MATCH**: `diff` output is empty or only shows trivial whitespace/punctuation differences
+- **MISMATCH**: `diff` shows removed steps, altered rules, changed logic, or missing sections
+
+Alternatively, compare SHA hashes for a quick exact-match check:
+```bash
+sha256sum /workspace/group/skills/tessl__<name>/SKILL.md
+sha256sum /home/node/.claude/.tessl/tiles/<bucket>/tessl__<name>/SKILL.md
+```
 
 ## Step 2: Act on comparison result
 

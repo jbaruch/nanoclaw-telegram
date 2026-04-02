@@ -5,6 +5,8 @@ description: Reads pending cleanup items from morning-brief-pending.json and sen
 
 You are AyeAye, Baruch's assistant. Send all pending decisions/questions as separate async messages for Baruch to respond to at his own pace.
 
+**Note:** This skill is invoked automatically from `morning-brief` (Step 6) every run. Also available on-demand. See the `morning-brief` skill for how items are added to the pending queue.
+
 ## Step 1: Read pending items
 Read `/workspace/group/morning-brief-pending.json`. Extract `cleanup_items` array.
 If file doesn't exist or `cleanup_items` is empty — do nothing, stay silent.
@@ -43,10 +45,18 @@ Track each send result (success/failure) before proceeding.
 This prevents data loss from a partial send.
 
 ## Step 4: Learn from responses
-When Baruch responds to cleanup items:
-- Update classification rules in `/workspace/group/MEMORY.md` based on his answers. Add or update entries under the `## Email Classification Rules` section using the pattern: `- {sender domain or keyword}: {actionable|noise|review}`.
-- If the item was an email classification question, append the pattern to `/workspace/group/email-classification-feedback.json` so future similar emails are handled automatically. That file holds an array of feedback records; append a new object with this schema:
-  ```json
-  { "pattern": "<sender/keyword>", "label": "<actionable|noise>", "source": "baruch-response", "date": "<ISO date>" }
-  ```
-- Treat each response as a training signal — the goal is to stop asking the same question twice.
+When Baruch responds to cleanup items, treat each reply as a training signal — the goal is to stop asking the same question twice.
+
+### 4a. Update MEMORY.md
+Add or update entries under the `## Email Classification Rules` section of `/workspace/group/MEMORY.md` using the pattern:
+```
+- {sender domain or keyword}: {actionable|noise|review}
+```
+If that section does not yet exist, create it at the end of the file.
+
+### 4b. Update email classification feedback (email items only)
+If the item was an email classification question, append a record to `/workspace/group/email-classification-feedback.json` so future similar emails are handled automatically:
+```json
+{ "pattern": "<sender/keyword>", "label": "<actionable|noise>", "source": "baruch-response", "date": "<ISO date>" }
+```
+That file holds an array of feedback records. If it does not yet exist, initialise it as `[]` before appending.

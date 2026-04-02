@@ -1,6 +1,6 @@
 ---
 name: status
-description: Quick read-only health check — session context, workspace mounts, tool availability, and task snapshot. Use when the user asks for system status or runs /status.
+description: Quick read-only health check — session context, workspace mounts, tool availability, and task snapshot. Use when the user asks for system status, health check, diagnostics, system info, check environment, what tools are available, or runs /status.
 ---
 
 # /status — System Status Check
@@ -51,30 +51,30 @@ echo "=== IPC ==="
 ls /workspace/ipc/ 2>/dev/null
 ```
 
-### 4. Tool availability
+### 4. Tool availability and container utilities
 
-Confirm which tool families are available to you:
-
-- **Core:** Bash, Read, Write, Edit, Glob, Grep
-- **Web:** WebSearch, WebFetch
-- **Orchestration:** Task, TaskOutput, TaskStop, TeamCreate, TeamDelete, SendMessage
-- **MCP:** mcp__nanoclaw__* (send_message, schedule_task, list_tasks, pause_task, resume_task, cancel_task, update_task, register_group)
-
-### 5. Container utilities
+Check each tool family and report **available** or **unavailable**:
 
 ```bash
-which agent-browser 2>/dev/null && echo "agent-browser: available" || echo "agent-browser: not installed"
+# Core — file system and shell tools
+echo "Read/Write/Bash: available"
+
+# Web — browser and fetch tools
+which agent-browser 2>/dev/null && echo "Web (agent-browser): available" || echo "Web (agent-browser): unavailable"
+
+# Orchestration — sub-agent / task tools
+ls /workspace/ipc/ 2>/dev/null && echo "Orchestration (IPC): available" || echo "Orchestration (IPC): unavailable"
+
+# Container utilities
 node --version 2>/dev/null
 claude --version 2>/dev/null
 ```
 
-### 6. Task snapshot
+Then call `mcp__nanoclaw__list_tasks` — if it returns without error, report **MCP: available** and use the result for the task snapshot (step 5); if it errors, report **MCP: unavailable**.
 
-Use the MCP tool to list tasks:
+### 5. Task snapshot
 
-```
-Call mcp__nanoclaw__list_tasks to get scheduled tasks.
-```
+Use the result from the `mcp__nanoclaw__list_tasks` call above.
 
 If no tasks exist, report "No scheduled tasks."
 

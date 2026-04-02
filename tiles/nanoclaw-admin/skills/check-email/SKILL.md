@@ -37,7 +37,7 @@ If the file doesn't exist or is empty, proceed with default rules only.
 
 ## Fetch
 
-Use `COMPOSIO_SEARCH_TOOLS` to find `GMAIL_FETCH_EMAILS`, then fetch recent emails:
+Discover Gmail tool per `composio-preamble` rule, then fetch recent emails:
 - max_results: 20
 - label_ids: ["INBOX"]
 - Do NOT include spam/trash

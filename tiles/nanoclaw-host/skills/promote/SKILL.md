@@ -1,11 +1,11 @@
 ---
 name: promote
-description: Promote AyeAye-created skills and rules from NAS staging to tessl tiles. Runs the full pipeline — pull, optimize, lint, commit, push, deploy, publish, install. Use when Baruch says there are new items on staging, or after check-staging shows pending items.
+description: Promote the agent-created skills and rules from NAS staging to tessl tiles. Runs the full pipeline — pull, optimize, lint, commit, push, deploy, publish, install. Use when the user says there are new items on staging, or after check-staging shows pending items.
 ---
 
 # Promote from Staging
 
-Promotes skills and rules from AyeAye's NAS staging area to tessl tiles via `scripts/promote-skill.sh`.
+Promotes skills and rules from the agent's NAS staging area to tessl tiles via `scripts/promote-skill.sh`.
 
 ## Before promoting
 
@@ -41,7 +41,7 @@ The script handles both staging paths:
 ## After promoting
 
 1. Run `./scripts/reconcile-tiles.sh` to verify everything is in sync
-2. Tell AyeAye to run `/verify-tiles` to clean up staging copies
+2. Tell the agent to run `/verify-tiles` to clean up staging copies
 
 ## If publish times out
 
