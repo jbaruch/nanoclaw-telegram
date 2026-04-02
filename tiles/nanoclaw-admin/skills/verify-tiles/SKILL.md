@@ -1,11 +1,11 @@
 ---
 name: verify-tiles
-description: Verifies tile installation after promotion — compares installed tiles against staging, removes stale staging copies if content matches, reports mismatches. Runs in a fresh container after tile promotion. Use after promoting tiles, deploying skill updates, or when installed skill versions appear incorrect or out of date.
+description: Verifies tile installation after promotion — compares installed plugins against staging, removes stale staging copies if content matches, reports mismatches. Runs in a fresh container after plugin promotion. Use after promoting tiles, deploying skill updates, or when installed skill versions appear incorrect or out of date.
 ---
 
-# Verify Tile Installation
+# Verify Plugin Installation
 
-## Step 1: Compare staging skills against installed tiles
+## Step 1: Compare staging skills against installed plugins
 
 For each skill in `/workspace/group/skills/`, find the corresponding installed version:
 
@@ -35,7 +35,7 @@ sha256sum /home/node/.claude/.tessl/tiles/<bucket>/tessl__<name>/SKILL.md
 
 ## Step 2: Act on comparison result
 
-**If MATCH** (staging content is faithfully in the tile):
+**If MATCH** (staging content is faithfully in the plugin):
 ```bash
 rm -rf /workspace/group/skills/tessl__<name>
 ```

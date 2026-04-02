@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Promote AyeAye-created skills and rules from NAS staging to tessl tiles.
+# Promote AyeAye-created skills and rules from NAS staging to tessl plugins.
 #
 # Usage:
 #   ./scripts/promote-skill.sh                    # promote ALL staging skills + rules
@@ -189,7 +189,7 @@ echo ""
 # --- 4. Lint ---
 
 echo "4. Linting..."
-tessl tile lint "$TILE_DIR"
+tessl plugin lint "$TILE_DIR"
 echo ""
 
 # --- 5. Commit, push, publish, deploy ---
@@ -211,12 +211,12 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 git push origin main
 
 echo ""
-echo "Deploying to NAS (tiles are delivered from git, not tessl registry)..."
+echo "Deploying to NAS (plugins are delivered from git, not tessl registry)..."
 nas "cd $NAS_PROJECT_DIR && git pull && docker compose up -d --build"
 
 echo ""
 echo "Publishing to tessl registry..."
-if tessl tile publish --bump patch "$TILE_DIR"; then
+if tessl plugin publish --bump patch "$TILE_DIR"; then
   git add "$TILE_JSON"
   git commit -m "chore: bump $TILE_NAME version after publish
 
@@ -225,8 +225,8 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
   nas "cd $NAS_PROJECT_DIR && git pull"
 
   echo ""
-  echo "Pulling tiles from registry into orchestrator..."
-  # IMPORTANT: install ALL tiles together — vendored mode removes tiles not in the install list
+  echo "Pulling plugins from registry into orchestrator..."
+  # IMPORTANT: install ALL plugins together — vendored mode removes tiles not in the install list
   TILE_OWNER_VAL=$(grep TILE_OWNER "$PROJECT_ROOT/.env" 2>/dev/null | cut -d= -f2)
   TILE_OWNER_VAL="${TILE_OWNER_VAL:-nanoclaw}"
   ALL_TILES=$(ls "$PROJECT_ROOT/tiles/" | while read t; do echo "$TILE_OWNER_VAL/$t"; done | tr '\n' ' ')
@@ -234,13 +234,13 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
     echo "  ERROR: tessl update in orchestrator failed"
     exit 1
   }
-  # Kill all running agent containers so they respawn with new tiles
+  # Kill all running agent containers so they respawn with new plugins
   echo "Killing stale agent containers..."
   nas "docker ps --format '{{.ID}} {{.Names}}' | grep nanoclaw-telegram | awk '{print \$1}' | xargs -r docker kill" || true
 else
-  echo "  tessl publish failed — tiles deployed via git only"
+  echo "  tessl publish failed — plugins deployed via git only"
 fi
 
 echo ""
 echo "Done! $PROMOTED_COUNT item(s) promoted and deployed."
-echo "Tell AyeAye to run /verify-tiles to clean up staging copies."
+echo "Tell AyeAye to run /verify-plugins to clean up staging copies."
