@@ -29,6 +29,9 @@
   "skills": {
     "status": {
       "path": "skills/status/SKILL.md"
+    },
+    "morning-brief": {
+      "path": "skills/morning-brief/SKILL.md"
     }
   }
 }
