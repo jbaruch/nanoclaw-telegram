@@ -44,6 +44,7 @@ export interface ContainerInput {
   groupFolder: string;
   chatJid: string;
   isMain: boolean;
+  isTrusted?: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
@@ -102,14 +103,25 @@ function buildVolumeMounts(
   });
 
   // Global memory directory (SOUL.md, shared CLAUDE.md).
-  // Only trusted + main get this. Untrusted must NOT see SOUL.md.
+  // Trusted + main get the full directory. Untrusted get only SOUL-untrusted.md
+  // mounted as SOUL.md so core-behavior's "read SOUL.md" still works.
+  const globalDir = path.join(GROUPS_DIR, 'global');
   if (isMain || group.containerConfig?.trusted) {
-    const globalDir = path.join(GROUPS_DIR, 'global');
     if (fs.existsSync(globalDir)) {
       mounts.push({
         hostPath: toHostPath(globalDir),
         containerPath: '/workspace/global',
-        readonly: !isMain, // main can update global memory, trusted read-only
+        readonly: !isMain,
+      });
+    }
+  } else {
+    // Untrusted: mount only the sanitized SOUL as a single file
+    const untrustedSoul = path.join(globalDir, 'SOUL-untrusted.md');
+    if (fs.existsSync(untrustedSoul)) {
+      mounts.push({
+        hostPath: toHostPath(untrustedSoul),
+        containerPath: '/workspace/global/SOUL.md',
+        readonly: true,
       });
     }
   }
@@ -126,15 +138,17 @@ function buildVolumeMounts(
     }
   }
 
-  // Store directory (messages.db) — read-only access for all groups.
-  // Needed for heartbeat checks (unanswered messages, stuck tasks, DB size).
-  const storeDir = path.join(process.cwd(), 'store');
-  if (fs.existsSync(storeDir)) {
-    mounts.push({
-      hostPath: toHostPath(storeDir),
-      containerPath: '/workspace/store',
-      readonly: true,
-    });
+  // Store directory (messages.db) — trusted + main only.
+  // Contains ALL messages from ALL groups. Untrusted must NOT have access.
+  if (isMain || group.containerConfig?.trusted) {
+    const storeDir = path.join(process.cwd(), 'store');
+    if (fs.existsSync(storeDir)) {
+      mounts.push({
+        hostPath: toHostPath(storeDir),
+        containerPath: '/workspace/store',
+        readonly: true,
+      });
+    }
   }
 
   // Per-group Claude sessions directory (isolated from other groups)
