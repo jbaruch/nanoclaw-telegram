@@ -1,1 +1,24 @@
-{"name":"nanoclaw-orchestrator","mode":"vendored","dependencies":{}}
+{
+  "name": "nanoclaw-orchestrator",
+  "mode": "managed",
+  "dependencies": {
+    "jbaruch/nanoclaw-core": {
+      "version": "0.1.37"
+    },
+    "jbaruch/nanoclaw-admin": {
+      "version": "0.1.43"
+    },
+    "jbaruch/nanoclaw-untrusted": {
+      "version": "0.1.5"
+    },
+    "jbaruch/nanoclaw-trusted": {
+      "version": "0.1.1"
+    },
+    "jbaruch/reclaim-tripit-sync": {
+      "version": "0.1.2"
+    },
+    "jbaruch/nanoclaw-host": {
+      "version": "0.1.2"
+    }
+  }
+}

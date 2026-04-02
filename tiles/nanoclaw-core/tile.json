@@ -1,6 +1,6 @@
 {
   "name": "jbaruch/nanoclaw-core",
-  "version": "0.1.36",
+  "version": "0.1.37",
   "summary": "Core behavioral rules and skills for NanoClaw personal assistant agents. Always-on rules for communication, async tasks, memory, and formatting. On-demand skills for message formatting, task scheduling, heartbeat orchestration, and checks (unanswered messages, calendar, email, CFPs).",
   "private": false,
   "rules": {
@@ -18,9 +18,6 @@
     },
     "temporal-awareness": {
       "rules": "rules/temporal-awareness.md"
-    },
-    "filesystem-inventory": {
-      "rules": "rules/filesystem-inventory.md"
     },
     "ground-truth": {
       "rules": "rules/ground-truth.md"
