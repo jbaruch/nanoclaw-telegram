@@ -38,3 +38,5 @@ groups/global/*
 agents-sdk-docs
 scripts/heartbeat-external.conf
 scripts/heartbeat-external.state
+._*
+trusted/
