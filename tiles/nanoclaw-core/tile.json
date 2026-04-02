@@ -18,6 +18,9 @@
     },
     "temporal-awareness": {
       "rules": "rules/temporal-awareness.md"
+    },
+    "filesystem-inventory": {
+      "rules": "rules/filesystem-inventory.md"
     }
   },
   "skills": {
