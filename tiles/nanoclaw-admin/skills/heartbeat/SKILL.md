@@ -39,8 +39,12 @@ Read `/workspace/group/session-state.json`. If `pending_response` is non-null:
 - Then continue with the rest of the heartbeat
 
 ## Step 1: System checks
-Run: `python3 /workspace/group/scripts/heartbeat-checks.py`
-If `issues` array is non-empty → report. Otherwise silent.
+Run both checks in parallel:
+
+1. `python3 /workspace/group/scripts/heartbeat-checks.py` — container-level metrics (CPU, disk, memory)
+2. `Skill(skill: "tessl__check-system-health")` — NanoClaw health (stuck tasks, DB size, task run failures)
+
+If `issues` array from the script is non-empty → report. If check-system-health finds issues → it reports directly. Otherwise silent.
 
 Also check container age: read `container_started` from `/workspace/group/session-state.json`, compute age in days. If age ≥ 14 days → add to report:
 ```
