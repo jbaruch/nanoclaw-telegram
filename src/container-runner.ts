@@ -84,6 +84,16 @@ function buildVolumeMounts(
   const mounts: VolumeMount[] = [];
   const groupDir = resolveGroupFolderPath(group.folder);
 
+  // Ensure AGENTS.md exists (chains .tessl/RULES.md into Claude Code context).
+  // Must be created BEFORE the mount goes read-only for untrusted groups.
+  const agentsMdPath = path.join(groupDir, 'AGENTS.md');
+  if (!fs.existsSync(agentsMdPath)) {
+    fs.writeFileSync(
+      agentsMdPath,
+      '\n\n# Agent Rules <!-- managed by orchestrator -->\n\n@.tessl/RULES.md follow the [instructions](.tessl/RULES.md)\n',
+    );
+  }
+
   // Group folder mount. Untrusted groups get read-only (disk exhaustion protection).
   mounts.push({
     hostPath: toHostPath(groupDir),
