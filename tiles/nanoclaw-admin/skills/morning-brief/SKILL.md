@@ -6,7 +6,7 @@ description: Generates and delivers Baruch's daily morning briefing. Fetches tod
 You are AyeAye, Baruch's assistant.
 
 ## Tool Discovery (run once at start)
-Discover tools per `composio-preamble` rule: Calendar, Tasks (list + get), Scheduler.
+Discover tools per `composio-preamble` rule: Calendar, Tasks (list + get + update), Scheduler.
 
 **Default failure behavior:** If any step fails (tool unavailable, non-zero exit, no output, file missing), note the failure, treat missing data as empty, and continue — unless a step specifies otherwise.
 
@@ -55,17 +55,38 @@ Output includes `pending.undated_tasks` and `pending.cleanup_items` from `mornin
 
 ## Step 3a: Auto-assign dates to undated tasks
 
-For each task in `pending.undated_tasks`, attempt to assign a due date automatically:
+For each task in `pending.undated_tasks`, attempt to assign a due date automatically by reading the linked email.
 
-1. **Check for linked email** — Google Tasks created from Gmail have a source email URL in the `notes` field. If present, fetch the email and read it for deadlines ("respond by...", "deadline is...", event dates, urgency signals).
+### 3a-1: Find the linked email
 
-2. **Infer from email content** — explicit deadlines, event dates, urgency words ("ASAP", "today", "this week"). Assign the appropriate date.
+Google Tasks tasks created from Gmail have a link to the source email in the task's `notes` field (a URL like `https://mail.google.com/mail/u/0/#inbox/...`). Check `task.notes` for such a URL.
 
-3. **Fallback to title inference** — if no email found, infer from the task title (conference name → known dates, "follow up" → today/tomorrow, "review PR" → today).
+- **If a link is present:** Extract the message ID from the URL (the part after `#inbox/` or `#all/`). Fetch the email body using GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID (discover per `composio-preamble`). Read the full email content.
+- **If no link is present:** Search Gmail for emails related to the task title. Pick the most relevant result and read it.
 
-4. **Apply the date** — call the Tasks update tool to set the due date, remove from the undated display list.
+### 3a-2: Determine due date from email content
 
-Only ask the owner if you genuinely cannot determine any reasonable date after steps 1-3. Include in "📋 Без даты:" with a specific question. If all dates were assigned, omit the section entirely.
+Read the fetched email body and determine an appropriate due date:
+- Explicit deadlines ("please respond by...", "deadline is...", "due by...")
+- Event dates mentioned (conference dates, meeting dates, schedule references)
+- Urgency signals ("ASAP", "urgent", "today", "this week")
+- Context clues (voting email for an event next month → assign before voting closes)
+
+### 3a-3: Fallback — infer from title only
+
+If no email can be found, fall back to title-based inference:
+- Conference/event name → infer from knowledge of that event's dates
+- "Follow up with X" → today or tomorrow
+- "Review PR" → today
+- Generic tasks with no time signal → today
+
+### 3a-4: Apply the date
+
+For each task where a date was determined: call the Tasks update tool to set the due date, remove from the `undated_tasks` display list.
+
+**Only ask the owner if** after reading the email AND attempting title inference, you genuinely cannot determine any reasonable date. Include that task in "📋 Без даты:" with a specific question.
+
+If all dates were assigned, omit the section entirely.
 
 ## Step 4a: Check urgent CFPs
 Run: `python3 /workspace/group/scripts/morning-brief-cfp.py`
@@ -103,9 +124,7 @@ Format in Telegram HTML/style (*bold* single asterisks, • bullets, no markdown
 • Ответить на письмо Михаила
 
 *📋 Без даты:*
-• Разобрать инбокс
-• Обновить CV
-_Нужно установить дату для этих задач_
+• Разобрать инбокс — <i>когда это нужно сделать?</i>
 
 _2 события, 3 задачи_
 ```
@@ -113,7 +132,7 @@ _2 события, 3 задачи_
 **Section rules:**
 - *📅 Сегодня:* — timed events with local time in `current_tz`.
 - *✅ Задачи:* — overdue tasks (original due date, marked ⚠️) + tasks due today. Omit if no tasks.
-- *📋 Без даты:* — list titles from `undated_tasks` with prompt to set dates. Omit if array is empty.
+- *📋 Без даты:* — only tasks where AyeAye could NOT infer a date (see Step 3a). Each entry includes a specific question. Omit entirely if Step 3a assigned dates to all undated tasks.
 - *📢 CFP дедлайны:* — CFPs closing within 7 days (from Step 4a). Omit if none.
 - *📦 Заказы:* — flagged orders (from Step 4). Omit if none.
 - Footer: `_N событий, M задач_`

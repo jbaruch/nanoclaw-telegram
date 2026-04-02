@@ -12,10 +12,10 @@ Invoke the `task-tz-sync` skill. It runs silently if no timezone change is detec
 Read `/workspace/group/task-tz-state.json`. For each entry in `follow_me_tasks`:
 1. Compute current local time in `current_tz` (use UTC offsets from the timezone table in `task-tz-sync`)
 2. If `local_hour:local_minute` has already passed today **and** `last_run_date` ≠ today's local date → the task was missed
-3. For each missed task, invoke its skill immediately:
+3. For each missed task, **immediately write `last_run_date = today's local date`** for that task into `task-tz-state.json` (optimistic lock — prevents a second heartbeat from double-triggering while the skill is still running). Then invoke the skill:
    - `morning-brief` → `Skill(skill: "tessl__morning-brief")`
    - `nightly-housekeeping` → `Skill(skill: "tessl__nightly-housekeeping")`
-4. The invoked skill updates `last_run_date` itself — do NOT update it here
+4. The skill also updates `last_run_date` at the end (belt-and-suspenders) — but heartbeat sets it first
 
 Only surface output if the invoked skill itself has something to report.
 
