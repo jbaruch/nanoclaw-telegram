@@ -74,6 +74,38 @@ server.tool(
 );
 
 server.tool(
+  'send_file',
+  'Send a file from the workspace to the user via Telegram. The file must exist on the container filesystem. Use for generated reports, exports, or any file the user asked you to create. Trusted containers only.',
+  {
+    filePath: z.string().describe('Absolute path to the file in the container (e.g., /workspace/group/report.csv)'),
+    caption: z.string().optional().describe('Optional caption to send with the file'),
+    reply_to: z.string().optional().describe('Message ID to reply to'),
+  },
+  async (args) => {
+    if (!fs.existsSync(args.filePath)) {
+      return {
+        content: [{ type: 'text' as const, text: `File not found: ${args.filePath}` }],
+        isError: true,
+      };
+    }
+
+    const data: Record<string, string | undefined> = {
+      type: 'send_file',
+      chatJid,
+      filePath: args.filePath,
+      caption: args.caption,
+      replyToMessageId: args.reply_to,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return { content: [{ type: 'text' as const, text: `File queued for sending: ${path.basename(args.filePath)}` }] };
+  },
+);
+
+server.tool(
   'react_to_message',
   'React to a message with an emoji. Use to acknowledge, approve, or express sentiment without sending a full text reply. Invalid emoji falls back to 👍.',
   {

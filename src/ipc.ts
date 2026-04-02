@@ -7,6 +7,7 @@ import { CronExpressionParser } from 'cron-parser';
 import {
   ASSISTANT_NAME,
   DATA_DIR,
+  GROUPS_DIR,
   IPC_POLL_INTERVAL,
   TIMEZONE,
 } from './config.js';
@@ -35,6 +36,12 @@ export interface IpcDeps {
     replyToMessageId?: string,
   ) => Promise<string | void>;
   pinMessage?: (jid: string, messageId: string) => Promise<void>;
+  sendFile?: (
+    jid: string,
+    filePath: string,
+    caption?: string,
+    replyToMessageId?: string,
+  ) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -141,6 +148,59 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC reaction attempt blocked',
                   );
+                }
+              } else if (
+                data.type === 'send_file' &&
+                data.chatJid &&
+                data.filePath &&
+                deps.sendFile
+              ) {
+                const targetGroup = registeredGroups[data.chatJid];
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
+                  // Translate container path to host path
+                  const containerPath: string = data.filePath;
+                  let hostPath: string;
+                  if (containerPath.startsWith('/workspace/group/')) {
+                    hostPath = path.join(
+                      GROUPS_DIR,
+                      sourceGroup,
+                      containerPath.replace('/workspace/group/', ''),
+                    );
+                  } else if (containerPath.startsWith('/workspace/trusted/')) {
+                    hostPath = path.join(
+                      process.cwd(),
+                      'trusted',
+                      containerPath.replace('/workspace/trusted/', ''),
+                    );
+                  } else {
+                    logger.warn(
+                      { containerPath, sourceGroup },
+                      'send_file: path outside allowed mounts',
+                    );
+                    fs.unlinkSync(filePath);
+                    continue;
+                  }
+
+                  if (fs.existsSync(hostPath)) {
+                    await deps.sendFile(
+                      data.chatJid,
+                      hostPath,
+                      data.caption,
+                      data.replyToMessageId,
+                    );
+                    logger.info(
+                      { chatJid: data.chatJid, hostPath, sourceGroup },
+                      'IPC file sent',
+                    );
+                  } else {
+                    logger.warn(
+                      { hostPath, containerPath, sourceGroup },
+                      'send_file: file not found on host',
+                    );
+                  }
                 }
               } else if (data.type === 'message' && data.chatJid && data.text) {
                 // Strip <internal> tags — if nothing remains, skip silently
