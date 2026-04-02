@@ -102,15 +102,16 @@ function buildVolumeMounts(
   });
 
   // Global memory directory (SOUL.md, shared CLAUDE.md).
-  // All groups get this — main used to get it via /workspace/project, but that mount
-  // was removed for NAS. Now mounted explicitly for everyone.
-  const globalDir = path.join(GROUPS_DIR, 'global');
-  if (fs.existsSync(globalDir)) {
-    mounts.push({
-      hostPath: toHostPath(globalDir),
-      containerPath: '/workspace/global',
-      readonly: !isMain, // main can update global memory, others read-only
-    });
+  // Only trusted + main get this. Untrusted must NOT see SOUL.md.
+  if (isMain || group.containerConfig?.trusted) {
+    const globalDir = path.join(GROUPS_DIR, 'global');
+    if (fs.existsSync(globalDir)) {
+      mounts.push({
+        hostPath: toHostPath(globalDir),
+        containerPath: '/workspace/global',
+        readonly: !isMain, // main can update global memory, trusted read-only
+      });
+    }
   }
 
   // Shared trusted directory — writable space for trusted containers.
