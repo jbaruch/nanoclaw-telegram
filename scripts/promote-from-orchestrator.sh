@@ -138,6 +138,10 @@ cd /app/tessl-workspace
 # Build tile list from tiles/ directory
 TILE_LIST=$(ls /app/repo/tiles/ 2>/dev/null | while read t; do echo "$TILE_OWNER/$t"; done | tr '\n' ' ')
 tessl update \
-  --yes --dangerously-ignore-security --agent claude-code 2>&1 || echo "WARN: tile install had issues"
+  --yes --dangerously-ignore-security --agent claude-code 2>&1 || echo "WARN: tile update had issues"
+
+# Kill all running agent containers so they respawn with new tiles
+echo "Killing stale agent containers..."
+docker ps --format '{{.ID}} {{.Names}}' | grep nanoclaw-telegram | awk '{print $1}' | xargs -r docker kill 2>/dev/null || true
 
 echo "Done! $PROMOTED item(s) promoted."

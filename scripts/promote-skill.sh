@@ -234,6 +234,9 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
     echo "  ERROR: tessl update in orchestrator failed"
     exit 1
   }
+  # Kill all running agent containers so they respawn with new tiles
+  echo "Killing stale agent containers..."
+  nas "docker ps --format '{{.ID}} {{.Names}}' | grep nanoclaw-telegram | awk '{print \$1}' | xargs -r docker kill" || true
 else
   echo "  tessl publish failed — tiles deployed via git only"
 fi
