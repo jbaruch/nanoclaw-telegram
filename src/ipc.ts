@@ -970,23 +970,36 @@ export async function processTaskIpc(
 
           const event = (await resp.json()) as Record<string, unknown>;
           const cfpDates = (event.cfpDates ?? {}) as Record<string, unknown>;
-          const eventDates = (event.eventDates ?? {}) as Record<string, unknown>;
+          const eventDates = (event.eventDates ?? {}) as Record<
+            string,
+            unknown
+          >;
           const location = (event.location ?? {}) as Record<string, unknown>;
           const timezone = (event.timezone ?? {}) as Record<string, unknown>;
-          const expenses = (event.expensesCovered ?? {}) as Record<string, unknown>;
+          const expenses = (event.expensesCovered ?? {}) as Record<
+            string,
+            unknown
+          >;
           const normalized = {
             name: event.name,
-            cfp_open: !!cfpDates.endUtc && new Date(cfpDates.endUtc as string) > new Date(),
+            cfp_open:
+              !!cfpDates.endUtc &&
+              new Date(cfpDates.endUtc as string) > new Date(),
             cfp_start: cfpDates.startUtc,
             cfp_end: cfpDates.endUtc,
+            cfp_start_local: cfpDates.start,
+            cfp_end_local: cfpDates.end,
             conf_start: eventDates.start,
             conf_end: eventDates.end,
             location: location.full,
+            city: location.city,
+            country: location.country,
             timezone: timezone.iana,
             is_online: event.isOnline,
             website: event.website,
+            cfp_url: event.cfpLink || `https://sessionize.com/${data.slug}/`,
             expenses_covered: expenses,
-            cfp_url: `https://sessionize.com/${data.slug}/`,
+            organizer: event.organizer,
           };
 
           fs.writeFileSync(
