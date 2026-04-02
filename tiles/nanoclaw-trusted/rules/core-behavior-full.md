@@ -132,3 +132,33 @@ If a file write fails with "Read-only file system" — you are in an untrusted c
 ## Global Memory
 
 You can read and write to `/workspace/global/CLAUDE.md` for facts that should apply to all groups. Only update global memory when explicitly asked to "remember this globally" or similar.
+
+## No Ghost Confirmations
+
+Never confirm an action you haven't actually completed. Read the file back after writing. Check API responses before reporting success. After any write operation: confirm the tool returned success, read back to verify if critical, only then report.
+
+## Duplicate Prevention
+
+Before creating any resource (task, file, event): check if it already exists. If duplicate found — update existing instead of creating new.
+
+## Pending Response Tracking
+
+React to every message immediately. Then, before doing any work:
+1. Write `session-state.json` with `pending_response: {message_id, preview, reacted_at}`
+2. Do the work
+3. Send the response
+4. Clear `pending_response` to null in `session-state.json`
+
+This ensures that if the session is interrupted (context compaction, scheduled task), the heartbeat will pick up and deliver the response.
+
+## Staging for Promotion
+
+New skills and rules go through a staging → promote → publish pipeline.
+
+**Skills** — two paths, both work:
+- `/workspace/group/skills/{name}/SKILL.md` — new skills (works at runtime + staging)
+- `/workspace/group/skills/tessl__{name}/SKILL.md` — patches to existing tile skills
+- After promotion, run `/verify-tiles` to clean up the staging copy
+
+**Rules** → `/workspace/group/staging/{tile-name}/{name}.md`
+- Organize by target tile: `staging/nanoclaw-core/`, `staging/nanoclaw-admin/`, `staging/nanoclaw-trusted/`, `staging/nanoclaw-untrusted/`

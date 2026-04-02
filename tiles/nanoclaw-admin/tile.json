@@ -7,20 +7,11 @@
     "admin-context": {
       "rules": "rules/admin-context.md"
     },
-    "operational-principles": {
-      "rules": "rules/operational-principles.md"
-    },
     "slack-formatting": {
       "rules": "rules/slack-formatting.md"
     },
-    "core-behavior-full": {
-      "rules": "rules/core-behavior-full.md"
-    },
     "skill-tile-placement": {
       "rules": "rules/skill-tile-placement.md"
-    },
-    "daily-discoveries-rule": {
-      "rules": "rules/daily-discoveries-rule.md"
     }
   },
   "skills": {
@@ -80,12 +71,6 @@
     },
     "task-tz-sync": {
       "path": "skills/task-tz-sync/SKILL.md"
-    },
-    "verify-tiles": {
-      "path": "skills/verify-tiles/SKILL.md"
-    },
-    "promote-tiles": {
-      "path": "skills/promote-tiles/SKILL.md"
     },
     "soul-searching": {
       "path": "skills/soul-searching/SKILL.md"
