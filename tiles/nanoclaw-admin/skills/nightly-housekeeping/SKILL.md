@@ -47,6 +47,13 @@ Invoke the `check-orders` skill to fetch order emails, update orders-db.json, an
 - Flagged items → the skill reports them automatically
 - Nothing anomalous → stay silent
 
+## Step 5b: Refresh CFP data
+Invoke the `check-cfps` skill to refresh open CFP data from primary sources, apply Sessionize verification, and update `cfp-state.json`.
+
+**This step is research-only.** Do NOT forward the CFP list to Baruch — that is the morning brief's job. The goal here is keeping cfp-state.json current so the morning brief has accurate deadline data.
+
+Consume the skill output internally (do not include in any message to Baruch). If the skill fails completely (both primary sources unreachable), note it in Step 7 daily summary.
+
 ## Step 6: Check for undated tasks
 Discover Google Tasks tools per `composio-preamble` rule, then fetch all tasks from "My Tasks" list with no due date (tasks where `due` is absent).
 

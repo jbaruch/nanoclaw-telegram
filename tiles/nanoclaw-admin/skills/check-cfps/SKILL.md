@@ -36,6 +36,24 @@ Apply the full YES/NO criteria from `/workspace/group/RELEVANCE-CRITERIA.md`. Us
 
 **No fallback default.** Think it through and make a call. Both false positives (irrelevant confs Baruch has to dismiss) and false negatives (missing good confs) are bad — use judgment to avoid both.
 
+## Step 1c — Sessionize deadline verification
+
+For each CFP that survived Step 1b, attempt to verify/enrich via Sessionize using the slug:
+
+```
+mcp__nanoclaw__sessionize_get_event(slug: "{slug}")
+```
+
+If the call succeeds:
+- `cfp_open: false` → remove from list (CFP closed per Sessionize)
+- `is_online: true` → remove from list (online-only)
+- Update `deadline` with `cfp_end_local[:10]` (authoritative deadline from Sessionize, more accurate than scraped sources)
+- Note `expenses_covered` for new state entries (add to `bot_notes`)
+
+If the call returns an error or 404 → skip silently (not all conferences are on Sessionize). **Never block on Sessionize failures** — continue with original data.
+
+Run calls in parallel where possible (one per CFP with a slug). Do not call for slugs that are clearly not Sessionize event IDs.
+
 ## Step 2 — Web search for gaps
 
 Run these searches to catch AI/developer conferences not in the primary sources:
