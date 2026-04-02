@@ -137,7 +137,7 @@ echo "Installing tiles from registry..."
 cd /app/tessl-workspace
 # Build tile list from tiles/ directory
 TILE_LIST=$(ls /app/repo/tiles/ 2>/dev/null | while read t; do echo "$TILE_OWNER/$t"; done | tr '\n' ' ')
-tessl install $TILE_LIST \
+tessl update \
   --yes --dangerously-ignore-security --agent claude-code 2>&1 || echo "WARN: tile install had issues"
 
 echo "Done! $PROMOTED item(s) promoted."

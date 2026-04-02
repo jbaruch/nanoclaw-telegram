@@ -230,8 +230,8 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
   TILE_OWNER_VAL=$(grep TILE_OWNER "$PROJECT_ROOT/.env" 2>/dev/null | cut -d= -f2)
   TILE_OWNER_VAL="${TILE_OWNER_VAL:-nanoclaw}"
   ALL_TILES=$(ls "$PROJECT_ROOT/tiles/" | while read t; do echo "$TILE_OWNER_VAL/$t"; done | tr '\n' ' ')
-  nas "docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl install $ALL_TILES --yes --dangerously-ignore-security --agent claude-code 2>&1'" || {
-    echo "  ERROR: tessl install in orchestrator failed"
+  nas "docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl update --yes --dangerously-ignore-security --agent claude-code 2>&1'" || {
+    echo "  ERROR: tessl update in orchestrator failed"
     exit 1
   }
 else
