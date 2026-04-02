@@ -17,7 +17,21 @@ Use `COMPOSIO_SEARCH_TOOLS` to locate and cache the following tools:
 
 ---
 
-## Step 0: Read current timezone
+## Step 0: Optimistic Lock
+
+Before any API calls or calendar fetches, claim the run slot:
+
+1. Read `/workspace/group/task-tz-state.json`.
+2. Find the entry in `follow_me_tasks` where `name == "morning-brief"`.
+3. Compute today's local date in `America/Chicago` (YYYY-MM-DD).
+4. Set `last_run_date` to today's local date for that entry.
+5. Write the updated file back, preserving all other fields.
+
+This prevents a second heartbeat instance from re-triggering morning-brief while this run is still in progress. Even if two instances were invoked simultaneously, the first to write wins and the second sees `last_run_date = today` when heartbeat checks next time.
+
+---
+
+## Step 0.5: Read current timezone
 
 Read `/workspace/group/task-tz-state.json`. Extract `current_tz` (e.g. `"Europe/Amsterdam"`).
 
@@ -56,24 +70,40 @@ Output includes `pending.undated_tasks` and `pending.cleanup_items` from `mornin
 
 ## Step 3a: Auto-assign dates to undated tasks
 
-For each task in `pending.undated_tasks`, AyeAye MUST attempt to assign a due date automatically:
+For each task in `pending.undated_tasks`, AyeAye MUST attempt to assign a due date automatically by reading the linked email.
 
-1. **Infer from task title context.** Examples:
-   - "QCon London Voting Results" → conference date is known or can be inferred; assign a reasonable date (e.g. the week after the conference, or today if the conference has already passed).
-   - "Prepare slides for DevOpsDays" → assign a few days before the conference.
-   - "Follow up with X" → assign today or tomorrow.
-   - "Review PR" → assign today.
-   - Generic tasks with no time signal → assign today.
+### 3a-1: Find the linked email
 
-2. **Rule: if the task title gives any time signal (conference name, event, deadline), infer the date.** Use your knowledge of upcoming/recent events. When in doubt, pick today or within the next 7 days — a concrete date is always better than leaving it undated.
+Google Tasks tasks created from Gmail have a link to the source email in the task's `notes` field (a URL like `https://mail.google.com/mail/u/0/#inbox/...` or similar). Check `task.notes` for such a URL.
 
-3. **Only ask Baruch if** the task title is completely ambiguous AND contains no event/conference/deadline reference AND you have no reasonable basis to choose a date. This should be rare.
+- **If a link is present:** Extract the message ID from the URL (the part after `#inbox/` or `#all/`). Fetch the email body using `GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID` (or equivalent). Read the full email content.
+- **If no link is present:** Search Gmail for emails related to the task title using `GMAIL_SEARCH_EMAILS` with a query based on the task title keywords. Pick the most relevant result and read it.
 
-4. For each task where you can assign a date: call the Google Tasks update tool to set the due date on that task, then remove it from the `undated_tasks` display list.
+### 3a-2: Determine due date from email content
 
-5. If you assigned dates to all undated tasks, the "📋 Без даты:" section is omitted from the brief.
+Read the fetched email body and determine an appropriate due date based on the content:
+- Explicit deadlines in the email ("please respond by...", "deadline is...", "due by...")
+- Event dates mentioned (conference dates, meeting dates, schedule references)
+- Urgency signals ("ASAP", "urgent", "today", "this week")
+- Context clues (if it's a voting email for an event happening next month, assign a date before voting closes)
 
-6. If one or more tasks remain truly undated (you couldn't infer a date), include them in the brief under "📋 Без даты:" with a specific question per task: `• TaskTitle — <i>когда это нужно сделать?</i>`
+Use this information to assign a concrete due date.
+
+### 3a-3: Fallback — infer from title only
+
+If no email can be found (search returns nothing relevant), fall back to title-based inference:
+- Conference/event name in title → infer from knowledge of that event's dates
+- "Follow up with X" → assign today or tomorrow
+- "Review PR" → assign today
+- Generic tasks with no time signal → assign today
+
+### 3a-4: Apply the date
+
+For each task where a date was determined: call `GOOGLETASKS_UPDATE_TASK` (or patch equivalent) to set the due date on that task, then remove it from the `undated_tasks` display list.
+
+**Only ask Baruch if** after reading the email AND attempting title inference, you genuinely cannot determine any reasonable date. This should be rare. Include that task in "📋 Без даты:" with a specific question: `• TaskTitle — <i>когда это нужно сделать?</i>`
+
+If you assigned dates to all undated tasks, the "📋 Без даты:" section is omitted from the brief.
 
 ## Step 4a: Check urgent CFPs
 Run: `python3 /workspace/group/scripts/morning-brief-cfp.py`

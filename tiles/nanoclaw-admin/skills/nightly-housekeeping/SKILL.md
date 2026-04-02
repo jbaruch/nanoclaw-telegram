@@ -9,6 +9,16 @@ You are AyeAye, Baruch's assistant. Run these nightly maintenance steps silently
 
 **MANDATORY REPORTING:** Any step that fails and requires host action (missing modules, script errors, broken integrations) MUST be reported to Baruch via `mcp__nanoclaw__send_message` — regardless of silence defaults. Silence is for clean runs only. Broken = report.
 
+## Step 0: Optimistic Lock
+
+**This must be the very first action before any API calls or work begins.**
+
+Read `/workspace/group/task-tz-state.json`. Find the entry in `follow_me_tasks` where `name == "nightly-housekeeping"`. Set its `last_run_date` to today's local date (YYYY-MM-DD in `current_tz`). Write the file back immediately, preserving all other fields and all other entries exactly.
+
+This prevents double-execution: if heartbeat triggers a second run before the old one finishes, the second run will see today's date already written and abort.
+
+If the file cannot be read or written, continue anyway (log the error for Step 10 retry) — do not abort the housekeeping run.
+
 ## Step 1: TripIt → Reclaim sync
 Run via host: `mcp__nanoclaw__run_host_script(script: "sync-tripit.sh")`
 Do NOT call sync.mjs directly — it won't find its modules. The wrapper script handles the correct working directory.
@@ -118,6 +128,8 @@ Invoke the `check-watchlist` skill to check if any tracked upcoming shows have b
 
 ## Step 10: Mark as run
 Read `/workspace/group/task-tz-state.json`. Find the entry in `follow_me_tasks` where `name == "nightly-housekeeping"`. Set its `last_run_date` to today's local date (YYYY-MM-DD in `current_tz`). Write the file back, preserving all other fields.
+
+(This is a confirmation write. Step 0 already wrote this value as an optimistic lock. If Step 0 failed, this step ensures the date is recorded.)
 
 ## Step 10b: Backup to git
 Run the backup sync script via bash:
