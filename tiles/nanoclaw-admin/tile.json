@@ -51,9 +51,6 @@
     "check-cfps": {
       "path": "skills/check-cfps/SKILL.md"
     },
-    "check-unanswered": {
-      "path": "skills/check-unanswered/SKILL.md"
-    },
     "trakt-watch-history": {
       "path": "skills/trakt-watch-history/SKILL.md"
     },

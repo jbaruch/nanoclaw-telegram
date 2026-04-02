@@ -117,4 +117,3 @@ After generating recommendations, for any shows discovered that are announced bu
 
 Read existing watchlist.json first, merge, and write back. Do not add duplicates.
 
-Reply in Russian if Baruch asked in Russian.

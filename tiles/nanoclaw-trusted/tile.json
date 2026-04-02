@@ -12,9 +12,6 @@
     },
     "skill-dependencies": {
       "rules": "rules/skill-dependencies.md"
-    },
-    "temporal-awareness": {
-      "rules": "rules/temporal-awareness.md"
     }
   },
   "skills": {
@@ -23,6 +20,9 @@
     },
     "trusted-memory": {
       "path": "skills/trusted-memory/SKILL.md"
+    },
+    "check-unanswered": {
+      "path": "skills/check-unanswered/SKILL.md"
     }
   }
 }

@@ -110,31 +110,31 @@ If none → skip this section silently.
 ## Step 5: Send morning brief
 Select events using the [Event Filter Rules](#event-filter-rules-shared-reference).
 
-Format in Telegram HTML/style (*bold* single asterisks, • bullets, no markdown headings). Canonical example:
+Format in Telegram HTML. Canonical example:
 
 ```
-*Доброе утро! Понедельник, 9 июня*
+<b>Доброе утро! Понедельник, 9 июня</b>
 
-*📅 Сегодня:*
+<b>📅 Сегодня:</b>
 • 09:00 — Standup with team
 • 14:00 — 1:1 with Alex
 
-*✅ Задачи:*
+<b>✅ Задачи:</b>
 • ⚠️ Обновить README (просрочено: 6 июня)
 • Ответить на письмо Михаила
 
-*📋 Без даты:*
+<b>📋 Без даты:</b>
 • Разобрать инбокс — <i>когда это нужно сделать?</i>
 
-_2 события, 3 задачи_
+<i>2 события, 3 задачи</i>
 ```
 
 **Section rules:**
-- *📅 Сегодня:* — timed events with local time in `current_tz`.
-- *✅ Задачи:* — overdue tasks (original due date, marked ⚠️) + tasks due today. Omit if no tasks.
-- *📋 Без даты:* — only tasks where AyeAye could NOT infer a date (see Step 3a). Each entry includes a specific question. Omit entirely if Step 3a assigned dates to all undated tasks.
-- *📢 CFP дедлайны:* — CFPs closing within 7 days (from Step 4a). Omit if none.
-- *📦 Заказы:* — flagged orders (from Step 4). Omit if none.
+- `<b>📅 Сегодня:</b>` — timed events with local time in `current_tz`.
+- `<b>✅ Задачи:</b>` — overdue tasks (original due date, marked ⚠️) + tasks due today. Omit if no tasks.
+- `<b>📋 Без даты:</b>` — only tasks where the agent could NOT infer a date (see Step 3a). Each entry includes a specific question. Omit entirely if Step 3a assigned dates to all undated tasks.
+- `<b>📢 CFP дедлайны:</b>` — CFPs closing within 7 days (from Step 4a). Omit if none.
+- `<b>📦 Заказы:</b>` — flagged orders (from Step 4). Omit if none.
 - Footer: `_N событий, M задач_`
 
 Send via `mcp__nanoclaw__send_message` with `pin: true`.

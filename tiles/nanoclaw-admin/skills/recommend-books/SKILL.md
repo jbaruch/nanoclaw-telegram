@@ -71,4 +71,3 @@ Keep it tight — 3-5 recommendations max. For each, write a **targeted pitch**,
 
 If a recommendation doesn't fit ("уже читал", "не закончена"), pivot immediately to alternatives — don't just say "okay".
 
-Reply in Russian if Baruch asked in Russian.

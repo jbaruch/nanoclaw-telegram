@@ -22,17 +22,7 @@ conn.close()
 "
 ```
 
-**If stuck > 0:** Auto-fix by resetting next_run:
-```bash
-python3 -c "
-import sqlite3
-conn = sqlite3.connect('/workspace/store/messages.db')
-conn.execute(\"UPDATE scheduled_tasks SET next_run = datetime('now', '+1 minute') WHERE status='active' AND next_run <= datetime('now', '-5 minutes')\")
-conn.commit()
-print(f'Reset {conn.total_changes} stuck tasks')
-conn.close()
-"
-```
+**If stuck > 0:** Report the stuck task IDs and prompts. The DB is read-only from the container — auto-fix is not possible. The orchestrator's scheduler will retry on the next poll cycle. If tasks remain stuck, flag for the owner to investigate.
 
 ## 2. Database size
 

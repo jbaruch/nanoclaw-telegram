@@ -15,6 +15,9 @@
     },
     "default-silence": {
       "rules": "rules/default-silence.md"
+    },
+    "temporal-awareness": {
+      "rules": "rules/temporal-awareness.md"
     }
   },
   "skills": {
