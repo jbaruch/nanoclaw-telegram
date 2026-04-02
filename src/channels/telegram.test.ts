@@ -566,7 +566,7 @@ describe('TelegramChannel', () => {
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
-        expect.objectContaining({ content: '[Image - download failed]' }),
+        expect.objectContaining({ content: '[Image]' }),
       );
     });
 
@@ -584,7 +584,7 @@ describe('TelegramChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
         expect.objectContaining({
-          content: '[Image - download failed] Look at this',
+          content: '[Image] Look at this',
         }),
       );
     });

@@ -640,14 +640,20 @@ export class TelegramChannel implements Channel {
         isGroup,
       );
 
-      const containerPath = await savePhoto(
-        this.bot!,
-        ctx.message.photo,
-        group.folder,
-      );
-      const placeholder = containerPath
-        ? `[Image: ${containerPath}]`
-        : '[Image - download failed]';
+      const isTrustedPhoto = group.isMain || !!group.containerConfig?.trusted;
+      let placeholder: string;
+      if (isTrustedPhoto) {
+        const containerPath = await savePhoto(
+          this.bot!,
+          ctx.message.photo,
+          group.folder,
+        );
+        placeholder = containerPath
+          ? `[Image: ${containerPath}]`
+          : '[Image - download failed]';
+      } else {
+        placeholder = '[Image]';
+      }
 
       this.opts.onMessage(chatJid, {
         id: ctx.message.message_id.toString(),
@@ -659,7 +665,7 @@ export class TelegramChannel implements Channel {
         is_from_me: false,
       });
       logger.info(
-        { chatJid, senderName, containerPath },
+        { chatJid, senderName, placeholder },
         'Telegram photo stored',
       );
     });
@@ -735,9 +741,10 @@ export class TelegramChannel implements Channel {
 
       const fileName = ctx.message.document?.file_name || 'file';
       const fileId = ctx.message.document?.file_id;
+      const isTrusted = group.isMain || !!group.containerConfig?.trusted;
       let content: string;
 
-      if (fileId) {
+      if (fileId && isTrusted) {
         const containerPath = await saveDocument(
           this.bot!,
           fileId,
@@ -753,6 +760,8 @@ export class TelegramChannel implements Channel {
             'Telegram document stored',
           );
         }
+      } else if (fileId && !isTrusted) {
+        content = `[Document: ${fileName}]${caption}`;
       } else {
         content = `[Document: ${fileName} - no file_id]${caption}`;
       }
