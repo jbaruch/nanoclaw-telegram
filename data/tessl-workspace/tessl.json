@@ -3,16 +3,16 @@
   "mode": "managed",
   "dependencies": {
     "jbaruch/nanoclaw-core": {
-      "version": "0.1.37"
+      "version": "0.1.38"
     },
     "jbaruch/nanoclaw-admin": {
-      "version": "0.1.43"
+      "version": "0.1.45"
     },
     "jbaruch/nanoclaw-untrusted": {
       "version": "0.1.5"
     },
     "jbaruch/nanoclaw-trusted": {
-      "version": "0.1.1"
+      "version": "0.1.2"
     },
     "jbaruch/reclaim-tripit-sync": {
       "version": "0.1.2"
