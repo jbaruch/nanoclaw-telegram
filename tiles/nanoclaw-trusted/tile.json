@@ -12,6 +12,9 @@
     },
     "skill-dependencies": {
       "rules": "rules/skill-dependencies.md"
+    },
+    "read-full-content": {
+      "rules": "rules/read-full-content.md"
     }
   },
   "skills": {
@@ -23,6 +26,9 @@
     },
     "check-unanswered": {
       "path": "skills/check-unanswered/SKILL.md"
+    },
+    "morning-brief": {
+      "path": "skills/morning-brief/SKILL.md"
     }
   }
 }
