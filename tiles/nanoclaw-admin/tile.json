@@ -83,6 +83,9 @@
     },
     "scheduler-timezone": {
       "path": "skills/scheduler-timezone/SKILL.md"
+    },
+    "check-system-health": {
+      "path": "skills/check-system-health/SKILL.md"
     }
   }
 }
