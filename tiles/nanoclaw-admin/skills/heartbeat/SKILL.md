@@ -22,6 +22,8 @@ Only surface output if the invoked skill itself has something to report.
 ## Step 0.7: Unanswered message check
 Invoke `Skill(skill: "tessl__check-unanswered")`.
 
+**If the returned list is empty → do nothing. No output, no message, no acknowledgement. This step is complete.**
+
 For each unanswered message returned:
 1. React to it with 👌 via `mcp__nanoclaw__react_to_message(messageId: "<id>", emoji: "👌")`
 2. **Use judgment to respond based on context** — don't just report, actually reply to the message thread. Consider:
