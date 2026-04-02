@@ -969,17 +969,23 @@ export async function processTaskIpc(
           }
 
           const event = (await resp.json()) as Record<string, unknown>;
-          const cfp = (event.cfp ?? {}) as Record<string, unknown>;
+          const cfpDates = (event.cfpDates ?? {}) as Record<string, unknown>;
+          const eventDates = (event.eventDates ?? {}) as Record<string, unknown>;
+          const location = (event.location ?? {}) as Record<string, unknown>;
+          const timezone = (event.timezone ?? {}) as Record<string, unknown>;
+          const expenses = (event.expensesCovered ?? {}) as Record<string, unknown>;
           const normalized = {
             name: event.name,
-            cfp_open: cfp.isOpen,
-            cfp_start: cfp.startDate,
-            cfp_end: cfp.endDate,
-            conf_start: event.startDate,
-            conf_end: event.endDate,
-            city: event.city,
-            country: event.country,
+            cfp_open: !!cfpDates.endUtc && new Date(cfpDates.endUtc as string) > new Date(),
+            cfp_start: cfpDates.startUtc,
+            cfp_end: cfpDates.endUtc,
+            conf_start: eventDates.start,
+            conf_end: eventDates.end,
+            location: location.full,
+            timezone: timezone.iana,
+            is_online: event.isOnline,
             website: event.website,
+            expenses_covered: expenses,
             cfp_url: `https://sessionize.com/${data.slug}/`,
           };
 
