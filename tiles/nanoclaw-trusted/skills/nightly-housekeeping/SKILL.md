@@ -54,6 +54,20 @@ Invoke the `check-cfps` skill to refresh open CFP data from primary sources, app
 
 Consume the skill output internally (do not include in any message to Baruch). If the skill fails completely (both primary sources unreachable), note it in Step 7 daily summary.
 
+## Step 5c: YouTube comment check
+Search for the YouTube tool via `COMPOSIO_SEARCH_TOOLS` (query: `"youtube list comment threads"`). Use the returned tool to fetch recent comments on Baruch's channel (channel ID: `UCZ8-VX2SiAIBE7guw7NG-Sg`).
+
+1. Fetch videos published in the last 30 days using the video list tool.
+2. For each video, fetch comment threads.
+3. Filter to comments published in the last 24 hours.
+4. If new comments exist → send a summary via `mcp__nanoclaw__send_message`:
+   - Video title + link
+   - Author + comment text (truncated to 100 chars if long)
+   - Group by video
+5. No new comments → stay silent.
+
+On Composio tool error → skip silently, note in Step 7 daily summary.
+
 ## Step 6: Check for undated tasks
 Discover Google Tasks tools per `composio-preamble` rule, then fetch all tasks from "My Tasks" list with no due date (tasks where `due` is absent).
 
