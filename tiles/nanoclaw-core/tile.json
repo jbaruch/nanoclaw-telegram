@@ -21,6 +21,9 @@
     },
     "ground-truth": {
       "rules": "rules/ground-truth.md"
+    },
+    "read-full-content": {
+      "rules": "rules/read-full-content.md"
     }
   },
   "skills": {
