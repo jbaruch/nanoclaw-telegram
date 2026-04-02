@@ -89,6 +89,9 @@
     },
     "soul-searching": {
       "path": "skills/soul-searching/SKILL.md"
+    },
+    "status": {
+      "path": "skills/status/SKILL.md"
     }
   }
 }

@@ -11,7 +11,7 @@ description: Detect calendar changes and reschedule reminders. Compares current 
 
 ## Precondition
 
-Read `/workspace/group/calendar-state.json`. If it exists and `date` matches today, proceed. If the state file doesn't exist or is from a previous day, skip — morning brief handles initial scheduling at 8am.
+Read `/workspace/group/calendar-state.json`. If it exists and `date` matches today, proceed. If the state file doesn't exist or is from a previous day, skip the Compare/Reschedule steps — but **still run the UTC Reminder Verification and Declined Event Sweep steps below**, fetching today's events fresh if needed.
 
 ### Expected calendar-state.json calendar section
 
@@ -50,6 +50,8 @@ Use `COMPOSIO_SEARCH_TOOLS` to find `GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS`, 
 - single_events = true
 - order_by = startTime
 
+Keep the fetched events list in memory — it's used by both the Compare step and the Declined Event Sweep below.
+
 ## Compare
 
 Compare the fetched events to the state file's `events` list (match by event_id). Check for:
@@ -79,6 +81,23 @@ If calendar changed:
    Capture the returned `task_id` and store it as `reminder_task_id` for that event.
 
 3. **Update state:** Write the new event list (with updated `reminder_task_id` values) and today's date back to `/workspace/group/calendar-state.json`.
+
+## Declined Event Sweep
+
+Run this step every time (even when calendar has no changes). It catches reminders scheduled by morning-brief for events that were later declined.
+
+1. Read `/workspace/group/scheduled-reminders.json`. If it doesn't exist or is empty, skip.
+
+2. Build a lookup map of `event_id → responseStatus` from the fetched events (fetched above). If events weren't fetched (precondition failed), fetch today's events now.
+
+3. For each reminder entry in `scheduled-reminders.json` that has an `event_id`:
+   - Look up that `event_id` in the fetched events
+   - If the attendee with `self=true` has `responseStatus="declined"` **OR** the event no longer appears in today's calendar:
+     a. Cancel the task: `mcp__nanoclaw__cancel_task(task_id=<reminder's task_id>)`
+     b. Remove this entry from `scheduled-reminders.json`
+     c. Save the updated file
+
+4. Wrap any cancellations in `<internal>` tags — no user-visible output.
 
 ## UTC Reminder Verification
 

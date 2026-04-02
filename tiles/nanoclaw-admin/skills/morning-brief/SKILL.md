@@ -10,6 +10,7 @@ Use `COMPOSIO_SEARCH_TOOLS` to locate and cache the following tools:
 - **Calendar:** search `"googlecalendar events list all calendars"`
 - **Tasks (list):** search `"googletasks list"`
 - **Tasks (get):** search `"googletasks get"`
+- **Tasks (update):** search `"googletasks update task"`
 - **Scheduler/Reminder:** search `"reminder create"` or `"task schedule"`
 
 **Default failure behavior:** If any step fails (tool unavailable, non-zero exit, no output, file missing), note the failure, treat missing data as empty, and continue — unless a step specifies otherwise.
@@ -53,6 +54,27 @@ Using the resolved tasks tools, fetch all task lists, then for each list fetch t
 Run: `python3 /workspace/group/scripts/morning-brief-fetch.py`
 Output includes `pending.undated_tasks` and `pending.cleanup_items` from `morning-brief-pending.json`.
 
+## Step 3a: Auto-assign dates to undated tasks
+
+For each task in `pending.undated_tasks`, AyeAye MUST attempt to assign a due date automatically:
+
+1. **Infer from task title context.** Examples:
+   - "QCon London Voting Results" → conference date is known or can be inferred; assign a reasonable date (e.g. the week after the conference, or today if the conference has already passed).
+   - "Prepare slides for DevOpsDays" → assign a few days before the conference.
+   - "Follow up with X" → assign today or tomorrow.
+   - "Review PR" → assign today.
+   - Generic tasks with no time signal → assign today.
+
+2. **Rule: if the task title gives any time signal (conference name, event, deadline), infer the date.** Use your knowledge of upcoming/recent events. When in doubt, pick today or within the next 7 days — a concrete date is always better than leaving it undated.
+
+3. **Only ask Baruch if** the task title is completely ambiguous AND contains no event/conference/deadline reference AND you have no reasonable basis to choose a date. This should be rare.
+
+4. For each task where you can assign a date: call the Google Tasks update tool to set the due date on that task, then remove it from the `undated_tasks` display list.
+
+5. If you assigned dates to all undated tasks, the "📋 Без даты:" section is omitted from the brief.
+
+6. If one or more tasks remain truly undated (you couldn't infer a date), include them in the brief under "📋 Без даты:" with a specific question per task: `• TaskTitle — <i>когда это нужно сделать?</i>`
+
 ## Step 4a: Check urgent CFPs
 Run: `python3 /workspace/group/scripts/morning-brief-cfp.py`
 
@@ -91,9 +113,7 @@ Format in Telegram HTML/style (*bold* single asterisks, • bullets, no markdown
 • Ответить на письмо Михаила
 
 *📋 Без даты:*
-• Разобрать инбокс
-• Обновить CV
-_Нужно установить дату для этих задач_
+• Разобрать инбокс — <i>когда это нужно сделать?</i>
 
 _2 события, 3 задачи_
 ```
@@ -101,7 +121,7 @@ _2 события, 3 задачи_
 **Section rules:**
 - *📅 Сегодня:* — timed events with local time in `current_tz`.
 - *✅ Задачи:* — overdue tasks (original due date, marked ⚠️) + tasks due today. Omit if no tasks.
-- *📋 Без даты:* — list titles from `undated_tasks` with prompt to set dates. Omit if array is empty.
+- *📋 Без даты:* — only tasks where AyeAye could NOT infer a date (see Step 3a). Each entry includes a specific question. Omit entirely if Step 3a assigned dates to all undated tasks.
 - *📢 CFP дедлайны:* — CFPs closing within 7 days (from Step 4a). Omit if none.
 - *📦 Заказы:* — flagged orders (from Step 4). Omit if none.
 - Footer: `_N событий, M задач_`
