@@ -59,18 +59,20 @@ For each task in `pending.undated_tasks`, attempt to assign a due date automatic
 
 ### 3a-1: Find the linked email
 
-Google Tasks tasks created from Gmail have a link to the source email in the task's `notes` field (a URL like `https://mail.google.com/mail/u/0/#inbox/...`). Check `task.notes` for such a URL.
+Google Tasks tasks created from Gmail have an email link in `task.links[]` — look for an entry with `type: "email"` and extract the message ID from the `link` URL (the hex part after `#inbox/` or `#all/`). Do NOT check `task.notes` — Gmail tasks store the link in `links[]`, not notes.
 
-- **If a link is present:** Extract the message ID from the URL (the part after `#inbox/` or `#all/`). Fetch the email body using GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID (discover per `composio-preamble`). Read the full email content.
-- **If no link is present:** Search Gmail for emails related to the task title. Pick the most relevant result and read it.
+- **If a link is present:** Call `GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID` with `format: "full"`. Decode the full body from `payload.parts[]`: find the part with `mimeType: "text/plain"` and base64url-decode `body.data`. If no plain text part exists, use `text/html` and strip tags. **NEVER use `messageText`, `preview`, or `snippet` — these are truncated and will produce wrong dates.**
+- **If no link is present:** Search Gmail for emails related to the task title. Pick the most relevant result and read the full body the same way.
 
 ### 3a-2: Determine due date from email content
 
-Read the fetched email body and determine an appropriate due date:
+Read the **complete decoded email body** and determine an appropriate due date:
 - Explicit deadlines ("please respond by...", "deadline is...", "due by...")
 - Event dates mentioned (conference dates, meeting dates, schedule references)
 - Urgency signals ("ASAP", "urgent", "today", "this week")
 - Context clues (voting email for an event next month → assign before voting closes)
+- **Gradual release schedules** ("2 per week starting X", "over the next few weeks") → due date is end of that window, not the start date
+- If there is no deadline and no urgency — default to end of current week, not today
 
 ### 3a-3: Fallback — infer from title only
 
