@@ -35,8 +35,8 @@ Read `/workspace/group/calendar-state.json`. If it exists and `date` matches tod
 
 ## Fetch current events
 
-Discover calendar tool per [`composio-preamble`](/workspace/group/skills/composio-preamble.md) rule, then fetch today's events:
-- time_min/time_max = today in `current_tz` (from [`task-tz-state.json`](/workspace/group/task-tz-state.json))
+Discover calendar tool per `composio-preamble` rule, then fetch today's events:
+- time_min/time_max = today in `current_tz` (from `task-tz-state.json`)
 - single_events = true
 - order_by = startTime
 
@@ -60,7 +60,7 @@ If calendar changed:
    mcp__nanoclaw__cancel_task(task_id="task_7f3a9b")
    ```
 
-2. **Create new reminders:** For each timed event (not all-day, not Travel, not "Home", not week-number events) starting more than 20 min from now — **applying the [`event-filter-rules`](/workspace/group/skills/event-filter-rules.md) (including declined event check)** — schedule a new `once` task 15 min before start (local time, no Z suffix):
+2. **Create new reminders:** For each timed event (not all-day, not Travel, not "Home", not week-number events) starting more than 20 min from now — **applying the `event-filter-rules` (including declined event check)** — schedule a new `once` task 15 min before start (local time, no Z suffix):
    ```
    mcp__nanoclaw__create_task(
      scheduled_time="2024-06-10T08:45:00",   # local time, no Z suffix
@@ -98,7 +98,7 @@ Run every time (even when calendar has no changes) to ensure reminders are corre
 2. Determine current timezone (in priority order):
    - `<context timezone="...">` tag in the current prompt
    - `current_tz` from `/workspace/group/nanoclaw-state.json`
-   - `home_tz` from [`task-tz-state.json`](/workspace/group/task-tz-state.json) or TZ env var
+   - `home_tz` from `task-tz-state.json` or TZ env var
 
 3. Call `mcp__nanoclaw__list_tasks` to get all active scheduled tasks.
 
