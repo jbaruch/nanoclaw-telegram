@@ -12,6 +12,12 @@
     },
     "skill-dependencies": {
       "rules": "rules/skill-dependencies.md"
+    },
+    "context-recovery": {
+      "rules": "rules/context-recovery.md"
+    },
+    "read-full-content": {
+      "rules": "rules/read-full-content.md"
     }
   },
   "skills": {
@@ -23,6 +29,15 @@
     },
     "check-unanswered": {
       "path": "skills/check-unanswered/SKILL.md"
+    },
+    "check-cfps": {
+      "path": "skills/check-cfps/SKILL.md"
+    },
+    "morning-brief": {
+      "path": "skills/morning-brief/SKILL.md"
+    },
+    "nightly-housekeeping": {
+      "path": "skills/nightly-housekeeping/SKILL.md"
     }
   }
 }
