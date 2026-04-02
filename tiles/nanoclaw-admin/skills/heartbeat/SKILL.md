@@ -49,16 +49,22 @@ Also check container age: read `container_started` from `/workspace/group/sessio
 Silent if < 14 days.
 
 ## Step 2: Calendar check
-Use COMPOSIO_MULTI_EXECUTE_TOOL with GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS:
+Discover calendar tool per `composio-preamble` rule:
 - time_min: now (UTC)
-- time_max: 1 year from now
+- time_max: 7 days from now
 - single_events: true
+
+**Do NOT use 1 year — fetching thousands of events causes OOM kills.**
+
 Check for events updated in the last 30 minutes (new invites, cancellations, changes).
 Report: new calendar invites needing a response (responseStatus = needsAction).
 
 ## Step 3: Email check
-Use GMAIL_FETCH_EMAILS with `query: "is:unread in:inbox"`, max_results: 20, verbose: false.
-**Always open the full email** (GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID) when subject/preview is insufficient to classify — especially for reservations, financial emails, or anything with dates.
+Discover Gmail tool per `composio-preamble` rule. Fetch with `query: "is:unread in:inbox"`, max_results: 20, verbose: false.
+
+**Skip already-processed emails.** Read `seen_email_ids` from `/workspace/group/session-state.json`. Only process emails whose ID is NOT in that list. After processing, add their IDs to `seen_email_ids` and write back.
+
+For new emails: read the full body per `email-read-full` rule — never classify from subject/preview alone.
 
 ### Email classification
 
