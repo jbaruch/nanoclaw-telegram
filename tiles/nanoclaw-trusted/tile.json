@@ -13,9 +13,6 @@
     "skill-dependencies": {
       "rules": "rules/skill-dependencies.md"
     },
-    "context-recovery": {
-      "rules": "rules/context-recovery.md"
-    },
     "no-orphan-tasks": {
       "rules": "rules/no-orphan-tasks.md"
     }

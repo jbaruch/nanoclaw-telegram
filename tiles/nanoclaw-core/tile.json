@@ -24,6 +24,9 @@
     },
     "read-full-content": {
       "rules": "rules/read-full-content.md"
+    },
+    "context-recovery": {
+      "rules": "rules/context-recovery.md"
     }
   },
   "skills": {
