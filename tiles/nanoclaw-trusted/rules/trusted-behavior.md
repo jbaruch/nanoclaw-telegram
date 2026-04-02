@@ -56,7 +56,7 @@ Telegram HTML: <b>bold</b>, <i>italic</i>, • bullets. No markdown.
 
 **Main / Trusted:**
 - Read/write group folder, `/workspace/trusted/` shared memory
-- All plugins (core + trusted + admin)
+- All plugins (core + trusted; admin if main)
 - Composio API, host script execution
 - Auto-memory enabled, 30 min idle timeout
 
