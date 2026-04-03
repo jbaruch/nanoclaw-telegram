@@ -63,6 +63,38 @@ rows = conn.execute("""
 
 This is critical after a session nuke — you have no memory of who said what, but the database does.
 
+## Unanswered message detection
+
+After a session nuke or on first message in a new session, check for messages you never replied to. A message is "unanswered" if no bot reply appeared within 10 minutes after it:
+
+```python
+import sqlite3, json
+from datetime import datetime, timedelta, timezone
+
+conn = sqlite3.connect('/workspace/store/messages.db')
+chat_jid = conn.execute("SELECT jid FROM chats LIMIT 1").fetchone()[0]
+cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime('%Y-%m-%dT%H:%M:%S')
+
+user_msgs = conn.execute("""
+    SELECT id, sender_name, content, timestamp FROM messages
+    WHERE chat_jid = ? AND is_from_me = 0 AND is_bot_message = 0 AND timestamp > ?
+    ORDER BY timestamp ASC
+""", (chat_jid, cutoff)).fetchall()
+
+bot_times = [datetime.fromisoformat(ts.replace('Z', '+00:00')) for _, ts in
+    conn.execute("SELECT id, timestamp FROM messages WHERE chat_jid = ? AND is_from_me = 1 AND timestamp > ?",
+    (chat_jid, cutoff)).fetchall()]
+conn.close()
+
+for msg_id, sender, content, ts in user_msgs:
+    msg_time = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+    window_end = msg_time + timedelta(minutes=10)
+    if not any(msg_time < bt <= window_end for bt in bot_times):
+        print(f"UNANSWERED: [{ts}] {sender}: {content[:80]}")
+```
+
+If you find unanswered messages: acknowledge the gap and respond to any that are still actionable. Don't pretend they didn't happen.
+
 ## When to use
 
 - User references something from an earlier session that's not in active context
@@ -70,6 +102,7 @@ This is critical after a session nuke — you have no memory of who said what, b
 - Someone says "I told you" / "we discussed" / "yesterday I asked" — match their handle to DB history
 - Any "I don't remember" impulse — check first
 - After context compaction (the summary will mention "continued from previous session")
+- First message after a nuke — check for unanswered messages from before the nuke
 
 ## This is a hard requirement
 
