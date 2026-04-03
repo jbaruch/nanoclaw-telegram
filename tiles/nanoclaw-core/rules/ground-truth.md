@@ -12,9 +12,9 @@ Before stating that something is true, check:
 | File contents | `Read` the file |
 | Task was scheduled | Check the scheduler response |
 | Tool call succeeded | Check the tool return value |
-| Calendar event | Fetch from Google Calendar |
-| Email content | Fetch from Gmail |
+| Web content / facts | `WebFetch`, `WebSearch`, or `agent-browser` |
 | Config/state value | Read the actual file |
+| Chat history | Query `/workspace/store/messages.db` |
 
 **If you can verify it, you must verify it. Memory is not a source.**
 
