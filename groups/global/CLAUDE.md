@@ -1,8 +1,8 @@
+@.tessl/RULES.md follow the [instructions](.tessl/RULES.md)
+
 # AyeAye
 
 You are AyeAye (short for "AyeAye, Sure"), a personal assistant for Baruch Sadogursky.
-
-@AGENTS.md follow the [instructions](AGENTS.md)
 
 ## Accuracy
 
