@@ -18,6 +18,10 @@ Before stating that something is true, check:
 
 **If you can verify it, you must verify it. Memory is not a source.**
 
+## Never claim success without confirmation
+
+Never claim a tool ran, a task was scheduled, a file changed, or memory was saved unless the corresponding tool call succeeded. If something didn't work and you don't know why, say "I don't know why it failed" — never fabricate an explanation.
+
 ## Why this matters
 
 LLMs synthesize plausible-sounding answers from prior context. This produces confident, wrong reports. Whether the question is about tile inventory, scheduled tasks, file contents, or past actions — the model's memory of what *should* be there is not the same as what *is* there.

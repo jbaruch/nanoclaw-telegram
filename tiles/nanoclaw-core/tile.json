@@ -27,11 +27,32 @@
     },
     "context-recovery": {
       "rules": "rules/context-recovery.md"
+    },
+    "max-effort": {
+      "rules": "rules/max-effort.md"
+    },
+    "no-unverified-claims": {
+      "rules": "rules/no-unverified-claims.md"
     }
   },
   "skills": {
     "status": {
       "path": "skills/status/SKILL.md"
+    },
+    "check-email": {
+      "path": "skills/check-email/SKILL.md"
+    },
+    "check-system-health": {
+      "path": "skills/check-system-health/SKILL.md"
+    },
+    "check-unanswered": {
+      "path": "skills/check-unanswered/SKILL.md"
+    },
+    "heartbeat": {
+      "path": "skills/heartbeat/SKILL.md"
+    },
+    "soul-searching": {
+      "path": "skills/soul-searching/SKILL.md"
     }
   }
 }
