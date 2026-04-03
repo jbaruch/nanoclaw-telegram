@@ -15,7 +15,7 @@
 #   6. Commit, push, publish, deploy
 #   7. Version bump commit
 #
-# Staging copies are NOT deleted — AyeAye keeps them as working copies.
+# Staging copies are cleaned by AyeAye after verify-tiles confirms installation.
 
 set -euo pipefail
 
@@ -243,4 +243,4 @@ fi
 
 echo ""
 echo "Done! $PROMOTED_COUNT item(s) promoted and deployed."
-echo "Tell AyeAye to run /verify-plugins to clean up staging copies."
+echo "AyeAye will clean staging after verify-tiles confirms installation."

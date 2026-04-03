@@ -329,7 +329,9 @@ function drainIpcInput(): string[] {
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         consumedInputFiles.add(file);
-        try { fs.unlinkSync(filePath); } catch { /* read-only mount — tracked in memory */ }
+        try { fs.unlinkSync(filePath); } catch (e: any) {
+          if (e.code !== 'EROFS' && e.code !== 'EACCES') throw e;
+        }
         if (data.type === 'message' && data.text) {
           messages.push(data.text);
           if (data.replyToMessageId) {
@@ -338,13 +340,11 @@ function drainIpcInput(): string[] {
         }
       } catch (err) {
         log(
-          \`Failed to process input file \${file}: \${err instanceof Error ? err.message : String(err)}\`,
+          `Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`,
         );
         consumedInputFiles.add(file);
-        try {
-          fs.unlinkSync(filePath);
-        } catch {
-          /* ignore */
+        try { fs.unlinkSync(filePath); } catch (e: any) {
+          if (e.code !== 'EROFS' && e.code !== 'EACCES' && e.code !== 'ENOENT') throw e;
         }
       }
     }
@@ -754,7 +754,7 @@ async function main(): Promise<void> {
       } catch (resumeErr) {
         const msg = resumeErr instanceof Error ? resumeErr.message : String(resumeErr);
         if (sessionId && /session|conversation not found|resume/i.test(msg)) {
-          log(\`Session resume failed (\${msg}), retrying with fresh session\`);
+          log(`Session resume failed (\${msg}), retrying with fresh session`);
           sessionId = undefined;
           resumeAt = undefined;
           queryResult = await runQuery(prompt, undefined, mcpServerPath, containerInput, sdkEnv, undefined);

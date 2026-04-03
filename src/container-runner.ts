@@ -53,80 +53,24 @@ function createFilteredDb(chatJid: string, groupFolder: string): string | null {
   const filteredPath = path.join(filteredDir, 'messages.db');
 
   // Remove stale copy from previous run
-  try {
+  if (fs.existsSync(filteredPath)) {
     fs.unlinkSync(filteredPath);
-  } catch {
-    /* didn't exist */
   }
 
-  const src = new Database(srcDb, { readonly: true });
+  // Use ATTACH to copy schema-agnostically — picks up new columns automatically
   const dst = new Database(filteredPath);
   try {
-    dst.exec(`
-      CREATE TABLE IF NOT EXISTS chats (
-        jid TEXT PRIMARY KEY,
-        name TEXT,
-        last_message_time TEXT,
-        channel TEXT,
-        is_group INTEGER DEFAULT 0
-      );
-      CREATE TABLE IF NOT EXISTS messages (
-        id TEXT,
-        chat_jid TEXT,
-        sender TEXT,
-        sender_name TEXT,
-        content TEXT,
-        timestamp TEXT,
-        is_from_me INTEGER,
-        is_bot_message INTEGER DEFAULT 0,
-        PRIMARY KEY (id, chat_jid)
-      );
-      CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp);
-    `);
-
-    // Copy only this group's chat metadata and messages
-    const chat = src.prepare('SELECT * FROM chats WHERE jid = ?').get(chatJid);
-    if (chat) {
-      const chatRow = chat as Record<string, unknown>;
-      dst
-        .prepare(
-          'INSERT OR REPLACE INTO chats (jid, name, last_message_time, channel, is_group) VALUES (?, ?, ?, ?, ?)',
-        )
-        .run(
-          chatRow.jid,
-          chatRow.name,
-          chatRow.last_message_time,
-          chatRow.channel,
-          chatRow.is_group,
-        );
-    }
-
-    const messages = src
-      .prepare('SELECT * FROM messages WHERE chat_jid = ?')
-      .all(chatJid);
-    const insertMsg = dst.prepare(
-      'INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    dst.exec(`ATTACH DATABASE '${srcDb.replace(/'/g, "''")}' AS src`);
+    dst.exec(
+      `CREATE TABLE chats AS SELECT * FROM src.chats WHERE jid = '${chatJid.replace(/'/g, "''")}'`,
     );
-    const insertAll = dst.transaction(
-      (rows: Array<Record<string, unknown>>) => {
-        for (const row of rows) {
-          insertMsg.run(
-            row.id,
-            row.chat_jid,
-            row.sender,
-            row.sender_name,
-            row.content,
-            row.timestamp,
-            row.is_from_me,
-            row.is_bot_message,
-          );
-        }
-      },
+    dst.exec(
+      `CREATE TABLE messages AS SELECT * FROM src.messages WHERE chat_jid = '${chatJid.replace(/'/g, "''")}'`,
     );
-    insertAll(messages as Array<Record<string, unknown>>);
+    dst.exec('CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp)');
+    dst.exec('DETACH src');
   } finally {
     dst.close();
-    src.close();
   }
 
   // Chown so container user can read
@@ -136,8 +80,8 @@ function createFilteredDb(chatJid: string, groupFolder: string): string | null {
     try {
       fs.chownSync(filteredDir, uid, gid);
       fs.chownSync(filteredPath, uid, gid);
-    } catch {
-      /* best-effort */
+    } catch (err: unknown) {
+      logger.warn({ err, filteredPath }, 'Failed to chown filtered DB');
     }
   }
 
@@ -457,8 +401,8 @@ function buildVolumeMounts(
   if (jsonUid !== 0) {
     try {
       fs.chownSync(claudeJsonPath, jsonUid, jsonGid);
-    } catch {
-      /* best-effort */
+    } catch (err: unknown) {
+      logger.warn({ err, claudeJsonPath }, 'Failed to chown .claude.json');
     }
   }
   mounts.push({
