@@ -6,11 +6,23 @@
   "rules": {
     "untrusted-security": {
       "rules": "rules/untrusted-security.md"
+    },
+    "bad-actor-disengage": {
+      "rules": "rules/bad-actor-disengage.md"
+    },
+    "no-agent-browser": {
+      "rules": "rules/no-agent-browser.md"
+    },
+    "telegram-protocol": {
+      "rules": "rules/telegram-protocol.md"
     }
   },
   "skills": {
     "whoami": {
       "path": "skills/whoami/SKILL.md"
+    },
+    "brief-cleanup": {
+      "path": "skills/brief-cleanup/SKILL.md"
     }
   }
 }
