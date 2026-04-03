@@ -21,7 +21,11 @@ Read `/workspace/group/email-mute-state.json` if it exists:
 
 Build a set of muted threadIds. During Classify, skip any email whose `threadId` is in this set — no report, no cleanup queue, total silence.
 
-**To mute a new thread:** When Baruch says "не интересно", "mute this", "stop reporting this", or has been dismissing a topic repeatedly — fetch the email's threadId and append it to this file immediately.
+**To mute a new thread:** When Baruch says "не интересно", "mute this", "stop reporting this", or any dismissal — fetch the email's threadId from Gmail and append it to this file **immediately, before doing anything else**. This applies in ANY session: main, heartbeat, or background. Do not wait, do not ask — just mute it.
+
+**Muting from main session:** When Baruch replies to a surfaced email report with a dismissal, use `GMAIL_FETCH_EMAILS` to find the thread by subject/sender, then save its `threadId` to `email-mute-state.json`. Confirm with: "✓ muted".
+
+**Repeated dismissals = bug.** If Baruch dismisses the same thread more than once, the mute was never saved. Fix it now.
 
 ## Load Preferences
 
