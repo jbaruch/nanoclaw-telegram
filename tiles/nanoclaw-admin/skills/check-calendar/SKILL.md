@@ -22,8 +22,8 @@ Read `/workspace/group/calendar-state.json`. If it exists and `date` matches tod
     {
       "event_id": "abc123xyz",
       "title": "Team Standup",
-      "start": "2024-06-10T09:00:00",
-      "end": "2024-06-10T09:30:00",
+      "start": "2024-06-10T09:00:00Z",
+      "end": "2024-06-10T09:30:00Z",
       "all_day": false,
       "reminder_task_id": "task_7f3a9b"
     }
@@ -31,7 +31,7 @@ Read `/workspace/group/calendar-state.json`. If it exists and `date` matches tod
 }
 ```
 
-`reminder_task_id`: task ID from when the reminder was scheduled, or `null` if none was created (e.g. all-day or Travel events).
+`start` is always stored as **UTC with Z suffix**. `reminder_task_id`: task ID from when the reminder was scheduled, or `null` if none was created (e.g. all-day or Travel events).
 
 ## Fetch current events
 
@@ -60,17 +60,38 @@ If calendar changed:
    mcp__nanoclaw__cancel_task(task_id="task_7f3a9b")
    ```
 
-2. **Create new reminders:** For each timed event (not all-day, not Travel, not "Home", not week-number events) starting more than 20 min from now — **applying the `event-filter-rules` (including declined event check)** — schedule a new `once` task 15 min before start (local time, no Z suffix):
+2. **Create new reminders:** For each timed event (not all-day, not Travel, not "Home", not week-number events) starting more than 20 min from now — **applying the `event-filter-rules` (including declined event check)**:
+
+   **TIMEZONE CONVERSION — do this exactly:**
+   ```python
+   from zoneinfo import ZoneInfo
+   from datetime import datetime, timedelta
+
+   # event_start_utc comes from the API response start.dateTime
+   # The API returns local time with offset, e.g. "2026-04-03T16:00:00-05:00"
+   event_dt = datetime.fromisoformat(event_start_str)  # timezone-aware
+   event_utc = event_dt.astimezone(ZoneInfo("UTC"))
+   reminder_utc = event_utc - timedelta(minutes=15)
+
+   # Convert to current local timezone for the scheduler
+   current_tz = ZoneInfo(current_tz_str)  # e.g., "America/Chicago"
+   reminder_local = reminder_utc.astimezone(current_tz)
+   schedule_value = reminder_local.strftime("%Y-%m-%dT%H:%M:%S")  # NO Z suffix
    ```
-   mcp__nanoclaw__create_task(
-     scheduled_time="2024-06-10T08:45:00",   # local time, no Z suffix
-     recurrence="once",
-     message="Reminder: Team Standup in 15 minutes"
+
+   Example: event at 4:00 PM CDT ("2026-04-03T16:00:00-05:00" = 21:00 UTC) → reminder_utc = 20:45 UTC → CDT = 3:45 PM → `schedule_value = "2026-04-03T15:45:00"`
+
+   Schedule:
+   ```
+   mcp__nanoclaw__schedule_task(
+     prompt="Send reminder: ...",
+     schedule_type="once",
+     schedule_value="2026-04-03T15:45:00"  # local time, NO Z suffix
    )
    ```
    Capture the returned `task_id` and store it as `reminder_task_id` for that event.
 
-3. **Update state:** Write the new event list (with updated `reminder_task_id` values) and today's date back to `/workspace/group/calendar-state.json`.
+3. **Update state:** Write the new event list (with updated `reminder_task_id` values) and today's date back to `/workspace/group/calendar-state.json`. Store `start` as UTC with Z suffix.
 
 ## Declined Event Sweep
 
@@ -97,16 +118,16 @@ Run every time (even when calendar has no changes) to ensure reminders are corre
 
 2. Determine current timezone (in priority order):
    - `<context timezone="...">` tag in the current prompt
-   - `current_tz` from `/workspace/group/nanoclaw-state.json`
+   - `current_tz` from `/workspace/group/task-tz-state.json`
    - `home_tz` from `task-tz-state.json` or TZ env var
 
 3. Call `mcp__nanoclaw__list_tasks` to get all active scheduled tasks.
 
 4. For each reminder in `scheduled-reminders.json`:
-   - Compute `expected_fire_utc = utc_time - reminder_offset_min`
-   - Convert to current local timezone → `expected_fire_local` (no Z suffix)
+   - Compute `reminder_utc = utc_time - reminder_offset_min` (subtract minutes from the stored UTC time)
+   - Convert `reminder_utc` to current local timezone → `expected_fire_local` (no Z suffix)
    - Find the task by `task_id` in list_tasks output
-   - If task not found OR `|task.fire_time - expected_fire_local| > 2 minutes`:
+   - If task not found OR `|task.fire_time_utc - reminder_utc| > 2 minutes`:
      a. Cancel: `mcp__nanoclaw__cancel_task(task_id=old_task_id)`
      b. Schedule new task at `expected_fire_local` (no Z suffix)
      c. Update `task_id` in `scheduled-reminders.json` and save
