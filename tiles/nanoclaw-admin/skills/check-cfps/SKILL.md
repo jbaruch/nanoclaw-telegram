@@ -3,6 +3,8 @@ name: check-cfps
 description: Finds open CFPs relevant to Baruch across Java/AI/developer conferences. Extends the tessl tile version with persistent CFP state (sent/dismissed/remind) from cfp-state.json. Use when Baruch asks about upcoming conferences, call for papers, speaking opportunities, CFP deadlines, or where to submit a talk proposal.
 ---
 
+**Every step below is mandatory. Execute them in order. Do not skip, reorder, or abbreviate any step.**
+
 # Check CFPs (with State Management)
 
 Fetches and filters open CFPs, applies AI-based relevance reasoning, and maintains persistent state across sessions.
@@ -10,7 +12,7 @@ Fetches and filters open CFPs, applies AI-based relevance reasoning, and maintai
 ## Step 1 — Run fetch-and-filter script
 
 Execute the deterministic pipeline (fetches sources, applies hard filters, checks state).
-Script does NOT filter by topic relevance — that's your job in Step 1b.
+Script does NOT filter by topic relevance — that's your job in Step 2.
 
 ```bash
 python3 /workspace/group/scripts/check-cfps-fetch.py
@@ -24,7 +26,7 @@ Parse the JSON output:
 **Alert if:** script fails to run (report error and abort).
 **Note:** warnings about unreachable sources should be mentioned briefly at the top of output.
 
-## Step 1b — Relevance filter (AI reasoning)
+## Step 2 — Relevance filter (AI reasoning)
 
 For each CFP in the script output, reason about whether it's relevant to Baruch:
 
@@ -32,15 +34,15 @@ For each CFP in the script output, reason about whether it's relevant to Baruch:
 
 Apply the full YES/NO criteria from `/workspace/group/RELEVANCE-CRITERIA.md`. Use reasoning — not keyword matching, not a default fallback. Arrive at a confident YES or NO.
 
-**Ambiguous conference names:** If the conference name doesn't clearly indicate its topic (e.g., acronyms, regional names, or names that could apply to multiple domains), do NOT guess — proceed to Step 1c immediately and use the Sessionize description to determine relevance before making a YES/NO call.
+**Ambiguous conference names:** If the conference name doesn't clearly indicate its topic (e.g., acronyms, regional names, or names that could apply to multiple domains), do NOT guess — proceed to Step 3 immediately and use the Sessionize description to determine relevance before making a YES/NO call.
 
 **Reasoning for ambiguous AI conferences:** Ask yourself — is the speaker lineup typically ML engineers and data scientists (Python/PyTorch/TensorFlow), or software developers building on top of AI APIs? If it's the former → skip. If developers building AI-powered apps → keep.
 
 **No fallback default.** Think it through and make a call. Both false positives (irrelevant confs Baruch has to dismiss) and false negatives (missing good confs) are bad — use judgment to avoid both.
 
-## Step 1c — Sessionize verification + description re-filter
+## Step 3 — Sessionize verification + description re-filter
 
-For each CFP that survived Step 1b (and for any ambiguous CFPs from Step 1b that need description lookup), call Sessionize:
+For each CFP that survived Step 2 (and for any ambiguous CFPs from Step 2 that need description lookup), call Sessionize:
 
 ```
 mcp__nanoclaw__sessionize_get_event(slug: "{slug}")
@@ -51,7 +53,7 @@ If the call succeeds:
 - `is_online: true` → remove from list (online-only)
 - Update `deadline` with `cfp_end_local[:10]` (authoritative deadline from Sessionize, more accurate than scraped sources)
 - Note `expenses_covered` for new state entries (add to `bot_notes`)
-- **Read the event description/abstract.** If it reveals the conference is about ERP, business software, accounting, supply chain, or other non-developer topics → remove from list, regardless of what Step 1b decided. The full description is the ground truth. See `/workspace/group/RELEVANCE-CRITERIA.md` for NO categories.
+- **Read the event description/abstract.** If it reveals the conference is about ERP, business software, accounting, supply chain, or other non-developer topics → remove from list, regardless of what Step 2 decided. The full description is the ground truth. See `/workspace/group/RELEVANCE-CRITERIA.md` for NO categories.
 
 **Example:** A conference called "BC TechDays" could be British Columbia (developer conf) or Business Central/Dynamics 365 (ERP). If the Sessionize description mentions Dynamics 365, ERP, business processes, NAV, or supply chain → remove immediately.
 
@@ -59,7 +61,7 @@ If the call returns an error or 404 → skip silently (not all conferences are o
 
 Run calls in parallel where possible (one per CFP with a slug). Do not call for slugs that are clearly not Sessionize event IDs.
 
-## Step 2 — Web search for gaps
+## Step 4 — Web search for gaps
 
 Run these searches to catch AI/developer conferences not in the primary sources:
 
@@ -67,9 +69,9 @@ Run these searches to catch AI/developer conferences not in the primary sources:
 2. `developer conference CFP 2026 autumn fall open submissions`
 
 Add new CFPs found that aren't already in the list (deduplicate by conference name).
-Apply hard filters (no online/virtual, no excluded locations) then the same relevance reasoning as Step 1b.
+Apply hard filters (no online/virtual, no excluded locations) then the same relevance reasoning as Step 2.
 
-## Step 3 — Sort and format
+## Step 5 — Sort and format
 
 The script already returns results sorted by deadline. Merge in web search additions (also sorted).
 
@@ -100,7 +102,7 @@ The script handles state filtering automatically. When Baruch gives feedback abo
 
 ### Writing discovered CFPs to state
 
-After Steps 1b and 2, **write every relevant CFP** (kept after relevance filter) to `cfp-state.json`. This is what feeds the morning brief CFP section — without it, CFPs never appear in the brief.
+After Steps 2 and 4, **write every relevant CFP** (kept after relevance filter) to `cfp-state.json`. This is what feeds the morning brief CFP section — without it, CFPs never appear in the brief.
 
 Rules:
 - If the slug already has a user action (`dismissed`/`sent`/`remind`) → preserve it, do NOT overwrite

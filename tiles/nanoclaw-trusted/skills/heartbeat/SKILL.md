@@ -3,12 +3,14 @@ name: heartbeat
 description: Periodic silent health check across system, calendar, and email for Baruch. Use when performing a scheduled heartbeat run, when Baruch asks about system status, disk usage, CPU load, upcoming calendar events, calendar conflicts, email alerts, unread emails, or wants a daily summary. Checks system health via a diagnostic script, scans Google Calendar for new invites or changes in the last 30 minutes, and flags high-priority unread emails (financial, banking, tax deadlines, software updates, conference action items, personal requests). Runs silently — reports only actionable items; queues ambiguous emails for morning cleanup; writes a memory log entry only when something is reported.
 ---
 
+**Every step below is mandatory. Execute them in order. Do not skip, reorder, or abbreviate any step.**
+
 You are AyeAye, Baruch's assistant. **Global silence rule: run every step silently — report ONLY actionable items. Never output "all clear", acknowledgements, or status confirmations when there is nothing to report. This rule applies to every step below; per-step silence reminders are omitted.**
 
-## Step 0.5: Timezone sync
+## Step 1: Timezone sync
 Invoke the `task-tz-sync` skill. It runs silently if no timezone change is detected; sends a notification to Baruch if his timezone has changed and tasks were rescheduled.
 
-## Step 0.6: Missed task detection
+## Step 2: Missed task detection
 Read `/workspace/group/task-tz-state.json`. For each entry in `follow_me_tasks`:
 1. Compute current local time in `current_tz` (use UTC offsets from the timezone table in `task-tz-sync`)
 2. If `local_hour:local_minute` has already passed today **and** `last_run_date` ≠ today's local date → the task was missed
@@ -19,7 +21,7 @@ Read `/workspace/group/task-tz-state.json`. For each entry in `follow_me_tasks`:
 
 Only surface output if the invoked skill itself has something to report.
 
-## Step 0.7: Unanswered message check
+## Step 3: Unanswered message check
 Invoke `Skill(skill: "tessl__check-unanswered")`.
 
 If the returned list is empty → done. For each unanswered message:
@@ -35,13 +37,13 @@ If the returned list is empty → done. For each unanswered message:
 
 3. Send reply via `mcp__nanoclaw__send_message` with `reply_to: "<id>"`
 
-## Step 0: Pending response check
+## Step 4: Pending response check
 Read `/workspace/group/session-state.json`. If `pending_response` is non-null:
 - Send the pending response to Baruch now (message_id and preview are hints for context)
 - Clear `pending_response` to null in the file
 - Then continue with the rest of the heartbeat
 
-## Step 1: System checks
+## Step 5: System checks
 Run both checks in parallel:
 
 1. `python3 /workspace/group/scripts/heartbeat-checks.py` — container-level metrics (CPU, disk, memory)
@@ -54,7 +56,7 @@ Also check container age: read `container_started` from `/workspace/group/sessio
 ⚠️ <b>Container age:</b> N days — consider nuking for a fresh start
 ```
 
-## Step 2: Calendar check
+## Step 6: Calendar check
 Use COMPOSIO_MULTI_EXECUTE_TOOL with GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS:
 - time_min: now (UTC)
 - time_max: 1 year from now
@@ -62,7 +64,7 @@ Use COMPOSIO_MULTI_EXECUTE_TOOL with GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS:
 Check for events updated in the last 30 minutes (new invites, cancellations, changes).
 Report: new calendar invites needing a response (responseStatus = needsAction).
 
-## Step 3: Email check
+## Step 7: Email check
 Use GMAIL_FETCH_EMAILS with `query: "is:unread in:inbox"`, max_results: 20, verbose: false.
 **Always open the full email** (GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID) when subject/preview is insufficient to classify — especially for reservations, financial emails, or anything with dates.
 
@@ -91,14 +93,14 @@ Append to `/workspace/group/morning-brief-pending.json` under `cleanup_items`:
 
 **Already reported:** Skip emails already surfaced in a previous heartbeat this session — compare against recent messages to avoid duplicates.
 
-## Step 4: Update daily memory log
+## Step 8: Update daily memory log
 If anything was reported this heartbeat (email, calendar, system issue), append a brief entry to `/workspace/group/memory/daily/YYYY-MM-DD.md` (today's date in `current_tz`):
 ```
 - HH:MM UTC — [what was reported, one line]
 ```
 If nothing was reported, skip this step entirely — do not write anything.
 
-## Step 4.5: Internal-monologue violation scan
+## Step 9: Internal-monologue violation scan
 Run via Bash:
 ```bash
 python3 /workspace/group/scripts/violation-scan.py
