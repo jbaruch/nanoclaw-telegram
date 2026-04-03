@@ -65,7 +65,7 @@ This is critical after a session nuke — you have no memory of who said what, b
 
 ## Unanswered message detection
 
-After a session nuke or on first message in a new session, check for messages you never replied to. A message is "unanswered" if no bot reply appeared within 10 minutes after it:
+After a session nuke or on first message in a new session, check for messages you never replied to. A message is "unanswered" if no bot reply appeared within 15 minutes after it:
 
 ```python
 import sqlite3, json
@@ -88,7 +88,7 @@ conn.close()
 
 for msg_id, sender, content, ts in user_msgs:
     msg_time = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-    window_end = msg_time + timedelta(minutes=10)
+    window_end = msg_time + timedelta(minutes=15)
     if not any(msg_time < bt <= window_end for bt in bot_times):
         print(f"UNANSWERED: [{ts}] {sender}: {content[:80]}")
 ```

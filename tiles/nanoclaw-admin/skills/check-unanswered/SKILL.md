@@ -1,6 +1,6 @@
 ---
 name: check-unanswered
-description: Finds user messages that never got a bot reply. Uses gap detection — a message is unanswered if no bot reply appeared within 10 minutes after it. Deterministic script, no LLM reasoning for detection. Use when performing heartbeat checks or after session recovery.
+description: Finds user messages that never got a bot reply. Uses gap detection — a message is unanswered if no bot reply appeared within 15 minutes after it. Deterministic script, no LLM reasoning for detection. Use when performing heartbeat checks or after session recovery.
 ---
 
 # Check Unanswered Messages
@@ -19,7 +19,7 @@ The script outputs JSON:
   ],
   "chat_jid": "tg:...",
   "lookback_hours": 24,
-  "reply_window_minutes": 10,
+  "reply_window_minutes": 15,
   "checked_at": "..."
 }
 ```

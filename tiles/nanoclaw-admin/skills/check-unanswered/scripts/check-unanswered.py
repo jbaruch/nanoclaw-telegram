@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 DB = os.environ.get('NANOCLAW_DB', '/workspace/store/messages.db')
 CHAT_JID = os.environ.get('NANOCLAW_CHAT_JID', '')
 LOOKBACK_HOURS = int(os.environ.get('LOOKBACK_HOURS', '24'))
-REPLY_WINDOW_MINUTES = int(os.environ.get('REPLY_WINDOW_MINUTES', '10'))
+REPLY_WINDOW_MINUTES = int(os.environ.get('REPLY_WINDOW_MINUTES', '15'))
 
 if not CHAT_JID:
     # Fall back to detecting current chat from most recent bot message
