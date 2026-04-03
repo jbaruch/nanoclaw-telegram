@@ -5,7 +5,23 @@ description: Fetch recent emails, calibrate for source noise (automated senders 
 
 # Check Email
 
-**Workflow:** Load Preferences → Fetch → Calibrate → Classify → Output
+**Workflow:** Load Muted Threads → Load Preferences → Fetch → Calibrate → Classify → Output
+
+## Load Muted Threads
+
+Read `/workspace/group/email-mute-state.json` if it exists:
+
+```json
+{
+  "muted_threads": [
+    {"threadId": "...", "subject": "...", "reason": "dismissed", "muted_at": "..."}
+  ]
+}
+```
+
+Build a set of muted threadIds. During Classify, skip any email whose `threadId` is in this set — no report, no cleanup queue, total silence.
+
+**To mute a new thread:** When Baruch says "не интересно", "mute this", "stop reporting this", or has been dismissing a topic repeatedly — fetch the email's threadId and append it to this file immediately.
 
 ## Load Preferences
 
