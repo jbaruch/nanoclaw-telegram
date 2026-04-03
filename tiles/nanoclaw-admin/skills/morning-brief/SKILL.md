@@ -22,15 +22,25 @@ Read `current_tz` from `/workspace/group/task-tz-state.json` (Step 0). **All tim
 
 ---
 
-## Step 0: Initialization (Lock + Timezone)
+## Step 0: Initialization (Dedup + Lock + Timezone)
 
-Read `/workspace/group/task-tz-state.json` once and extract both values in a single read:
+Read `/workspace/group/task-tz-state.json` once and extract all needed values in a single read.
 
-1. **Optimistic lock:** Find entry where `name == "morning-brief"` in `follow_me_tasks`. Set `last_run_date` to today's local date (YYYY-MM-DD in `current_tz`). Write back, preserving all other fields. This prevents heartbeat re-triggering while the run is in progress.
+**Dedup guard — check first, before writing anything:**
 
-2. **Timezone:** Extract `current_tz` per the [Timezone Reference](#timezone-reference) above.
+Find the entry where `name == "morning-brief"` in `follow_me_tasks`. Read its current `last_run_date`.
 
-> **Note:** Step 10 performs the final write-back of `last_run_date` after all steps complete.
+Compute today's local date in `current_tz`. If `last_run_date` already equals today's date → **exit silently. Do not send any message, do not output any text, do not report "already ran". Just stop.** This prevents double-runs when both heartbeat and the scheduler trigger within the same day.
+
+**Optimistic lock (only if dedup check passed):**
+
+Set `last_run_date` to today's local date (YYYY-MM-DD in `current_tz`). Write back, preserving all other fields. This prevents heartbeat re-triggering while the run is in progress.
+
+**Timezone:** Extract `current_tz` per the [Timezone Reference](#timezone-reference) above.
+
+> **Note:** Step 10 performs the final write-back of `last_run_date` after all steps complete. The Step 0 write is the dedup guard; Step 10 is the canonical record.
+
+> **Silence rule:** All internal progress notes (e.g. "lock set", "running step 3", "brief complete") MUST be wrapped in `<internal>` tags or omitted entirely. They must never appear as plain text output — they would stream directly to Telegram.
 
 ---
 

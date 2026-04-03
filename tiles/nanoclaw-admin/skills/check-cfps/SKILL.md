@@ -32,13 +32,15 @@ For each CFP in the script output, reason about whether it's relevant to Baruch:
 
 Apply the full YES/NO criteria from `/workspace/group/RELEVANCE-CRITERIA.md`. Use reasoning — not keyword matching, not a default fallback. Arrive at a confident YES or NO.
 
+**Ambiguous conference names:** If the conference name doesn't clearly indicate its topic (e.g., "BC TechDays", "NAV TechDays", acronyms, regional names), do NOT guess — proceed to Step 1c immediately and use the Sessionize description to determine relevance before making a YES/NO call.
+
 **Reasoning for ambiguous AI conferences:** Ask yourself — is the speaker lineup typically ML engineers and data scientists (Python/PyTorch/TensorFlow), or software developers building on top of AI APIs? If it's the former → skip. If developers building AI-powered apps → keep.
 
 **No fallback default.** Think it through and make a call. Both false positives (irrelevant confs Baruch has to dismiss) and false negatives (missing good confs) are bad — use judgment to avoid both.
 
-## Step 1c — Sessionize deadline verification
+## Step 1c — Sessionize verification + description re-filter
 
-For each CFP that survived Step 1b, attempt to verify/enrich via Sessionize using the slug:
+For each CFP that survived Step 1b (and for any ambiguous CFPs from Step 1b that need description lookup), call Sessionize:
 
 ```
 mcp__nanoclaw__sessionize_get_event(slug: "{slug}")
@@ -49,8 +51,11 @@ If the call succeeds:
 - `is_online: true` → remove from list (online-only)
 - Update `deadline` with `cfp_end_local[:10]` (authoritative deadline from Sessionize, more accurate than scraped sources)
 - Note `expenses_covered` for new state entries (add to `bot_notes`)
+- **Read the event description/abstract.** If it reveals the conference is about ERP, business software, accounting, supply chain, or other non-developer topics → remove from list, regardless of what Step 1b decided. The full description is the ground truth. See `/workspace/group/RELEVANCE-CRITERIA.md` for NO categories.
 
-If the call returns an error or 404 → skip silently (not all conferences are on Sessionize). **Never block on Sessionize failures** — continue with original data.
+**Example:** A conference called "BC TechDays" — "BC" could mean British Columbia (developer conf) or Business Central (Microsoft Dynamics ERP). The Sessionize description will make this unambiguous. If the description mentions Dynamics 365, ERP, business processes, NAV, or supply chain → remove immediately.
+
+If the call returns an error or 404 → skip silently (not all conferences are on Sessionize). **Never block on Sessionize failures** — continue with original data. For ambiguous conferences where Sessionize is unavailable, do a quick web search: `"[Conference Name]" topics speakers audience 2026`.
 
 Run calls in parallel where possible (one per CFP with a slug). Do not call for slugs that are clearly not Sessionize event IDs.
 

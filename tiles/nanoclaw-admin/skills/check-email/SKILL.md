@@ -15,17 +15,32 @@ Read `/workspace/group/email-mute-state.json` if it exists:
 {
   "muted_threads": [
     {"threadId": "...", "subject": "...", "reason": "dismissed", "muted_at": "..."}
+  ],
+  "muted_subject_patterns": [
+    {"pattern": "[jc] sharat", "reason": "...", "muted_at": "..."}
   ]
 }
 ```
 
-Build a set of muted threadIds. During Classify, skip any email whose `threadId` is in this set — no report, no cleanup queue, total silence.
+Build:
+- A **set of muted threadIds** from `muted_threads[].threadId`
+- A **list of muted subject patterns** (lowercased strings) from `muted_subject_patterns[].pattern`
 
-**To mute a new thread:** When Baruch says "не интересно", "mute this", "stop reporting this", or any dismissal — fetch the email's threadId from Gmail and append it to this file **immediately, before doing anything else**. This applies in ANY session: main, heartbeat, or background. Do not wait, do not ask — just mute it.
+During Classify, skip any email where:
+- Its `threadId` is in the muted threadId set, **OR**
+- Its subject (lowercased) contains any muted pattern (lowercased substring match)
 
-**Muting from main session:** When Baruch replies to a surfaced email report with a dismissal, use `GMAIL_FETCH_EMAILS` to find the thread by subject/sender, then save its `threadId` to `email-mute-state.json`. Confirm with: "✓ muted".
+Skip means: no report, no cleanup queue, total silence.
 
-**Repeated dismissals = bug.** If Baruch dismisses the same thread more than once, the mute was never saved. Fix it now.
+**When to use threadId vs subject pattern:**
+- **threadId**: one-off threads from regular email senders (works reliably)
+- **subject pattern**: mailing list threads (groups.io, etc.) where each reply gets a new Gmail threadId — threadId muting silently fails for these. Use a pattern that matches the subject prefix (e.g. `[jc] sharat`).
+
+**To mute a new thread:** When Baruch says "не интересно", "mute this", "stop reporting this", or any dismissal — determine which type applies, then append to the right array in `email-mute-state.json` **immediately, before doing anything else**. This applies in ANY session: main, heartbeat, or background. Do not wait, do not ask — just mute it.
+
+**Muting from main session:** When Baruch replies to a surfaced email report with a dismissal, use `GMAIL_FETCH_EMAILS` to find the thread by subject/sender. Check if it's from a mailing list (groups.io, listserv, etc.) — if yes, add a subject pattern; if no, save the `threadId`. Confirm with: "✓ muted".
+
+**Repeated dismissals = bug.** If Baruch dismisses the same thread more than once, the mute was never saved or the wrong type was used. Fix it now — check if a threadId mute exists but is failing due to mailing list behavior, and convert it to a subject pattern.
 
 ## Load Preferences
 
