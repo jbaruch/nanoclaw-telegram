@@ -442,6 +442,16 @@ function buildVolumeMounts(
   if (!fs.existsSync(claudeJsonPath)) {
     fs.writeFileSync(claudeJsonPath, '{}');
   }
+  // Chown so container user can write (Claude Code updates this file at runtime)
+  const jsonUid = HOST_UID ?? 1000;
+  const jsonGid = HOST_GID ?? 1000;
+  if (jsonUid !== 0) {
+    try {
+      fs.chownSync(claudeJsonPath, jsonUid, jsonGid);
+    } catch {
+      /* best-effort */
+    }
+  }
   mounts.push({
     hostPath: toHostPath(claudeJsonPath),
     containerPath: '/home/node/.claude.json',
