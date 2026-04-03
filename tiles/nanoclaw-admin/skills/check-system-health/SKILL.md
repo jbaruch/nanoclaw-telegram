@@ -74,4 +74,6 @@ Persistent dismissals are stored in `/workspace/group/system-health-dismissed.js
 
 ## Output
 
-Return issues found or empty if all clear.
+**If issues found:** report them via `mcp__nanoclaw__send_message`.
+
+**If no issues: output nothing. Complete silence. Never output "all clear", "no issues found", "everything looks good", or any confirmation that checks passed. Silence IS the success signal.**
