@@ -23,6 +23,8 @@ Expected JSON structure:
 }
 ```
 
+**Mute filter:** Read `/workspace/group/email-mute-state.json` (if it exists). Build the list of muted subject patterns from `muted_subject_patterns[].pattern` (lowercased strings). For each cleanup item, if its `subject` field (lowercased) contains any muted pattern — **remove it silently** from the send list and immediately purge it from `cleanup_items` in `morning-brief-pending.json`. Save the file after purging. Muted items get no message, no log, total silence.
+
 ## Step 2: Send each item as a separate message
 For each item in `cleanup_items`, send a separate message via `mcp__nanoclaw__send_message`:
 - Format: `*[Cleanup N/Total]* {item question or description}`
