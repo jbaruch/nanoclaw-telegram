@@ -15,7 +15,8 @@
 #   6. Commit, push, publish, deploy
 #   7. Version bump commit
 #
-# Staging copies are NOT deleted — AyeAye keeps them as working copies.
+# After successful publish, staging copies are deleted from the group folder.
+# Stale staging overrides tile updates — they MUST be cleaned after promote.
 
 set -euo pipefail
 
@@ -241,6 +242,20 @@ else
   echo "  tessl publish failed — plugins deployed via git only"
 fi
 
+# --- 6. Clean up staging copies ---
+
+echo "6. Cleaning staging copies from NAS..."
+for skill in "${SKILLS_TO_PROMOTE[@]}"; do
+  [ -z "$skill" ] && continue
+  nas "rm -rf '$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/$skill' '$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/tessl__$skill'" 2>/dev/null
+  echo "  removed: $skill"
+done
+if [ "$PROMOTE_RULES" = true ] && [ -n "${RULES_ON_NAS:-}" ]; then
+  for rule in $RULES_ON_NAS; do
+    nas "rm -f '$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/staging/$TILE_NAME/$rule.md'" 2>/dev/null
+    echo "  removed rule: $rule"
+  done
+fi
+
 echo ""
-echo "Done! $PROMOTED_COUNT item(s) promoted and deployed."
-echo "Tell AyeAye to run /verify-plugins to clean up staging copies."
+echo "Done! $PROMOTED_COUNT item(s) promoted, deployed, and staging cleaned."
