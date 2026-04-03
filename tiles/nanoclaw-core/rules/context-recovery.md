@@ -43,15 +43,66 @@ chats(jid, name, last_message_time, channel, is_group)
 
 - `is_from_me = 1` — messages from the bot (your own responses)
 - `is_from_me = 0` — messages from users
-- `sender_name` — display name of the sender
+- `sender` — numeric user ID (stable across name changes)
+- `sender_name` — display name with username, e.g. `Leonid (@ligolnik)`, `JBáruch (@JBaruch)`
 - `content` — full message text
+
+## Connecting people to history
+
+`sender_name` contains both the display name AND the username. When someone in the current conversation references past messages ("I told you yesterday"), match their Telegram username or name against `sender_name`:
+
+```python
+# Find what @ligolnik said yesterday
+rows = conn.execute("""
+    SELECT timestamp, content FROM messages
+    WHERE sender_name LIKE '%ligolnik%'
+      AND timestamp > datetime('now', '-2 days')
+    ORDER BY timestamp DESC LIMIT 10
+""").fetchall()
+```
+
+This is critical after a session nuke — you have no memory of who said what, but the database does.
+
+## Unanswered message detection
+
+After a session nuke or on first message in a new session, check for messages you never replied to. A message is "answered" only if a bot message exists with `reply_to_message_id` pointing to it. No reply-thread = not an answer.
+
+```python
+import sqlite3
+conn = sqlite3.connect('/workspace/store/messages.db')
+chat_jid = conn.execute("SELECT jid FROM chats LIMIT 1").fetchone()[0]
+
+unanswered = conn.execute("""
+    SELECT m.id, m.sender_name, m.content, m.timestamp
+    FROM messages m
+    WHERE m.chat_jid = ?
+      AND m.is_from_me = 0
+      AND m.is_bot_message = 0
+      AND m.timestamp > datetime('now', '-24 hours')
+      AND NOT EXISTS (
+        SELECT 1 FROM messages r
+        WHERE r.chat_jid = m.chat_jid
+          AND r.is_from_me = 1
+          AND r.reply_to_message_id = m.id
+      )
+    ORDER BY m.timestamp ASC
+""", (chat_jid,)).fetchall()
+conn.close()
+
+for msg_id, sender, content, ts in unanswered:
+    print(f"UNANSWERED: [{ts}] {sender}: {content[:80]}")
+```
+
+If you find unanswered messages: acknowledge the gap and respond to any that are still actionable. Don't pretend they didn't happen.
 
 ## When to use
 
 - User references something from an earlier session that's not in active context
 - User says "ты говорил..." (you said...) and you don't have it in context
+- Someone says "I told you" / "we discussed" / "yesterday I asked" — match their username to DB history
 - Any "I don't remember" impulse — check first
 - After context compaction (the summary will mention "continued from previous session")
+- First message after a nuke — check for unanswered messages from before the nuke
 
 ## This is a hard requirement
 

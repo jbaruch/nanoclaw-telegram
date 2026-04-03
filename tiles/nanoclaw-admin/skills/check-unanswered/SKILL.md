@@ -1,115 +1,45 @@
 ---
 name: check-unanswered
-description: Scans a Telegram-backed SQLite message store for user messages that have received no bot text reply, returning a list of unanswered threads with sender, content, and timestamp. Use when the user asks to find unanswered messages, check for pending replies, audit response coverage, review missed messages, or identify unresponded threads in the message history.
+description: Finds user messages that never got a threaded bot reply. A message is "answered" only if a bot message exists with reply_to_message_id pointing to it. Deterministic script, no LLM reasoning for detection. Use when performing heartbeat checks or after session recovery.
 ---
 
 # Check Unanswered Messages
 
-Find user messages since last check that have no text reply from the bot.
+Run the deterministic detector script:
 
-## Code
-
-```python
-import sqlite3, json, os, sys
-
-STATE_FILE = '/workspace/group/nanoclaw-state.json'
-DB = '/workspace/store/messages.db'
-
-# Load state file, defaulting gracefully if missing or corrupted
-try:
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE) as f:
-            state = json.load(f)
-    else:
-        state = {}
-except (json.JSONDecodeError, OSError):
-    state = {}
-
-try:
-    conn = sqlite3.connect(DB, timeout=5)
-except sqlite3.OperationalError as e:
-    raise RuntimeError(f"Could not open message DB: {e}")
-
-try:
-    has_reactions = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='reactions'"
-    ).fetchone()
-    if not has_reactions:
-        print("WARNING: reactions table not found — proceeding with text-reply-only detection", file=sys.stderr)
-
-    # Detect current chat from the most recent bot message, then scope all queries to it
-    row = conn.execute(
-        "SELECT chat_jid FROM messages WHERE is_from_me=1 ORDER BY timestamp DESC LIMIT 1"
-    ).fetchone()
-
-    if not row:
-        unanswered = []
-    else:
-        current_chat = row[0]
-
-        cursors = state.get('unanswered_cursors', {})
-        last_ts = cursors.get(current_chat, '1970-01-01T00:00:00.000Z')
-
-        try:
-            # A message is answered if any later is_from_me=1 message exists in the same chat
-            rows = conn.execute('''
-              SELECT m.id, m.sender_name, m.content, m.timestamp
-              FROM messages m
-              WHERE m.chat_jid = ?
-                AND m.timestamp > ?
-                AND m.is_from_me = 0
-                AND NOT EXISTS (
-                  SELECT 1 FROM messages r
-                  WHERE r.chat_jid = m.chat_jid
-                    AND r.is_from_me = 1
-                    AND r.timestamp > m.timestamp
-                )
-              ORDER BY m.timestamp ASC
-            ''', (current_chat, last_ts)).fetchall()
-        except sqlite3.OperationalError as e:
-            raise RuntimeError(f"Query failed — possible schema mismatch: {e}")
-
-        # Advance cursor to most recent user message in this chat
-        max_ts = conn.execute(
-            "SELECT MAX(timestamp) FROM messages WHERE chat_jid = ? AND is_from_me = 0",
-            (current_chat,)
-        ).fetchone()[0]
-
-        cursors[current_chat] = max_ts or last_ts
-        state['unanswered_cursors'] = cursors
-        # Remove legacy global cursor if present
-        state.pop('unanswered_last_checked_id', None)
-
-        try:
-            with open(STATE_FILE, 'w') as f:
-                json.dump(state, f, indent=2)
-        except OSError as e:
-            raise RuntimeError(f"Failed to persist state file: {e}")
-
-        unanswered = rows
-
-finally:
-    conn.close()
+```bash
+python3 /workspace/group/scripts/check-unanswered.py
 ```
 
-## Output
-
-Return `unanswered` list to caller. **If empty: return nothing. Send NO message, output NO text, produce NO acknowledgement. "No new messages to respond to at this time." is a forbidden phrase — never output it. Silence is the correct and complete response when there is nothing to report.**
-
-Each entry in `unanswered` is a tuple of `(id, sender_name, content, timestamp)`, where `id` is the message row ID, `sender_name` is the display name of the user, `content` is the raw message text, and `timestamp` is an ISO-8601 string.
-
-## Validation
-
-After retrieving results, confirm no returned message has a later bot reply in the same chat by running:
-
-```sql
-SELECT m.id, m.timestamp, r.timestamp AS bot_reply_ts
-FROM messages m
-JOIN messages r ON r.chat_jid = m.chat_jid
-                AND r.is_from_me = 1
-                AND r.timestamp > m.timestamp
-WHERE m.id IN (<comma-separated ids from unanswered>)
-LIMIT 10;
+The script outputs JSON:
+```json
+{
+  "unanswered": [
+    {"id": "123", "sender_name": "Leonid (@ligolnik)", "content": "...", "timestamp": "..."}
+  ],
+  "chat_jid": "tg:...",
+  "lookback_hours": 24,
+  "checked_at": "..."
+}
 ```
 
-This query should return zero rows. Any match indicates the main query missed a reply and the result set should be discarded for investigation.
+## How it works
+
+A bot message "answers" a user message when `reply_to_message_id = user_msg.id`. If no bot message threads to a user message, it's unanswered. A standalone bot message (no reply_to) is NOT an answer — it's just another message.
+
+## If empty: silence
+
+**If `unanswered` is empty: return nothing. No output, no message, no acknowledgement.**
+
+## If non-empty: respond to each
+
+For each unanswered message:
+1. React with 👌: `mcp__nanoclaw__react_to_message(messageId: "<id>", emoji: "👌")`
+2. Reply with judgment — consider whether it's still actionable, trivial, or too late
+3. Thread correctly: `mcp__nanoclaw__send_message(reply_to: "<id>")`
+
+## Environment variables
+
+The script accepts overrides:
+- `NANOCLAW_CHAT_JID` — chat to check (auto-detected if unset)
+- `LOOKBACK_HOURS` — how far back to look (default: 24)
