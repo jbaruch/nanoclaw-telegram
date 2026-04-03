@@ -43,13 +43,31 @@ chats(jid, name, last_message_time, channel, is_group)
 
 - `is_from_me = 1` — messages from the bot (your own responses)
 - `is_from_me = 0` — messages from users
-- `sender_name` — display name of the sender
+- `sender` — numeric user ID (stable across name changes)
+- `sender_name` — display name with handle, e.g. `Leonid (@ligolnik)`, `JBáruch (@JBaruch)`
 - `content` — full message text
+
+## Connecting people to history
+
+`sender_name` contains both the display name AND the @handle. When someone in the current conversation references past messages ("I told you yesterday"), match their @handle or name against `sender_name`:
+
+```python
+# Find what @ligolnik said yesterday
+rows = conn.execute("""
+    SELECT timestamp, content FROM messages
+    WHERE sender_name LIKE '%ligolnik%'
+      AND timestamp > datetime('now', '-2 days')
+    ORDER BY timestamp DESC LIMIT 10
+""").fetchall()
+```
+
+This is critical after a session nuke — you have no memory of who said what, but the database does.
 
 ## When to use
 
 - User references something from an earlier session that's not in active context
 - User says "ты говорил..." (you said...) and you don't have it in context
+- Someone says "I told you" / "we discussed" / "yesterday I asked" — match their handle to DB history
 - Any "I don't remember" impulse — check first
 - After context compaction (the summary will mention "continued from previous session")
 
