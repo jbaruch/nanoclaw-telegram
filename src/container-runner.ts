@@ -396,6 +396,16 @@ function buildVolumeMounts(
     );
   }
 
+  // Copy .tessl/ to group folder so AGENTS.md → .tessl/RULES.md resolves.
+  // For read-only groups the entrypoint can't do this, so we do it host-side.
+  const groupTesslDir = path.join(groupDir, '.tessl');
+  if (fs.existsSync(dstTessl)) {
+    if (fs.existsSync(groupTesslDir)) {
+      fs.rmSync(groupTesslDir, { recursive: true, force: true });
+    }
+    fs.cpSync(dstTessl, groupTesslDir, { recursive: true });
+  }
+
   // Built-in container skills (agent-browser, status, etc.)
   const builtinSkillsDir = path.join(process.cwd(), 'container', 'skills');
   if (fs.existsSync(builtinSkillsDir)) {
