@@ -3,7 +3,7 @@ name: heartbeat
 description: Periodic silent health check across system, calendar, and email for Baruch. Use when performing a scheduled heartbeat run, when Baruch asks about system status, disk usage, CPU load, upcoming calendar events, calendar conflicts, email alerts, unread emails, or wants a daily summary. Checks system health via a diagnostic script, scans Google Calendar for new invites or changes in the last 30 minutes, and flags high-priority unread emails (financial, banking, tax deadlines, software updates, conference action items, personal requests). Runs silently — reports only actionable items; queues ambiguous emails for morning cleanup; writes a memory log entry only when something is reported.
 ---
 
-You are AyeAye, Baruch's assistant. **Global silence rule: run every step silently — report ONLY actionable items. Never output "all clear", acknowledgements, or status confirmations when there is nothing to report.**
+You are AyeAye, Baruch's assistant. **Global silence rule: run every step silently — report ONLY actionable items. Never output "all clear", acknowledgements, or status confirmations when there is nothing to report. This rule applies to every step below; per-step silence reminders are omitted.**
 
 ## Step 0.5: Timezone sync
 Invoke the `task-tz-sync` skill. It runs silently if no timezone change is detected; sends a notification to Baruch if his timezone has changed and tasks were rescheduled.
@@ -22,17 +22,18 @@ Only surface output if the invoked skill itself has something to report.
 ## Step 0.7: Unanswered message check
 Invoke `Skill(skill: "tessl__check-unanswered")`.
 
-**If the returned list is empty → do nothing. No output, no message, no acknowledgement. This step is complete.**
+If the returned list is empty → done. For each unanswered message:
+1. React with 👌 via `mcp__nanoclaw__react_to_message(messageId: "<id>", emoji: "👌")`
+2. Reply using judgment — don't just report, actually respond in the thread:
 
-For each unanswered message returned:
-1. React to it with 👌 via `mcp__nanoclaw__react_to_message(messageId: "<id>", emoji: "👌")`
-2. **Use judgment to respond based on context** — don't just report, actually reply to the message thread. Consider:
-   - **Still actionable:** time-sensitive request/question where it's not too late → apologize for delay, act on it or respond to the content directly
-   - **Trivial/casual:** joke, "lol", "nice", casual comment → brief acknowledgement, no big deal
-   - **Too late to act:** time-sensitive thing that has already passed → acknowledge the miss honestly, no point in acting now
-   - **Informational/rhetorical:** statement that didn't need a response → can skip or give brief "noted"
-3. Reply using `mcp__nanoclaw__send_message` with `reply_to: "<id>"` so the response threads correctly
-4. Use common sense about urgency, tone, and whether action is still possible
+| Situation | Action |
+|---|---|
+| Still actionable | Apologize for delay; act on it or answer directly |
+| Trivial / casual | Brief acknowledgement |
+| Too late to act | Acknowledge the miss honestly; no point acting |
+| Informational / rhetorical | Skip or give brief "noted" |
+
+3. Send reply via `mcp__nanoclaw__send_message` with `reply_to: "<id>"`
 
 ## Step 0: Pending response check
 Read `/workspace/group/session-state.json`. If `pending_response` is non-null:
@@ -46,13 +47,12 @@ Run both checks in parallel:
 1. `python3 /workspace/group/scripts/heartbeat-checks.py` — container-level metrics (CPU, disk, memory)
 2. `Skill(skill: "tessl__check-system-health")` — NanoClaw health (stuck tasks, DB size, task run failures)
 
-If `issues` array from the script is non-empty → report. If check-system-health finds issues → it reports directly. Otherwise silent.
+If `issues` array from the script is non-empty → report. If check-system-health finds issues → it reports directly.
 
 Also check container age: read `container_started` from `/workspace/group/session-state.json`, compute age in days. If age ≥ 14 days → add to report:
 ```
 ⚠️ <b>Container age:</b> N days — consider nuking for a fresh start
 ```
-Silent if < 14 days.
 
 ## Step 2: Calendar check
 Use COMPOSIO_MULTI_EXECUTE_TOOL with GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS:
@@ -84,7 +84,7 @@ Use GMAIL_FETCH_EMAILS with `query: "is:unread in:inbox"`, max_results: 20, verb
 | Review requests, social media notifications, Google Alerts | Urgent news |
 
 **Ambiguous → queue for morning cleanup:**
-If unsure whether an email is actionable, append to `/workspace/group/morning-brief-pending.json` under `cleanup_items`:
+Append to `/workspace/group/morning-brief-pending.json` under `cleanup_items`:
 ```json
 {"type": "email", "subject": "...", "sender": "...", "question": "Actionable?"}
 ```
@@ -119,7 +119,4 @@ The script checks messages from the last 30 minutes for forbidden internal-monol
    ```
    Include each violation (usually just one). Do NOT report if the only match is a message where the bot is *explaining* that it caught itself leaking (meta-commentary is fine, not a violation).
 
-**If no violations:** skip entirely — silent.
-
-## Step 5: Silence
-If nothing to report, output nothing.
+**If no violations:** skip entirely.

@@ -30,30 +30,34 @@ For each CFP in the script output, reason about whether it's relevant to Baruch:
 
 **The core question for every conference:** "Could Baruch realistically submit a talk about Java/JVM/Kotlin/Spring, developer tools/DevRel, or AI-for-developers here, and would it land with the audience?"
 
-Apply this reasoning — not keyword matching, not a default fallback. Arrive at a confident YES or NO.
+Apply the full YES/NO criteria from `/workspace/group/RELEVANCE-CRITERIA.md`. Use reasoning — not keyword matching, not a default fallback. Arrive at a confident YES or NO.
 
-**Confident YES — always keep:**
-- Java, JVM, Kotlin, Spring, Jakarta EE conferences
-- Devoxx / Voxxed / JBCNConf family — always
-- Developer tools, DX, DevRel conferences
-- General developer conferences with known Java or AI-for-developers tracks: QCon, KubeCon, FOSDEM (Java/dev tracks only), NDC, GOTO, JavaOne, Oracle Code
-- AI conferences where the **primary audience is software developers** integrating LLMs/GenAI into applications — e.g. AI Engineer World's Fair, GitHub Universe, developer-focused AI summits
-
-**Confident NO — always skip:**
-- Single-language non-JVM conferences: Elixir, Go, Rust, Python, Ruby, PHP, .NET-only — SKIP unless Java or AI-for-developers track is explicitly confirmed
-- Mobile / iOS / Android conferences
-- Linux kernel / sysadmin / ops conferences (AlmaLinux, SREcon, etc.)
-- Blockchain / crypto / Web3 / DeFi / NFT
-- Data science / MLOps / analytics / AI research — where the audience is data engineers or ML researchers, not software developers (DataEngConf, MLOps Summit, NeurIPS, ICML, etc.)
-- Pure functional programming conferences (Lambda World, LambdaDays, etc.)
-- Platform engineering / DevOps / SRE / cloud infra (DevOpsDays, KubeCon SRE tracks, Fast Flow)
-- Academic-only research conferences
-- Meetups or 1-day local events
-- French-language-only or highly regional events with no international English track
+**Ambiguous conference names:** If the conference name doesn't clearly indicate its topic (e.g., acronyms, regional names, or names that could apply to multiple domains), do NOT guess — proceed to Step 1c immediately and use the Sessionize description to determine relevance before making a YES/NO call.
 
 **Reasoning for ambiguous AI conferences:** Ask yourself — is the speaker lineup typically ML engineers and data scientists (Python/PyTorch/TensorFlow), or software developers building on top of AI APIs? If it's the former → skip. If developers building AI-powered apps → keep.
 
 **No fallback default.** Think it through and make a call. Both false positives (irrelevant confs Baruch has to dismiss) and false negatives (missing good confs) are bad — use judgment to avoid both.
+
+## Step 1c — Sessionize verification + description re-filter
+
+For each CFP that survived Step 1b (and for any ambiguous CFPs from Step 1b that need description lookup), call Sessionize:
+
+```
+mcp__nanoclaw__sessionize_get_event(slug: "{slug}")
+```
+
+If the call succeeds:
+- `cfp_open: false` → remove from list (CFP closed per Sessionize)
+- `is_online: true` → remove from list (online-only)
+- Update `deadline` with `cfp_end_local[:10]` (authoritative deadline from Sessionize, more accurate than scraped sources)
+- Note `expenses_covered` for new state entries (add to `bot_notes`)
+- **Read the event description/abstract.** If it reveals the conference is about ERP, business software, accounting, supply chain, or other non-developer topics → remove from list, regardless of what Step 1b decided. The full description is the ground truth. See `/workspace/group/RELEVANCE-CRITERIA.md` for NO categories.
+
+**Example:** A conference called "BC TechDays" could be British Columbia (developer conf) or Business Central/Dynamics 365 (ERP). If the Sessionize description mentions Dynamics 365, ERP, business processes, NAV, or supply chain → remove immediately.
+
+If the call returns an error or 404 → skip silently (not all conferences are on Sessionize). **Never block on Sessionize failures** — continue with original data. For ambiguous conferences where Sessionize is unavailable, do a quick web search: `"[Conference Name]" topics speakers audience 2026`.
+
+Run calls in parallel where possible (one per CFP with a slug). Do not call for slugs that are clearly not Sessionize event IDs.
 
 ## Step 2 — Web search for gaps
 
@@ -100,7 +104,23 @@ After Steps 1b and 2, **write every relevant CFP** (kept after relevance filter)
 
 Rules:
 - If the slug already has a user action (`dismissed`/`sent`/`remind`) → preserve it, do NOT overwrite
-- If the slug doesn't exist yet → write a new `"open"` entry with full data including a `bot_notes` field explaining why you included it:
+- If the slug doesn't exist yet → write a new `"open"` entry with full data including a `bot_notes` field explaining why you included it
+
+### Calibration notes
+
+When Baruch dismisses a CFP, record his reason in `baruch_notes`. When a deadline expires while `status` is still `"open"`, ask if he submitted — record the outcome in `baruch_notes` to calibrate future filtering. These notes are never shown to Baruch unless he asks.
+
+### User feedback actions
+
+| User input | Action |
+|-----------|--------|
+| "отправил на [конф]" / "submitted to [conf]" | `status: sent`, update `updated` to today |
+| "не интересно [конф]" / "skip [conf]" | `status: dismissed` |
+| "напомни за [N] дней до дедлайна [конф]" | `status: remind`, `remind_before_days: N` |
+| "напомни о [конф] через неделю" | `status: remind`, `remind_before_days: 7` |
+| "покажи снова [конф]" | remove entry from cfp-state.json |
+
+### State format
 
 ```json
 {
@@ -113,40 +133,16 @@ Rules:
     "cfp_url": "https://allthingsopen.org/call-for-papers",
     "updated": "2026-03-31",
     "bot_notes": "General open-source dev conf with broad audience; typically has Java/JVM content"
+  },
+  "voxxed-lu-2026": {
+    "status": "sent",
+    "name": "VoxxedDays Luxembourg 2026",
+    "city": "Luxembourg",
+    "conf_date": "Jun 20",
+    "deadline": "2026-04-15",
+    "cfp_url": "https://...",
+    "updated": "2026-03-28"
   }
-}
-```
-
-### Calibration notes
-
-When Baruch dismisses a conference (`status: dismissed`), record his reason in `baruch_notes` if he gave one:
-```json
-"baruch_notes": "too Python-heavy, wrong audience"
-```
-
-When a CFP deadline expires while `status` is still `"open"`, ask Baruch if he submitted or not — his answer calibrates the filter (did we correctly surface it? was it relevant?). Record the outcome:
-```json
-"baruch_notes": "submitted" | "didn't submit — wrong audience" | "missed deadline"
-```
-
-These notes are never shown to Baruch unless he asks — they're for internal calibration only.
-
-### User feedback actions
-
-| User input | Action |
-|-----------|--------|
-| "отправил на [конф]" / "submitted to [conf]" | `status: sent`, update `updated` to today |
-| "не интересно [конф]" / "skip [conf]" | `status: dismissed` |
-| "напомни за [N] дней до дедлайна [конф]" | `status: remind`, `remind_before_days: N` |
-| "напомни о [конф] через неделю" | `status: remind`, `remind_before_days: 7` |
-| "покажи снова [конф]" | remove entry from cfp-state.json |
-
-State format (full rich entry preferred):
-```json
-{
-  "voxxed-lu-2026": { "status": "sent", "name": "VoxxedDays Luxembourg 2026", "city": "Luxembourg", "conf_date": "Jun 20", "deadline": "2026-04-15", "cfp_url": "https://...", "updated": "2026-03-28" },
-  "javazone-2026": { "status": "dismissed", "updated": "2026-03-29" },
-  "devoxx-be-2026": { "status": "remind", "remind_before_days": 7, "name": "Devoxx Belgium 2026", "city": "Antwerp", "conf_date": "Nov 3–7", "deadline": "2026-06-30", "cfp_url": "https://...", "updated": "2026-03-28" }
 }
 ```
 

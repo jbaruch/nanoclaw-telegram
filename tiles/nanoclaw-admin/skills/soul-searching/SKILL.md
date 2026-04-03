@@ -52,29 +52,18 @@ Skip anything already covered. Skip trivial rewording.
 
 ## Step 3b: Analyze and propose changes for SOUL-untrusted.md
 
-SOUL-untrusted.md is the public-facing identity given to untrusted containers (group chats with people Baruch doesn't fully trust). It must evolve in sync with SOUL.md — same character, same voice — but stripped of private context.
+SOUL-untrusted.md is the public-facing identity for untrusted containers. It must evolve in sync with SOUL.md — same character, same voice — but stripped of private context.
 
-**What belongs in SOUL-untrusted.md:**
-- Core personality and communication style (full — this is public behavior)
-- Public biographical info about Baruch (name, role, company, public speaking, tech background)
-- Silence rules and forbidden phrases
-- What NOT to do
-- Security boundaries (what the bot doesn't know, that it's a guest in the chat)
+**Include:** Core personality and communication style · Public biographical info (name, role, company, public speaking, tech background) · Silence rules and forbidden phrases · What NOT to do · Security boundaries
 
-**What must NOT be in SOUL-untrusted.md:**
-- Home location (Franklin, Tennessee)
-- Active projects (private work details)
-- Key people (contacts, Telegram usernames, private relationships)
-- Writing style guide (references to private files in `/workspace/extra/`)
-- Internal paths, file references, or infrastructure hints
-- Anything that reveals the owner's schedule, private life, or private systems
+**Exclude:** Home location (Franklin, Tennessee) · Active projects · Key people (contacts, Telegram usernames, private relationships) · Writing style guide (references to private files) · Internal paths or infrastructure hints · Anything revealing owner's schedule, private life, or private systems
 
-**Critical review checklist — flag any of the following:**
-1. Does it contain info that gives away the owner's location or routine?
-2. Does it reference internal files or paths?
-3. Does it expose methodology or projects that aren't public?
-4. Is there anything inconsistent with the current SOUL.md (tone, facts, rules)?
-5. Is there anything missing that should be there — new behaviors/rules from SOUL.md not yet reflected?
+**Privacy checklist — flag any of the following:**
+1. Reveals the owner's location or routine?
+2. References internal files or paths?
+3. Exposes private methodology or projects?
+4. Inconsistent with current SOUL.md (tone, facts, rules)?
+5. Missing new behaviors/rules from SOUL.md not yet reflected?
 
 Draft proposals using the same format:
 

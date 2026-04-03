@@ -6,41 +6,49 @@ description: Generates and delivers Baruch's daily morning briefing. Fetches tod
 You are AyeAye, Baruch's assistant.
 
 ## Tool Discovery (run once at start)
-Use `COMPOSIO_SEARCH_TOOLS` to locate and cache the following tools:
-- **Calendar:** search `"googlecalendar events list all calendars"`
-- **Tasks (list):** search `"googletasks list"`
-- **Tasks (get):** search `"googletasks get"`
-- **Scheduler/Reminder:** search `"reminder create"` or `"task schedule"`
+Discover tools per `composio-preamble` rule: Calendar, Tasks (list + get + update), Scheduler.
 
 **Default failure behavior:** If any step fails (tool unavailable, non-zero exit, no output, file missing), note the failure, treat missing data as empty, and continue — unless a step specifies otherwise.
 
 ---
 
-## Step 0: Read current timezone
+## Timezone Reference
 
-Read `/workspace/group/task-tz-state.json`. Extract `current_tz` (e.g. `"Europe/Amsterdam"`).
+Read `current_tz` from `/workspace/group/task-tz-state.json` (Step 0). **All time operations use `current_tz`** — calendar window boundaries, event display times, and reminder scheduling. If `current_tz` is missing, fall back to `home_tz` or the `TZ` env var.
 
-Use this timezone for ALL time operations in this skill:
-- Calendar event window (Step 1)
-- Displaying event times (Step 5)
-- Reminder fire times (Step 8c)
-
-If the file doesn't exist or `current_tz` is missing, default to `America/Chicago`.
+- Calendar window boundaries (Step 1): express as UTC offset, e.g. `2026-04-01T00:00:00+02:00`.
+- Event display times (Step 5): always local `current_tz` time.
+- Reminder scheduling (Steps 8c/8d): convert event local time → UTC → scheduler timezone per the `scheduler-timezone` skill protocol. Store `utc_time` with a `Z` suffix.
 
 ---
 
-## Event Filter Rules (shared reference)
-Apply these exclusions whenever processing calendar events — in both Step 5 (brief display) and Step 8 (reminders):
-- Skip Travel events
-- Skip all-day "Home" events
-- Skip week-number events
-- Skip any event where Baruch's attendee entry (`jbaruch@sadogursky.com`, `self=true`) has `responseStatus="declined"`
+## Step 0: Initialization (Dedup + Lock + Timezone)
+
+Read `/workspace/group/task-tz-state.json` once and extract all needed values in a single read.
+
+**Dedup guard — check first, before writing anything:**
+
+Find the entry where `name == "morning-brief"` in `follow_me_tasks`. Read its current `last_run_date`.
+
+Compute today's local date in `current_tz`. If `last_run_date` already equals today's date → **exit silently. Do not send any message, do not output any text, do not report "already ran". Just stop.**
+
+**Optimistic lock (only if dedup check passed):**
+
+Set `last_run_date` to today's local date (YYYY-MM-DD in `current_tz`). Write back, preserving all other fields.
+
+**Timezone:** Extract `current_tz` per the [Timezone Reference](#timezone-reference) above.
+
+> **Silence rule:** All internal progress notes MUST be wrapped in `<internal>` tags or omitted entirely — they must never appear as plain text output, as they would stream directly to Telegram.
+
+---
+
+Apply the `event-filter-rules` (admin rule) to all calendar events in this skill — both display and reminders.
 
 ---
 
 ## Step 1: Fetch today's calendar
 Call the resolved calendar tool:
-- `time_min`: today at 00:00:00 in `current_tz` (convert to UTC offset, e.g. `2026-04-01T00:00:00+02:00` for Amsterdam)
+- `time_min`: today at 00:00:00 in `current_tz`
 - `time_max`: today at 23:59:59 in `current_tz`
 - `single_events`: true, `order_by`: startTime
 
@@ -52,6 +60,17 @@ Using the resolved tasks tools, fetch all task lists, then for each list fetch t
 ## Step 3: Check pending items
 Run: `python3 /workspace/group/scripts/morning-brief-fetch.py`
 Output includes `pending.undated_tasks` and `pending.cleanup_items` from `morning-brief-pending.json`.
+
+## Step 3a: Auto-assign dates to undated tasks
+
+Follow the `undated-task-date-assignment` skill for the full sub-workflow (reading linked Gmail, inferring due dates, calling the Tasks update tool). Summary:
+
+1. For each task in `pending.undated_tasks`, find its linked email via `task.links[]` (type `"email"`) and read the **full decoded body** — never use `snippet` or `preview`.
+2. Infer a due date from explicit deadlines, event dates, urgency signals, or title inference as a fallback.
+3. Call the Tasks update tool to set the date and remove the task from the undated display list.
+4. **Only ask the owner** if — after email reading and title inference — no reasonable date can be determined. Include those tasks in `📋 Без даты:` with a specific question.
+
+If all dates were assigned, omit the `📋 Без даты:` section entirely.
 
 ## Step 4a: Check urgent CFPs
 Run: `python3 /workspace/group/scripts/morning-brief-cfp.py`
@@ -75,35 +94,31 @@ If none → skip this section silently.
 ## Step 5: Send morning brief
 Select events using the [Event Filter Rules](#event-filter-rules-shared-reference).
 
-Display all event times in `current_tz` local time (not Chicago time).
-
-Format in Telegram HTML/style (*bold* single asterisks, • bullets, no markdown headings). Canonical example:
+Format in Telegram HTML. Canonical example:
 
 ```
-*Доброе утро! Понедельник, 9 июня*
+<b>Доброе утро! Понедельник, 9 июня</b>
 
-*📅 Сегодня:*
+<b>📅 Сегодня:</b>
 • 09:00 — Standup with team
 • 14:00 — 1:1 with Alex
 
-*✅ Задачи:*
+<b>✅ Задачи:</b>
 • ⚠️ Обновить README (просрочено: 6 июня)
 • Ответить на письмо Михаила
 
-*📋 Без даты:*
-• Разобрать инбокс
-• Обновить CV
-_Нужно установить дату для этих задач_
+<b>📋 Без даты:</b>
+• Разобрать инбокс — <i>когда это нужно сделать?</i>
 
-_2 события, 3 задачи_
+<i>2 события, 3 задачи</i>
 ```
 
 **Section rules:**
-- *📅 Сегодня:* — timed events with local time in `current_tz`.
-- *✅ Задачи:* — overdue tasks (original due date, marked ⚠️) + tasks due today. Omit if no tasks.
-- *📋 Без даты:* — list titles from `undated_tasks` with prompt to set dates. Omit if array is empty.
-- *📢 CFP дедлайны:* — CFPs closing within 7 days (from Step 4a). Omit if none.
-- *📦 Заказы:* — flagged orders (from Step 4). Omit if none.
+- `<b>📅 Сегодня:</b>` — timed events with local time in `current_tz`.
+- `<b>✅ Задачи:</b>` — overdue tasks (original due date, marked ⚠️) + tasks due today. Omit if no tasks.
+- `<b>📋 Без даты:</b>` — only tasks where a date could NOT be inferred (see Step 3a). Each entry includes a specific question. Omit entirely if Step 3a assigned all dates.
+- `<b>📢 CFP дедлайны:</b>` — CFPs closing within 7 days (from Step 4a). Omit if none.
+- `<b>📦 Заказы:</b>` — flagged orders (from Step 4). Omit if none.
 - Footer: `_N событий, M задач_`
 
 Send via `mcp__nanoclaw__send_message` with `pin: true`.
@@ -124,37 +139,14 @@ For each timed event — per the [Event Filter Rules](#event-filter-rules-shared
 Read `/workspace/group/scheduled-reminders.json`. If the file doesn't exist, treat as `{"reminders": []}`.
 
 ### 8b: Deduplicate
-Before scheduling a reminder for an event, check if `event_id` already exists in `scheduled-reminders.json`. If found — skip scheduling for that event (the reminder is already registered).
+Before scheduling a reminder for an event, check if `event_id` already exists in `scheduled-reminders.json`. If found — skip scheduling for that event.
 
 ### 8c: Schedule new reminders
 For events not already in `scheduled-reminders.json`, schedule a once-off reminder.
 
-**CRITICAL — timezone conversion is mandatory. This step has caused real bugs (e.g. Amsterdam keynote reminders firing after the event was over). Follow exactly:**
+**CRITICAL — use the `scheduler-timezone` skill protocol for timezone conversion.** Follow the protocol exactly — convert event time → UTC → scheduler timezone → format without Z suffix.
 
-1. Get the event start time from the Google Calendar response. It may be in local timezone (e.g. `2026-04-01T09:50:00+02:00`) or UTC. Convert to UTC first.
-2. Subtract 15 minutes (in UTC). Example: `09:50 Amsterdam = 07:50 UTC` → `07:50 UTC − 15 min = 07:35 UTC`.
-3. **Convert that UTC time to America/Chicago local time.** CDT = UTC−5 (Mar–Nov), CST = UTC−6 (Nov–Mar). Example: `07:35 UTC → 02:35 CDT`. Do NOT pass the UTC time or Amsterdam time — the scheduler interprets the value as Chicago local time and will fire at the wrong moment.
-4. Format as `"YYYY-MM-DDTHH:MM:SS"` with **no Z suffix** and pass as `schedule_value`.
-
-**Worked example (travel scenario):**
-- Event: keynote at 09:50 Amsterdam time (UTC+2) = `07:50 UTC`
-- Reminder offset: −15 min → `07:35 UTC`
-- Chicago CDT (UTC−5): `07:35 − 5h = 02:35 CDT`
-- Correct `schedule_value`: `"2026-04-01T02:35:00"` ← Chicago local, no Z
-- WRONG (caused the bug): `"2026-04-01T07:35:00"` ← this is UTC, scheduler fires at 12:35 UTC = 14:35 Amsterdam, event already over
-
-Use Python's `datetime` with `pytz` or `zoneinfo` to do this conversion reliably — do not compute UTC offsets by hand.
-
-```python
-from datetime import datetime, timezone, timedelta
-import zoneinfo
-
-chicago = zoneinfo.ZoneInfo("America/Chicago")
-event_utc = datetime(2026, 4, 1, 7, 50, tzinfo=timezone.utc)  # event start in UTC
-reminder_utc = event_utc - timedelta(minutes=15)               # subtract offset
-reminder_chicago = reminder_utc.astimezone(chicago)            # convert to Chicago
-schedule_value = reminder_chicago.strftime("%Y-%m-%dT%H:%M:%S")  # no Z, no offset
-```
+**Apply `temporal-awareness` rule** before scheduling each reminder: will this reminder be actionable when it fires? Skip reminders that fail this check.
 
 If no scheduling tool is available, or a reminder fails for a specific event, skip that event and continue.
 
@@ -171,9 +163,7 @@ For each newly scheduled reminder, append an entry to the `reminders` array in `
 }
 ```
 
-**UTC conversion:** Convert the event's local start time to UTC before storing. The event data from Google Calendar includes timezone info; derive UTC from that. Store in `utc_time` with a `Z` suffix.
-
-Write the updated file back to `/workspace/group/scheduled-reminders.json`.
+Derive `utc_time` from the event's local start time using `current_tz`. Write the updated file back to `/workspace/group/scheduled-reminders.json`.
 
 ## Step 9: Save state
 Write to `/workspace/group/calendar-state.json`:

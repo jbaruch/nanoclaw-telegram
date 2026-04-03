@@ -15,43 +15,36 @@ Read `/workspace/group/email-mute-state.json` if it exists:
 {
   "muted_threads": [
     {"threadId": "...", "subject": "...", "reason": "dismissed", "muted_at": "..."}
+  ],
+  "muted_subject_patterns": [
+    {"pattern": "[jc] sharat", "reason": "...", "muted_at": "..."}
   ]
 }
 ```
 
-Build a set of muted threadIds. During Classify, skip any email whose `threadId` is in this set — no report, no cleanup queue, total silence.
+Build:
+- A **set of muted threadIds** from `muted_threads[].threadId`
+- A **list of muted subject patterns** (lowercased strings) from `muted_subject_patterns[].pattern`
 
-**To mute a new thread:** When Baruch says "не интересно", "mute this", "stop reporting this", or any dismissal — fetch the email's threadId from Gmail and append it to this file **immediately, before doing anything else**. This applies in ANY session: main, heartbeat, or background. Do not wait, do not ask — just mute it.
+During Classify, skip any email where its `threadId` is in the muted set **OR** its subject (lowercased) contains any muted pattern. Skip = no report, no cleanup queue, total silence.
 
-**Muting from main session:** When Baruch replies to a surfaced email report with a dismissal, use `GMAIL_FETCH_EMAILS` to find the thread by subject/sender, then save its `threadId` to `email-mute-state.json`. Confirm with: "✓ muted".
+**Which mute type to use:**
+- **threadId** — one-off threads from regular senders
+- **subject pattern** — mailing list threads (groups.io, listserv, etc.) where each reply gets a new threadId; use the subject prefix (e.g. `[jc] sharat`)
 
-**Repeated dismissals = bug.** If Baruch dismisses the same thread more than once, the mute was never saved. Fix it now.
+**To mute:** When Baruch says "не интересно", "mute this", "stop reporting this", or any dismissal — determine type, append to the right array in `email-mute-state.json` **immediately, before anything else**. Any session (main, heartbeat, background). No waiting, no asking. Confirm with: "✓ muted".
+
+- *From main session:* Use `GMAIL_FETCH_EMAILS` to find the thread by subject/sender. Check for mailing list origin → subject pattern; otherwise → threadId.
+- *Repeated dismissals = bug.* If the same thread is dismissed twice, the mute wasn't saved or wrong type was used. Check if a threadId mute is failing due to mailing list behavior and convert it to a subject pattern.
 
 ## Load Preferences
 
-Read `/workspace/group/email-preferences.json` if it exists. This file contains user feedback on past classifications:
+Read `/workspace/group/email-preferences.json` if it exists. Schema:
+- `always_important` — array of `{sender, reason}` or `{domain, reason}` entries; skip calibration, always flag
+- `always_ignore` — array of `{sender, reason}` or `{domain, reason}` entries; skip calibration, always drop
+- `patterns` — array of `{rule, action, reason}` entries applied during classification (e.g. `"subject contains 'CFP'"` → `"important"`)
 
-```json
-{
-  "always_important": [
-    {"sender": "sarah@jfrog.com", "reason": "direct colleague"},
-    {"domain": "devreluni.com", "reason": "conference organizer"}
-  ],
-  "always_ignore": [
-    {"sender": "noreply@github.com", "reason": "automated notifications"},
-    {"domain": "marketing.salesforce.com", "reason": "disguised marketing"}
-  ],
-  "patterns": [
-    {"rule": "subject contains 'CFP'", "action": "important", "reason": "conference submissions"},
-    {"rule": "sender ends with @linkedin.com", "action": "ignore", "reason": "LinkedIn noise"}
-  ]
-}
-```
-
-These override all calibration and classification rules:
-- `always_important` — skip calibration, always flag
-- `always_ignore` — skip calibration, always drop
-- `patterns` — applied as additional rules during classification
+`always_important` and `always_ignore` override all calibration and classification rules. `patterns` act as additional classification rules.
 
 If the file doesn't exist or is empty, proceed with default rules only.
 
@@ -62,7 +55,7 @@ Discover Gmail tool per `composio-preamble` rule, then fetch recent emails:
 - label_ids: ["INBOX"]
 - Do NOT include spam/trash
 
-Read `/workspace/group/nanoclaw-state.json` to get `last_email_checked` (a messageId string). Only process emails NEWER than that ID (higher messageId = newer in Gmail). If no state file exists or the field is missing, process the latest 5 only.
+Read `/workspace/group/nanoclaw-state.json` to get `last_email_checked` (a messageId string). Only process emails NEWER than that ID (higher messageId = newer in Gmail). If no state file or field is missing, process the latest 5 only.
 
 After processing, update `last_email_checked` in `/workspace/group/nanoclaw-state.json` with the newest messageId seen.
 
@@ -121,8 +114,8 @@ New email from [Sarah Lee]: "Can you review the PR before EOD?" -- Hey, could yo
 When the user reacts with feedback ("good fit", "bad fit", "this one was spam", "you missed one from X"):
 
 1. Read `/workspace/group/email-preferences.json` (create if missing)
-2. Derive a general rule from the error class, not just the specific email
-3. Add the entry and confirm briefly what you learned
+2. Derive a general rule from the error class — not just the specific email
+3. Add the entry and briefly confirm what you learned
 
 | Feedback | Rule to add |
 |---|---|
@@ -131,4 +124,4 @@ When the user reacts with feedback ("good fit", "bad fit", "this one was spam", 
 | "good fit" on a CFP email | Pattern: subject contains CFP → important |
 | "you missed one from my boss" | Add boss's email to `always_important`; add domain too if unrecognized |
 
-Only record "good fit" feedback if it reinforces a non-obvious pattern — if default rules already covered it, don't clutter the file.
+Only record "good fit" feedback if it reinforces a non-obvious pattern — skip if default rules already covered it.
