@@ -207,6 +207,15 @@ function buildVolumeMounts(
     );
   }
 
+  if (isMain) {
+    // Main gets the project root read-only.
+    mounts.push({
+      hostPath: toHostPath(process.cwd()),
+      containerPath: '/workspace/project',
+      readonly: true,
+    });
+  }
+
   // Group folder mount. Untrusted groups get read-only (disk exhaustion protection).
   mounts.push({
     hostPath: toHostPath(groupDir),
