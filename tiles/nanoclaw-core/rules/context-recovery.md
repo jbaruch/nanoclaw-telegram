@@ -65,33 +65,13 @@ This is critical after a session nuke — you have no memory of who said what, b
 
 ## Unanswered message detection
 
-After a session nuke or on first message in a new session, check for messages you never replied to. A message is "answered" only if a bot message exists with `reply_to_message_id` pointing to it. No reply-thread = not an answer.
+After a session nuke or on first message in a new session, check for messages you never replied to:
 
-```python
-import sqlite3
-conn = sqlite3.connect('/workspace/store/messages.db')
-chat_jid = conn.execute("SELECT jid FROM chats LIMIT 1").fetchone()[0]
-
-unanswered = conn.execute("""
-    SELECT m.id, m.sender_name, m.content, m.timestamp
-    FROM messages m
-    WHERE m.chat_jid = ?
-      AND m.is_from_me = 0
-      AND m.is_bot_message = 0
-      AND m.timestamp > datetime('now', '-24 hours')
-      AND NOT EXISTS (
-        SELECT 1 FROM messages r
-        WHERE r.chat_jid = m.chat_jid
-          AND r.is_from_me = 1
-          AND r.reply_to_message_id = m.id
-      )
-    ORDER BY m.timestamp ASC
-""", (chat_jid,)).fetchall()
-conn.close()
-
-for msg_id, sender, content, ts in unanswered:
-    print(f"UNANSWERED: [{ts}] {sender}: {content[:80]}")
+```bash
+python3 /workspace/group/scripts/check-unanswered.py
 ```
+
+The script outputs JSON with an `unanswered` array. A message is "answered" only if a bot message exists with `reply_to_message_id` pointing to it. No reply-thread = not an answer.
 
 If you find unanswered messages: acknowledge the gap and respond to any that are still actionable. Don't pretend they didn't happen.
 
