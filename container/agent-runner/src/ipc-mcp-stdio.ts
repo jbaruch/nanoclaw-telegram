@@ -744,6 +744,64 @@ server.tool(
 );
 
 server.tool(
+  'sessionize_open_cfps',
+  'Fetch all open CFPs from Sessionize for the authenticated speaker account. Returns array of events with CFP dates, location, expenses, isOnline, cfpLink. Host handles the API key (SESSIONIZE_SPEAKER_KEY).',
+  {
+    filter: z
+      .object({
+        isOnline: z
+          .boolean()
+          .optional()
+          .describe('If true, include online events. Default: false (in-person only)'),
+        isUserGroup: z
+          .boolean()
+          .optional()
+          .describe('If true, include user groups. Default: false'),
+      })
+      .optional()
+      .describe('Optional filters'),
+  },
+  async (args) => {
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const data = {
+      type: 'sessionize_open_cfps',
+      filter: args.filter ?? {},
+      requestId,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
+    const timeoutMs = 30_000;
+    const pollMs = 500;
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+      if (fs.existsSync(resultPath)) {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        fs.unlinkSync(resultPath);
+        if (result.error) {
+          return {
+            content: [{ type: 'text' as const, text: `Sessionize error: ${result.error}` }],
+            isError: true,
+          };
+        }
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(result.data) }],
+        };
+      }
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'Sessionize timeout' }],
+      isError: true,
+    };
+  },
+);
+
+server.tool(
   'promote_staging',
   'Promote staged skills and rules to tessl tiles. Runs the full pipeline: copy from staging, lint, git commit+push, publish to registry, install. Main group only.',
   {

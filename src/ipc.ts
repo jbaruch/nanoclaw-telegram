@@ -364,6 +364,7 @@ export async function processTaskIpc(
     tileName?: string;
     skillName?: string;
     slug?: string;
+    filter?: Record<string, boolean>;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -937,13 +938,13 @@ export async function processTaskIpc(
         );
 
         const { readEnvFile: readSessionizeEnv } = await import('./env.js');
-        const sessionizeVars = readSessionizeEnv(['SESSIONIZE_API_KEY']);
-        const apiKey = sessionizeVars.SESSIONIZE_API_KEY;
+        const sessionizeVars = readSessionizeEnv(['SESSIONIZE_EVENT_API_KEY']);
+        const apiKey = sessionizeVars.SESSIONIZE_EVENT_API_KEY;
 
         if (!apiKey) {
           fs.writeFileSync(
             sessionizeResultPath,
-            JSON.stringify({ error: 'SESSIONIZE_API_KEY not set in .env' }),
+            JSON.stringify({ error: 'SESSIONIZE_EVENT_API_KEY not set in .env' }),
           );
           break;
         }
@@ -1017,6 +1018,79 @@ export async function processTaskIpc(
           );
           fs.writeFileSync(
             sessionizeResultPath,
+            JSON.stringify({ error: errMsg }),
+          );
+        }
+      }
+      break;
+
+    case 'sessionize_open_cfps':
+      if (data.requestId) {
+        const cfpsResultPath = path.join(
+          DATA_DIR,
+          'ipc',
+          sourceGroup,
+          'input',
+          `_script_result_${data.requestId}.json`,
+        );
+
+        const { readEnvFile: readCfpsEnv } = await import('./env.js');
+        const cfpsVars = readCfpsEnv(['SESSIONIZE_SPEAKER_KEY']);
+        const speakerKey = cfpsVars.SESSIONIZE_SPEAKER_KEY;
+
+        if (!speakerKey) {
+          fs.writeFileSync(
+            cfpsResultPath,
+            JSON.stringify({ error: 'SESSIONIZE_SPEAKER_KEY not set in .env' }),
+          );
+          break;
+        }
+
+        logger.info({ sourceGroup }, 'Fetching Sessionize open CFPs');
+
+        try {
+          const resp = await fetch(
+            'https://sessionize.com/api/universal/open-cfps',
+            {
+              headers: { 'X-API-KEY': speakerKey },
+              signal: AbortSignal.timeout(15_000),
+            },
+          );
+
+          if (!resp.ok) {
+            fs.writeFileSync(
+              cfpsResultPath,
+              JSON.stringify({
+                error: `Sessionize API returned ${resp.status}: ${resp.statusText}`,
+              }),
+            );
+            break;
+          }
+
+          let events = (await resp.json()) as Array<Record<string, unknown>>;
+          const filter = (data.filter ?? {}) as Record<string, boolean>;
+
+          // Apply filters — default: exclude online and user groups
+          if (!filter.isOnline) {
+            events = events.filter((e) => !e.isOnline);
+          }
+          if (!filter.isUserGroup) {
+            events = events.filter((e) => !e.isUserGroup);
+          }
+
+          fs.writeFileSync(
+            cfpsResultPath,
+            JSON.stringify({ data: events }),
+          );
+          logger.info(
+            { count: events.length },
+            'Sessionize open CFPs fetched',
+          );
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          logger.error({ error: errMsg }, 'Sessionize open CFPs fetch failed');
+          fs.writeFileSync(
+            cfpsResultPath,
             JSON.stringify({ error: errMsg }),
           );
         }
