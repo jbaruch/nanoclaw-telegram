@@ -3,6 +3,8 @@ name: morning-brief
 description: Generates and delivers Baruch's daily morning briefing. Fetches today's Google Calendar events, retrieves overdue and due Google Tasks, surfaces undated tasks and pending cleanup items, checks flagged orders, formats everything in Telegram style, pins the message to chat, and schedules per-event reminders. Use when the user asks for a morning briefing, daily summary, agenda, standup overview, or wants to know what's on their schedule today — e.g. "good morning", "what's on my plate today", "daily brief", "give me my agenda", "what tasks are due", or "run the morning brief".
 ---
 
+**Every step below is mandatory. Execute them in order. Do not skip, reorder, or abbreviate any step.**
+
 You are AyeAye, Baruch's assistant.
 
 ## Tool Discovery (run once at start)
@@ -14,15 +16,15 @@ Discover tools per `composio-preamble` rule: Calendar, Tasks (list + get + updat
 
 ## Timezone Reference
 
-Read `current_tz` from `/workspace/group/task-tz-state.json` (Step 0). **All time operations use `current_tz`** — calendar window boundaries, event display times, and reminder scheduling. If `current_tz` is missing, fall back to `home_tz` or the `TZ` env var.
+Read `current_tz` from `/workspace/group/task-tz-state.json` (Step 1). **All time operations use `current_tz`** — calendar window boundaries, event display times, and reminder scheduling. If `current_tz` is missing, fall back to `home_tz` or the `TZ` env var.
 
-- Calendar window boundaries (Step 1): express as UTC offset, e.g. `2026-04-01T00:00:00+02:00`.
-- Event display times (Step 5): always local `current_tz` time.
-- Reminder scheduling (Steps 8c/8d): convert event local time → UTC → scheduler timezone per the `scheduler-timezone` skill protocol. Store `utc_time` with a `Z` suffix.
+- Calendar window boundaries (Step 2): express as UTC offset, e.g. `2026-04-01T00:00:00+02:00`.
+- Event display times (Step 8): always local `current_tz` time.
+- Reminder scheduling (Steps 14/15): convert event local time → UTC → scheduler timezone per the `scheduler-timezone` skill protocol. Store `utc_time` with a `Z` suffix.
 
 ---
 
-## Step 0: Initialization (Dedup + Lock + Timezone)
+## Step 1: Initialization (Dedup + Lock + Timezone)
 
 Read `/workspace/group/task-tz-state.json` once and extract all needed values in a single read.
 
@@ -46,22 +48,22 @@ Apply the `event-filter-rules` (admin rule) to all calendar events in this skill
 
 ---
 
-## Step 1: Fetch today's calendar
+## Step 2: Fetch today's calendar
 Call the resolved calendar tool:
 - `time_min`: today at 00:00:00 in `current_tz`
 - `time_max`: today at 23:59:59 in `current_tz`
 - `single_events`: true, `order_by`: startTime
 
-## Step 2: Fetch Google Tasks
+## Step 3: Fetch Google Tasks
 Using the resolved tasks tools, fetch all task lists, then for each list fetch tasks that are:
 - Due today (due date = today)
 - Overdue (due date before today, status != completed)
 
-## Step 3: Check pending items
+## Step 4: Check pending items
 Run: `python3 /workspace/group/scripts/morning-brief-fetch.py`
 Output includes `pending.undated_tasks` and `pending.cleanup_items` from `morning-brief-pending.json`.
 
-## Step 3a: Auto-assign dates to undated tasks
+## Step 5: Auto-assign dates to undated tasks
 
 Follow the `undated-task-date-assignment` skill for the full sub-workflow (reading linked Gmail, inferring due dates, calling the Tasks update tool). Summary:
 
@@ -72,7 +74,7 @@ Follow the `undated-task-date-assignment` skill for the full sub-workflow (readi
 
 If all dates were assigned, omit the `📋 Без даты:` section entirely.
 
-## Step 4a: Check urgent CFPs
+## Step 6: Check urgent CFPs
 Run: `python3 /workspace/group/scripts/morning-brief-cfp.py`
 
 Outputs a JSON array of CFPs with deadlines within 7 days. Each entry has: `name`, `city`, `conf_date`, `deadline`, `cfp_url`, `days_until`.
@@ -84,14 +86,14 @@ If the array is non-empty, include in the brief under:
 Color marker by days_until: 0–1 → 🔴, 2–3 → 🟡, 4–7 → 🟢.
 If empty array or script fails → skip this section silently.
 
-## Step 4: Check flagged orders
+## Step 7: Check flagged orders
 Read `/workspace/group/orders-db.json`. Collect all orders where `flagged: true`.
 
 If flagged orders exist, include them in the brief under:
 `📦 <b>Заказы:</b>` — one bullet per order: description, flag_reason, source, order_date.
 If none → skip this section silently.
 
-## Step 5: Send morning brief
+## Step 8: Send morning brief
 Select events using the [Event Filter Rules](#event-filter-rules-shared-reference).
 
 Format in Telegram HTML. Canonical example:
@@ -116,32 +118,32 @@ Format in Telegram HTML. Canonical example:
 **Section rules:**
 - `<b>📅 Сегодня:</b>` — timed events with local time in `current_tz`.
 - `<b>✅ Задачи:</b>` — overdue tasks (original due date, marked ⚠️) + tasks due today. Omit if no tasks.
-- `<b>📋 Без даты:</b>` — only tasks where a date could NOT be inferred (see Step 3a). Each entry includes a specific question. Omit entirely if Step 3a assigned all dates.
-- `<b>📢 CFP дедлайны:</b>` — CFPs closing within 7 days (from Step 4a). Omit if none.
-- `<b>📦 Заказы:</b>` — flagged orders (from Step 4). Omit if none.
+- `<b>📋 Без даты:</b>` — only tasks where a date could NOT be inferred (see Step 5). Each entry includes a specific question. Omit entirely if Step 5 assigned all dates.
+- `<b>📢 CFP дедлайны:</b>` — CFPs closing within 7 days (from Step 6). Omit if none.
+- `<b>📦 Заказы:</b>` — flagged orders (from Step 7). Omit if none.
 - Footer: `_N событий, M задач_`
 
 Send via `mcp__nanoclaw__send_message` with `pin: true`.
 
-**Checkpoint:** Confirm the message was sent successfully (tool returns success/message ID) before proceeding to Steps 6 and 8. If sending fails, retry once; if still failing, log the error and stop.
+**Checkpoint:** Confirm the message was sent successfully (tool returns success/message ID) before proceeding to Steps 9 and 11. If sending fails, retry once; if still failing, log the error and stop.
 
-## Step 6: Run brief-cleanup
+## Step 9: Run brief-cleanup
 After the brief is confirmed sent, invoke the brief-cleanup skill to send any pending `cleanup_items` as separate async messages. Run every morning — it is silent if nothing is pending.
 
-## Step 7: Clear pending file
+## Step 10: Clear pending file
 After brief-cleanup runs, set both arrays in `morning-brief-pending.json` to `[]`.
 
-## Step 8: Schedule reminders for today's events
+## Step 11: Schedule reminders for today's events
 
 For each timed event — per the [Event Filter Rules](#event-filter-rules-shared-reference), additionally excluding all-day events, and only events starting more than 20 min from now:
 
-### 8a: Read existing reminders
+## Step 12: Read existing reminders
 Read `/workspace/group/scheduled-reminders.json`. If the file doesn't exist, treat as `{"reminders": []}`.
 
-### 8b: Deduplicate
+## Step 13: Deduplicate
 Before scheduling a reminder for an event, check if `event_id` already exists in `scheduled-reminders.json`. If found — skip scheduling for that event.
 
-### 8c: Schedule new reminders
+## Step 14: Schedule new reminders
 For events not already in `scheduled-reminders.json`, schedule a once-off reminder.
 
 **CRITICAL — use the `scheduler-timezone` skill protocol for timezone conversion.** Follow the protocol exactly — convert event time → UTC → scheduler timezone → format without Z suffix.
@@ -150,7 +152,7 @@ For events not already in `scheduled-reminders.json`, schedule a once-off remind
 
 If no scheduling tool is available, or a reminder fails for a specific event, skip that event and continue.
 
-### 8d: Write to scheduled-reminders.json
+## Step 15: Write to scheduled-reminders.json
 For each newly scheduled reminder, append an entry to the `reminders` array in `/workspace/group/scheduled-reminders.json`:
 
 ```json
@@ -165,11 +167,11 @@ For each newly scheduled reminder, append an entry to the `reminders` array in `
 
 Derive `utc_time` from the event's local start time using `current_tz`. Write the updated file back to `/workspace/group/scheduled-reminders.json`.
 
-## Step 9: Save state
+## Step 16: Save state
 Write to `/workspace/group/calendar-state.json`:
 ```json
 { "date": "...", "fetched_at": "...", "events": [{"event_id": "...", "title": "...", "start": "...", "reminder_task_id": "..."}] }
 ```
 
-## Step 10: Mark as run
+## Step 17: Mark as run
 Read `/workspace/group/task-tz-state.json`. Find the entry in `follow_me_tasks` where `name == "morning-brief"`. Set its `last_run_date` to today's local date (YYYY-MM-DD in `current_tz`). Write the file back, preserving all other fields.

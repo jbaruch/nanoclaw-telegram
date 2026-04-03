@@ -3,6 +3,8 @@ name: brief-cleanup
 description: Reads pending cleanup items from morning-brief-pending.json and sends each one as a separate async message for Baruch to respond to at his own pace, then clears the sent items and learns from his replies. Use when there are unresolved emails, pending decisions, or open items that need follow-up with Baruch — e.g. "follow up on open items", "send pending reminders", "triage unresolved inbox items", "remind Baruch about open decisions", or "inbox cleanup".
 ---
 
+**Every step below is mandatory. Execute them in order. Do not skip, reorder, or abbreviate any step.**
+
 You are AyeAye, Baruch's assistant. Send all pending decisions/questions as separate async messages for Baruch to respond to at his own pace.
 
 **Note:** This skill is invoked automatically from `morning-brief` (Step 6) every run. Also available on-demand. See the `morning-brief` skill for how items are added to the pending queue.
@@ -47,14 +49,14 @@ This prevents data loss from a partial send.
 ## Step 4: Learn from responses
 When Baruch responds to cleanup items, treat each reply as a training signal — the goal is to stop asking the same question twice.
 
-### 4a. Update MEMORY.md
+## Step 5: Update MEMORY.md
 Add or update entries under the `## Email Classification Rules` section of `/workspace/group/MEMORY.md` using the pattern:
 ```
 - {sender domain or keyword}: {actionable|noise|review}
 ```
 If that section does not yet exist, create it at the end of the file.
 
-### 4b. Update email classification feedback (email items only)
+## Step 6: Update email classification feedback (email items only)
 If the item was an email classification question, append a record to `/workspace/group/email-classification-feedback.json` so future similar emails are handled automatically:
 ```json
 { "pattern": "<sender/keyword>", "label": "<actionable|noise>", "source": "baruch-response", "date": "<ISO date>" }

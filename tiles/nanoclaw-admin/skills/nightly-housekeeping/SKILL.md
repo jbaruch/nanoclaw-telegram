@@ -3,6 +3,8 @@ name: nightly-housekeeping
 description: "Runs nightly maintenance for Baruch: syncs TripIt travel timezones to Reclaim, refreshes travel schedule and booking gaps, updates Trakt watch history, checks orders, cleans up undated Google Tasks, generates a daily summary, archives daily logs to weekly memory, and checks the show watchlist. Use when running nightly maintenance, syncing travel plans, cleaning up undated tasks, fixing booking gaps, or running the nightly sync routine. Trigger phrases: 'run nightly housekeeping', 'nightly sync', 'sync travel calendar', 'clean up tasks', 'run nightly sync'."
 ---
 
+**Every step below is mandatory. Execute them in order. Do not skip, reorder, or abbreviate any step.**
+
 You are AyeAye, Baruch's assistant. Run these nightly maintenance steps silently. Report only if something needs attention.
 
 **Error handling:** Continue through all remaining steps even if one fails. Collect all errors and report them together at the end.
@@ -11,7 +13,7 @@ You are AyeAye, Baruch's assistant. Run these nightly maintenance steps silently
 
 **File write convention:** After every file write, read the file back to verify contents — confirm pre-existing fields are preserved and new entries appended. Applies to all steps below.
 
-## Step 0: Optimistic Lock
+## Step 1: Optimistic Lock
 
 **This must be the very first action before any API calls or work begins.**
 
@@ -19,9 +21,9 @@ Read `/workspace/group/task-tz-state.json`. Find the entry in `follow_me_tasks` 
 
 This prevents double-execution: if heartbeat triggers a second run before the old one finishes, the second run will see today's date already written and abort.
 
-If the file cannot be read or written, continue anyway (log the error for Step 10 retry) — do not abort the housekeeping run.
+If the file cannot be read or written, continue anyway (log the error for Step 16 retry) — do not abort the housekeeping run.
 
-## Step 1: TripIt → Reclaim sync
+## Step 2: TripIt → Reclaim sync
 Run via host: `mcp__nanoclaw__run_host_script(script: "sync-tripit.sh")`
 Do NOT call sync.mjs directly — it won't find its modules. The wrapper script handles the correct working directory.
 - `noChanges: true` → silent
@@ -29,32 +31,32 @@ Do NOT call sync.mjs directly — it won't find its modules. The wrapper script 
 - Overlapping trips → flag as warning
 - Error → report and continue
 
-## Step 2: Refresh travel schedule
+## Step 3: Refresh travel schedule
 Use `mcp__nanoclaw__run_host_script(script: "refresh-travel-schedule.py")`.
 Rebuilds `travel-schedule.json` from the TripIt ICS feed. Silent on success; report only on error.
 
-## Step 3: Travel bookings check
+## Step 4: Travel bookings check
 Invoke the `check-travel-bookings` skill to find missing flights/hotels for upcoming trips.
 Report gaps; skip if all snoozed or complete.
 
-## Step 4: Refresh Trakt watch history
+## Step 5: Refresh Trakt watch history
 Use `mcp__nanoclaw__run_host_script(script: "trakt-watch-history.py")`.
 Saves fresh watch history to `/workspace/group/trakt-history.json`.
 Silent on success. Report on error or `total_shows: 0` (if sync hasn't run yet → skip silently).
 
-## Step 5: Check orders
+## Step 6: Check orders
 Invoke the `check-orders` skill to fetch order emails, update orders-db.json, and flag anomalies.
 - Flagged items → the skill reports them automatically
 - Nothing anomalous → stay silent
 
-## Step 5b: Refresh CFP data
+## Step 7: Refresh CFP data
 Invoke the `check-cfps` skill to refresh open CFP data from primary sources, apply Sessionize verification, and update `cfp-state.json`.
 
 **This step is research-only.** Do NOT forward the CFP list to Baruch — that is the morning brief's job. The goal here is keeping cfp-state.json current so the morning brief has accurate deadline data.
 
-Consume the skill output internally (do not include in any message to Baruch). If the skill fails completely (both primary sources unreachable), note it in Step 7 daily summary.
+Consume the skill output internally (do not include in any message to Baruch). If the skill fails completely (both primary sources unreachable), note it in Step 10 daily summary.
 
-## Step 5c: YouTube comment check
+## Step 8: YouTube comment check
 Search for the YouTube tool via `COMPOSIO_SEARCH_TOOLS` (query: `"youtube list comment threads"`). Use the returned tool to fetch recent comments on Baruch's channel (channel ID: `UCZ8-VX2SiAIBE7guw7NG-Sg`).
 
 1. Fetch videos published in the last 30 days using the video list tool.
@@ -66,9 +68,9 @@ Search for the YouTube tool via `COMPOSIO_SEARCH_TOOLS` (query: `"youtube list c
    - Group by video
 5. No new comments → stay silent.
 
-On Composio tool error → skip silently, note in Step 7 daily summary.
+On Composio tool error → skip silently, note in Step 10 daily summary.
 
-## Step 6: Check for undated tasks
+## Step 9: Check for undated tasks
 Discover Google Tasks tools per `composio-preamble` rule, then fetch all tasks from "My Tasks" list with no due date (tasks where `due` is absent).
 
 For each undated task:
@@ -77,7 +79,7 @@ For each undated task:
 
 Merge with existing file contents — do not overwrite other fields.
 
-## Step 7: Generate daily summary
+## Step 10: Generate daily summary
 Write a daily summary to `/workspace/group/memory/daily/YYYY-MM-DD.md` (today's date).
 If the file already exists, read it first and append/update — do not overwrite.
 
@@ -93,7 +95,7 @@ Format — include only sections with content:
 
 Keep entries concise (one line each). This file is read on container startup to restore recent context.
 
-## Steps 8, 8c, 8d: Archive daily memory files
+## Step 11: Archive daily memory files
 
 ### Shared archival procedure
 For each path below, apply this pattern in sequence:
@@ -108,17 +110,17 @@ For each path below, apply this pattern in sequence:
 2. Append to the highlights file under `## Week YYYY-WNN (Mon DD – Sun DD)` with one-line bullets.
 3. Delete the previous week's weekly file.
 
-### Step 8: Group daily memory
+## Step 12: Group daily memory
 - Daily: `/workspace/group/memory/daily/YYYY-MM-DD.md`
 - Weekly: `/workspace/group/memory/weekly/YYYY-WNN.md` — header: `# Weekly Summary — YYYY-WNN`
 - Highlights: `/workspace/trusted/highlights.md`
 
-### Step 8c: Trusted daily memory
+## Step 13: Trusted daily memory
 - Daily: `/workspace/trusted/memory/daily/YYYY-MM-DD.md` (entries prefixed with `[source]`)
 - Weekly: `/workspace/trusted/memory/weekly/YYYY-WNN.md` — header: `# Trusted Weekly Memory — YYYY-WNN`
 - Highlights: `/workspace/trusted/highlights.md` — preserve source attribution `[chat-name]` in bullets.
 
-### Step 8d: Process daily_discoveries
+## Step 14: Process daily_discoveries
 1. Read `/workspace/trusted/memory/daily_discoveries.md`. If absent → skip silently.
 2. Scan for entries without `✓ processed` marker.
 3. For each unprocessed entry:
@@ -128,22 +130,22 @@ For each path below, apply this pattern in sequence:
 4. Write updated `daily_discoveries.md` back with all markers in place.
 5. Silent on success; report only on file write failure.
 
-## Step 9: Check watchlist
+## Step 15: Check watchlist
 Invoke the `check-watchlist` skill to check if any tracked upcoming shows have been released.
 - Show released → skill notifies Baruch and updates watchlist.json automatically
 - Nothing released → stay silent
 
-## Step 10: Mark as run
+## Step 16: Mark as run
 Read `/workspace/group/task-tz-state.json`. Find the entry in `follow_me_tasks` where `name == "nightly-housekeeping"`. Set `last_run_date` to today's local date (`YYYY-MM-DD` in `current_tz`). Write back, preserving all other fields.
 
-(This is a confirmation write. Step 0 already wrote this value as an optimistic lock. If Step 0 failed, this step ensures the date is recorded.)
+(This is a confirmation write. Step 1 already wrote this value as an optimistic lock. If Step 1 failed, this step ensures the date is recorded.)
 
-## Step 10b: Backup to git
+## Step 17: Backup to git
 ```
 bash /workspace/group/scripts/backup-to-git.sh
 ```
 Then call `mcp__nanoclaw__github_backup` with message `"nightly backup: YYYY-MM-DD"`.
 Silent on success; report only on error.
 
-## Step 11: Silence
+## Step 18: Silence
 If nothing to report, output nothing (wrap in `<internal>`).
