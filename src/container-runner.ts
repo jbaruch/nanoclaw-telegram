@@ -431,6 +431,23 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Claude Code config file — lives at /home/node/.claude.json (outside .claude/).
+  // Read-only rootfs can't create it, so we bind-mount it from the sessions dir.
+  const claudeJsonPath = path.join(
+    DATA_DIR,
+    'sessions',
+    group.folder,
+    '.claude.json',
+  );
+  if (!fs.existsSync(claudeJsonPath)) {
+    fs.writeFileSync(claudeJsonPath, '{}');
+  }
+  mounts.push({
+    hostPath: toHostPath(claudeJsonPath),
+    containerPath: '/home/node/.claude.json',
+    readonly: false,
+  });
+
   // Per-group IPC namespace
   const groupIpcDir = resolveGroupIpcPath(group.folder);
   const isTrustedIpc = isMain || !!group.containerConfig?.trusted;
