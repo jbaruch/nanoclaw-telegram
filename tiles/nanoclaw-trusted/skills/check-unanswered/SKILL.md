@@ -7,6 +7,12 @@ description: Scans a Telegram-backed SQLite message store for user messages that
 
 Find user messages since last check that have no text reply from the bot.
 
+## Schema Expectations
+
+- **`messages`** table: `id`, `chat_jid`, `sender_name`, `content`, `timestamp` (ISO-8601), `is_from_me` (0/1)
+- **`reactions`** table: optional; absence triggers a warning but does not halt execution
+- **State file** (`nanoclaw-state.json`): JSON object with an `unanswered_cursors` map of `chat_jid → last_timestamp`
+
 ## Code
 
 ```python
@@ -15,7 +21,6 @@ import sqlite3, json, os, sys
 STATE_FILE = '/workspace/group/nanoclaw-state.json'
 DB = '/workspace/store/messages.db'
 
-# Load state file, defaulting gracefully if missing or corrupted
 try:
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
@@ -69,7 +74,6 @@ try:
         except sqlite3.OperationalError as e:
             raise RuntimeError(f"Query failed — possible schema mismatch: {e}")
 
-        # Advance cursor to most recent user message in this chat
         max_ts = conn.execute(
             "SELECT MAX(timestamp) FROM messages WHERE chat_jid = ? AND is_from_me = 0",
             (current_chat,)
@@ -77,7 +81,6 @@ try:
 
         cursors[current_chat] = max_ts or last_ts
         state['unanswered_cursors'] = cursors
-        # Remove legacy global cursor if present
         state.pop('unanswered_last_checked_id', None)
 
         try:
@@ -94,9 +97,7 @@ finally:
 
 ## Output
 
-Return `unanswered` list to caller. If empty, return nothing.
-
-Each entry in `unanswered` is a tuple of `(id, sender_name, content, timestamp)`, where `id` is the message row ID, `sender_name` is the display name of the user, `content` is the raw message text, and `timestamp` is an ISO-8601 string.
+Return `unanswered` list to caller. Each entry is a tuple of `(id, sender_name, content, timestamp)`. **If the list is empty, produce no output — silence is the correct response.**
 
 ## Validation
 

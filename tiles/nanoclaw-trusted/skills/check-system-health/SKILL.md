@@ -42,43 +42,48 @@ print(f'messages={msg_count} task_run_logs={log_count} size={size_mb:.1f}MB')
 
 ## 3. Recent task failures
 
-```bash
-python3 -c "
-import sqlite3, json, os
-conn = sqlite3.connect('/workspace/store/messages.db')
-rows = conn.execute(\"SELECT task_id, substr(error, 1, 80), run_at FROM task_run_logs WHERE status='error' AND run_at >= datetime('now', '-24 hours') ORDER BY run_at DESC LIMIT 10\").fetchall()
-conn.close()
+Task failure checks are handled by `heartbeat-checks.py` (`check_task_failures` function at `/workspace/group/heartbeat-checks.py`), which queries `task_run_logs` and respects the dismiss file at `/workspace/group/system-health-dismissed.json`. Inspect that file directly if you need to review or replicate the query logic.
 
-# Skip already-dismissed failures (tracked by run_at timestamp)
-state_path = '/workspace/group/session-state.json'
-dismissed = set()
-if os.path.exists(state_path):
-    state = json.load(open(state_path))
-    dismissed = set(state.get('dismissed_task_failure_timestamps', []))
-
-new_failures = [r for r in rows if r[2] not in dismissed]
-for r in new_failures: print(r)
-print(f'failures={len(new_failures)}')
-"
-```
-
-**Alert if:** failures > 0. Report task IDs and error summaries.
-
-**After reporting failures:** Append the reported `run_at` timestamps to `dismissed_task_failure_timestamps` in `/workspace/group/session-state.json` so they are not re-reported in future heartbeats:
-
-```python
-import json, os
-state_path = '/workspace/group/session-state.json'
-state = json.load(open(state_path))
-dismissed = state.get('dismissed_task_failure_timestamps', [])
-# Add new failure timestamps here
-state['dismissed_task_failure_timestamps'] = list(set(dismissed + new_timestamps))
-with open(state_path, 'w') as f:
-    json.dump(state, f, indent=2)
-```
+**Alert if:** failures > 0 and not dismissed. Report task IDs and error summaries.
 
 **Note:** The correct column name is `run_at` (not `timestamp`) in `task_run_logs`.
 
+## 4. Dismiss mechanism
+
+Persistent dismissals are stored in `/workspace/group/system-health-dismissed.json`:
+
+```json
+{
+  "dismissed": {
+    "task_failure:<task_id>": {
+      "reason": "why dismissed",
+      "dismissed_at": "2026-04-02T16:00:00Z",
+      "expires_at": null
+    }
+  }
+}
+```
+
+- **Fingerprint format:** `task_failure:<task_id>` (e.g., `task_failure:task-1774576028296-wfve4q`)
+- **`expires_at`: null** = permanent dismiss (never re-reports)
+- **`expires_at`: ISO timestamp** = snooze until that time (e.g., `"2026-04-03T16:00:00Z"` = 24h snooze)
+
+**To dismiss an issue:** write its fingerprint into `system-health-dismissed.json`. The check will skip it on all future runs (until expiry if set).
+
+**To re-enable:** remove the entry from `system-health-dismissed.json` or set `expires_at` to a past timestamp.
+
+## Error handling
+
+If a check fails to run, handle these common cases before reporting:
+
+- **DB file missing** (`/workspace/store/messages.db` not found): report that the database is unreachable and skip remaining checks.
+- **Table doesn't exist** (`OperationalError: no such table`): report which table is missing; the schema may be out of date or not yet initialised.
+- **DB locked** (`OperationalError: database is locked`): retry once after a short pause; if still locked, report the lock condition and skip that check.
+
+Do not suppress these errors silently — report them via `mcp__nanoclaw__send_message` the same way you would report a health issue.
+
 ## Output
 
-Return issues found or empty if all clear.
+**If issues found:** report them via `mcp__nanoclaw__send_message`.
+
+**If no issues: output nothing. Complete silence. Never output "all clear", "no issues found", "everything looks good", or any confirmation that checks passed. Silence IS the success signal.**
