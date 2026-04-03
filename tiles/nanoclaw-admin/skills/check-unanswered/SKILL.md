@@ -1,6 +1,6 @@
 ---
 name: check-unanswered
-description: Finds user messages that never got a bot reply. Uses gap detection — a message is unanswered if no bot reply appeared within 15 minutes after it. Deterministic script, no LLM reasoning for detection. Use when performing heartbeat checks or after session recovery.
+description: Finds user messages that never got a threaded bot reply. A message is "answered" only if a bot message exists with reply_to_message_id pointing to it. Deterministic script, no LLM reasoning for detection. Use when performing heartbeat checks or after session recovery.
 ---
 
 # Check Unanswered Messages
@@ -19,10 +19,13 @@ The script outputs JSON:
   ],
   "chat_jid": "tg:...",
   "lookback_hours": 24,
-  "reply_window_minutes": 15,
   "checked_at": "..."
 }
 ```
+
+## How it works
+
+A bot message "answers" a user message when `reply_to_message_id = user_msg.id`. If no bot message threads to a user message, it's unanswered. A standalone bot message (no reply_to) is NOT an answer — it's just another message.
 
 ## If empty: silence
 
@@ -40,4 +43,3 @@ For each unanswered message:
 The script accepts overrides:
 - `NANOCLAW_CHAT_JID` — chat to check (auto-detected if unset)
 - `LOOKBACK_HOURS` — how far back to look (default: 24)
-- `REPLY_WINDOW_MINUTES` — how long to wait for a reply before flagging (default: 10)

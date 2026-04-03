@@ -65,32 +65,32 @@ This is critical after a session nuke — you have no memory of who said what, b
 
 ## Unanswered message detection
 
-After a session nuke or on first message in a new session, check for messages you never replied to. A message is "unanswered" if no bot reply appeared within 15 minutes after it:
+After a session nuke or on first message in a new session, check for messages you never replied to. A message is "answered" only if a bot message exists with `reply_to_message_id` pointing to it. No reply-thread = not an answer.
 
 ```python
-import sqlite3, json
-from datetime import datetime, timedelta, timezone
-
+import sqlite3
 conn = sqlite3.connect('/workspace/store/messages.db')
 chat_jid = conn.execute("SELECT jid FROM chats LIMIT 1").fetchone()[0]
-cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime('%Y-%m-%dT%H:%M:%S')
 
-user_msgs = conn.execute("""
-    SELECT id, sender_name, content, timestamp FROM messages
-    WHERE chat_jid = ? AND is_from_me = 0 AND is_bot_message = 0 AND timestamp > ?
-    ORDER BY timestamp ASC
-""", (chat_jid, cutoff)).fetchall()
-
-bot_times = [datetime.fromisoformat(ts.replace('Z', '+00:00')) for _, ts in
-    conn.execute("SELECT id, timestamp FROM messages WHERE chat_jid = ? AND is_from_me = 1 AND timestamp > ?",
-    (chat_jid, cutoff)).fetchall()]
+unanswered = conn.execute("""
+    SELECT m.id, m.sender_name, m.content, m.timestamp
+    FROM messages m
+    WHERE m.chat_jid = ?
+      AND m.is_from_me = 0
+      AND m.is_bot_message = 0
+      AND m.timestamp > datetime('now', '-24 hours')
+      AND NOT EXISTS (
+        SELECT 1 FROM messages r
+        WHERE r.chat_jid = m.chat_jid
+          AND r.is_from_me = 1
+          AND r.reply_to_message_id = m.id
+      )
+    ORDER BY m.timestamp ASC
+""", (chat_jid,)).fetchall()
 conn.close()
 
-for msg_id, sender, content, ts in user_msgs:
-    msg_time = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-    window_end = msg_time + timedelta(minutes=15)
-    if not any(msg_time < bt <= window_end for bt in bot_times):
-        print(f"UNANSWERED: [{ts}] {sender}: {content[:80]}")
+for msg_id, sender, content, ts in unanswered:
+    print(f"UNANSWERED: [{ts}] {sender}: {content[:80]}")
 ```
 
 If you find unanswered messages: acknowledge the gap and respond to any that are still actionable. Don't pretend they didn't happen.

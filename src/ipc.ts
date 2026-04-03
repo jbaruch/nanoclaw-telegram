@@ -251,6 +251,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     timestamp: new Date().toISOString(),
                     is_from_me: true,
                     is_bot_message: true,
+                    reply_to_message_id: data.replyToMessageId,
                   });
                   logger.info(
                     { chatJid: data.chatJid, sourceGroup },
