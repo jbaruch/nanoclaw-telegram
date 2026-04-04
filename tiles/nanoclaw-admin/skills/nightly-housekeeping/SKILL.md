@@ -50,7 +50,7 @@ Invoke the `check-orders` skill to fetch order emails, update orders-db.json, an
 - Nothing anomalous → stay silent
 
 ## Step 7: Refresh CFP data
-Invoke the `check-cfps` skill to refresh open CFP data from primary sources, apply Sessionize verification, and update `cfp-state.json`.
+`Skill(skill: "tessl__check-cfps")` — refresh open CFP data from primary sources, apply Sessionize verification, update `cfp-state.json`.
 
 **This step is research-only.** Do NOT forward the CFP list to Baruch — that is the morning brief's job. The goal here is keeping cfp-state.json current so the morning brief has accurate deadline data.
 

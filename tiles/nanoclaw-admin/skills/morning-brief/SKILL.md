@@ -128,7 +128,7 @@ Send via `mcp__nanoclaw__send_message` with `pin: true`.
 **Checkpoint:** Confirm the message was sent successfully (tool returns success/message ID) before proceeding to Steps 9 and 11. If sending fails, retry once; if still failing, log the error and stop.
 
 ## Step 9: Run brief-cleanup
-After the brief is confirmed sent, invoke the brief-cleanup skill to send any pending `cleanup_items` as separate async messages. Run every morning — it is silent if nothing is pending.
+After the brief is confirmed sent: `Skill(skill: "tessl__brief-cleanup")`. Sends pending `cleanup_items` as separate async messages. Silent if nothing is pending.
 
 ## Step 10: Clear pending file
 After brief-cleanup runs, set both arrays in `morning-brief-pending.json` to `[]`.

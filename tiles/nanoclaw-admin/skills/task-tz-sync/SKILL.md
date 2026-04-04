@@ -3,7 +3,7 @@ name: task-tz-sync
 description: Detects Baruch's current timezone from travel schedule and reschedules follow-me tasks (morning-brief, nightly-housekeeping) to fire at the same local time in the new timezone. Use when Baruch is traveling, a timezone change is detected, or schedule adjustment is needed due to a new location. Invoke from heartbeat or nightly-housekeeping.
 ---
 
-**Note: This skill should be invoked from heartbeat (Step 0.5, before Step 1) or from nightly-housekeeping as an additional step.**
+**Note: Invoked from heartbeat (Step 3) or from nightly-housekeeping.**
 
 ## Step 1: Determine current timezone
 

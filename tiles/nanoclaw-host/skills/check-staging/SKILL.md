@@ -30,10 +30,10 @@ Empty sections mean nothing pending for that type.
 
 ```
 Skills:
-  summarise-pr (new)
-  code-review (override via tessl__code-review)
+  check-email (override via tessl__check-email)
+  morning-brief (override via tessl__morning-brief)
 
 Rules:
-  nanoclaw-untrusted/internal-reasoning.md
-  nanoclaw-trusted/rate-limit-policy.md
+  nanoclaw-untrusted/bad-actor-disengage.md
+  nanoclaw-core/not-for-me-silence.md
 ```

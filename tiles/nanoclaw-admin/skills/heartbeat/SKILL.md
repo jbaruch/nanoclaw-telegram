@@ -36,14 +36,16 @@ Read `/workspace/group/session-state.json`. If `pending_response` is non-null:
 
 ## Step 3: Timezone sync
 
-Invoke `task-tz-sync` skill silently.
+`Skill(skill: "tessl__task-tz-sync")`
 
 ## Step 4: Missed task detection
 
 Read `/workspace/group/task-tz-state.json`. For each entry in `follow_me_tasks`:
 1. Compute current local time in `current_tz`
 2. If `local_hour:local_minute` has passed today AND `last_run_date` ≠ today → task was missed
-3. Write `last_run_date = today` immediately (optimistic lock), then invoke the skill
+3. Write `last_run_date = today` immediately (optimistic lock), then invoke:
+   - `morning-brief` → `Skill(skill: "tessl__morning-brief")`
+   - `nightly-housekeeping` → `Skill(skill: "tessl__nightly-housekeeping")`
 
 ## Step 5: System checks
 
