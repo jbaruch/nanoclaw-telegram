@@ -944,7 +944,9 @@ export async function processTaskIpc(
         if (!apiKey) {
           fs.writeFileSync(
             sessionizeResultPath,
-            JSON.stringify({ error: 'SESSIONIZE_EVENT_API_KEY not set in .env' }),
+            JSON.stringify({
+              error: 'SESSIONIZE_EVENT_API_KEY not set in .env',
+            }),
           );
           break;
         }
@@ -1078,21 +1080,12 @@ export async function processTaskIpc(
             events = events.filter((e) => !e.isUserGroup);
           }
 
-          fs.writeFileSync(
-            cfpsResultPath,
-            JSON.stringify({ data: events }),
-          );
-          logger.info(
-            { count: events.length },
-            'Sessionize open CFPs fetched',
-          );
+          fs.writeFileSync(cfpsResultPath, JSON.stringify({ data: events }));
+          logger.info({ count: events.length }, 'Sessionize open CFPs fetched');
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           logger.error({ error: errMsg }, 'Sessionize open CFPs fetch failed');
-          fs.writeFileSync(
-            cfpsResultPath,
-            JSON.stringify({ error: errMsg }),
-          );
+          fs.writeFileSync(cfpsResultPath, JSON.stringify({ error: errMsg }));
         }
       }
       break;
@@ -1155,7 +1148,8 @@ export async function processTaskIpc(
             } else {
               // Clear ALL sessions so every group picks up new tiles on next spawn
               // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { deleteAllSessions } = require('./db.js') as typeof import('./db.js');
+              const { deleteAllSessions } =
+                require('./db.js') as typeof import('./db.js');
               const cleared = deleteAllSessions();
               logger.info(
                 { sourceGroup, sessionsCleared: cleared },
