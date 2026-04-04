@@ -1153,10 +1153,20 @@ export async function processTaskIpc(
                 }),
               );
             } else {
-              logger.info({ sourceGroup }, 'promote_staging completed');
+              // Clear ALL sessions so every group picks up new tiles on next spawn
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { deleteAllSessions } = require('./db.js') as typeof import('./db.js');
+              const cleared = deleteAllSessions();
+              logger.info(
+                { sourceGroup, sessionsCleared: cleared },
+                'promote_staging completed — all sessions invalidated',
+              );
               fs.writeFileSync(
                 promoteResultPath,
-                JSON.stringify({ stdout: stdout.trim() }),
+                JSON.stringify({
+                  stdout: stdout.trim(),
+                  sessionsCleared: cleared,
+                }),
               );
             }
           },
