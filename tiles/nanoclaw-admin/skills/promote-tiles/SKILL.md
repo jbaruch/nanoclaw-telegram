@@ -3,7 +3,7 @@ name: promote-tiles
 description: "Promotes staged skills and rules to tiles, then schedules nuke (20 min) and verify (21 min) so verify runs in a fresh container after tessl review+optimize completes. Use when the user wants to promote, deploy, or push staged skills or rules to tiles, or invokes /promote-tiles."
 ---
 
-# Promote Plugins
+**Every step below is mandatory. Execute them in order. Do not skip, reorder, or abbreviate any step.**
 
 ## Step 1: Check what's staged
 
@@ -12,38 +12,39 @@ ls /workspace/group/skills/ 2>/dev/null
 find /workspace/group/staging -type f -name "*.md" 2>/dev/null
 ```
 
-**If nothing is staged**, stop immediately and send a message indicating there is nothing staged to promote. Do not proceed to the remaining steps.
+If nothing is staged, stop and report. Do not proceed.
 
-## Staging paths
+## Step 2: Determine tile placement
 
-**Skills** — two paths, both work:
-- `/workspace/group/skills/{name}/SKILL.md` — new skills (works at runtime + staging)
-- `/workspace/group/skills/tessl__{name}/SKILL.md` — patches to existing plugin skills
+**For EACH staged item**, read the `skill-tile-placement` rule and find the skill in the concrete placement table.
 
-**Rules** → `/workspace/group/staging/{tile-name}/{name}.md`
-- `staging/nanoclaw-core/`, `staging/nanoclaw-trusted/`, `staging/nanoclaw-admin/`, `staging/nanoclaw-untrusted/`
+**HARD VALIDATION — do this for every item before promoting:**
 
-For each staged item, determine which plugin it belongs to by consulting the `skill-tile-placement` skill: `Skill(skill: 'tessl__skill-tile-placement')`. When in doubt → **nanoclaw-admin**.
+1. Look up the skill name in the placement table
+2. If found → use the listed tile. No exceptions.
+3. If NOT found → apply the decision rules (credentials → admin, /workspace/trusted/ → trusted, pure logic → core, security → untrusted)
+4. If unsure → admin
 
-## Step 2: Promote staged content
+**NEVER promote to core or untrusted without verifying the skill is explicitly listed for that tile in the placement table.** Core and untrusted are security boundaries. Getting this wrong exposes admin skills to untrusted containers.
 
-Call `mcp__nanoclaw__promote_staging` for each plugin that has staged content:
-- `mcp__nanoclaw__promote_staging(tileName: "nanoclaw-admin")` — if admin skills or rules are staged
-- `mcp__nanoclaw__promote_staging(tileName: "nanoclaw-core")` — if core skills or rules are staged
+List each item and its target tile. Confirm the assignments before proceeding.
 
-If a specific skill was requested, pass `skillName` as well.
+## Step 3: Promote staged content
 
-**Validate the result**: Check the return value of each `promote_staging` call for errors. If any call indicates failure, stop and report the error via `mcp__nanoclaw__send_message` before proceeding. Do **not** schedule the nuke or verify tasks if promotion failed.
+Call `mcp__nanoclaw__promote_staging` for each tile that has staged content:
+- `mcp__nanoclaw__promote_staging(tileName: "nanoclaw-admin")` — admin items
+- `mcp__nanoclaw__promote_staging(tileName: "nanoclaw-trusted")` — trusted items
+- `mcp__nanoclaw__promote_staging(tileName: "nanoclaw-core")` — core items (rare!)
 
-## Step 3: Send promotion result
+Validate the result. If any call fails, stop and report.
 
-Send a message via `mcp__nanoclaw__send_message` with:
-- What was promoted (skill names, plugin names, new plugin versions)
+## Step 4: Send promotion result
+
+Send via `mcp__nanoclaw__send_message`:
+- What was promoted (skill names, target tiles)
 - Note that nuke fires in 20 min, verify in 21 min
 
-## Step 4: Schedule nuke in 20 minutes
-
-Compute `now + 20 minutes` as local time (NO Z suffix). Schedule:
+## Step 5: Schedule nuke in 20 minutes
 
 ```
 mcp__nanoclaw__schedule_task(
@@ -53,11 +54,7 @@ mcp__nanoclaw__schedule_task(
 )
 ```
 
-The 20-minute delay lets tessl's review+optimize pipeline finish before the container restarts.
-
-## Step 5: Schedule verify-tiles in 21 minutes
-
-Compute `now + 21 minutes` as local time (NO Z suffix). Schedule:
+## Step 6: Schedule verify-tiles in 21 minutes
 
 ```
 mcp__nanoclaw__schedule_task(
@@ -66,5 +63,3 @@ mcp__nanoclaw__schedule_task(
   schedule_value: "<now+21min, format YYYY-MM-DDTHH:MM:SS, NO Z suffix>"
 )
 ```
-
-The 1-minute gap after the nuke ensures the fresh container is ready before verify runs.

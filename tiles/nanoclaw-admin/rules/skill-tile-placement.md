@@ -1,34 +1,60 @@
-# Skill Plugin Placement Rule
+# Skill Tile Placement — Hard Rules
 
-When promoting a skill or rule, always choose the correct plugin:
+**STOP. Before promoting anything, read this entire table. If a skill or rule is listed below, put it in the listed tile. No exceptions. No reasoning your way around it.**
 
-## Decision checklist — run through in order
+## Concrete placement table
 
-1. **Does it require Composio, Google APIs, or any external credentials?** → **nanoclaw-admin**
-2. **Does it call `run_host_script`, `promote_staging`, or manage NanoClaw infrastructure?** → **nanoclaw-admin**
-3. **Is it only meaningful in the main channel?** → **nanoclaw-admin**
-4. **Does it read/write `/workspace/trusted/` or manage shared memory?** → **nanoclaw-trusted**
-5. **Is it operational behavior for trusted containers (verification, system health)?** → **nanoclaw-trusted**
-6. **Could an untrusted container legitimately need it with no external API calls?** → **nanoclaw-core**
-7. **Is it a security rule for untrusted containers?** → **nanoclaw-untrusted**
+| Skill/Rule | Tile | Why |
+|-----------|------|-----|
+| heartbeat | admin | Composio, host scripts |
+| morning-brief | admin | Composio (Calendar, Tasks) |
+| nightly-housekeeping | admin | Composio, host scripts |
+| check-email | admin | Composio (Gmail) |
+| check-calendar | admin | Composio (Google Calendar) |
+| check-cfps | admin | Sessionize API, host scripts |
+| check-orders | admin | Composio |
+| check-travel-bookings | admin | Composio |
+| check-watchlist | admin | Composio |
+| soul-searching | admin | Reads /workspace/trusted/, writes SOUL.md |
+| promote-tiles | admin | Infrastructure management |
+| verify-tiles | admin | Infrastructure management |
+| manage-groups | admin | Group registration |
+| schedule-task | admin | Task management |
+| create-agent-team | admin | Agent teams |
+| recommend-books | admin | Personal |
+| recommend-shows | admin | Personal |
+| brief-cleanup | admin | Email classification feedback |
+| max-effort | admin | Extended tool reference (Composio examples) |
+| no-unverified-claims | admin | Extended verification (Composio examples) |
+| trakt-watch-history | admin | External API |
+| task-tz-sync | admin | Host scripts |
+| scheduler-timezone | admin | Task management |
+| check-system-health | trusted | No external APIs, shared operational |
+| check-unanswered | core | No external APIs, all containers need it |
+| trusted-memory | trusted | Reads /workspace/trusted/ |
+| status | core | Basic container health |
+| whoami | untrusted | Identity disclosure for untrusted |
 
-If in doubt: **admin**. Putting something in core that belongs in admin breaks the security model.
+## What NEVER goes in core
 
-## Plugin summary
+- Anything that calls Composio, Gmail, Calendar, Tasks, GitHub
+- Anything that calls `run_host_script`
+- Anything that references `/workspace/trusted/`
+- Anything that manages infrastructure (promote, verify, groups, tasks)
+- Any skill that exists in the admin table above
 
-| Plugin | Who gets it | What goes here |
-|------|------------|----------------|
-| **nanoclaw-core** | All containers | Basic behavior, formatting, language, silence, staging process |
-| **nanoclaw-trusted** | Trusted + main | Shared memory, operational discipline, system health, skill dependencies |
-| **nanoclaw-admin** | Main only | Personal skills, external API integrations, group management, promotion |
-| **nanoclaw-untrusted** | Untrusted only | Security rules, code execution refusal, identity etiquette |
+## What NEVER goes in untrusted
 
-## Rule of thumb
+- Any operational skill (heartbeat, morning-brief, check-*)
+- Any skill that writes files (brief-cleanup, soul-searching)
+- Any skill from admin or trusted — untrusted gets core + untrusted-security only
 
-- External API call → **admin**
-- Writes to `/workspace/trusted/` → **trusted**
-- Pure logic, no credentials, all containers need it → **core**
-- Security restriction for public groups → **untrusted**
+## Decision process
 
-**Always check before calling promote_staging — wrong plugin = security model broken.**
-
+1. **Is the skill in the table above?** Use the listed tile. Done.
+2. **New skill not in the table?** Apply these rules in order:
+   - Needs external credentials → **admin**
+   - Needs `/workspace/trusted/` → **trusted**
+   - Pure logic, no credentials, useful for all containers → **core**
+   - Security restriction → **untrusted**
+3. **Still unsure?** → **admin**. Wrong tile = security model broken.
