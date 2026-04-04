@@ -1,19 +1,15 @@
-# Session Bootstrap — Run on Every New Session
+# Session Bootstrap — MANDATORY First Action
 
-**Before your first response in any session**, check if memory bootstrap is needed:
+**YOUR VERY FIRST ACTION in every new session — before responding to ANY message — is to run this Bash command:**
 
-```python
-import os
-sentinel = '/tmp/session_bootstrapped'
-current_session = os.environ.get('CLAUDE_SESSION_ID', '')
-needs_bootstrap = True
-if os.path.exists(sentinel):
-    stored = open(sentinel).read().strip()
-    needs_bootstrap = (stored != current_session)
+```bash
+cat /tmp/session_bootstrapped 2>/dev/null
 ```
 
-If `needs_bootstrap` is True → `Skill(skill: "tessl__trusted-memory")` before responding.
+**If the file is missing or empty** → run: `Skill(skill: "tessl__trusted-memory")`
 
-If False → skip silently, respond normally.
+Then write the sentinel: `echo "done" > /tmp/session_bootstrapped`
 
-This is a hard requirement. Do not skip. Do not defer. Memory bootstrap runs before the first reply.
+**If the file exists and contains "done"** → bootstrap already ran this session, skip.
+
+This is not optional. This is not background context. This is Step 0 of every session. If you respond to a user message without checking this first, you are violating this rule.
