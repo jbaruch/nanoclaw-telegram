@@ -18,6 +18,9 @@
     },
     "ground-truth-trusted": {
       "rules": "rules/ground-truth-trusted.md"
+    },
+    "session-bootstrap": {
+      "rules": "rules/session-bootstrap.md"
     }
   },
   "skills": {
