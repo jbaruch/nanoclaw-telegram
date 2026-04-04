@@ -344,6 +344,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             timestamp: new Date().toISOString(),
             is_from_me: true,
             is_bot_message: true,
+            reply_to_message_id: replyId,
           });
           // Consume after first reply — prevents replying to the wrong message
           // when user sends follow-ups while background agent is working.
