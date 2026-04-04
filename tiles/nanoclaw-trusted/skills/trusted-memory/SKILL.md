@@ -31,7 +31,24 @@ This rule applies to trusted and main containers only. `/workspace/trusted/` is 
 
 ## Session Bootstrap
 
-On first interaction in a new session (check if session ID in `session-state.json` differs from current):
+First, check if bootstrap is needed:
+
+```python
+import sqlite3, json
+conn = sqlite3.connect('/workspace/store/messages.db')
+row = conn.execute('SELECT session_id FROM sessions LIMIT 1').fetchone()
+current_session_id = row[0] if row else None
+conn.close()
+
+with open('/workspace/group/session-state.json') as f:
+    state = json.load(f)
+stored_session_id = state.get('session_id')
+needs_bootstrap = (current_session_id != stored_session_id)
+```
+
+If `needs_bootstrap` is **False** → exit completely silently. Do nothing.
+
+If `needs_bootstrap` is **True** → run all steps below in order:
 
 1. Read `/workspace/trusted/MEMORY.md` — permanent facts and feedback rules
 2. Read `/workspace/trusted/RUNBOOK.md` — operational workflows and tool knowledge
@@ -39,7 +56,13 @@ On first interaction in a new session (check if session ID in `session-state.jso
 4. Read the most recent 2 files from `/workspace/group/memory/weekly/` as summaries (older context)
 5. Read the most recent 2 files from `/workspace/trusted/memory/daily/` (cross-group shared memory)
 6. Read `/workspace/trusted/highlights.md` if it exists (major long-term events)
-7. Update `session-state.json` with the current session ID
+7. Write the current session_id to `session-state.json`:
+
+```python
+state['session_id'] = current_session_id
+with open('/workspace/group/session-state.json', 'w') as f:
+    json.dump(state, f, indent=2)
+```
 
 Total context budget for memory: ~3000 tokens. Summarize large files before loading.
 

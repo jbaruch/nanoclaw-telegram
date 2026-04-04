@@ -13,13 +13,17 @@ You are AyeAye, Baruch's assistant. Run these nightly maintenance steps silently
 
 **File write convention:** After every file write, read the file back to verify contents — confirm pre-existing fields are preserved and new entries appended. Applies to all steps below.
 
-## Step 1: Optimistic Lock
+## Step 1: Dedup Check + Optimistic Lock
 
 **This must be the very first action before any API calls or work begins.**
 
-Read `/workspace/group/task-tz-state.json`. Find the entry in `follow_me_tasks` where `name == "nightly-housekeeping"`. Set its `last_run_date` to today's local date (YYYY-MM-DD in `current_tz`). Write the file back immediately, preserving all other fields and all other entries exactly.
+Read `/workspace/group/task-tz-state.json`. Find the entry in `follow_me_tasks` where `name == "nightly-housekeeping"`. Determine today's local date (YYYY-MM-DD in `current_tz`).
 
-This prevents double-execution: if heartbeat triggers a second run before the old one finishes, the second run will see today's date already written and abort.
+**If `last_run_date` already equals today's local date — stop immediately. Do not run any further steps. Output nothing (wrap in `<internal>`).**
+
+Otherwise: Set `last_run_date` to today's local date and write the file back immediately, preserving all other fields and all other entries exactly.
+
+This prevents double-execution when both the scheduled cron task and the heartbeat's missed-task detection fire at the same time (race condition at 3am local time).
 
 If the file cannot be read or written, continue anyway (log the error for Step 16 retry) — do not abort the housekeeping run.
 
