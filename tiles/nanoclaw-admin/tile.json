@@ -18,6 +18,9 @@
     },
     "email-read-full": {
       "rules": "rules/email-read-full.md"
+    },
+    "skill-writing-guide": {
+      "rules": "rules/skill-writing-guide.md"
     }
   },
   "skills": {
