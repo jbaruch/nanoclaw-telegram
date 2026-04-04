@@ -25,7 +25,7 @@ Otherwise: Set `last_run_date` to today's local date and write the file back imm
 
 This prevents double-execution when both the scheduled cron task and the heartbeat's missed-task detection fire at the same time (race condition at 3am local time).
 
-If the file cannot be read or written, continue anyway (log the error for Step 16 retry) — do not abort the housekeeping run.
+If the file cannot be read or written, continue anyway (log the error for Step 17 retry) — do not abort the housekeeping run.
 
 ## Step 2: TripIt → Reclaim sync
 Run via host: `mcp__nanoclaw__run_host_script(script: "sync-tripit.sh")`
@@ -99,57 +99,91 @@ Format — include only sections with content:
 
 Keep entries concise (one line each). This file is read on container startup to restore recent context.
 
-## Step 11: Archive daily memory files
+## Step 11: Deduplicate daily logs
+
+Run dedup on both daily log directories:
+
+```bash
+python3 /workspace/group/scripts/dedup-memory.py /workspace/group/memory/daily --days 3
+python3 /workspace/group/scripts/dedup-memory.py /workspace/trusted/memory/daily --days 3
+```
+
+Parse JSON output. Log the count of duplicates removed but do not report to Baruch. If script errors, log and continue.
+
+## Step 12: Archive daily memory (with classification)
+
+For each entry in yesterday's daily log, classify before archiving:
+
+**Permanent** (extract to typed memory file + MEMORY.md index):
+- Owner preferences and behavioral feedback
+- Architecture decisions and their rationale
+- People's roles, relationships, contact info
+- Credential scopes, system access, integrations
+
+**Medium-term** (include in weekly summary):
+- Task progress, what was done
+- Debugging sessions and outcomes
+- Conversation summaries
+
+**Short-term** (drop — do NOT include in weekly):
+- Scheduling logistics ("meeting at 3pm")
+- Transient state ("deploy is running", "waiting for CI")
+- Acknowledgments and small talk context
+
+For permanent entries: create/update typed file in `/workspace/trusted/`, add/update MEMORY.md index entry. Also include in weekly for temporal context.
+
+Apply this classification to both group-local and trusted daily logs.
 
 ### Shared archival procedure
 For each path below, apply this pattern in sequence:
 1. Determine yesterday's date. If the daily file doesn't exist → skip silently.
-2. Read the daily file and extract key points.
-3. Determine the ISO week file (`YYYY-WNN`). Create with the appropriate header if it doesn't exist.
-4. Append a dated section (`## YYYY-MM-DD`) with concise bullets worth remembering.
-5. Delete yesterday's daily file.
+2. Read the daily file and classify each entry (permanent / medium-term / short-term).
+3. Extract permanent entries to typed files + MEMORY.md index.
+4. Determine the ISO week file (`YYYY-WNN`). Create with the appropriate header if it doesn't exist.
+5. Append a dated section (`## YYYY-MM-DD`) with permanent + medium-term entries as concise bullets.
+6. Delete yesterday's daily file.
 
 **Monday rollup** (after archiving Sunday's daily, for each path):
 1. Read the previous week's weekly file. Extract top 5–10 highlights.
 2. Append to the highlights file under `## Week YYYY-WNN (Mon DD – Sun DD)` with one-line bullets.
 3. Delete the previous week's weekly file.
 
-## Step 12: Group daily memory
+## Step 13: Group daily memory
 - Daily: `/workspace/group/memory/daily/YYYY-MM-DD.md`
 - Weekly: `/workspace/group/memory/weekly/YYYY-WNN.md` — header: `# Weekly Summary — YYYY-WNN`
 - Highlights: `/workspace/trusted/highlights.md`
 
-## Step 13: Trusted daily memory
+## Step 14: Trusted daily memory
 - Daily: `/workspace/trusted/memory/daily/YYYY-MM-DD.md` (entries prefixed with `[source]`)
 - Weekly: `/workspace/trusted/memory/weekly/YYYY-WNN.md` — header: `# Trusted Weekly Memory — YYYY-WNN`
 - Highlights: `/workspace/trusted/highlights.md` — preserve source attribution `[chat-name]` in bullets.
 
-## Step 14: Process daily_discoveries
+## Step 15: Process daily_discoveries
 1. Read `/workspace/trusted/memory/daily_discoveries.md`. If absent → skip silently.
 2. Scan for entries without `✓ processed` marker.
 3. For each unprocessed entry:
    - **Promote to: RUNBOOK.md** → append to appropriate section of `/workspace/trusted/RUNBOOK.md`. Mark `✓ processed`.
-   - **Promote to: MEMORY.md** → append fact/index entry to `/workspace/trusted/MEMORY.md`. Mark `✓ processed`.
-   - **Promote to: unsure** → operational/workflow/tool fact → RUNBOOK.md; behavioral preference/feedback → MEMORY.md. Mark `✓ processed`.
+   - **Promote to: typed memory file + MEMORY.md index** → create/update typed file in `/workspace/trusted/`, add/update MEMORY.md index entry. Mark `✓ processed`.
+   - **Promote to: unsure** → operational/workflow/tool fact → RUNBOOK.md; behavioral preference/feedback → typed memory file + MEMORY.md index. Mark `✓ processed`.
 4. Write updated `daily_discoveries.md` back with all markers in place.
 5. Silent on success; report only on file write failure.
 
-## Step 15: Check watchlist
+## Step 16: Check watchlist
 `Skill(skill: "tessl__check-watchlist")` — check if any tracked upcoming shows have been released.
 - Show released → skill notifies Baruch and updates watchlist.json automatically
 - Nothing released → stay silent
 
-## Step 16: Mark as run
+## Step 17: Mark as run
 Read `/workspace/group/task-tz-state.json`. Find the entry in `follow_me_tasks` where `name == "nightly-housekeeping"`. Set `last_run_date` to today's local date (`YYYY-MM-DD` in `current_tz`). Write back, preserving all other fields.
 
 (This is a confirmation write. Step 1 already wrote this value as an optimistic lock. If Step 1 failed, this step ensures the date is recorded.)
 
-## Step 17: Backup to git
+## Step 18: Backup to git
 ```
 bash /workspace/group/scripts/backup-to-git.sh
 ```
 Then call `mcp__nanoclaw__github_backup` with message `"nightly backup: YYYY-MM-DD"`.
 Silent on success; report only on error.
 
-## Step 18: Silence
+## Step 19: Silence
 If nothing to report, output nothing (wrap in `<internal>`).
