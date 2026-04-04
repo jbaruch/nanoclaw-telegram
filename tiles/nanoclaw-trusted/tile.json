@@ -29,6 +29,15 @@
     },
     "check-unanswered": {
       "path": "skills/check-unanswered/SKILL.md"
+    },
+    "check-calendar": {
+      "path": "skills/check-calendar/SKILL.md"
+    },
+    "check-cfps": {
+      "path": "skills/check-cfps/SKILL.md"
+    },
+    "morning-brief": {
+      "path": "skills/morning-brief/SKILL.md"
     }
   }
 }
