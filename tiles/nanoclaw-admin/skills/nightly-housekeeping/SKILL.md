@@ -36,7 +36,7 @@ Use `mcp__nanoclaw__run_host_script(script: "refresh-travel-schedule.py")`.
 Rebuilds `travel-schedule.json` from the TripIt ICS feed. Silent on success; report only on error.
 
 ## Step 4: Travel bookings check
-Invoke the `check-travel-bookings` skill to find missing flights/hotels for upcoming trips.
+`Skill(skill: "tessl__check-travel-bookings")` — find missing flights/hotels for upcoming trips.
 Report gaps; skip if all snoozed or complete.
 
 ## Step 5: Refresh Trakt watch history
@@ -45,7 +45,7 @@ Saves fresh watch history to `/workspace/group/trakt-history.json`.
 Silent on success. Report on error or `total_shows: 0` (if sync hasn't run yet → skip silently).
 
 ## Step 6: Check orders
-Invoke the `check-orders` skill to fetch order emails, update orders-db.json, and flag anomalies.
+`Skill(skill: "tessl__check-orders")` — fetch order emails, update orders-db.json, flag anomalies.
 - Flagged items → the skill reports them automatically
 - Nothing anomalous → stay silent
 
@@ -131,7 +131,7 @@ For each path below, apply this pattern in sequence:
 5. Silent on success; report only on file write failure.
 
 ## Step 15: Check watchlist
-Invoke the `check-watchlist` skill to check if any tracked upcoming shows have been released.
+`Skill(skill: "tessl__check-watchlist")` — check if any tracked upcoming shows have been released.
 - Show released → skill notifies Baruch and updates watchlist.json automatically
 - Nothing released → stay silent
 
