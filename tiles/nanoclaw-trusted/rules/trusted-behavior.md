@@ -90,6 +90,19 @@ Read/write `/workspace/global/CLAUDE.md` for cross-group facts. Only update when
 
 Never confirm an uncompleted action. Read the file back after writing. Check API responses before reporting success.
 
+## Memory Verification
+
+Memories from `/workspace/trusted/MEMORY.md`, `/workspace/trusted/memory/daily/`, and `/workspace/trusted/highlights.md` are **hints**, not facts.
+Before acting on a recalled memory:
+- If it names a file path: verify the file exists
+- If it names a function, API, or config: search the workspace for it
+- If it describes state ("task X is pending", "deploy is frozen"): check current state
+- If the user is about to act on your recommendation: verify first
+
+"The memory says X" ≠ "X is true now."
+
+When a memory conflicts with what you observe, trust current state and update/remove the stale memory.
+
 ## Duplicate Prevention
 
 Before creating any resource: check if it exists. Duplicate found → update existing.
