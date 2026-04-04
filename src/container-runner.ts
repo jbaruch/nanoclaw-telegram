@@ -381,10 +381,24 @@ function buildVolumeMounts(
   // AyeAye-created skills (staging) — override tile skills if names collide
   const groupSkillsDir = path.join(groupDir, 'skills');
   if (fs.existsSync(groupSkillsDir)) {
-    for (const skillDir of fs.readdirSync(groupSkillsDir)) {
-      const srcDir = path.join(groupSkillsDir, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      fs.cpSync(srcDir, path.join(skillsDst, skillDir), { recursive: true });
+    const stagingSkills = fs
+      .readdirSync(groupSkillsDir)
+      .filter((d) => {
+        const p = path.join(groupSkillsDir, d);
+        return fs.statSync(p).isDirectory();
+      });
+    if (stagingSkills.length > 0) {
+      logger.warn(
+        { folder: group.folder, skills: stagingSkills },
+        'Staging skills override tile skills — run verify-tiles to clear',
+      );
+      for (const skillDir of stagingSkills) {
+        fs.cpSync(
+          path.join(groupSkillsDir, skillDir),
+          path.join(skillsDst, skillDir),
+          { recursive: true },
+        );
+      }
     }
   }
   mounts.push({
