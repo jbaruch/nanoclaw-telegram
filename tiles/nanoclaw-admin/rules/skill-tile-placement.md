@@ -1,60 +1,48 @@
-# Skill Tile Placement — Hard Rules
+# Skill Tile Placement
 
-**STOP. Before promoting anything, read this entire table. If a skill or rule is listed below, put it in the listed tile. No exceptions. No reasoning your way around it.**
+When promoting a skill or rule, choose the correct tile. Getting this wrong breaks the security model — admin skills in core means untrusted containers get admin capabilities.
 
-## Concrete placement table
+## The four tiles
 
-| Skill/Rule | Tile | Why |
-|-----------|------|-----|
-| heartbeat | admin | Composio, host scripts |
-| morning-brief | admin | Composio (Calendar, Tasks) |
-| nightly-housekeeping | admin | Composio, host scripts |
-| check-email | admin | Composio (Gmail) |
-| check-calendar | admin | Composio (Google Calendar) |
-| check-cfps | admin | Sessionize API, host scripts |
-| check-orders | admin | Composio |
-| check-travel-bookings | admin | Composio |
-| check-watchlist | admin | Composio |
-| soul-searching | admin | Reads /workspace/trusted/, writes SOUL.md |
-| promote-tiles | admin | Infrastructure management |
-| verify-tiles | admin | Infrastructure management |
-| manage-groups | admin | Group registration |
-| schedule-task | admin | Task management |
-| create-agent-team | admin | Agent teams |
-| recommend-books | admin | Personal |
-| recommend-shows | admin | Personal |
-| brief-cleanup | admin | Email classification feedback |
-| max-effort | admin | Extended tool reference (Composio examples) |
-| no-unverified-claims | admin | Extended verification (Composio examples) |
-| trakt-watch-history | admin | External API |
-| task-tz-sync | admin | Host scripts |
-| scheduler-timezone | admin | Task management |
-| check-system-health | trusted | No external APIs, shared operational |
+| Tile | Who gets it | Purpose |
+|------|------------|---------|
+| **nanoclaw-core** | ALL containers (including untrusted) | Universal behavior: formatting, silence, language, context recovery. No external APIs, no credentials. |
+| **nanoclaw-trusted** | Trusted + main | Shared operational: system health checks, memory management. No personal APIs (Gmail, Calendar). |
+| **nanoclaw-admin** | Main only | Everything personal: email, calendar, CFPs, host scripts, group management, task scheduling, Composio integrations. |
+| **nanoclaw-untrusted** | Untrusted only | Security restrictions: credential protection, code execution refusal, bad actor handling. |
+
+## Decision criteria — apply in order
+
+1. **Does it call Composio, Gmail, Calendar, Tasks, GitHub, Sessionize, or any external API?** → admin
+2. **Does it call `run_host_script` or manage infrastructure (promote, verify, groups)?** → admin
+3. **Does it read/write `/workspace/trusted/` or manage shared memory?** → trusted
+4. **Is it a security restriction for public groups?** → untrusted
+5. **Is it pure logic with no credentials that ALL containers need?** → core
+
+## Examples
+
+| Skill | Tile | Reasoning |
+|-------|------|-----------|
+| check-email | admin | Gmail via Composio |
+| morning-brief | admin | Calendar + Tasks via Composio |
+| check-cfps | admin | Sessionize API + host scripts |
+| heartbeat | admin | Calls Composio skills (email, calendar) |
+| soul-searching | admin | Writes to /workspace/trusted/ |
+| check-system-health | trusted | No external APIs, operational |
 | check-unanswered | core | No external APIs, all containers need it |
-| trusted-memory | trusted | Reads /workspace/trusted/ |
-| status | core | Basic container health |
-| whoami | untrusted | Identity disclosure for untrusted |
+| status | core | Basic container info |
+| default-silence | core | Universal behavior rule |
+| bad-actor-disengage | untrusted | Security rule for public groups |
 
-## What NEVER goes in core
+## Red flags — if you see any of these, it's NOT core
 
-- Anything that calls Composio, Gmail, Calendar, Tasks, GitHub
-- Anything that calls `run_host_script`
-- Anything that references `/workspace/trusted/`
-- Anything that manages infrastructure (promote, verify, groups, tasks)
-- Any skill that exists in the admin table above
+- `Composio`, `GMAIL`, `GOOGLECALENDAR`, `GOOGLETASKS` anywhere in the skill
+- `run_host_script`, `promote_staging`, `register_group`
+- `/workspace/trusted/`
+- Any API key or credential reference
+- `schedule_task` with complex scheduling logic
+- Skills that only make sense for Baruch personally (books, shows, orders, travel)
 
-## What NEVER goes in untrusted
+## When in doubt → admin
 
-- Any operational skill (heartbeat, morning-brief, check-*)
-- Any skill that writes files (brief-cleanup, soul-searching)
-- Any skill from admin or trusted — untrusted gets core + untrusted-security only
-
-## Decision process
-
-1. **Is the skill in the table above?** Use the listed tile. Done.
-2. **New skill not in the table?** Apply these rules in order:
-   - Needs external credentials → **admin**
-   - Needs `/workspace/trusted/` → **trusted**
-   - Pure logic, no credentials, useful for all containers → **core**
-   - Security restriction → **untrusted**
-3. **Still unsure?** → **admin**. Wrong tile = security model broken.
+Putting something in admin that belongs in core wastes a few tokens. Putting something in core that belongs in admin **gives untrusted containers admin capabilities**. Always err toward admin.

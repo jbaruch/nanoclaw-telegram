@@ -16,32 +16,28 @@ If nothing is staged, stop and report. Do not proceed.
 
 ## Step 2: Determine tile placement
 
-**For EACH staged item**, read the `skill-tile-placement` rule and find the skill in the concrete placement table.
+**For EACH staged item**, apply the `skill-tile-placement` rule (already loaded in your RULES.md — do NOT call Skill() for it, just read your rules).
 
-**HARD VALIDATION — do this for every item before promoting:**
+For each item, state:
+- The skill/rule name
+- Which tile it goes to
+- Why (one of: "external API", "host script", "trusted memory", "security rule", "pure logic/universal")
 
-1. Look up the skill name in the placement table
-2. If found → use the listed tile. No exceptions.
-3. If NOT found → apply the decision rules (credentials → admin, /workspace/trusted/ → trusted, pure logic → core, security → untrusted)
-4. If unsure → admin
-
-**NEVER promote to core or untrusted without verifying the skill is explicitly listed for that tile in the placement table.** Core and untrusted are security boundaries. Getting this wrong exposes admin skills to untrusted containers.
-
-List each item and its target tile. Confirm the assignments before proceeding.
+**VALIDATION:** If you're about to put anything in core or untrusted, check the red flags list in the placement rule. If ANY red flag matches → admin, not core.
 
 ## Step 3: Promote staged content
 
 Call `mcp__nanoclaw__promote_staging` for each tile that has staged content:
-- `mcp__nanoclaw__promote_staging(tileName: "nanoclaw-admin")` — admin items
-- `mcp__nanoclaw__promote_staging(tileName: "nanoclaw-trusted")` — trusted items
-- `mcp__nanoclaw__promote_staging(tileName: "nanoclaw-core")` — core items (rare!)
+- `mcp__nanoclaw__promote_staging(tileName: "nanoclaw-admin")` — most skills go here
+- `mcp__nanoclaw__promote_staging(tileName: "nanoclaw-trusted")` — shared operational only
+- `mcp__nanoclaw__promote_staging(tileName: "nanoclaw-core")` — rare! Pure logic only
 
 Validate the result. If any call fails, stop and report.
 
 ## Step 4: Send promotion result
 
 Send via `mcp__nanoclaw__send_message`:
-- What was promoted (skill names, target tiles)
+- What was promoted (skill names, target tiles, reasoning)
 - Note that nuke fires in 20 min, verify in 21 min
 
 ## Step 5: Schedule nuke in 20 minutes
