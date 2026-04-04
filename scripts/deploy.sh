@@ -48,8 +48,28 @@ echo "3. Updating tiles from registry..."
 docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl update --yes --dangerously-ignore-security 2>&1' | tail -10
 echo ""
 
-# 4. Kill ALL agent containers
-echo "4. Killing all agent containers..."
+# 4. Clear staging overrides from all groups
+echo "4. Clearing staging overrides..."
+STAGING_COUNT=0
+for group_dir in groups/*/; do
+    skills_dir="${group_dir}skills"
+    if [[ -d "$skills_dir" ]] && [[ -n "$(ls -A "$skills_dir" 2>/dev/null)" ]]; then
+        echo "  cleaning: $skills_dir"
+        rm -rf "${skills_dir:?}"/*
+        ((STAGING_COUNT++))
+    fi
+    staging_dir="${group_dir}staging"
+    if [[ -d "$staging_dir" ]] && [[ -n "$(ls -A "$staging_dir" 2>/dev/null)" ]]; then
+        echo "  cleaning: $staging_dir"
+        rm -rf "${staging_dir:?}"/*
+        ((STAGING_COUNT++))
+    fi
+done
+echo "  cleaned $STAGING_COUNT group(s) with staging"
+echo ""
+
+# 5. Kill ALL agent containers
+echo "5. Killing all agent containers..."
 AGENTS=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -v '^nanoclaw$' || true)
 if [[ -n "$AGENTS" ]]; then
     echo "$AGENTS" | xargs docker kill 2>/dev/null || true
@@ -59,15 +79,15 @@ else
 fi
 echo ""
 
-# 5. Clear sessions
-echo "5. Clearing all sessions..."
+# 6. Clear sessions
+echo "6. Clearing all sessions..."
 sqlite3 store/messages.db 'DELETE FROM sessions'
 CLEARED=$(sqlite3 store/messages.db 'SELECT changes()')
 echo "  cleared $CLEARED sessions"
 echo ""
 
-# 6. Restart orchestrator
-echo "6. Restarting orchestrator..."
+# 7. Restart orchestrator
+echo "7. Restarting orchestrator..."
 docker compose restart nanoclaw
 echo ""
 
