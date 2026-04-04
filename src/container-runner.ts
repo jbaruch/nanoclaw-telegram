@@ -194,13 +194,22 @@ function buildVolumeMounts(
   // Shared trusted directory — writable space for trusted containers.
   if (isMain || group.containerConfig?.trusted) {
     const trustedDir = path.join(process.cwd(), 'trusted');
-    if (fs.existsSync(trustedDir)) {
-      mounts.push({
-        hostPath: toHostPath(trustedDir),
-        containerPath: '/workspace/trusted',
-        readonly: false,
-      });
+    fs.mkdirSync(trustedDir, { recursive: true });
+    // Chown so container user can write memory files
+    const trustedUid = HOST_UID ?? 1000;
+    const trustedGid = HOST_GID ?? 1000;
+    if (trustedUid !== 0) {
+      try {
+        fs.chownSync(trustedDir, trustedUid, trustedGid);
+      } catch (err: unknown) {
+        logger.warn({ err, trustedDir }, 'Failed to chown trusted dir');
+      }
     }
+    mounts.push({
+      hostPath: toHostPath(trustedDir),
+      containerPath: '/workspace/trusted',
+      readonly: false,
+    });
   }
 
   // Store directory (messages.db).
