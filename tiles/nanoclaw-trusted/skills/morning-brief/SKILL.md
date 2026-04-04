@@ -146,7 +146,26 @@ Before scheduling a reminder for an event, check if `event_id` already exists in
 ## Step 14: Schedule new reminders
 For events not already in `scheduled-reminders.json`, schedule a once-off reminder.
 
-**CRITICAL — use the `scheduler-timezone` skill protocol for timezone conversion.** Follow the protocol exactly — convert event time → UTC → scheduler timezone → format without Z suffix.
+**TIMEZONE CONVERSION — compute `schedule_value` exactly as follows:**
+```python
+from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta
+
+# event.start.dateTime from the Google Calendar API includes timezone offset
+# e.g. "2026-04-03T16:00:00-05:00" (4 PM CDT) or "2026-04-03T21:00:00Z"
+event_dt = datetime.fromisoformat(event_start_str)   # timezone-aware
+event_utc = event_dt.astimezone(ZoneInfo("UTC"))
+reminder_utc = event_utc - timedelta(minutes=15)
+
+# Convert to current local timezone for the scheduler (scheduler uses local time)
+tz = ZoneInfo(current_tz)   # e.g. "America/Chicago"
+reminder_local = reminder_utc.astimezone(tz)
+schedule_value = reminder_local.strftime("%Y-%m-%dT%H:%M:%S")   # NO Z suffix
+```
+
+Example: event "2026-04-03T16:00:00-05:00" (4 PM CDT = 21:00 UTC) → reminder_utc = 20:45 UTC → CDT = 3:45 PM → `schedule_value = "2026-04-03T15:45:00"`
+
+**Do NOT** strip the Z from a UTC time and pass it directly as `schedule_value` — the scheduler interprets `schedule_value` as local time, so "15:45:00" means 3:45 PM local, not 3:45 PM UTC.
 
 **Apply `temporal-awareness` rule** before scheduling each reminder: will this reminder be actionable when it fires? Skip reminders that fail this check.
 

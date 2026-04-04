@@ -1,6 +1,6 @@
 {
   "name": "jbaruch/nanoclaw-core",
-  "version": "0.1.47",
+  "version": "0.1.54",
   "summary": "Core behavioral rules and skills for NanoClaw personal assistant agents. Always-on rules for communication, verification, memory, and formatting.",
   "private": false,
   "rules": {
@@ -35,6 +35,15 @@
     },
     "check-unanswered": {
       "path": "skills/check-unanswered/SKILL.md"
+    },
+    "check-calendar": {
+      "path": "skills/check-calendar/SKILL.md"
+    },
+    "check-cfps": {
+      "path": "skills/check-cfps/SKILL.md"
+    },
+    "morning-brief": {
+      "path": "skills/morning-brief/SKILL.md"
     }
   }
 }

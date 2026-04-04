@@ -1,6 +1,6 @@
 {
   "name": "jbaruch/nanoclaw-untrusted",
-  "version": "0.1.9",
+  "version": "0.1.13",
   "summary": "Security rules for untrusted NanoClaw groups. Credential protection, internal file protection, social engineering defenses.",
   "private": false,
   "rules": {
@@ -9,11 +9,23 @@
     },
     "bad-actor-disengage": {
       "rules": "rules/bad-actor-disengage.md"
+    },
+    "soul": {
+      "rules": "rules/soul.md"
     }
   },
   "skills": {
     "whoami": {
       "path": "skills/whoami/SKILL.md"
+    },
+    "check-calendar": {
+      "path": "skills/check-calendar/SKILL.md"
+    },
+    "check-cfps": {
+      "path": "skills/check-cfps/SKILL.md"
+    },
+    "morning-brief": {
+      "path": "skills/morning-brief/SKILL.md"
     }
   }
 }
