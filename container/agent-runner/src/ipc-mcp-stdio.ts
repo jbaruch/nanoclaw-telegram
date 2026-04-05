@@ -34,6 +34,44 @@ function writeIpcFile(dir: string, data: object): string {
   return filename;
 }
 
+/**
+ * Send a named host operation via IPC and poll for the result.
+ * Each operation maps to a specific handler on the host with locked-down credentials.
+ */
+async function runHostOperation(
+  type: string,
+  extra?: Record<string, unknown>,
+  timeoutMs = 180_000,
+): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  writeIpcFile(TASKS_DIR, {
+    type,
+    groupFolder,
+    chatJid,
+    requestId,
+    timestamp: new Date().toISOString(),
+    ...extra,
+  });
+
+  const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
+  const pollMs = 500;
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    if (fs.existsSync(resultPath)) {
+      const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+      fs.unlinkSync(resultPath);
+      if (result.error) {
+        return { content: [{ type: 'text' as const, text: `Error: ${result.error}` }], isError: true };
+      }
+      return { content: [{ type: 'text' as const, text: result.stdout || '(no output)' }] };
+    }
+    await new Promise(r => setTimeout(r, pollMs));
+  }
+
+  return { content: [{ type: 'text' as const, text: `Operation ${type} timed out` }], isError: true };
+}
+
 const server = new McpServer({
   name: 'nanoclaw',
   version: '1.0.0',
@@ -598,53 +636,86 @@ server.tool(
   },
 );
 
+// --- Named host operations ---
+// Each tool maps to a specific script with locked-down credentials on the host.
+
 server.tool(
-  'run_host_script',
-  'Run a Python script on the host (orchestrator) with access to credentials the container does not have (TripIt, Reclaim, Google OAuth). Use for scripts that need external API access. The script runs in the group folder context. Returns the script stdout as JSON.',
+  'fetch_cfps',
+  'Fetch open CFPs from configured sources. Returns JSON with event details.',
+  {},
+  async () => runHostOperation('fetch_cfps'),
+);
+
+server.tool(
+  'build_travel_db',
+  'Build/refresh the travel bookings database from calendar data.',
+  {},
+  async () => runHostOperation('build_travel_db'),
+);
+
+server.tool(
+  'check_travel_bookings',
+  'Check upcoming travel bookings and return schedule details.',
+  {},
+  async () => runHostOperation('check_travel_bookings'),
+);
+
+server.tool(
+  'check_unanswered',
+  'Scan messages DB for unanswered messages that need attention.',
   {
-    script: z.string().describe('Script name (e.g. "refresh-travel-schedule.py", "check-travel-bookings.py"). Must exist in the group\'s scripts/ directory.'),
+    lookback_hours: z.number().optional().describe('Hours to look back (default: 24)'),
   },
-  async (args) => {
-    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const data = {
-      type: 'run_host_script',
-      script: args.script,
-      groupFolder,
-      chatJid,
-      requestId,
-      timestamp: new Date().toISOString(),
-    };
+  async (args) => runHostOperation('check_unanswered', { lookback_hours: args.lookback_hours }),
+);
 
-    writeIpcFile(TASKS_DIR, data);
+server.tool(
+  'heartbeat_checks',
+  'Run heartbeat health checks — system status, task state, recent errors.',
+  {},
+  async () => runHostOperation('heartbeat_checks'),
+);
 
-    // Poll for result file
-    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
-    const timeoutMs = 180_000;
-    const pollMs = 500;
-    const start = Date.now();
+server.tool(
+  'violation_scan',
+  'Scan recent agent outputs for rule violations across all groups.',
+  {},
+  async () => runHostOperation('violation_scan'),
+);
 
-    while (Date.now() - start < timeoutMs) {
-      if (fs.existsSync(resultPath)) {
-        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
-        fs.unlinkSync(resultPath);
-        if (result.error) {
-          return {
-            content: [{ type: 'text' as const, text: `Script error: ${result.error}` }],
-            isError: true,
-          };
-        }
-        return {
-          content: [{ type: 'text' as const, text: result.stdout || '(no output)' }],
-        };
-      }
-      await new Promise(r => setTimeout(r, pollMs));
-    }
+server.tool(
+  'fetch_morning_brief',
+  'Fetch data for the morning briefing — calendar, tasks, email summary.',
+  {},
+  async () => runHostOperation('fetch_morning_brief'),
+);
 
-    return {
-      content: [{ type: 'text' as const, text: 'Script timed out after 60s' }],
-      isError: true,
-    };
-  },
+server.tool(
+  'dedup_memory',
+  'Deduplicate memory files — remove redundant entries across group memories.',
+  {},
+  async () => runHostOperation('dedup_memory'),
+);
+
+server.tool(
+  'refresh_travel_schedule',
+  'Refresh travel schedule data from booking sources.',
+  {},
+  async () => runHostOperation('refresh_travel_schedule'),
+);
+
+server.tool(
+  'sync_tripit',
+  'Sync TripIt travel data to Reclaim timezone settings.',
+  {},
+  async () => runHostOperation('sync_tripit'),
+);
+
+server.tool(
+  'fetch_trakt_history',
+  'Fetch Trakt.tv watch history for show/movie recommendations.',
+  {},
+  async () => runHostOperation('fetch_trakt_history'),
 );
 
 server.tool(
@@ -666,7 +737,7 @@ server.tool(
 
     writeIpcFile(TASKS_DIR, data);
 
-    // Poll for result file (same pattern as run_host_script)
+    // Poll for result file
     const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
     const timeoutMs = 60_000;
     const pollMs = 500;

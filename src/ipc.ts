@@ -358,13 +358,14 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
-    // For run_host_script / github_backup / promote_staging / sessionize
+    // For host operations / github_backup / promote_staging / sessionize
     requestId?: string;
     message?: string;
     tileName?: string;
     skillName?: string;
     slug?: string;
     filter?: Record<string, boolean>;
+    lookback_hours?: number;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -684,27 +685,65 @@ export async function processTaskIpc(
       }
       break;
 
-    case 'run_host_script':
-      if (data.script && data.requestId) {
-        // Security: only allow .py/.js/.mjs/.sh scripts, no path traversal
-        const scriptName = path.basename(data.script);
-        const allowedExts = ['.py', '.js', '.mjs', '.sh'];
-        if (
-          scriptName !== data.script ||
-          !allowedExts.some((ext) => scriptName.endsWith(ext))
-        ) {
-          logger.warn(
-            { script: data.script, sourceGroup },
-            'Invalid host script name',
-          );
-          break;
-        }
+    // --- Named host operations (no generic script execution) ---
+    // Each case runs a specific script with only the credentials it needs.
+    // Scripts are resolved from the group's scripts/ directory by the helper.
+
+    case 'fetch_cfps':
+    case 'build_travel_db':
+    case 'check_travel_bookings':
+    case 'check_unanswered':
+    case 'heartbeat_checks':
+    case 'violation_scan':
+    case 'fetch_morning_brief':
+    case 'dedup_memory':
+    case 'refresh_travel_schedule':
+    case 'sync_tripit':
+    case 'fetch_trakt_history':
+      if (data.requestId) {
+        const opsConfig: Record<
+          string,
+          { script: string; envKeys: string[] }
+        > = {
+          fetch_cfps: { script: 'check-cfps-fetch.py', envKeys: [] },
+          build_travel_db: { script: 'build-travel-db.py', envKeys: [] },
+          check_travel_bookings: {
+            script: 'check-travel-bookings.py',
+            envKeys: ['TRIPIT_ICAL_URL'],
+          },
+          check_unanswered: { script: 'check-unanswered.py', envKeys: [] },
+          heartbeat_checks: { script: 'heartbeat-checks.py', envKeys: [] },
+          violation_scan: { script: 'violation-scan.py', envKeys: [] },
+          fetch_morning_brief: {
+            script: 'morning-brief-fetch.py',
+            envKeys: [],
+          },
+          dedup_memory: { script: 'dedup-memory.py', envKeys: [] },
+          refresh_travel_schedule: {
+            script: 'refresh-travel-schedule.py',
+            envKeys: [],
+          },
+          sync_tripit: { script: 'sync-tripit.sh', envKeys: [] },
+          fetch_trakt_history: {
+            script: 'trakt-watch-history.py',
+            envKeys: ['TRAKT_CLIENT_ID', 'TRAKT_ACCESS_TOKEN'],
+          },
+        };
+
+        const opConfig = opsConfig[data.type];
+        if (!opConfig) break;
 
         const groupDir = path.resolve(process.cwd(), 'groups', sourceGroup);
-        const scriptPath = path.join(groupDir, 'scripts', scriptName);
+        const scriptPath = path.join(
+          groupDir,
+          'scripts',
+          opConfig.script,
+        );
         if (!fs.existsSync(scriptPath)) {
-          logger.warn({ scriptPath, sourceGroup }, 'Host script not found');
-          // Write error result so the MCP tool doesn't hang
+          logger.warn(
+            { script: opConfig.script, sourceGroup },
+            'Host script not found',
+          );
           const errResultPath = path.join(
             DATA_DIR,
             'ipc',
@@ -714,51 +753,54 @@ export async function processTaskIpc(
           );
           fs.writeFileSync(
             errResultPath,
-            JSON.stringify({ error: `Script not found: ${scriptName}` }),
+            JSON.stringify({ error: `Script not found: ${opConfig.script}` }),
           );
           break;
         }
 
-        logger.info({ script: scriptName, sourceGroup }, 'Running host script');
+        logger.info(
+          { op: data.type, script: opConfig.script, sourceGroup },
+          'Running named host operation',
+        );
 
-        // Run with all host env vars (credentials available on orchestrator).
-        // Scripts hardcode /workspace/group/ paths. Create a per-execution
-        // wrapper that patches those paths to the real group directory.
-        const { readEnvFile: readEnv } = await import('./env.js');
-        const allEnvVars = readEnv([
-          'TRIPIT_ICAL_URL',
-          'TRIPIT_IGNORE_TRIPS',
-          'TRIPIT_IGNORE_KEYWORDS',
-          'RECLAIM_API_TOKEN',
-          'GOOGLE_CLIENT_ID',
-          'GOOGLE_CLIENT_SECRET',
-          'GOOGLE_REFRESH_TOKEN',
-          'OPENAI_API_KEY',
-          'TRAKT_CLIENT_ID',
-          'TRAKT_CLIENT_SECRET',
-          'TRAKT_ACCESS_TOKEN',
-          'TRAKT_REFRESH_TOKEN',
-        ]);
-        const env = {
-          ...process.env,
-          ...Object.fromEntries(
-            Object.entries(allEnvVars).filter(([, v]) => v),
+        // Minimal env: only PATH, HOME, TZ, and declared credentials
+        const baseEnv: Record<string, string> = {
+          PATH: process.env.PATH || '/usr/bin:/bin',
+          HOME: process.env.HOME || '/root',
+          TZ: process.env.TZ || 'UTC',
+          NANOCLAW_DB: path.join(
+            process.env.NANOCLAW_STORE_DIR ||
+              path.join(process.cwd(), 'data', 'store'),
+            'messages.db',
           ),
+          NANOCLAW_CHAT_JID: data.chatJid || '',
         };
+        if (opConfig.envKeys.length > 0) {
+          const { readEnvFile: readEnv } = await import('./env.js');
+          const secrets = readEnv(opConfig.envKeys);
+          for (const key of opConfig.envKeys) {
+            if (secrets[key]) baseEnv[key] = secrets[key];
+          }
+        }
+        if (data.lookback_hours) {
+          baseEnv.LOOKBACK_HOURS = String(data.lookback_hours);
+        }
 
-        // Read the script, replace /workspace/group with the real path
+        // Patch /workspace/group paths to real group directory
         const scriptContent = fs.readFileSync(scriptPath, 'utf-8');
         const patchedContent = scriptContent.replace(
           /\/workspace\/group/g,
           groupDir,
         );
-        const tmpScript = path.join(groupDir, `.tmp_host_${scriptName}`);
+        const tmpScript = path.join(
+          groupDir,
+          `.tmp_host_${opConfig.script}`,
+        );
         fs.writeFileSync(tmpScript, patchedContent);
 
-        // Select runtime by extension
-        const runtime = scriptName.endsWith('.py')
+        const runtime = opConfig.script.endsWith('.py')
           ? 'python3'
-          : scriptName.endsWith('.sh')
+          : opConfig.script.endsWith('.sh')
             ? 'bash'
             : 'node';
 
@@ -767,7 +809,7 @@ export async function processTaskIpc(
           [tmpScript],
           {
             cwd: groupDir,
-            env,
+            env: baseEnv,
             timeout: 120_000,
             maxBuffer: 1024 * 1024,
           },
@@ -781,13 +823,8 @@ export async function processTaskIpc(
             );
             if (error) {
               logger.error(
-                {
-                  script: scriptName,
-                  sourceGroup,
-                  error: error.message,
-                  stderr,
-                },
-                'Host script failed',
+                { op: data.type, sourceGroup, error: error.message, stderr },
+                'Host operation failed',
               );
               fs.writeFileSync(
                 resultPath,
@@ -796,34 +833,16 @@ export async function processTaskIpc(
                   stderr: stderr.slice(-500),
                 }),
               );
-              try {
-                fs.unlinkSync(tmpScript);
-              } catch {
-                /* best effort */
-              }
             } else {
               logger.info(
-                { script: scriptName, sourceGroup, stdoutLen: stdout.length },
-                'Host script completed',
-              );
-              logger.info(
-                { resultPath, requestId: data.requestId },
-                'Writing script result file',
+                { op: data.type, sourceGroup, stdoutLen: stdout.length },
+                'Host operation completed',
               );
               fs.writeFileSync(
                 resultPath,
                 JSON.stringify({ stdout, stderr: stderr || undefined }),
               );
-              logger.info(
-                {
-                  resultPath,
-                  exists: fs.existsSync(resultPath),
-                  size: fs.statSync(resultPath).size,
-                },
-                'Script result file written',
-              );
             }
-            // Clean up temp script
             try {
               fs.unlinkSync(tmpScript);
             } catch {
