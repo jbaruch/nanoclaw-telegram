@@ -41,10 +41,7 @@ import { readEnvFile } from './env.js';
  * Main: core + trusted + admin. Trusted: core + trusted. Untrusted: core + untrusted.
  * Admin loads last so it can override trusted skills.
  */
-export function selectTiles(
-  isMain: boolean,
-  isTrusted: boolean,
-): string[] {
+export function selectTiles(isMain: boolean, isTrusted: boolean): string[] {
   if (isMain) return ['nanoclaw-core', 'nanoclaw-trusted', 'nanoclaw-admin'];
   if (isTrusted) return ['nanoclaw-core', 'nanoclaw-trusted'];
   return ['nanoclaw-core', 'nanoclaw-untrusted'];
