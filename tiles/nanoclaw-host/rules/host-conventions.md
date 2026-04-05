@@ -62,6 +62,15 @@ This applies to:
 
 The only exception: changes to SOUL.md, personal skills, and group memory — those are the owner's domain. Everything else is yours to fix.
 
+## Never edit tiles locally
+
+Tile content is delivered through the staging → promote pipeline. Never edit files under `tiles/` directly, even for "quick fixes." Instead:
+
+1. Push the fixed content to NAS staging: `staging/{tileName}/rules/{name}.md` or `staging/{tileName}/skills/{name}/SKILL.md`
+2. Promote with `TILE_NAME={tileName} ./scripts/promote-skill.sh`
+
+This keeps all tile changes — whether from AyeAye or from you — flowing through the same pipeline: review, optimize, lint, commit, publish, deploy. Direct edits bypass all of that and create version drift between what's in git and what you think you shipped.
+
 ## Scripts use common.sh
 
 All scripts in `scripts/` source `scripts/common.sh` for shared config (`NAS_HOST`, `NAS_PROJECT_DIR`, `nas()` helper). No hardcoded IPs or paths.
