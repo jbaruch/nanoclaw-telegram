@@ -1,6 +1,6 @@
 {
   "name": "jbaruch/nanoclaw-admin",
-  "version": "0.1.103",
+  "version": "0.1.104",
   "summary": "Admin rules and skills for the NanoClaw main channel. Group management, agent teams, authentication, and container configuration. Only loaded for the main (elevated) channel.",
   "private": true,
   "rules": {
@@ -21,6 +21,9 @@
     },
     "skill-writing-guide": {
       "rules": "rules/skill-writing-guide.md"
+    },
+    "no-inplace-overrides": {
+      "rules": "rules/no-inplace-overrides.md"
     }
   },
   "skills": {

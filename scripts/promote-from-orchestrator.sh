@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Promote staging skills/rules to plugins — runs INSIDE the orchestrator container.
+# Promote staging skills/rules to tiles — runs INSIDE the orchestrator container.
 # Called by the promote_staging MCP tool via IPC.
 #
 # Args: $1 = group folder (e.g. "telegram_swarm")
@@ -24,7 +24,50 @@ if [ ! -f "$TILE_DIR/tile.json" ]; then
   exit 1
 fi
 
+# --- Tile placement validation ---
+# Red flags that indicate a skill belongs in admin, not core or trusted.
+validate_placement() {
+  local skill_file="$1"
+  local tile="$2"
+  local canonical="$3"
+
+  # Admin tile accepts everything
+  if [ "$tile" = "nanoclaw-admin" ]; then
+    return 0
+  fi
+
+  # Untrusted tile — only security rules
+  if [ "$tile" = "nanoclaw-untrusted" ]; then
+    if grep -qiE 'composio|gmail|calendar|tasks|schedule_task|promote|host_script|sync_tripit|fetch_trakt' "$skill_file" 2>/dev/null; then
+      echo "BLOCKED: $canonical has admin-level content but target is $tile"
+      echo "  Red flags found. This skill belongs in nanoclaw-admin."
+      return 1
+    fi
+    return 0
+  fi
+
+  # Core or trusted — check for admin red flags
+  if grep -qiE 'composio|gmail|googlecalendar|googletasks|sessionize|sync_tripit|fetch_trakt|promote_staging|github_backup|register_group' "$skill_file" 2>/dev/null; then
+    echo "BLOCKED: $canonical has admin-level content but target is $tile"
+    echo "  Found: Composio, external API, or infrastructure references."
+    echo "  This skill belongs in nanoclaw-admin."
+    return 1
+  fi
+
+  # Trusted — also block personal content
+  if [ "$tile" = "nanoclaw-core" ]; then
+    if grep -qiE '/workspace/trusted/|trusted.memory|cross.group' "$skill_file" 2>/dev/null; then
+      echo "BLOCKED: $canonical references trusted workspace but target is core"
+      echo "  This skill belongs in nanoclaw-trusted."
+      return 1
+    fi
+  fi
+
+  return 0
+}
+
 PROMOTED=0
+BLOCKED=0
 
 # --- Pull skills ---
 if [ "$MODE" != "--rules-only" ]; then
@@ -41,9 +84,27 @@ if [ "$MODE" != "--rules-only" ]; then
     [ -f "$src/SKILL.md" ] || continue
 
     canonical="${skill_dir#tessl__}"
+
+    # Validate tile placement before copying
+    if ! validate_placement "$src/SKILL.md" "$TILE_NAME" "$canonical"; then
+      ((++BLOCKED))
+      continue
+    fi
+
+    # Check for duplicates — skill must not exist in another tile
+    for other_tile in "$TILES_DIR"/nanoclaw-*/; do
+      other_name=$(basename "$other_tile")
+      [ "$other_name" = "$TILE_NAME" ] && continue
+      if [ -d "$other_tile/skills/$canonical" ]; then
+        echo "BLOCKED: $canonical already exists in $other_name — skills must not duplicate across tiles"
+        ((++BLOCKED))
+        continue 2
+      fi
+    done
+
     dst="$TILE_DIR/skills/$canonical"
     mkdir -p "$dst"
-    cp "$src/SKILL.md" "$dst/SKILL.md"
+    cp -r "$src/." "$dst/"
     echo "pulled: $canonical (from $skill_dir)"
 
     # Update tile.json
@@ -94,6 +155,12 @@ with open('$TILE_DIR/tile.json', 'w') as f:
   fi
 fi
 
+if [ "$BLOCKED" -gt 0 ]; then
+  echo ""
+  echo "WARNING: $BLOCKED item(s) blocked by tile placement validation."
+  echo "Review the output above. Skills with admin-level content must go to nanoclaw-admin."
+fi
+
 if [ "$PROMOTED" -eq 0 ]; then
   echo "Nothing to promote."
   exit 0
@@ -128,20 +195,14 @@ fi
 echo "Publishing..."
 tessl plugin publish --bump patch "$TILE_DIR" || echo "WARN: publish failed (tiles deployed via git)"
 
-# --- Rebuild orchestrator ---
-# Can't rebuild self from inside, but the git push triggers the change.
-# Next docker compose up --build will pick it up.
-
-# --- Install plugins ---
-echo "Installing plugins from registry..."
+# --- Install tiles ---
+echo "Installing tiles from registry..."
 cd /app/tessl-workspace
-# Build tile list from tiles/ directory
-TILE_LIST=$(ls /app/repo/tiles/ 2>/dev/null | while read t; do echo "$TILE_OWNER/$t"; done | tr '\n' ' ')
 tessl update \
   --yes --dangerously-ignore-security --agent claude-code 2>&1 || echo "WARN: tile update had issues"
 
-# Kill all running agent containers so they respawn with new plugins
+# Kill all running agent containers so they respawn with new tiles
 echo "Killing stale agent containers..."
 docker ps --format '{{.ID}} {{.Names}}' | grep nanoclaw-telegram | awk '{print $1}' | xargs -r docker kill 2>/dev/null || true
 
-echo "Done! $PROMOTED item(s) promoted."
+echo "Done! $PROMOTED item(s) promoted, $BLOCKED blocked."
