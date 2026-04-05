@@ -695,6 +695,13 @@ server.tool(
 );
 
 server.tool(
+  'fetch_trakt_history',
+  'Fetch Trakt.tv watch history (shows, movies, ratings) for recommendations.',
+  {},
+  async () => runHostOperation('fetch_trakt_history'),
+);
+
+server.tool(
   'github_backup',
   'Commit and push the group backup repo to GitHub. Use for nightly backups or when important state changes. The host handles git credentials — the container just triggers it.',
   {

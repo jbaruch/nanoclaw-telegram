@@ -842,10 +842,16 @@ export async function processTaskIpc(
         const scriptPath = path.join(groupDir, 'scripts', 'sync-tripit.sh');
         if (!fs.existsSync(scriptPath)) {
           const errPath = path.join(
-            DATA_DIR, 'ipc', sourceGroup, 'input',
+            DATA_DIR,
+            'ipc',
+            sourceGroup,
+            'input',
             `_script_result_${data.requestId}.json`,
           );
-          fs.writeFileSync(errPath, JSON.stringify({ error: 'sync-tripit.sh not found' }));
+          fs.writeFileSync(
+            errPath,
+            JSON.stringify({ error: 'sync-tripit.sh not found' }),
+          );
           break;
         }
 
@@ -865,19 +871,103 @@ export async function processTaskIpc(
           PATH: process.env.PATH || '/usr/bin:/bin',
           HOME: process.env.HOME || '/root',
           TZ: process.env.TZ || 'UTC',
+          ...Object.fromEntries(Object.entries(syncVars).filter(([, v]) => v)),
+        };
+
+        const scriptContent = fs.readFileSync(scriptPath, 'utf-8');
+        const patchedContent = scriptContent.replace(
+          /\/workspace\/group/g,
+          groupDir,
+        );
+        const tmpScript = path.join(groupDir, '.tmp_host_sync-tripit.sh');
+        fs.writeFileSync(tmpScript, patchedContent);
+
+        execFile(
+          'bash',
+          [tmpScript],
+          {
+            cwd: groupDir,
+            env: syncEnv,
+            timeout: 120_000,
+            maxBuffer: 1024 * 1024,
+          },
+          (error, stdout, stderr) => {
+            const resultPath = path.join(
+              DATA_DIR,
+              'ipc',
+              sourceGroup,
+              'input',
+              `_script_result_${data.requestId}.json`,
+            );
+            if (error) {
+              logger.error(
+                { sourceGroup, error: error.message, stderr },
+                'sync_tripit failed',
+              );
+              fs.writeFileSync(
+                resultPath,
+                JSON.stringify({
+                  error: error.message,
+                  stderr: stderr.slice(-500),
+                }),
+              );
+            } else {
+              logger.info(
+                { sourceGroup, stdoutLen: stdout.length },
+                'sync_tripit completed',
+              );
+              fs.writeFileSync(
+                resultPath,
+                JSON.stringify({ stdout, stderr: stderr || undefined }),
+              );
+            }
+            try {
+              fs.unlinkSync(tmpScript);
+            } catch {
+              /* best effort */
+            }
+          },
+        );
+      }
+      break;
+
+    case 'fetch_trakt_history':
+      if (data.requestId) {
+        const groupDir = path.resolve(process.cwd(), 'groups', sourceGroup);
+        const scriptPath = path.join(groupDir, 'scripts', 'trakt-watch-history.py');
+        if (!fs.existsSync(scriptPath)) {
+          const errPath = path.join(
+            DATA_DIR, 'ipc', sourceGroup, 'input',
+            `_script_result_${data.requestId}.json`,
+          );
+          fs.writeFileSync(errPath, JSON.stringify({ error: 'trakt-watch-history.py not found' }));
+          break;
+        }
+
+        logger.info({ sourceGroup }, 'Running fetch_trakt_history');
+
+        const { readEnvFile: readTraktEnv } = await import('./env.js');
+        const traktVars = readTraktEnv([
+          'TRAKT_CLIENT_ID',
+          'TRAKT_ACCESS_TOKEN',
+        ]);
+        const traktEnv: Record<string, string> = {
+          PATH: process.env.PATH || '/usr/bin:/bin',
+          HOME: process.env.HOME || '/root',
+          TZ: process.env.TZ || 'UTC',
           ...Object.fromEntries(
-            Object.entries(syncVars).filter(([, v]) => v),
+            Object.entries(traktVars).filter(([, v]) => v),
           ),
         };
 
         const scriptContent = fs.readFileSync(scriptPath, 'utf-8');
         const patchedContent = scriptContent.replace(/\/workspace\/group/g, groupDir);
-        const tmpScript = path.join(groupDir, '.tmp_host_sync-tripit.sh');
+        const tmpScript = path.join(groupDir, '.tmp_host_trakt-watch-history.py');
         fs.writeFileSync(tmpScript, patchedContent);
 
-        execFile('bash', [tmpScript], {
+        execFile('python3', [tmpScript], {
           cwd: groupDir,
-          env: syncEnv,
+          env: traktEnv,
           timeout: 120_000,
           maxBuffer: 1024 * 1024,
         }, (error, stdout, stderr) => {
@@ -886,10 +976,10 @@ export async function processTaskIpc(
             `_script_result_${data.requestId}.json`,
           );
           if (error) {
-            logger.error({ sourceGroup, error: error.message, stderr }, 'sync_tripit failed');
+            logger.error({ sourceGroup, error: error.message, stderr }, 'fetch_trakt_history failed');
             fs.writeFileSync(resultPath, JSON.stringify({ error: error.message, stderr: stderr.slice(-500) }));
           } else {
-            logger.info({ sourceGroup, stdoutLen: stdout.length }, 'sync_tripit completed');
+            logger.info({ sourceGroup, stdoutLen: stdout.length }, 'fetch_trakt_history completed');
             fs.writeFileSync(resultPath, JSON.stringify({ stdout, stderr: stderr || undefined }));
           }
           try { fs.unlinkSync(tmpScript); } catch { /* best effort */ }

@@ -44,7 +44,7 @@ Rebuilds `travel-schedule.json` from the TripIt ICS feed. Silent on success; rep
 Report gaps; skip if all snoozed or complete.
 
 ## Step 5: Refresh Trakt watch history
-Use `mcp__nanoclaw__run_host_script(script: "trakt-watch-history.py")`.
+Use `mcp__nanoclaw__fetch_trakt_history()`.
 Saves fresh watch history to `/workspace/group/trakt-history.json`.
 Silent on success. Report on error or `total_shows: 0` (if sync hasn't run yet → skip silently).
 
