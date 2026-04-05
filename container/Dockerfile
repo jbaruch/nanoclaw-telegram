@@ -74,6 +74,10 @@ RUN git config --global pack.threads 1 && \
     git config --global pack.windowMemory 100m
 
 
+# Run as non-root node user (uid 1000) by default.
+# The orchestrator may override with --user for non-main groups.
+USER node
+
 # Set working directory to group workspace
 WORKDIR /workspace/group
 
