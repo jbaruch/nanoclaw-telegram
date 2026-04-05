@@ -5,12 +5,12 @@ description: Checks upcoming trips for missing bookings (flights, hotels, accomm
 
 # Check Travel Bookings
 
-**Run the script at `/workspace/group/scripts/check-travel-bookings.py` and interpret its JSON output. Do not implement the detection logic yourself.**
+**Run the script at `/home/node/.claude/skills/tessl__check-travel-bookings/scripts/check-travel-bookings.py` and interpret its JSON output. Do not implement the detection logic yourself.**
 
 ## How to run
 
 ```bash
-TRIPIT_ICAL_URL="$(cat /workspace/group/tripit-url.txt)" python3 /workspace/group/scripts/check-travel-bookings.py
+TRIPIT_ICAL_URL="$(cat /workspace/group/tripit-url.txt)" python3 /home/node/.claude/skills/tessl__check-travel-bookings/scripts/check-travel-bookings.py
 ```
 
 The script outputs JSON:

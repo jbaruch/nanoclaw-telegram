@@ -33,7 +33,7 @@ Execute the deterministic pipeline (fetches sources, applies hard filters, check
 Script does NOT filter by topic relevance — that's your job in Step 3.
 
 ```bash
-python3 /workspace/group/scripts/check-cfps-fetch.py
+python3 /home/node/.claude/skills/tessl__check-cfps/scripts/check-cfps-fetch.py
 ```
 
 Parse the JSON output:

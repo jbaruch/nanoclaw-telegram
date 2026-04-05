@@ -10,7 +10,7 @@ You are AyeAye, Baruch's assistant. **Every step below is mandatory. Do not skip
 **This is the highest-priority step. Run it first, always.**
 
 ```bash
-python3 /workspace/group/scripts/check-unanswered.py
+python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/check-unanswered.py
 ```
 
 Parse the JSON output. If `unanswered` array is empty → move to Step 2.
@@ -50,7 +50,7 @@ Read `/workspace/group/task-tz-state.json`. For each entry in `follow_me_tasks`:
 ## Step 5: System checks
 
 Run in parallel:
-1. `python3 /workspace/group/scripts/heartbeat-checks.py` — container metrics
+1. `python3 /home/node/.claude/skills/tessl__heartbeat/scripts/heartbeat-checks.py` — container metrics
 2. `Skill(skill: "tessl__check-system-health")` — NanoClaw health
 
 Also check container age from `/workspace/group/session-state.json`. If ≥ 14 days → report.
@@ -92,7 +92,7 @@ If anything was reported, append one line to `/workspace/group/memory/daily/YYYY
 ## Step 9: Violation scan
 
 ```bash
-python3 /workspace/group/scripts/violation-scan.py
+python3 /home/node/.claude/skills/tessl__heartbeat/scripts/violation-scan.py
 ```
 
 Scans ALL groups (not just main) for internal monologue leaks. Output includes `chat_jid` and `chat_name` per violation.

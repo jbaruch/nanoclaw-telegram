@@ -60,7 +60,7 @@ Using the resolved tasks tools, fetch all task lists, then for each list fetch t
 - Overdue (due date before today, status != completed)
 
 ## Step 4: Check pending items
-Run: `python3 /workspace/group/scripts/morning-brief-fetch.py`
+Run: `python3 /home/node/.claude/skills/tessl__morning-brief/scripts/morning-brief-fetch.py`
 Output includes `pending.undated_tasks` and `pending.cleanup_items` from `morning-brief-pending.json`.
 
 ## Step 5: Auto-assign dates to undated tasks
@@ -75,7 +75,7 @@ Follow the `undated-task-date-assignment` skill for the full sub-workflow (readi
 If all dates were assigned, omit the `📋 Без даты:` section entirely.
 
 ## Step 6: Check urgent CFPs
-Run: `python3 /workspace/group/scripts/morning-brief-cfp.py`
+Run: `python3 /home/node/.claude/skills/tessl__check-cfps/scripts/check-cfps-fetch.py`
 
 Outputs a JSON array of CFPs with deadlines within 7 days. Each entry has: `name`, `city`, `conf_date`, `deadline`, `cfp_url`, `days_until`.
 

@@ -36,7 +36,7 @@ Do NOT call sync.mjs directly — it won't find its modules. The wrapper script 
 - Error → report and continue
 
 ## Step 3: Refresh travel schedule
-Run: `python3 /workspace/group/scripts/refresh-travel-schedule.py`
+Run: `python3 /home/node/.claude/skills/tessl__nightly-housekeeping/scripts/refresh-travel-schedule.py`
 Rebuilds `travel-schedule.json` from the TripIt ICS feed (reads URL from `tripit-url.txt`). Silent on success; report only on error.
 
 ## Step 4: Travel bookings check
@@ -104,8 +104,8 @@ Keep entries concise (one line each). This file is read on container startup to 
 Run dedup on both daily log directories:
 
 ```bash
-python3 /workspace/group/scripts/dedup-memory.py /workspace/group/memory/daily --days 3
-python3 /workspace/group/scripts/dedup-memory.py /workspace/trusted/memory/daily --days 3
+python3 /home/node/.claude/skills/tessl__nightly-housekeeping/scripts/dedup-memory.py /workspace/group/memory/daily --days 3
+python3 /home/node/.claude/skills/tessl__nightly-housekeeping/scripts/dedup-memory.py /workspace/trusted/memory/daily --days 3
 ```
 
 Parse JSON output. Log the count of duplicates removed but do not report to Baruch. If script errors, log and continue.
@@ -180,7 +180,7 @@ Read `/workspace/group/task-tz-state.json`. Find the entry in `follow_me_tasks` 
 
 ## Step 18: Backup to git
 ```
-bash /workspace/group/scripts/backup-to-git.sh
+bash /home/node/.claude/skills/tessl__nightly-housekeeping/scripts/backup-to-git.sh
 ```
 Then call `mcp__nanoclaw__github_backup` with message `"nightly backup: YYYY-MM-DD"`.
 Silent on success; report only on error.

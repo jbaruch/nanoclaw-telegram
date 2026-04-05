@@ -8,7 +8,7 @@ description: Finds user messages that never got a threaded bot reply. A message 
 Run the deterministic detector script:
 
 ```bash
-python3 /workspace/group/scripts/check-unanswered.py
+python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/check-unanswered.py
 ```
 
 The script outputs JSON:
