@@ -48,24 +48,19 @@ echo "3. Updating tiles from registry..."
 docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl update --yes --dangerously-ignore-security 2>&1' | tail -10
 echo ""
 
-# 4. Clear staging overrides from all groups
-echo "4. Clearing staging overrides..."
-STAGING_COUNT=0
+# 4. Clear runtime skill overrides from all groups
+# NOTE: staging/ is NOT cleared here — that's verify-tiles' job after promotion.
+echo "4. Clearing runtime skill overrides..."
+OVERRIDE_COUNT=0
 for group_dir in groups/*/; do
     skills_dir="${group_dir}skills"
     if [[ -d "$skills_dir" ]] && [[ -n "$(ls -A "$skills_dir" 2>/dev/null)" ]]; then
         echo "  cleaning: $skills_dir"
         rm -rf "${skills_dir:?}"/*
-        ((STAGING_COUNT++))
-    fi
-    staging_dir="${group_dir}staging"
-    if [[ -d "$staging_dir" ]] && [[ -n "$(ls -A "$staging_dir" 2>/dev/null)" ]]; then
-        echo "  cleaning: $staging_dir"
-        rm -rf "${staging_dir:?}"/*
-        ((STAGING_COUNT++))
+        OVERRIDE_COUNT=$((OVERRIDE_COUNT + 1))
     fi
 done
-echo "  cleaned $STAGING_COUNT group(s) with staging"
+echo "  cleaned $OVERRIDE_COUNT group(s) with overrides"
 echo ""
 
 # 5. Kill ALL agent containers
