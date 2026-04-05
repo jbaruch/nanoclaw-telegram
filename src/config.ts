@@ -107,6 +107,16 @@ export function getTriggerPattern(trigger?: string): RegExp {
 
 export const TRIGGER_PATTERN = buildTriggerPattern(DEFAULT_TRIGGER);
 
+// --- Hubitat Smart Home ---
+export const HUBITAT_HUB_IP = process.env.HUBITAT_HUB_IP || '';
+export const HUBITAT_APP_ID = process.env.HUBITAT_APP_ID || '';
+export const HUBITAT_EVENT_RETENTION_DAYS = parseInt(
+  process.env.HUBITAT_EVENT_RETENTION_DAYS || '90',
+  10,
+);
+export const HUBITAT_ALERT_SENSITIVITY = (process.env.HUBITAT_ALERT_SENSITIVITY ||
+  'low') as 'low' | 'medium' | 'high';
+
 // Tile owner namespace for tessl registry (e.g., "jbaruch" → "jbaruch/nanoclaw-core")
 export const TILE_OWNER =
   process.env.TILE_OWNER || envConfig.TILE_OWNER || 'nanoclaw';

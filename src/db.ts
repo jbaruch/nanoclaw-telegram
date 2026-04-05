@@ -93,6 +93,20 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+
+    CREATE TABLE IF NOT EXISTS smart_home_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id TEXT NOT NULL,
+      device_name TEXT NOT NULL,
+      attribute_name TEXT NOT NULL,
+      value TEXT NOT NULL,
+      unit TEXT,
+      description TEXT,
+      source TEXT DEFAULT 'DEVICE',
+      timestamp TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_she_timestamp ON smart_home_events(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_she_device_time ON smart_home_events(device_id, timestamp);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -789,6 +803,103 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     };
   }
   return result;
+}
+
+// --- Smart Home event accessors ---
+
+export interface SmartHomeEvent {
+  id: number;
+  device_id: string;
+  device_name: string;
+  attribute_name: string;
+  value: string;
+  unit: string | null;
+  description: string | null;
+  source: string;
+  timestamp: string;
+}
+
+export function insertSmartHomeEvent(event: Omit<SmartHomeEvent, 'id'>): void {
+  db.prepare(
+    `INSERT INTO smart_home_events (device_id, device_name, attribute_name, value, unit, description, source, timestamp)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    event.device_id,
+    event.device_name,
+    event.attribute_name,
+    event.value,
+    event.unit ?? null,
+    event.description ?? null,
+    event.source ?? 'DEVICE',
+    event.timestamp,
+  );
+}
+
+export function getSmartHomeEventsSince(
+  since: string,
+  deviceId?: string,
+): SmartHomeEvent[] {
+  if (deviceId) {
+    return db
+      .prepare(
+        `SELECT * FROM smart_home_events WHERE timestamp > ? AND device_id = ? ORDER BY timestamp`,
+      )
+      .all(since, deviceId) as SmartHomeEvent[];
+  }
+  return db
+    .prepare(
+      `SELECT * FROM smart_home_events WHERE timestamp > ? ORDER BY timestamp`,
+    )
+    .all(since) as SmartHomeEvent[];
+}
+
+export function getSmartHomeEventsByHour(
+  startHour: string,
+  endHour: string,
+): SmartHomeEvent[] {
+  return db
+    .prepare(
+      `SELECT * FROM smart_home_events WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp`,
+    )
+    .all(startHour, endHour) as SmartHomeEvent[];
+}
+
+export function cleanupOldSmartHomeEvents(retentionDays: number): number {
+  const cutoff = new Date(
+    Date.now() - retentionDays * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  const result = db
+    .prepare(`DELETE FROM smart_home_events WHERE timestamp < ?`)
+    .run(cutoff);
+  return result.changes;
+}
+
+export function getLatestDeviceStates(): Array<{
+  device_id: string;
+  device_name: string;
+  attribute_name: string;
+  value: string;
+  unit: string | null;
+  timestamp: string;
+}> {
+  return db
+    .prepare(
+      `SELECT device_id, device_name, attribute_name, value, unit, timestamp
+       FROM smart_home_events e1
+       WHERE timestamp = (
+         SELECT MAX(timestamp) FROM smart_home_events e2
+         WHERE e2.device_id = e1.device_id AND e2.attribute_name = e1.attribute_name
+       )
+       ORDER BY device_name, attribute_name`,
+    )
+    .all() as Array<{
+    device_id: string;
+    device_name: string;
+    attribute_name: string;
+    value: string;
+    unit: string | null;
+    timestamp: string;
+  }>;
 }
 
 // --- JSON migration ---

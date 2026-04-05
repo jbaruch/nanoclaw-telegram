@@ -72,6 +72,10 @@ import {
   handleSessionCommand,
   isSessionCommandAllowed,
 } from './session-commands.js';
+import {
+  startHubitatListener,
+  stopHubitatListener,
+} from './hubitat-listener.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
@@ -793,6 +797,7 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    stopHubitatListener();
     proxyServer.close();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
@@ -1010,6 +1015,9 @@ async function main(): Promise<void> {
   startSessionCleanup();
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
+  // Start Hubitat smart home listener (if configured)
+  startHubitatListener();
+
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');
     process.exit(1);
