@@ -35,17 +35,13 @@ fi
 
 pull_skill() {
   local name="$1"
-  local skills_base="$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills"
+  local staging_skills="$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/staging/$TILE_NAME/skills"
   local dst="$TILE_DIR/skills/$name"
+  local src="$staging_skills/$name"
 
-  # Try skills/{name} first, then skills/tessl__{name} (runtime override path)
-  local src="$skills_base/$name"
   if ! nas "test -d '$src'"; then
-    src="$skills_base/tessl__$name"
-    if ! nas "test -d '$src'"; then
-      echo "  ERROR: $name not found in skills/ or skills/tessl__$name on NAS"
-      return 1
-    fi
+    echo "  ERROR: $name not found in staging/$TILE_NAME/skills/ on NAS"
+    return 1
   fi
 
   mkdir -p "$dst"
@@ -55,12 +51,12 @@ pull_skill() {
     rm -rf "$dst"
     return 1
   fi
-  echo "  pulled: $name (from $(basename $src))"
+  echo "  pulled: $name"
 }
 
 pull_rule() {
   local name="$1"
-  local src="$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/staging/$TILE_NAME/$name.md"
+  local src="$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/staging/$TILE_NAME/rules/$name.md"
   local dst="$TILE_DIR/rules/$name.md"
   mkdir -p "$TILE_DIR/rules"
   nas "cat $src" > "$dst"
@@ -108,17 +104,11 @@ PROMOTE_RULES=false
 if [ "$MODE" = "--rules-only" ]; then
   PROMOTE_RULES=true
 elif [ "$MODE" = "all" ] || [ "$MODE" = "--all" ]; then
-  # Get all staging skills from NAS (both skills/{name} and skills/tessl__{name})
-  declare -A SEEN_SKILLS
+  # Get all staged skills from NAS
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    # Strip tessl__ prefix to get the canonical skill name
-    skill_name="${line#tessl__}"
-    if [ -z "${SEEN_SKILLS[$skill_name]+x}" ]; then
-      SEEN_SKILLS[$skill_name]=1
-      SKILLS_TO_PROMOTE+=("$skill_name")
-    fi
-  done < <(nas "ls $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/skills/")
+    SKILLS_TO_PROMOTE+=("$line")
+  done < <(nas "ls $NAS_PROJECT_DIR/groups/$GROUP_FOLDER/staging/$TILE_NAME/skills/ 2>/dev/null")
   PROMOTE_RULES=true
 else
   SKILLS_TO_PROMOTE=("$MODE")
@@ -144,8 +134,8 @@ fi
 
 if [ "$PROMOTE_RULES" = true ]; then
   echo "1b. Pulling rules from NAS..."
-  STAGING_DIR="$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/staging/$TILE_NAME"
-  RULES_ON_NAS=$(nas "if [ -d '$STAGING_DIR' ]; then for f in '$STAGING_DIR'/*.md; do [ -f \"\$f\" ] && basename \"\$f\" .md; done; fi")
+  RULES_DIR="$NAS_PROJECT_DIR/groups/$GROUP_FOLDER/staging/$TILE_NAME/rules"
+  RULES_ON_NAS=$(nas "if [ -d '$RULES_DIR' ]; then for f in '$RULES_DIR'/*.md; do [ -f \"\$f\" ] && basename \"\$f\" .md; done; fi")
   for rule in $RULES_ON_NAS; do
     [ -z "$rule" ] && continue
     if pull_rule "$rule"; then

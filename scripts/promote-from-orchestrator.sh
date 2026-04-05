@@ -16,8 +16,9 @@ REPO_DIR="/app/repo"
 GROUPS_DIR="/app/groups"
 TILES_DIR="$REPO_DIR/tiles"
 TILE_DIR="$TILES_DIR/$TILE_NAME"
-SKILLS_SRC="$GROUPS_DIR/$GROUP_FOLDER/skills"
-RULES_SRC="$GROUPS_DIR/$GROUP_FOLDER/staging/$TILE_NAME"
+STAGING_DIR="$GROUPS_DIR/$GROUP_FOLDER/staging/$TILE_NAME"
+SKILLS_SRC="$STAGING_DIR/skills"
+RULES_SRC="$STAGING_DIR/rules"
 
 if [ ! -f "$TILE_DIR/tile.json" ]; then
   echo "ERROR: $TILE_DIR/tile.json not found"
