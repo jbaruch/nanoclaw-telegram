@@ -202,8 +202,8 @@ cd /app/tessl-workspace
 tessl update \
   --yes --dangerously-ignore-security --agent claude-code 2>&1 || echo "WARN: tile update had issues"
 
-# Kill all running agent containers so they respawn with new tiles
-echo "Killing stale agent containers..."
-docker ps --format '{{.ID}} {{.Names}}' | grep nanoclaw-telegram | awk '{print $1}' | xargs -r docker kill 2>/dev/null || true
+# Agent containers are NOT killed here — the IPC handler clears all sessions,
+# so the next spawn gets fresh tiles. Killing from inside the promote would
+# SIGKILL the container that called promote, triggering the circuit breaker.
 
 echo "Done! $PROMOTED item(s) promoted, $BLOCKED blocked."
