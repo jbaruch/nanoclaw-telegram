@@ -30,7 +30,7 @@ If 0 new candidates: continue to Step 2 with an empty Sessionize pool.
 ## Step 2 — Run fetch-and-filter script
 
 Execute the deterministic pipeline (fetches sources, applies hard filters, checks state).
-Script does NOT filter by topic relevance — that's your job in Step 4.
+Script does NOT filter by topic relevance — that's your job in Step 5.
 
 ```bash
 python3 /home/node/.claude/skills/tessl__check-cfps/scripts/check-cfps-fetch.py
@@ -41,14 +41,24 @@ Parse the JSON output:
 - `warnings` — data source failures or skipped checks to surface in output
 - `checked_at` — timestamp
 
-**Merge** the Sessionize candidates from Step 1 into this list (deduplicate by slug). The combined list is what you work with in Steps 3–6.
+**Merge** the Sessionize candidates from Step 1 into this list (deduplicate by slug).
 
 **Alert if:** script fails to run (report error and abort).
 **Note:** warnings about unreachable sources should be mentioned briefly at the top of output.
 
-## Step 3 — Enrich with Sessionize event details
+## Step 3 — Web search for gaps
 
-Before AI relevance filtering, fetch Sessionize details for every CFP that has a slug. Names can be deceiving — the AI needs the full description and metadata to make good calls.
+Run these searches to catch AI/developer conferences not in the primary sources:
+
+1. `AI developer conference CFP open 2026 "call for speakers" deadline`
+2. `developer conference CFP 2026 autumn fall open submissions`
+
+Add new CFPs found that aren't already in the list (deduplicate by conference name).
+Apply hard filters (no online/virtual, no excluded locations). Do NOT apply relevance filtering yet — that's Step 5.
+
+## Step 4 — Enrich with Sessionize event details
+
+Fetch Sessionize details for every CFP that has a slug. Names can be deceiving — the AI needs the full description and metadata to make good calls.
 
 For each CFP with a slug, call Sessionize:
 
@@ -62,14 +72,14 @@ If the call succeeds, enrich the CFP entry:
 - `cfp_open: false` → remove from list immediately (CFP closed)
 - `is_online: true` → remove from list immediately (online-only)
 - Update `deadline` with `cfp_end_local[:10]` (authoritative deadline, more accurate than scraped sources)
-- Attach `description` and `expenses_covered` to the entry for use in Step 4
+- Attach `description` and `expenses_covered` to the entry
 - Note `expenses_covered` for state entries (add to `bot_notes`)
 
 If the call returns an error or 404 → skip silently (not all conferences are on Sessionize). **Never block on Sessionize failures** — continue with original data.
 
-## Step 4 — Relevance filter (AI reasoning)
+## Step 5 — Relevance filter (AI reasoning)
 
-For each CFP in the enriched list, reason about whether it's relevant to Baruch. You now have the conference name, city, AND the Sessionize description (when available) — use ALL of it.
+All data is gathered. Now judge. For each CFP you have the conference name, city, Sessionize description (when available), and web search context — use ALL of it.
 
 **The core question for every conference:** "Could Baruch realistically submit a talk about Java/JVM/Kotlin/Spring, developer tools/DevRel, or AI-for-developers here, and would it land with the audience?"
 
@@ -77,23 +87,13 @@ Apply the full YES/NO criteria from `/workspace/group/RELEVANCE-CRITERIA.md`. Us
 
 **When Sessionize description is available:** Use it as ground truth. A conference called "BC TechDays" could be British Columbia (developer conf) or Business Central/Dynamics 365 (ERP). If the description mentions Dynamics 365, ERP, business processes, NAV, or supply chain → NO, regardless of how the name sounds. See `/workspace/group/RELEVANCE-CRITERIA.md` for NO categories.
 
-**When Sessionize description is NOT available:** If the conference name is ambiguous (acronyms, regional names, could apply to multiple domains), do a quick web search: `"[Conference Name]" topics speakers audience 2026` before making the call.
+**When no description is available and the name is ambiguous:** Do a targeted web search: `"[Conference Name]" topics speakers audience 2026` before making the call.
 
 **Reasoning for ambiguous AI conferences:** Is the speaker lineup typically ML engineers and data scientists (Python/PyTorch/TensorFlow), or software developers building on top of AI APIs? Former → skip. Latter → keep.
 
 **Sessionize-sourced candidates:** These are already pre-filtered to Baruch's speaker profile. Still apply relevance reasoning, but lean YES when the conference topic is ambiguous.
 
 **No fallback default.** Think it through and make a call. Both false positives (irrelevant confs Baruch has to dismiss) and false negatives (missing good confs) are bad — use judgment to avoid both.
-
-## Step 5 — Web search for gaps
-
-Run these searches to catch AI/developer conferences not in the primary sources:
-
-1. `AI developer conference CFP open 2026 "call for speakers" deadline`
-2. `developer conference CFP 2026 autumn fall open submissions`
-
-Add new CFPs found that aren't already in the list (deduplicate by conference name).
-Apply hard filters (no online/virtual, no excluded locations) then the same relevance reasoning as Step 4.
 
 ## Step 6 — Sort and format
 
@@ -126,7 +126,7 @@ The script handles state filtering automatically. When Baruch gives feedback abo
 
 ### Writing discovered CFPs to state
 
-After Steps 4 and 5, **write every relevant CFP** (kept after relevance filter) to `cfp-state.json`. This is what feeds the morning brief CFP section — without it, CFPs never appear in the brief.
+After Step 5, **write every relevant CFP** (kept after relevance filter) to `cfp-state.json`. This is what feeds the morning brief CFP section — without it, CFPs never appear in the brief.
 
 Rules:
 - If the slug already has a user action (`dismissed`/`sent`/`remind`) → preserve it, do NOT overwrite
