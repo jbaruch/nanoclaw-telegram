@@ -4,7 +4,7 @@
 
 NEVER write skill or rule files directly to `/workspace/group/skills/` or `/workspace/group/.tessl/`. ALL changes to skills and rules MUST go through the promotion pipeline:
 
-1. Stage the change (write to `/workspace/group/staging/{tileName}/` for rules, or `/workspace/group/skills/tessl__{name}/` for skills)
+1. Stage the change (write to `/workspace/group/staging/{tileName}/rules/{name}.md` for rules, or `/workspace/group/staging/{tileName}/skills/{name}/SKILL.md` for skills)
 2. Call `promote_staging` MCP tool with the correct tile name
 3. Wait for verify-tiles to confirm installation
 

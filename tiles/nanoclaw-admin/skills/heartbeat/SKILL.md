@@ -63,6 +63,12 @@ Use COMPOSIO_MULTI_EXECUTE_TOOL with GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS:
 
 ## Step 7: Email check
 
+**Mute filter (MUST run first):** Read `/workspace/group/email-mute-state.json` if it exists. Build:
+- A **set of muted threadIds** from `muted_threads[].threadId`
+- A **list of muted subject patterns** (lowercased strings) from `muted_subject_patterns[].pattern`
+
+During classification below, skip any email where its `threadId` is in the muted set **OR** its subject (lowercased) contains any muted pattern. Muted = total silence — no report, no cleanup queue, no ambiguous queue.
+
 Use GMAIL_FETCH_EMAILS with `query: "is:unread in:inbox"`, max_results: 20, verbose: false.
 **Always open the full email** when subject/preview is insufficient to classify.
 

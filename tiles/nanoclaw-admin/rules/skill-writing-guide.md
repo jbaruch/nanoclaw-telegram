@@ -33,6 +33,8 @@ description: What it does and when to use it. Front-load the key use case — tr
 
 Flat sequential: Step 1, Step 2, Step 3. No decimals (0.5), no sub-steps (3a, 4b), no Step 0.
 
+**Before saving any skill edit**, verify all `## Step N` headers use flat sequential numbering. If you catch yourself writing 3a, 4b, 0.5, or any non-integer step — stop and renumber.
+
 ## Mandatory execution
 
 Every multi-step skill MUST start with: `**Every step below is mandatory. Execute them in order. Do not skip, reorder, or abbreviate any step.**`
