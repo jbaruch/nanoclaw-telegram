@@ -36,8 +36,8 @@ Do NOT call sync.mjs directly — it won't find its modules. The wrapper script 
 - Error → report and continue
 
 ## Step 3: Refresh travel schedule
-Use `mcp__nanoclaw__run_host_script(script: "refresh-travel-schedule.py")`.
-Rebuilds `travel-schedule.json` from the TripIt ICS feed. Silent on success; report only on error.
+Run: `python3 /workspace/group/scripts/refresh-travel-schedule.py`
+Rebuilds `travel-schedule.json` from the TripIt ICS feed (reads URL from `tripit-url.txt`). Silent on success; report only on error.
 
 ## Step 4: Travel bookings check
 `Skill(skill: "tessl__check-travel-bookings")` — find missing flights/hotels for upcoming trips.

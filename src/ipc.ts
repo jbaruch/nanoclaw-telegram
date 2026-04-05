@@ -934,13 +934,23 @@ export async function processTaskIpc(
     case 'fetch_trakt_history':
       if (data.requestId) {
         const groupDir = path.resolve(process.cwd(), 'groups', sourceGroup);
-        const scriptPath = path.join(groupDir, 'scripts', 'trakt-watch-history.py');
+        const scriptPath = path.join(
+          groupDir,
+          'scripts',
+          'trakt-watch-history.py',
+        );
         if (!fs.existsSync(scriptPath)) {
           const errPath = path.join(
-            DATA_DIR, 'ipc', sourceGroup, 'input',
+            DATA_DIR,
+            'ipc',
+            sourceGroup,
+            'input',
             `_script_result_${data.requestId}.json`,
           );
-          fs.writeFileSync(errPath, JSON.stringify({ error: 'trakt-watch-history.py not found' }));
+          fs.writeFileSync(
+            errPath,
+            JSON.stringify({ error: 'trakt-watch-history.py not found' }),
+          );
           break;
         }
 
@@ -955,35 +965,66 @@ export async function processTaskIpc(
           PATH: process.env.PATH || '/usr/bin:/bin',
           HOME: process.env.HOME || '/root',
           TZ: process.env.TZ || 'UTC',
-          ...Object.fromEntries(
-            Object.entries(traktVars).filter(([, v]) => v),
-          ),
+          ...Object.fromEntries(Object.entries(traktVars).filter(([, v]) => v)),
         };
 
         const scriptContent = fs.readFileSync(scriptPath, 'utf-8');
-        const patchedContent = scriptContent.replace(/\/workspace\/group/g, groupDir);
-        const tmpScript = path.join(groupDir, '.tmp_host_trakt-watch-history.py');
+        const patchedContent = scriptContent.replace(
+          /\/workspace\/group/g,
+          groupDir,
+        );
+        const tmpScript = path.join(
+          groupDir,
+          '.tmp_host_trakt-watch-history.py',
+        );
         fs.writeFileSync(tmpScript, patchedContent);
 
-        execFile('python3', [tmpScript], {
-          cwd: groupDir,
-          env: traktEnv,
-          timeout: 120_000,
-          maxBuffer: 1024 * 1024,
-        }, (error, stdout, stderr) => {
-          const resultPath = path.join(
-            DATA_DIR, 'ipc', sourceGroup, 'input',
-            `_script_result_${data.requestId}.json`,
-          );
-          if (error) {
-            logger.error({ sourceGroup, error: error.message, stderr }, 'fetch_trakt_history failed');
-            fs.writeFileSync(resultPath, JSON.stringify({ error: error.message, stderr: stderr.slice(-500) }));
-          } else {
-            logger.info({ sourceGroup, stdoutLen: stdout.length }, 'fetch_trakt_history completed');
-            fs.writeFileSync(resultPath, JSON.stringify({ stdout, stderr: stderr || undefined }));
-          }
-          try { fs.unlinkSync(tmpScript); } catch { /* best effort */ }
-        });
+        execFile(
+          'python3',
+          [tmpScript],
+          {
+            cwd: groupDir,
+            env: traktEnv,
+            timeout: 120_000,
+            maxBuffer: 1024 * 1024,
+          },
+          (error, stdout, stderr) => {
+            const resultPath = path.join(
+              DATA_DIR,
+              'ipc',
+              sourceGroup,
+              'input',
+              `_script_result_${data.requestId}.json`,
+            );
+            if (error) {
+              logger.error(
+                { sourceGroup, error: error.message, stderr },
+                'fetch_trakt_history failed',
+              );
+              fs.writeFileSync(
+                resultPath,
+                JSON.stringify({
+                  error: error.message,
+                  stderr: stderr.slice(-500),
+                }),
+              );
+            } else {
+              logger.info(
+                { sourceGroup, stdoutLen: stdout.length },
+                'fetch_trakt_history completed',
+              );
+              fs.writeFileSync(
+                resultPath,
+                JSON.stringify({ stdout, stderr: stderr || undefined }),
+              );
+            }
+            try {
+              fs.unlinkSync(tmpScript);
+            } catch {
+              /* best effort */
+            }
+          },
+        );
       }
       break;
 
