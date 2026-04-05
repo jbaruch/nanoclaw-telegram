@@ -587,19 +587,10 @@ function buildContainerArgs(
   // Run as host user so bind-mounted files are accessible.
   // In DooD, process.getuid() returns the orchestrator container's uid (1000),
   // not the actual host user. HOST_UID/HOST_GID override this.
-  // Skip when running as root (uid 0), as the container's node user (uid 1000),
-  // or when getuid is unavailable (native Windows without WSL).
   const effectiveUid = HOST_UID ?? process.getuid?.();
   const effectiveGid = HOST_GID ?? process.getgid?.();
   if (effectiveUid != null && effectiveUid !== 0 && effectiveUid !== 1000) {
-    if (isMain) {
-      // Main containers start as root so the entrypoint can mount --bind
-      // to shadow .env. Privileges are dropped via setpriv in entrypoint.sh.
-      args.push('-e', `RUN_UID=${effectiveUid}`);
-      args.push('-e', `RUN_GID=${effectiveGid}`);
-    } else {
-      args.push('--user', `${effectiveUid}:${effectiveGid}`);
-    }
+    args.push('--user', `${effectiveUid}:${effectiveGid}`);
     args.push('-e', 'HOME=/home/node');
   }
 
