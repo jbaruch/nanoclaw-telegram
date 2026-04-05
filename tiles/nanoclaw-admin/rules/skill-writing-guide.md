@@ -114,5 +114,5 @@ Keep SKILL.md under 500 lines. Move detailed reference to separate files.
 
 Before promoting, apply the `skill-tile-placement` rule (in RULES.md). If ANY of these appear in the skill → it's admin, not core:
 - Composio, Gmail, Calendar, Tasks, GitHub, Sessionize
-- `run_host_script`, `promote_staging`, `register_group`
+- Named host operations (`sync_tripit`, `fetch_trakt_history`), `promote_staging`, `register_group`
 - `/workspace/trusted/`
