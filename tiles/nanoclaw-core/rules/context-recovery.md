@@ -68,7 +68,7 @@ This is critical after a session nuke — you have no memory of who said what, b
 After a session nuke or on first message in a new session, check for messages you never replied to:
 
 ```bash
-python3 /workspace/group/scripts/check-unanswered.py
+python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/check-unanswered.py
 ```
 
 The script outputs JSON with an `unanswered` array. A message is "answered" only if a bot message exists with `reply_to_message_id` pointing to it. No reply-thread = not an answer.

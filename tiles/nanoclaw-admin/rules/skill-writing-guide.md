@@ -72,7 +72,7 @@ Apply the `skill-tile-placement` rule (already in your RULES.md).
 Use the full path with a typed code block:
 
 ```
-`python3 /workspace/group/scripts/check-unanswered.py`
+`python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/check-unanswered.py`
 ```
 
 Not: "run the unanswered checker script"
