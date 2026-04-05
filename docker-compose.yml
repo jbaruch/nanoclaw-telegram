@@ -21,7 +21,7 @@ services:
       - ./trusted:/app/trusted
       # Tessl: credentials + persistent workspace for registry installs
       - ${HOME}/.tessl:/root/.tessl
-      - ./data/tessl-workspace:/app/tessl-workspace
+      - ./tessl-workspace:/app/tessl-workspace
     environment:
       # Docker-out-of-Docker: mount paths must reference the HOST filesystem
       - HOST_PROJECT_ROOT=${HOST_PROJECT_ROOT:-.}

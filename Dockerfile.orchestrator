@@ -38,9 +38,8 @@ COPY scripts/ ./scripts/
 # Tile sources (used as fallback and for promote script)
 COPY tiles/ ./tiles/
 
-# Create tessl workspace for registry installs
-RUN mkdir -p /app/tessl-workspace && \
-    echo '{"name":"nanoclaw-orchestrator","mode":"vendored","dependencies":{}}' > /app/tessl-workspace/tessl.json
+# Tessl workspace — tile dependencies tracked in git, installed at deploy time
+COPY tessl-workspace/tessl.json /app/tessl-workspace/tessl.json
 
 # Copy group templates (used by registerGroup to create CLAUDE.md for new groups)
 COPY groups/main/CLAUDE.md ./groups/main/CLAUDE.md
