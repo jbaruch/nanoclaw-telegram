@@ -288,11 +288,16 @@ function buildVolumeMounts(
   }
 
   // Tiles come from the tessl registry (installed by orchestrator).
-  // Main/trusted: all tiles. Admin loads last so it can override trusted skills.
-  const trustedTiles = ['nanoclaw-core', 'nanoclaw-trusted', 'nanoclaw-admin'];
+  // Main: core + trusted + admin. Trusted: core + trusted. Untrusted: core + untrusted.
+  // Admin loads last so it can override trusted skills.
+  const mainTiles = ['nanoclaw-core', 'nanoclaw-trusted', 'nanoclaw-admin'];
+  const trustedTiles = ['nanoclaw-core', 'nanoclaw-trusted'];
   const untrustedTiles = ['nanoclaw-core', 'nanoclaw-untrusted'];
-  const tilesToInstall =
-    isMain || group.containerConfig?.trusted ? trustedTiles : untrustedTiles;
+  const tilesToInstall = isMain
+    ? mainTiles
+    : group.containerConfig?.trusted
+      ? trustedTiles
+      : untrustedTiles;
 
   const registryTiles = path.join(
     process.cwd(),
