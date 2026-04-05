@@ -1,6 +1,7 @@
 import { Channel, NewMessage } from './types.js';
 import { formatLocalTime } from './timezone.js';
 import { logger } from './logger.js';
+import { parseTextStyles, ChannelType } from './text-styles.js';
 
 const MAX_OUTBOUND_LENGTH = 50_000;
 
@@ -39,7 +40,7 @@ export function stripInternalTags(text: string): string {
   return text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
 }
 
-export function formatOutbound(rawText: string): string {
+export function formatOutbound(rawText: string, channel?: ChannelType): string {
   let text = stripInternalTags(rawText);
   if (!text) return '';
   if (text.length > MAX_OUTBOUND_LENGTH) {
@@ -49,7 +50,7 @@ export function formatOutbound(rawText: string): string {
     );
     text = text.slice(0, MAX_OUTBOUND_LENGTH) + '\n\n[Message truncated]';
   }
-  return text;
+  return channel ? parseTextStyles(text, channel) : text;
 }
 
 export function routeOutbound(
