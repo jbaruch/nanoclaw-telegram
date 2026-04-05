@@ -95,4 +95,36 @@ If anything was reported, append one line to `/workspace/group/memory/daily/YYYY
 python3 /workspace/group/scripts/violation-scan.py
 ```
 
-If violations found → log and report. If none → skip.
+Scans ALL groups (not just main) for internal monologue leaks. Output includes `chat_jid` and `chat_name` per violation.
+
+If violations found:
+
+1. **Report** grouped by chat:
+```
+⚠️ <b>Internal monologue leak</b>
+• <b>{chat_name}</b>: <code>"{phrase}"</code> at {timestamp}
+  Preview: <i>{preview}</i>
+```
+
+2. **Create or update a feedback memory file** at `/workspace/trusted/feedback_silence-violations.md` with the pattern so you avoid it in future sessions:
+```markdown
+---
+name: silence-violations
+description: Internal monologue phrases that leaked to Telegram — never output these
+type: feedback
+---
+[append the new violation pattern and which group it leaked in]
+
+**Why:** These phrases went to Telegram as visible text. Every form of "I decided not to respond" IS the leak.
+**How to apply:** When deciding not to respond, produce zero output. No text, no narration, no reactions.
+```
+
+3. **Update MEMORY.md index** — ensure `/workspace/trusted/MEMORY.md` has an entry for this file:
+```
+- [Silence violations](feedback_silence-violations.md) — leaked internal monologue phrases to avoid
+```
+If the entry already exists, leave it. If MEMORY.md doesn't exist yet, create it with this entry.
+
+This creates a self-reinforcing feedback loop: violations → feedback file → MEMORY.md index → bootstrap loads it → agent avoids the pattern next session.
+
+If none → skip.
