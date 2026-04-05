@@ -291,7 +291,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     triggerPattern: getTriggerPattern(group.trigger),
     timezone: TIMEZONE,
     deps: {
-      sendMessage: (text) => channel.sendMessage(chatJid, text),
+      sendMessage: async (text) => { await channel.sendMessage(chatJid, text); },
       setTyping: (typing) =>
         channel.setTyping?.(chatJid, typing) ?? Promise.resolve(),
       runAgent: (prompt, onOutput) =>
