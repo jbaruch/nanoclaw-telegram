@@ -56,9 +56,9 @@ Silent on success. Report on error or `total_shows: 0` (if sync hasn't run yet �
 ## Step 7: Refresh CFP data
 `Skill(skill: "tessl__check-cfps")` — refresh open CFP data from primary sources, apply Sessionize verification, update `cfp-state.json`.
 
-**This step is research-only.** Do NOT forward the CFP list to Baruch — that is the morning brief's job. The goal here is keeping cfp-state.json current so the morning brief has accurate deadline data.
+**This step is research-only.** Do NOT forward the CFP list to Baruch — that is the morning brief's job. The morning brief reads `cfp-state.json` directly for deadline data.
 
-Consume the skill output internally (do not include in any message to Baruch). If the skill fails completely (both primary sources unreachable), note it in Step 10 daily summary.
+Consume the skill output internally (do not include in any message to Baruch). If the script fails, note it in Step 10 daily summary.
 
 ## Step 8: YouTube comment check
 Search for the YouTube tool via `COMPOSIO_SEARCH_TOOLS` (query: `"youtube list comment threads"`). Use the returned tool to fetch recent comments on Baruch's channel (channel ID: `UCZ8-VX2SiAIBE7guw7NG-Sg`).

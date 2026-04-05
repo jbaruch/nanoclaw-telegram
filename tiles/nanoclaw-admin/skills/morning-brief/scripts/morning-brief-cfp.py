@@ -2,41 +2,58 @@
 """
 Urgent CFP filter for morning brief.
 
-Runs check-cfps-fetch.py and filters to CFPs with deadlines within 7 days.
-Outputs a JSON array with simplified fields for the brief.
+Reads cfp-state.json (maintained by the check-cfps skill during nightly
+housekeeping) and filters to open CFPs with deadlines within 7 days.
 
-Exit code 0 always.
+Output: JSON array of {name, city, conf_date, deadline, cfp_url, days_until}.
+Empty array if no urgent CFPs or state file missing. Exit code 0 always.
 """
 
 import json
-import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
-FETCH_SCRIPT = Path('/home/node/.claude/skills/tessl__check-cfps/scripts/check-cfps-fetch.py')
+STATE_PATH = Path('/workspace/group/cfp-state.json')
 
-try:
-    result = subprocess.run(
-        [sys.executable, str(FETCH_SCRIPT)],
-        capture_output=True, text=True, timeout=60,
-    )
-    data = json.loads(result.stdout)
-except Exception as e:
+if not STATE_PATH.exists():
     print(json.dumps([]))
     sys.exit(0)
 
+try:
+    state = json.loads(STATE_PATH.read_text())
+except Exception:
+    print(json.dumps([]))
+    sys.exit(0)
+
+today = date.today()
 urgent = []
-for cfp in data.get('cfps', []):
-    days = cfp.get('days_left')
-    if days is not None and days <= 7:
-        urgent.append({
-            'name': cfp.get('name', ''),
-            'city': cfp.get('city', ''),
-            'conf_date': cfp.get('conf_date', ''),
-            'deadline': cfp.get('deadline', ''),
-            'cfp_url': cfp.get('cfp_url', ''),
-            'days_until': days,
-        })
+
+for slug, entry in state.items():
+    # Skip metadata keys (e.g. _blocked_prefixes)
+    if slug.startswith('_'):
+        continue
+    if entry.get('status') != 'open':
+        continue
+
+    deadline_str = entry.get('deadline', '')
+    try:
+        deadline = date.fromisoformat(deadline_str)
+    except (ValueError, TypeError):
+        continue
+
+    days_until = (deadline - today).days
+    if days_until < 0 or days_until > 7:
+        continue
+
+    urgent.append({
+        'name': entry.get('name', slug),
+        'city': entry.get('city', ''),
+        'conf_date': entry.get('conf_date', ''),
+        'deadline': deadline_str,
+        'cfp_url': entry.get('cfp_url', ''),
+        'days_until': days_until,
+    })
 
 urgent.sort(key=lambda c: c['days_until'])
 print(json.dumps(urgent, indent=2))
