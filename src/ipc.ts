@@ -15,6 +15,7 @@ import { sendPoolMessage } from './channels/telegram.js';
 import { AvailableGroup } from './container-runner.js';
 import {
   createTask,
+  deleteAllSessions,
   deleteTask,
   getTaskById,
   storeMessage,
@@ -1191,9 +1192,6 @@ export async function processTaskIpc(
               );
             } else {
               // Clear ALL sessions so every group picks up new tiles on next spawn
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { deleteAllSessions } =
-                require('./db.js') as typeof import('./db.js');
               const cleared = deleteAllSessions();
               logger.info(
                 { sourceGroup, sessionsCleared: cleared },
