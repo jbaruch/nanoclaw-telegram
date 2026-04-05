@@ -75,7 +75,7 @@ Follow the `undated-task-date-assignment` skill for the full sub-workflow (readi
 If all dates were assigned, omit the `📋 Без даты:` section entirely.
 
 ## Step 6: Check urgent CFPs
-Run: `python3 /home/node/.claude/skills/tessl__check-cfps/scripts/check-cfps-fetch.py`
+Run: `python3 /home/node/.claude/skills/tessl__morning-brief/scripts/morning-brief-cfp.py`
 
 Outputs a JSON array of CFPs with deadlines within 7 days. Each entry has: `name`, `city`, `conf_date`, `deadline`, `cfp_url`, `days_until`.
 
