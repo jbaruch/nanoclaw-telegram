@@ -485,7 +485,8 @@ async function runQuery(
             append: systemPromptAppend,
           }
         : undefined,
-      model: 'sonnet[1m]',
+      model: 'opus[1m]',
+      effort: 'max',
       allowedTools: [
         'Bash',
         'Read',
