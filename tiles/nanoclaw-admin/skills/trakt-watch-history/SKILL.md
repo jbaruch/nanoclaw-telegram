@@ -5,7 +5,7 @@ description: Fetch Trakt.tv watch history (shows, movies, ratings) for TV/movie 
 
 # Trakt Watch History
 
-Run via host: `mcp__nanoclaw__fetch_trakt_history()`
+Run via MCP: `mcp__nanoclaw__fetch_trakt_history()`
 
 The script returns JSON:
 ```json

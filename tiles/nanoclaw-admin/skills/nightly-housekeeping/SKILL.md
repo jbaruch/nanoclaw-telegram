@@ -28,23 +28,23 @@ This prevents double-execution when both the scheduled cron task and the heartbe
 If the file cannot be read or written, continue anyway (log the error for Step 17 retry) — do not abort the housekeeping run.
 
 ## Step 2: TripIt → Reclaim sync
-Run via host: `mcp__nanoclaw__sync_tripit()`
-Do NOT call sync.mjs directly — it won't find its modules. The wrapper script handles the correct working directory.
-- `noChanges: true` → silent
+Run via MCP: `mcp__nanoclaw__sync_tripit()`
+- Silent on success
 - Changes detected → report (new timezones, OOO blocks)
 - Overlapping trips → flag as warning
 - Error → report and continue
 
 ## Step 3: Refresh travel schedule
-Run: `python3 /home/node/.claude/skills/tessl__nightly-housekeeping/scripts/refresh-travel-schedule.py`
-Rebuilds `travel-schedule.json` from the TripIt ICS feed (reads URL from `tripit-url.txt`). Silent on success; report only on error.
+The `sync_tripit` MCP tool also refreshes travel-schedule.json as part of its pipeline.
+Verify `/workspace/group/travel-schedule.json` was updated (check modification time). If stale, call `mcp__nanoclaw__sync_tripit()` again.
+Silent on success; report only on error.
 
 ## Step 4: Travel bookings check
 `Skill(skill: "tessl__check-travel-bookings")` — find missing flights/hotels for upcoming trips.
 Report gaps; skip if all snoozed or complete.
 
 ## Step 5: Refresh Trakt watch history
-Use `mcp__nanoclaw__fetch_trakt_history()`.
+Run via MCP: `mcp__nanoclaw__fetch_trakt_history()`
 Saves fresh watch history to `/workspace/group/trakt-history.json`.
 Silent on success. Report on error or `total_shows: 0` (if sync hasn't run yet → skip silently).
 
@@ -56,9 +56,9 @@ Silent on success. Report on error or `total_shows: 0` (if sync hasn't run yet �
 ## Step 7: Refresh CFP data
 `Skill(skill: "tessl__check-cfps")` — refresh open CFP data from primary sources, apply Sessionize verification, update `cfp-state.json`.
 
-**This step is research-only.** Do NOT forward the CFP list to Baruch — that is the morning brief's job. The morning brief reads `cfp-state.json` directly for deadline data.
+**This step is research-only.** Do NOT forward the CFP list to Baruch — that is the morning brief's job. The goal here is keeping cfp-state.json current so the morning brief has accurate deadline data.
 
-Consume the skill output internally (do not include in any message to Baruch). If the script fails, note it in Step 10 daily summary.
+Consume the skill output internally (do not include in any message to Baruch). If the skill fails completely (both primary sources unreachable), note it in Step 10 daily summary.
 
 ## Step 8: YouTube comment check
 Search for the YouTube tool via `COMPOSIO_SEARCH_TOOLS` (query: `"youtube list comment threads"`). Use the returned tool to fetch recent comments on Baruch's channel (channel ID: `UCZ8-VX2SiAIBE7guw7NG-Sg`).
@@ -104,8 +104,8 @@ Keep entries concise (one line each). This file is read on container startup to 
 Run dedup on both daily log directories:
 
 ```bash
-python3 /home/node/.claude/skills/tessl__nightly-housekeeping/scripts/dedup-memory.py /workspace/group/memory/daily --days 3
-python3 /home/node/.claude/skills/tessl__nightly-housekeeping/scripts/dedup-memory.py /workspace/trusted/memory/daily --days 3
+python3 /workspace/group/scripts/dedup-memory.py /workspace/group/memory/daily --days 3
+python3 /workspace/group/scripts/dedup-memory.py /workspace/trusted/memory/daily --days 3
 ```
 
 Parse JSON output. Log the count of duplicates removed but do not report to Baruch. If script errors, log and continue.
@@ -180,7 +180,7 @@ Read `/workspace/group/task-tz-state.json`. Find the entry in `follow_me_tasks` 
 
 ## Step 18: Backup to git
 ```
-bash /home/node/.claude/skills/tessl__nightly-housekeeping/scripts/backup-to-git.sh
+bash /workspace/group/scripts/backup-to-git.sh
 ```
 Then call `mcp__nanoclaw__github_backup` with message `"nightly backup: YYYY-MM-DD"`.
 Silent on success; report only on error.
