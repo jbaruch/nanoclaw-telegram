@@ -13,6 +13,10 @@ const envConfig = readEnvFile([
   'TZ',
   'TELEGRAM_BOT_POOL',
   'TILE_OWNER',
+  'HUBITAT_HUB_IP',
+  'HUBITAT_APP_ID',
+  'HUBITAT_EVENT_RETENTION_DAYS',
+  'HUBITAT_ALERT_SENSITIVITY',
 ]);
 
 export const ASSISTANT_NAME =
@@ -108,13 +112,19 @@ export function getTriggerPattern(trigger?: string): RegExp {
 export const TRIGGER_PATTERN = buildTriggerPattern(DEFAULT_TRIGGER);
 
 // --- Hubitat Smart Home ---
-export const HUBITAT_HUB_IP = process.env.HUBITAT_HUB_IP || '';
-export const HUBITAT_APP_ID = process.env.HUBITAT_APP_ID || '';
+export const HUBITAT_HUB_IP =
+  process.env.HUBITAT_HUB_IP || envConfig.HUBITAT_HUB_IP || '';
+export const HUBITAT_APP_ID =
+  process.env.HUBITAT_APP_ID || envConfig.HUBITAT_APP_ID || '';
 export const HUBITAT_EVENT_RETENTION_DAYS = parseInt(
-  process.env.HUBITAT_EVENT_RETENTION_DAYS || '90',
+  process.env.HUBITAT_EVENT_RETENTION_DAYS ||
+    envConfig.HUBITAT_EVENT_RETENTION_DAYS ||
+    '90',
   10,
 );
-export const HUBITAT_ALERT_SENSITIVITY = (process.env.HUBITAT_ALERT_SENSITIVITY ||
+export const HUBITAT_ALERT_SENSITIVITY = (process.env
+  .HUBITAT_ALERT_SENSITIVITY ||
+  envConfig.HUBITAT_ALERT_SENSITIVITY ||
   'low') as 'low' | 'medium' | 'high';
 
 // Tile owner namespace for tessl registry (e.g., "jbaruch" → "jbaruch/nanoclaw-core")
