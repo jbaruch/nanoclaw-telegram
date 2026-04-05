@@ -28,7 +28,7 @@ This prevents double-execution when both the scheduled cron task and the heartbe
 If the file cannot be read or written, continue anyway (log the error for Step 17 retry) — do not abort the housekeeping run.
 
 ## Step 2: TripIt → Reclaim sync
-Run via host: `mcp__nanoclaw__run_host_script(script: "sync-tripit.sh")`
+Run via host: `mcp__nanoclaw__sync_tripit()`
 Do NOT call sync.mjs directly — it won't find its modules. The wrapper script handles the correct working directory.
 - `noChanges: true` → silent
 - Changes detected → report (new timezones, OOO blocks)

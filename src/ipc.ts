@@ -834,6 +834,69 @@ export async function processTaskIpc(
       }
       break;
 
+    // --- Named host operations (migrating from run_host_script) ---
+
+    case 'sync_tripit':
+      if (data.requestId) {
+        const groupDir = path.resolve(process.cwd(), 'groups', sourceGroup);
+        const scriptPath = path.join(groupDir, 'scripts', 'sync-tripit.sh');
+        if (!fs.existsSync(scriptPath)) {
+          const errPath = path.join(
+            DATA_DIR, 'ipc', sourceGroup, 'input',
+            `_script_result_${data.requestId}.json`,
+          );
+          fs.writeFileSync(errPath, JSON.stringify({ error: 'sync-tripit.sh not found' }));
+          break;
+        }
+
+        logger.info({ sourceGroup }, 'Running sync_tripit');
+
+        const { readEnvFile: readSyncEnv } = await import('./env.js');
+        const syncVars = readSyncEnv([
+          'TRIPIT_ICAL_URL',
+          'TRIPIT_IGNORE_TRIPS',
+          'TRIPIT_IGNORE_KEYWORDS',
+          'RECLAIM_API_TOKEN',
+          'GOOGLE_CLIENT_ID',
+          'GOOGLE_CLIENT_SECRET',
+          'GOOGLE_REFRESH_TOKEN',
+        ]);
+        const syncEnv: Record<string, string> = {
+          PATH: process.env.PATH || '/usr/bin:/bin',
+          HOME: process.env.HOME || '/root',
+          TZ: process.env.TZ || 'UTC',
+          ...Object.fromEntries(
+            Object.entries(syncVars).filter(([, v]) => v),
+          ),
+        };
+
+        const scriptContent = fs.readFileSync(scriptPath, 'utf-8');
+        const patchedContent = scriptContent.replace(/\/workspace\/group/g, groupDir);
+        const tmpScript = path.join(groupDir, '.tmp_host_sync-tripit.sh');
+        fs.writeFileSync(tmpScript, patchedContent);
+
+        execFile('bash', [tmpScript], {
+          cwd: groupDir,
+          env: syncEnv,
+          timeout: 120_000,
+          maxBuffer: 1024 * 1024,
+        }, (error, stdout, stderr) => {
+          const resultPath = path.join(
+            DATA_DIR, 'ipc', sourceGroup, 'input',
+            `_script_result_${data.requestId}.json`,
+          );
+          if (error) {
+            logger.error({ sourceGroup, error: error.message, stderr }, 'sync_tripit failed');
+            fs.writeFileSync(resultPath, JSON.stringify({ error: error.message, stderr: stderr.slice(-500) }));
+          } else {
+            logger.info({ sourceGroup, stdoutLen: stdout.length }, 'sync_tripit completed');
+            fs.writeFileSync(resultPath, JSON.stringify({ stdout, stderr: stderr || undefined }));
+          }
+          try { fs.unlinkSync(tmpScript); } catch { /* best effort */ }
+        });
+      }
+      break;
+
     case 'github_backup':
       if (data.requestId) {
         const backupDir = path.join(

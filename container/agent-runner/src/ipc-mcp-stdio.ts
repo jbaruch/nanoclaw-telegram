@@ -34,6 +34,44 @@ function writeIpcFile(dir: string, data: object): string {
   return filename;
 }
 
+/**
+ * Send a named host operation via IPC and poll for the result.
+ * Each operation maps to a specific handler on the host with locked-down credentials.
+ */
+async function runHostOperation(
+  type: string,
+  extra?: Record<string, unknown>,
+  timeoutMs = 180_000,
+): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  writeIpcFile(TASKS_DIR, {
+    type,
+    groupFolder,
+    chatJid,
+    requestId,
+    timestamp: new Date().toISOString(),
+    ...extra,
+  });
+
+  const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
+  const pollMs = 500;
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    if (fs.existsSync(resultPath)) {
+      const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+      fs.unlinkSync(resultPath);
+      if (result.error) {
+        return { content: [{ type: 'text' as const, text: `Error: ${result.error}` }], isError: true };
+      }
+      return { content: [{ type: 'text' as const, text: result.stdout || '(no output)' }] };
+    }
+    await new Promise(r => setTimeout(r, pollMs));
+  }
+
+  return { content: [{ type: 'text' as const, text: `Operation ${type} timed out` }], isError: true };
+}
+
 const server = new McpServer({
   name: 'nanoclaw',
   version: '1.0.0',
@@ -645,6 +683,15 @@ server.tool(
       isError: true,
     };
   },
+);
+
+// --- Named host operations (migrating from run_host_script, one at a time) ---
+
+server.tool(
+  'sync_tripit',
+  'Sync TripIt travel data to Reclaim timezone settings. Runs on the host with locked-down credentials.',
+  {},
+  async () => runHostOperation('sync_tripit'),
 );
 
 server.tool(
