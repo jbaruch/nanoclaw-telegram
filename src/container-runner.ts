@@ -345,7 +345,7 @@ function buildVolumeMounts(
         fs.cpSync(skillSrcDir, path.join(skillsDst, `tessl__${skillDir}`), {
           recursive: true,
         });
-        // Copy bundled scripts to group's scripts/ dir (used by named host operations)
+        // Copy bundled scripts to group's scripts/ dir (used by run_host_script)
         const skillScriptsDir = path.join(skillSrcDir, 'scripts');
         if (fs.existsSync(skillScriptsDir)) {
           const groupScriptsDir = path.join(groupDir, 'scripts');

@@ -28,7 +28,7 @@ This prevents double-execution when both the scheduled cron task and the heartbe
 If the file cannot be read or written, continue anyway (log the error for Step 17 retry) — do not abort the housekeeping run.
 
 ## Step 2: TripIt → Reclaim sync
-Run via host: `mcp__nanoclaw__sync_tripit()`
+Run via host: `mcp__nanoclaw__run_host_script(script: "sync-tripit.sh")`
 Do NOT call sync.mjs directly — it won't find its modules. The wrapper script handles the correct working directory.
 - `noChanges: true` → silent
 - Changes detected → report (new timezones, OOO blocks)
@@ -36,7 +36,7 @@ Do NOT call sync.mjs directly — it won't find its modules. The wrapper script 
 - Error → report and continue
 
 ## Step 3: Refresh travel schedule
-Use `mcp__nanoclaw__refresh_travel_schedule()`.
+Use `mcp__nanoclaw__run_host_script(script: "refresh-travel-schedule.py")`.
 Rebuilds `travel-schedule.json` from the TripIt ICS feed. Silent on success; report only on error.
 
 ## Step 4: Travel bookings check
@@ -44,7 +44,7 @@ Rebuilds `travel-schedule.json` from the TripIt ICS feed. Silent on success; rep
 Report gaps; skip if all snoozed or complete.
 
 ## Step 5: Refresh Trakt watch history
-Use `mcp__nanoclaw__fetch_trakt_history()`.
+Use `mcp__nanoclaw__run_host_script(script: "trakt-watch-history.py")`.
 Saves fresh watch history to `/workspace/group/trakt-history.json`.
 Silent on success. Report on error or `total_shows: 0` (if sync hasn't run yet → skip silently).
 

@@ -14,7 +14,7 @@ When promoting a skill or rule, choose the correct tile. Getting this wrong brea
 ## Decision criteria — apply in order
 
 1. **Does it call Composio, Gmail, Calendar, Tasks, GitHub, Sessionize, or any external API?** → admin
-2. **Does it call named host operations (sync_tripit, fetch_trakt_history, etc.) or manage infrastructure (promote, verify, groups)?** → admin
+2. **Does it call `run_host_script` or manage infrastructure (promote, verify, groups)?** → admin
 3. **Does it read/write `/workspace/trusted/` or manage shared memory?** → trusted
 4. **Is it a security restriction for public groups?** → untrusted
 5. **Is it pure logic with no credentials that ALL containers need?** → core
@@ -37,8 +37,7 @@ When promoting a skill or rule, choose the correct tile. Getting this wrong brea
 ## Red flags — if you see any of these, it's NOT core
 
 - `Composio`, `GMAIL`, `GOOGLECALENDAR`, `GOOGLETASKS` anywhere in the skill
-- Named host operations (`fetch_cfps`, `sync_tripit`, `fetch_trakt_history`, etc.)
-- `promote_staging`, `register_group`
+- `run_host_script`, `promote_staging`, `register_group`
 - `/workspace/trusted/`
 - Any API key or credential reference
 - `schedule_task` with complex scheduling logic
