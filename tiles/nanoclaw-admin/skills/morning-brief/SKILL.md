@@ -92,12 +92,6 @@ If the combined list is non-empty, include in the brief under:
 Color marker by days_until: 0–1 → 🔴, 2–3 → 🟡, 4–7 → 🟢.
 If empty array or script fails → skip this section silently.
 
-## Step 6a: Mark shown CFPs
-After the brief message is confirmed sent (Step 9), run:
-`python3 /home/node/.claude/skills/tessl__morning-brief/scripts/morning-brief-cfp.py --mark-shown`
-
-This marks all output CFPs with `shown_in_brief: true` in cfp-state.json so they persist in future briefs until their deadline passes.
-
 ## Step 7: Check flagged orders
 Read `/workspace/group/orders-db.json`. Collect all orders where `flagged: true`.
 
@@ -153,25 +147,30 @@ Format in Telegram HTML. Canonical example:
 
 Send via `mcp__nanoclaw__send_message` with `pin: true`.
 
-**Checkpoint:** Confirm the message was sent successfully (tool returns success/message ID) before proceeding to Steps 6a, 10, and 12. If sending fails, retry once; if still failing, log the error and stop.
+**Checkpoint:** Confirm the message was sent successfully (tool returns success/message ID) before proceeding to Steps 10–13. If sending fails, retry once; if still failing, log the error and stop.
 
-## Step 10: Run brief-cleanup
+## Step 10: Mark shown CFPs
+Run: `python3 /home/node/.claude/skills/tessl__morning-brief/scripts/morning-brief-cfp.py --mark-shown`
+
+This marks all output CFPs with `shown_in_brief: true` in cfp-state.json so they persist in future briefs until their deadline passes.
+
+## Step 11: Run brief-cleanup
 After the brief is confirmed sent: `Skill(skill: "tessl__brief-cleanup")`. Sends pending `cleanup_items` as separate async messages. Silent if nothing is pending.
 
-## Step 11: Clear pending file
+## Step 12: Clear pending file
 After brief-cleanup runs, set both arrays in `morning-brief-pending.json` to `[]`.
 
-## Step 12: Schedule reminders for today's events
+## Step 13: Schedule reminders for today's events
 
 For each timed event — per the [Event Filter Rules](#event-filter-rules-shared-reference), additionally excluding all-day events, and only events starting more than 20 min from now:
 
-## Step 13: Read existing reminders
+## Step 14: Read existing reminders
 Read `/workspace/group/scheduled-reminders.json`. If the file doesn't exist, treat as `{"reminders": []}`.
 
-## Step 14: Deduplicate
+## Step 15: Deduplicate
 Before scheduling a reminder for an event, check if `event_id` already exists in `scheduled-reminders.json`. If found — skip scheduling for that event.
 
-## Step 15: Schedule new reminders
+## Step 16: Schedule new reminders
 For events not already in `scheduled-reminders.json`, schedule a once-off reminder.
 
 **TIMEZONE CONVERSION — compute `schedule_value` exactly as follows:**
@@ -199,7 +198,7 @@ Example: event "2026-04-03T16:00:00-05:00" (4 PM CDT = 21:00 UTC) → reminder_u
 
 If no scheduling tool is available, or a reminder fails for a specific event, skip that event and continue.
 
-## Step 16: Write to scheduled-reminders.json
+## Step 17: Write to scheduled-reminders.json
 For each newly scheduled reminder, append an entry to the `reminders` array in `/workspace/group/scheduled-reminders.json`:
 
 ```json
@@ -214,11 +213,11 @@ For each newly scheduled reminder, append an entry to the `reminders` array in `
 
 Derive `utc_time` from the event's local start time using `current_tz`. Write the updated file back to `/workspace/group/scheduled-reminders.json`.
 
-## Step 17: Save state
+## Step 18: Save state
 Write to `/workspace/group/calendar-state.json`:
 ```json
 { "date": "...", "fetched_at": "...", "events": [{"event_id": "...", "title": "...", "start": "...", "reminder_task_id": "..."}] }
 ```
 
-## Step 18: Mark as run
+## Step 19: Mark as run
 Read `/workspace/group/task-tz-state.json`. Find the entry in `follow_me_tasks` where `name == "morning-brief"`. Set its `last_run_date` to today's local date (YYYY-MM-DD in `current_tz`). Write the file back, preserving all other fields.
