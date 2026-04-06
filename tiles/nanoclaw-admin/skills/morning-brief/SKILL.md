@@ -77,7 +77,9 @@ If all dates were assigned, omit the `📋 Без даты:` section entirely.
 ## Step 6: Check urgent CFPs
 Run: `python3 /home/node/.claude/skills/tessl__morning-brief/scripts/morning-brief-cfp.py`
 
-Outputs a JSON array of CFPs with deadlines within 7 days. Each entry has: `name`, `city`, `conf_date`, `deadline`, `cfp_url`, `days_until`.
+Outputs a JSON array of CFPs with deadlines within 7 days, plus any previously-shown CFPs whose deadline hasn't passed. Each entry has: `name`, `city`, `conf_date`, `deadline`, `cfp_url`, `days_until`, `previously_shown`.
+
+**CRITICAL: Include ALL CFPs returned by the script in the brief. Do not filter, omit, or reduce this list. The script already applies the correct filters — your job is to format and display every entry, not to second-guess relevance.**
 
 If the array is non-empty, include in the brief under:
 `📢 <b>CFP дедлайны:</b>` — one bullet per CFP:
@@ -85,6 +87,12 @@ If the array is non-empty, include in the brief under:
 
 Color marker by days_until: 0–1 → 🔴, 2–3 → 🟡, 4–7 → 🟢.
 If empty array or script fails → skip this section silently.
+
+## Step 6a: Mark shown CFPs
+After the brief message is confirmed sent (Step 9), run:
+`python3 /home/node/.claude/skills/tessl__morning-brief/scripts/morning-brief-cfp.py --mark-shown`
+
+This marks all output CFPs with `shown_in_brief: true` in cfp-state.json so they persist in future briefs until their deadline passes.
 
 ## Step 7: Check flagged orders
 Read `/workspace/group/orders-db.json`. Collect all orders where `flagged: true`.
@@ -141,7 +149,7 @@ Format in Telegram HTML. Canonical example:
 
 Send via `mcp__nanoclaw__send_message` with `pin: true`.
 
-**Checkpoint:** Confirm the message was sent successfully (tool returns success/message ID) before proceeding to Steps 10 and 12. If sending fails, retry once; if still failing, log the error and stop.
+**Checkpoint:** Confirm the message was sent successfully (tool returns success/message ID) before proceeding to Steps 6a, 10, and 12. If sending fails, retry once; if still failing, log the error and stop.
 
 ## Step 10: Run brief-cleanup
 After the brief is confirmed sent: `Skill(skill: "tessl__brief-cleanup")`. Sends pending `cleanup_items` as separate async messages. Silent if nothing is pending.
