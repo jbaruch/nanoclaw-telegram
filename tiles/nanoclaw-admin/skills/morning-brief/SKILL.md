@@ -147,7 +147,7 @@ Format in Telegram HTML. Canonical example:
 
 Send via `mcp__nanoclaw__send_message` with `pin: true`.
 
-**Checkpoint:** Confirm the message was sent successfully (tool returns success/message ID) before proceeding to Steps 10–13. If sending fails, retry once; if still failing, log the error and stop.
+**Checkpoint:** Confirm the message was sent successfully (tool returns success/message ID) before proceeding to Steps 10–19. If sending fails, retry once; if still failing, log the error and stop.
 
 ## Step 10: Mark shown CFPs
 Run: `python3 /home/node/.claude/skills/tessl__morning-brief/scripts/morning-brief-cfp.py --mark-shown`
