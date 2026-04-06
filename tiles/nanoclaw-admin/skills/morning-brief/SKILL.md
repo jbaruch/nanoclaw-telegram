@@ -79,9 +79,13 @@ Run: `python3 /home/node/.claude/skills/tessl__morning-brief/scripts/morning-bri
 
 Outputs a JSON array of CFPs with deadlines within 7 days, plus any previously-shown CFPs whose deadline hasn't passed. Each entry has: `name`, `city`, `conf_date`, `deadline`, `cfp_url`, `days_until`, `previously_shown`.
 
-**CRITICAL: Include ALL CFPs returned by the script in the brief. Do not filter, omit, or reduce this list. The script already applies the correct filters — your job is to format and display every entry, not to second-guess relevance.**
+**Two-tier filtering:**
+1. **Previously shown** (`previously_shown: true`): Always include — these already passed the relevance filter in a prior brief. Do not re-evaluate.
+2. **New CFPs** (`previously_shown: false`): Apply relevance filter — keep only conferences relevant to Baruch's profile (Java/JVM, DevRel, AI/agents, developer productivity, DevOps/CI-CD, software supply chain, platform engineering). Skip: blockchain, Elixir, Rust, Go-only, .NET-only, Power BI, Dynamics, security-only (BSides), design/UX-only, data science-only, non-dev audiences.
 
-If the array is non-empty, include in the brief under:
+**After filtering:** combine both lists and include ALL resulting CFPs in the brief. Do not further reduce.
+
+If the combined list is non-empty, include in the brief under:
 `📢 <b>CFP дедлайны:</b>` — one bullet per CFP:
 `• 🔴 <b>Name</b> — City, ConfDate · дедлайн: <b>DeadlineDate</b> · <a href="cfp_url">Submit</a>`
 
