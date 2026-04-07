@@ -104,20 +104,14 @@ function connect(): void {
   });
 
   ws.addEventListener('error', (event) => {
-    logger.error(
-      { error: String(event) },
-      'Hubitat EventSocket error',
-    );
+    logger.error({ error: String(event) }, 'Hubitat EventSocket error');
     // close event will fire after this, triggering reconnect
   });
 }
 
 function scheduleReconnect(): void {
   if (stopping) return;
-  logger.info(
-    { delayMs: reconnectDelay },
-    'Hubitat EventSocket reconnecting',
-  );
+  logger.info({ delayMs: reconnectDelay }, 'Hubitat EventSocket reconnecting');
   setTimeout(() => {
     reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
     connect();
