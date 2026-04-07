@@ -24,6 +24,9 @@
     },
     "verification-protocol": {
       "rules": "rules/verification-protocol.md"
+    },
+    "wiki-awareness": {
+      "rules": "rules/wiki-awareness.md"
     }
   },
   "skills": {
