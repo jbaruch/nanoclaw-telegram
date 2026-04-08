@@ -610,6 +610,12 @@ async function runQuery(
         result: textResult || null,
         newSessionId,
       });
+      // Break out of the for-await loop after receiving the result.
+      // Without this, the iterator hangs waiting for more SDK messages
+      // that will never come, and follow-up IPC messages are lost.
+      // The outer while(true) loop handles follow-ups via waitForIpcMessage().
+      // See: https://github.com/qwibitai/nanoclaw/issues/233
+      break;
     }
   }
 
