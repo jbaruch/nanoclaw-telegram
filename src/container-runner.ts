@@ -285,7 +285,7 @@ function buildVolumeMounts(
   }
 
   // Tile delivery — all host-side, no tessl CLI in containers.
-  // Build .tessl structure and skills/ from tiles/ directory (checked into git).
+  // Build .tessl structure and skills/ from registry-installed tiles (tessl-workspace).
   // Main/trusted get all tiles. Others get nanoclaw-core only.
   const skillsDst = path.join(groupSessionsDir, 'skills');
   if (fs.existsSync(skillsDst)) {

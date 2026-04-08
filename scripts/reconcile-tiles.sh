@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Reconcile plugins: compare git source vs registry-installed vs orchestrator.
-# Reports drift, missing items, and stale files.
+# Reconcile tiles: compare tile GitHub repos vs registry-installed in orchestrator.
+# Reports version mismatches and missing tiles.
 #
 # Usage:
 #   ./scripts/reconcile-tiles.sh
@@ -8,93 +8,71 @@
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+
+TILE_OWNER_VAL=$(grep TILE_OWNER "$PROJECT_ROOT/.env" 2>/dev/null | cut -d= -f2)
+TILE_OWNER_VAL="${TILE_OWNER_VAL:-jbaruch}"
+
+TILES="nanoclaw-admin nanoclaw-core nanoclaw-trusted nanoclaw-untrusted nanoclaw-host"
 ISSUES=0
 
 echo "=== Tile Reconciliation ==="
 echo ""
 
-# Write the comparison script to a temp file and execute remotely
-TILE_OWNER_VAL=$(grep TILE_OWNER "$PROJECT_ROOT/.env" 2>/dev/null | cut -d= -f2)
-TILE_OWNER_VAL="${TILE_OWNER_VAL:-nanoclaw}"
-
-REMOTE_SCRIPT=$(cat <<'ENDSCRIPT'
-TILE_OWNER=$(grep TILE_OWNER /app/.env 2>/dev/null | cut -d= -f2)
-TILE_OWNER="${TILE_OWNER:-nanoclaw}"
-for tile in nanoclaw-admin nanoclaw-core nanoclaw-untrusted; do
-  base="/app/tessl-workspace/.tessl/tiles/$TILE_OWNER/$tile"
-  git_base="/app/tiles/$tile"
-
-  for f in $base/rules/*.md; do
-    [ -f "$f" ] || continue
-    name=$(basename $f)
-    git_f="$git_base/rules/$name"
-    if [ -f "$git_f" ]; then
-      diff -q "$f" "$git_f" >/dev/null 2>&1 || echo "DRIFT: $tile/rules/$name (registry != git)"
-    else
-      echo "REGISTRY-ONLY: $tile/rules/$name"
-    fi
-  done
-
-  for f in $git_base/rules/*.md; do
-    [ -f "$f" ] || continue
-    name=$(basename $f)
-    [ ! -f "$base/rules/$name" ] && echo "GIT-ONLY: $tile/rules/$name (not published)"
-  done
-
-  for d in $base/skills/*/; do
-    [ -d "$d" ] || continue
-    name=$(basename $d)
-    reg_f="$d/SKILL.md"
-    git_f="$git_base/skills/$name/SKILL.md"
-    if [ -f "$git_f" ] && [ -f "$reg_f" ]; then
-      diff -q "$reg_f" "$git_f" >/dev/null 2>&1 || echo "DRIFT: $tile/skills/$name (registry != git)"
-    elif [ ! -f "$git_f" ]; then
-      echo "REGISTRY-ONLY: $tile/skills/$name"
-    fi
-  done
-
-  for d in $git_base/skills/*/; do
-    [ -d "$d" ] || continue
-    name=$(basename $d)
-    [ ! -d "$base/skills/$name" ] && echo "GIT-ONLY: $tile/skills/$name (not published)"
-  done
-done
-ENDSCRIPT
-)
-
-RESULT=$(nas "docker exec nanoclaw bash -c $(printf '%q' "$REMOTE_SCRIPT")") || true
-
-if [ -n "$RESULT" ]; then
-  echo "$RESULT"
-  ISSUES=$(echo "$RESULT" | wc -l | tr -d ' ')
-else
-  echo "All plugins in sync."
-fi
-
-echo ""
-
-# Check for untracked files in tiles/ on NAS
-UNTRACKED=$(nas "cd $NAS_PROJECT_DIR && git status tiles/ --porcelain 2>&1" | grep '^??' || true)
-if [ -n "$UNTRACKED" ]; then
-  echo "Untracked files on NAS tiles/:"
-  echo "$UNTRACKED"
-  ISSUES=$((ISSUES + $(echo "$UNTRACKED" | wc -l | tr -d ' ')))
-else
-  echo "No untracked files on NAS."
-fi
-
-echo ""
-
-# Version comparison
-echo "Tile versions:"
-for tile in nanoclaw-admin nanoclaw-core nanoclaw-untrusted; do
-  LOCAL=$(python3 -c "import json; print(json.load(open('tiles/$tile/tile.json'))['version'])")
-  INSTALLED=$(nas "docker exec nanoclaw cat /app/tessl-workspace/.tessl/tiles/${TILE_OWNER_VAL}/$tile/tile.json" | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
-  if [ "$LOCAL" = "$INSTALLED" ]; then
-    echo "  $tile: $LOCAL (in sync)"
-  else
-    echo "  $tile: local=$LOCAL installed=$INSTALLED (MISMATCH)"
+echo "Tile versions (repo vs registry):"
+for tile in $TILES; do
+  # Get version from tile GitHub repo
+  REPO_VERSION=$(gh api "repos/$TILE_OWNER_VAL/$tile/contents/tile.json" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])" 2>/dev/null)
+  if [ -z "$REPO_VERSION" ]; then
+    echo "  $tile: repo NOT FOUND"
     ISSUES=$((ISSUES + 1))
+    continue
+  fi
+
+  # Get version installed in orchestrator
+  INSTALLED_VERSION=$(nas "docker exec nanoclaw cat /app/tessl-workspace/.tessl/tiles/${TILE_OWNER_VAL}/$tile/tile.json 2>/dev/null" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])" 2>/dev/null)
+  if [ -z "$INSTALLED_VERSION" ]; then
+    echo "  $tile: repo=$REPO_VERSION installed=NOT FOUND"
+    ISSUES=$((ISSUES + 1))
+    continue
+  fi
+
+  # Get latest version in tessl registry
+  REGISTRY_VERSION=$(tessl tile info "$TILE_OWNER_VAL/$tile" 2>/dev/null | grep 'Latest Version' | awk '{print $NF}')
+
+  if [ "$REPO_VERSION" = "$INSTALLED_VERSION" ]; then
+    echo "  $tile: $REPO_VERSION (in sync)"
+  elif [ "$REGISTRY_VERSION" = "$INSTALLED_VERSION" ]; then
+    echo "  $tile: repo=$REPO_VERSION registry=$REGISTRY_VERSION installed=$INSTALLED_VERSION (repo ahead — GHA may be pending)"
+  else
+    echo "  $tile: repo=$REPO_VERSION registry=$REGISTRY_VERSION installed=$INSTALLED_VERSION (MISMATCH)"
+    ISSUES=$((ISSUES + 1))
+  fi
+done
+
+echo ""
+
+# Check for pending staging on NAS
+echo "Pending staging:"
+STAGING=$(nas "find $NAS_PROJECT_DIR/groups/*/staging -type f -name '*.md' 2>/dev/null" || true)
+if [ -n "$STAGING" ]; then
+  echo "$STAGING" | while read -r f; do
+    echo "  ${f#$NAS_PROJECT_DIR/}"
+  done
+else
+  echo "  (empty)"
+fi
+
+echo ""
+
+# Check GHA status for recent failures
+echo "Latest GHA runs:"
+for tile in $TILES; do
+  result=$(gh run list --repo "$TILE_OWNER_VAL/$tile" --limit 1 --json status,conclusion --jq '.[0] | "\(.conclusion)"' 2>/dev/null)
+  if [ "$result" = "failure" ]; then
+    echo "  $tile: FAILED"
+    ISSUES=$((ISSUES + 1))
+  else
+    echo "  $tile: $result"
   fi
 done
 

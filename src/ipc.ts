@@ -1222,19 +1222,44 @@ export async function processTaskIpc(
                 }),
               );
             } else {
-              // Clear ALL sessions so every group picks up new tiles on next spawn
-              const cleared = deleteAllSessions();
               logger.info(
-                { sourceGroup, sessionsCleared: cleared },
-                'promote_staging completed — all sessions invalidated',
+                { sourceGroup },
+                'promote_staging pushed to tile repo',
               );
               fs.writeFileSync(
                 promoteResultPath,
-                JSON.stringify({
-                  stdout: stdout.trim(),
-                  sessionsCleared: cleared,
-                }),
+                JSON.stringify({ stdout: stdout.trim() }),
               );
+
+              // Schedule tessl update + session clear after GHA completes (~3 min)
+              setTimeout(() => {
+                logger.info('Running post-promote tessl update');
+                execFile(
+                  'bash',
+                  [
+                    '-c',
+                    'cd /app/tessl-workspace && tessl update --yes --dangerously-ignore-security --agent claude-code 2>&1',
+                  ],
+                  { timeout: 120_000 },
+                  (updateErr, updateStdout) => {
+                    if (updateErr) {
+                      logger.error(
+                        { error: updateErr.message },
+                        'Post-promote tessl update failed',
+                      );
+                    } else {
+                      const cleared = deleteAllSessions();
+                      logger.info(
+                        {
+                          sessionsCleared: cleared,
+                          output: updateStdout.trim().slice(-200),
+                        },
+                        'Post-promote tessl update completed — sessions cleared',
+                      );
+                    }
+                  },
+                );
+              }, 180_000); // 3 minutes
             }
           },
         );
