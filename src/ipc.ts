@@ -1153,16 +1153,38 @@ export async function processTaskIpc(
         const promoteScript = path.join(
           process.cwd(),
           'scripts',
-          'promote-from-orchestrator.sh',
+          'promote-to-tile-repo.sh',
         );
 
         if (!fs.existsSync(promoteScript)) {
           fs.writeFileSync(
             promoteResultPath,
-            JSON.stringify({ error: 'promote-from-orchestrator.sh not found' }),
+            JSON.stringify({
+              error: 'promote-to-tile-repo.sh not found',
+            }),
           );
           break;
         }
+
+        const stagingDir = path.join(
+          GROUPS_DIR,
+          sourceGroup,
+          'staging',
+          data.tileName,
+        );
+
+        // Read credentials from .env for tile repo push
+        const envPath = path.join(process.cwd(), '.env');
+        const envContent = fs.existsSync(envPath)
+          ? fs.readFileSync(envPath, 'utf-8')
+          : '';
+        const getEnv = (key: string) =>
+          envContent
+            .split('\n')
+            .find((l) => l.startsWith(`${key}=`))
+            ?.split('=')
+            .slice(1)
+            .join('=') || '';
 
         logger.info(
           { sourceGroup, tileName: data.tileName, skillName: data.skillName },
@@ -1171,8 +1193,17 @@ export async function processTaskIpc(
 
         execFile(
           'bash',
-          [promoteScript, sourceGroup, data.tileName, data.skillName],
-          { timeout: 300_000, maxBuffer: 5 * 1024 * 1024 },
+          [promoteScript, stagingDir, data.tileName, data.skillName],
+          {
+            timeout: 300_000,
+            maxBuffer: 5 * 1024 * 1024,
+            env: {
+              ...process.env,
+              GITHUB_TOKEN: getEnv('GITHUB_TOKEN'),
+              TILE_OWNER: getEnv('TILE_OWNER') || 'jbaruch',
+              ASSISTANT_NAME: getEnv('ASSISTANT_NAME') || 'AyeAye',
+            },
+          },
           (error, stdout, stderr) => {
             if (error) {
               logger.error(

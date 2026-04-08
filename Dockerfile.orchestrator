@@ -35,9 +35,6 @@ RUN npm install -g tessl jbaruch/reclaim-tripit-timezones-sync && tessl --versio
 # Scripts (promote-from-orchestrator, etc.)
 COPY scripts/ ./scripts/
 
-# Tile sources (used as fallback and for promote script)
-COPY tiles/ ./tiles/
-
 # Tessl workspace — tile dependencies tracked in git, installed at deploy time
 COPY tessl-workspace/tessl.json /app/tessl-workspace/tessl.json
 

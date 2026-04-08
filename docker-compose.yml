@@ -15,8 +15,6 @@ services:
       - ./logs:/app/logs
       # Credentials (mounted, never baked into image)
       - ./.env:/app/.env:ro
-      # Full repo (for git operations in promote script)
-      - .:/app/repo
       # Shared trusted directory (mounted into trusted + main agent containers)
       - ./trusted:/app/trusted
       # Tessl: credentials + persistent workspace for registry installs
