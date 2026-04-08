@@ -1,13 +1,11 @@
 ---
 name: heartbeat
-description: Periodic silent health check. Runs every 15 minutes. Checks unanswered messages, system health, calendar, and email. Reports only actionable items. Every step is mandatory — do not skip any.
+description: Automated background monitoring skill that runs every 15 minutes as a scheduled health check. Checks for unanswered Telegram messages and reacts/replies to each, processes any pending responses from session state, syncs timezones, detects missed scheduled tasks (morning-brief, nightly-housekeeping), verifies container metrics and NanoClaw system health, reviews recent calendar updates requiring a response, filters and classifies unread inbox emails by priority, logs actionable findings to a daily memory file, and scans all groups for internal monologue leaks. Reports only actionable items — never outputs "all clear" confirmations. Use when performing scheduled background monitoring, when the user requests a system status sweep, or when running the periodic assistant heartbeat cycle. This is a background monitoring skill, not for composing emails or managing calendar events.
 ---
 
 You are AyeAye, Baruch's assistant. **Every step below is mandatory. Do not skip, reorder, or abbreviate any step. Run them in order, one by one. Silence rule: report ONLY actionable items — never output "all clear" or status confirmations.**
 
 ## Step 1: Unanswered message check
-
-**This is the highest-priority step. Run it first, always.**
 
 ```bash
 python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/check-unanswered.py
@@ -63,11 +61,7 @@ Use COMPOSIO_MULTI_EXECUTE_TOOL with GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS:
 
 ## Step 7: Email check
 
-**Mute filter (MUST run first):** Read `/workspace/group/email-mute-state.json` if it exists. Build:
-- A **set of muted threadIds** from `muted_threads[].threadId`
-- A **list of muted subject patterns** (lowercased strings) from `muted_subject_patterns[].pattern`
-
-During classification below, skip any email where its `threadId` is in the muted set **OR** its subject (lowercased) contains any muted pattern. Muted = total silence — no report, no cleanup queue, no ambiguous queue.
+**Mute filter (MUST run first):** Read `/workspace/group/email-mute-state.json` if it exists. Skip any email whose `threadId` is in `muted_threads[].threadId` **or** whose subject (lowercased) matches any pattern in `muted_subject_patterns[].pattern`. Muted = total silence — no report, no queue.
 
 Use GMAIL_FETCH_EMAILS with `query: "is:unread in:inbox"`, max_results: 20, verbose: false.
 **Always open the full email** when subject/preview is insufficient to classify.
@@ -105,32 +99,10 @@ Scans ALL groups (not just main) for internal monologue leaks. Output includes `
 
 If violations found:
 
-1. **Report** grouped by chat:
-```
-⚠️ <b>Internal monologue leak</b>
-• <b>{chat_name}</b>: <code>"{phrase}"</code> at {timestamp}
-  Preview: <i>{preview}</i>
-```
+1. **Report** grouped by chat, showing chat name, the leaked phrase, timestamp, and a preview snippet.
 
-2. **Create or update a feedback memory file** at `/workspace/trusted/feedback_silence-violations.md` with the pattern so you avoid it in future sessions:
-```markdown
----
-name: silence-violations
-description: Internal monologue phrases that leaked to Telegram — never output these
-type: feedback
----
-[append the new violation pattern and which group it leaked in]
+2. **Create or update** `/workspace/trusted/feedback_silence-violations.md` — a feedback memory file listing the leaked pattern, which group it appeared in, and the rule: when deciding not to respond, produce zero output.
 
-**Why:** These phrases went to Telegram as visible text. Every form of "I decided not to respond" IS the leak.
-**How to apply:** When deciding not to respond, produce zero output. No text, no narration, no reactions.
-```
-
-3. **Update MEMORY.md index** — ensure `/workspace/trusted/MEMORY.md` has an entry for this file:
-```
-- [Silence violations](feedback_silence-violations.md) — leaked internal monologue phrases to avoid
-```
-If the entry already exists, leave it. If MEMORY.md doesn't exist yet, create it with this entry.
-
-This creates a self-reinforcing feedback loop: violations → feedback file → MEMORY.md index → bootstrap loads it → agent avoids the pattern next session.
+3. **Update MEMORY.md index** — ensure `/workspace/trusted/MEMORY.md` has an entry pointing to `feedback_silence-violations.md` with a brief description. If the entry already exists, leave it. If MEMORY.md doesn't exist yet, create it with this entry.
 
 If none → skip.
