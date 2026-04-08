@@ -1231,7 +1231,7 @@ export async function processTaskIpc(
                 JSON.stringify({ stdout: stdout.trim() }),
               );
 
-              // Schedule tessl update + session clear after GHA completes (~3 min)
+              // Schedule tessl update + session clear after GHA completes (~5 min)
               setTimeout(() => {
                 logger.info('Running post-promote tessl update');
                 execFile(
@@ -1259,7 +1259,7 @@ export async function processTaskIpc(
                     }
                   },
                 );
-              }, 180_000); // 3 minutes
+              }, 300_000); // 5 minutes
             }
           },
         );

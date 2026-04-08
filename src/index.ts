@@ -36,6 +36,7 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
+  deleteAllSessions,
   deleteSession,
   getAllTasks,
   getLastBotMessageTimestamp,
@@ -1017,6 +1018,32 @@ async function main(): Promise<void> {
   recoverPendingMessages();
   // Start Hubitat smart home listener (if configured)
   startHubitatListener();
+
+  // Periodic tile update from registry (every 15 min)
+  // Heartbeat runs in the container and can't call tessl update.
+  // This catches publishes that the post-promote timer missed.
+  const { execFile: execTesslUpdate } = await import('child_process');
+  setInterval(() => {
+    execTesslUpdate(
+      'bash',
+      [
+        '-c',
+        'cd /app/tessl-workspace && tessl update --yes --dangerously-ignore-security --agent claude-code 2>&1',
+      ],
+      { timeout: 120_000 },
+      (err, stdout) => {
+        if (err) {
+          logger.warn({ error: err.message }, 'Periodic tessl update failed');
+        } else if (stdout.includes('Updated')) {
+          const cleared = deleteAllSessions();
+          logger.info(
+            { sessionsCleared: cleared, output: stdout.trim().slice(-200) },
+            'Periodic tessl update found new tiles — sessions cleared',
+          );
+        }
+      },
+    );
+  }, 900_000);
 
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');
