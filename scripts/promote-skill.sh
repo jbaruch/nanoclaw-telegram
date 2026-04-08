@@ -201,36 +201,31 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 git push origin main
 
 echo ""
-echo "Deploying to NAS (plugins are delivered from git, not tessl registry)..."
-nas "cd $NAS_PROJECT_DIR && git pull && docker compose up -d --build"
+echo "Deploying to NAS..."
+nas "cd $NAS_PROJECT_DIR && git stash 2>/dev/null; git pull --no-rebase origin main; git stash pop 2>/dev/null; true"
 
 echo ""
-echo "Publishing to tessl registry..."
-if tessl plugin publish --bump patch "$TILE_DIR"; then
-  git add "$TILE_JSON"
-  git commit -m "chore: bump $TILE_NAME version after publish
+echo "Syncing to tile GitHub repo (GHA handles review + lint + publish)..."
+TILE_REPO_DIR="/tmp/tile-repo-${TILE_NAME}"
+rm -rf "$TILE_REPO_DIR"
+if git clone --depth 1 "https://github.com/jbaruch/${TILE_NAME}.git" "$TILE_REPO_DIR" 2>/dev/null; then
+  rsync -a --delete --exclude='.git' --exclude='.github' "$TILE_DIR/" "$TILE_REPO_DIR/"
+  cd "$TILE_REPO_DIR"
+  git add -A
+  if git diff --cached --quiet; then
+    echo "  Tile repo already up to date."
+  else
+    git commit -m "feat: promote ${PROMOTED_COUNT} item(s) from staging
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
-  git push origin main
-  nas "cd $NAS_PROJECT_DIR && git pull"
-
-  echo ""
-  echo "Pulling plugins from registry into orchestrator..."
-  # IMPORTANT: install ALL plugins together — vendored mode removes tiles not in the install list
-  TILE_OWNER_VAL=$(grep TILE_OWNER "$PROJECT_ROOT/.env" 2>/dev/null | cut -d= -f2)
-  TILE_OWNER_VAL="${TILE_OWNER_VAL:-nanoclaw}"
-  ALL_TILES=$(ls "$PROJECT_ROOT/tiles/" | while read t; do echo "$TILE_OWNER_VAL/$t"; done | tr '\n' ' ')
-  nas "docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl update --yes --dangerously-ignore-security --agent claude-code 2>&1'" || {
-    echo "  ERROR: tessl update in orchestrator failed"
-    exit 1
-  }
-  # Kill all running agent containers so they respawn with new plugins
-  echo "Killing stale agent containers..."
-  nas "docker ps --format '{{.ID}} {{.Names}}' | grep nanoclaw-telegram | awk '{print \$1}' | xargs -r docker kill" || true
+    git push origin main
+    echo "  Pushed to jbaruch/${TILE_NAME} — GHA will review, lint, and publish."
+  fi
+  rm -rf "$TILE_REPO_DIR"
 else
-  echo "  tessl publish failed — plugins deployed via git only"
+  echo "  WARN: could not clone tile repo jbaruch/${TILE_NAME} — publish manually"
 fi
 
 echo ""
-echo "Done! $PROMOTED_COUNT item(s) promoted and deployed."
-echo "AyeAye will clean staging after verify-tiles confirms installation."
+echo "Done! $PROMOTED_COUNT item(s) promoted."
+echo "GHA publishes to registry. AyeAye cleans staging after verify-tiles confirms installation."

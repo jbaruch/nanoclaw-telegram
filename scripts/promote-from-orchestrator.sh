@@ -192,15 +192,30 @@ else
   git push origin main
 fi
 
-# --- Publish ---
-echo "Publishing..."
-tessl plugin publish --bump patch "$TILE_DIR" || echo "WARN: publish failed (tiles deployed via git)"
+# --- Sync to tile GitHub repo (GHA handles review + lint + publish) ---
+TILE_REPO_URL="https://x-access-token:${TOKEN}@github.com/${TILE_OWNER}/${TILE_NAME}.git"
+TILE_REPO_DIR="/tmp/tile-repo-${TILE_NAME}"
 
-# --- Install tiles ---
-echo "Installing tiles from registry..."
-cd /app/tessl-workspace
-tessl update \
-  --yes --dangerously-ignore-security --agent claude-code 2>&1 || echo "WARN: tile update had issues"
+echo "Syncing to GitHub repo ${TILE_OWNER}/${TILE_NAME}..."
+rm -rf "$TILE_REPO_DIR"
+if git clone --depth 1 "$TILE_REPO_URL" "$TILE_REPO_DIR" 2>/dev/null; then
+  # Sync tile content (preserve .github/ workflow)
+  rsync -a --delete --exclude='.git' --exclude='.github' "$TILE_DIR/" "$TILE_REPO_DIR/"
+  cd "$TILE_REPO_DIR"
+  git config user.email "nanoclaw@bot.local"
+  git config user.name "$ASSISTANT"
+  git add -A
+  if git diff --cached --quiet; then
+    echo "Tile repo already up to date."
+  else
+    git commit -m "feat: promote $PROMOTED item(s) from $ASSISTANT staging"
+    git push origin main
+    echo "Pushed to ${TILE_OWNER}/${TILE_NAME} — GHA will review, lint, and publish."
+  fi
+  rm -rf "$TILE_REPO_DIR"
+else
+  echo "WARN: could not clone tile repo ${TILE_OWNER}/${TILE_NAME} — publish manually"
+fi
 
 # Agent containers are NOT killed here — the IPC handler clears all sessions,
 # so the next spawn gets fresh tiles. Killing from inside the promote would
