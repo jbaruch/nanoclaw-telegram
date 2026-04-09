@@ -136,6 +136,17 @@ interface VolumeMount {
  * In Docker-out-of-Docker, the orchestrator's filesystem (/app/...) differs
  * from the host's (HOST_PROJECT_ROOT/...). Mount paths must use host paths.
  */
+function chownRecursive(dir: string, uid: number, gid: number): void {
+  fs.chownSync(dir, uid, gid);
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+    fs.chownSync(fullPath, uid, gid);
+    if (entry.isDirectory()) {
+      chownRecursive(fullPath, uid, gid);
+    }
+  }
+}
+
 function toHostPath(localPath: string): string {
   const projectRoot = process.cwd();
   if (HOST_PROJECT_ROOT === projectRoot) return localPath; // running directly on host
@@ -420,6 +431,17 @@ function buildVolumeMounts(
           { recursive: true },
         );
       }
+    }
+  }
+  // Chown the .claude session dir so the container user (node) can write to it.
+  // The SDK creates subdirs like session-env/ at runtime — without this, EACCES.
+  const sessionUid = HOST_UID ?? 1000;
+  const sessionGid = HOST_GID ?? 1000;
+  if (sessionUid !== 0) {
+    try {
+      chownRecursive(groupSessionsDir, sessionUid, sessionGid);
+    } catch (err: unknown) {
+      logger.warn({ err, groupSessionsDir }, 'Failed to chown .claude session dir');
     }
   }
   mounts.push({
