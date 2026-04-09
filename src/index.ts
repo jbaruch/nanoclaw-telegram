@@ -40,6 +40,7 @@ import {
   deleteSession,
   getAllTasks,
   getLastBotMessageTimestamp,
+  getMessageById,
   getMessagesSince,
   getNewMessages,
   getRouterState,
@@ -83,6 +84,18 @@ import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
+
+/** Check if a message is a reply to or quote of a bot message. */
+function isReplyToBot(msg: NewMessage): boolean {
+  // Check content prefix — resolveReply adds [Replying to SenderName: "..."]
+  if (msg.content.startsWith(`[Replying to ${ASSISTANT_NAME}:`)) return true;
+  // Check reply_to_message_id in DB — covers cases where prefix format differs
+  if (msg.reply_to_message_id) {
+    const original = getMessageById(msg.reply_to_message_id, msg.chat_jid);
+    if (original?.is_from_me) return true;
+  }
+  return false;
+}
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
@@ -333,7 +346,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const allowlistCfg = loadSenderAllowlist();
     const hasTrigger = missedMessages.some(
       (m) =>
-        triggerPattern.test(m.content.trim()) &&
+        (triggerPattern.test(m.content.trim()) || isReplyToBot(m)) &&
         (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
     );
     if (!hasTrigger) {
@@ -702,7 +715,7 @@ async function startMessageLoop(): Promise<void> {
             const allowlistCfg = loadSenderAllowlist();
             const hasTrigger = groupMessages.some(
               (m) =>
-                triggerPattern.test(m.content.trim()) &&
+                (triggerPattern.test(m.content.trim()) || isReplyToBot(m)) &&
                 (m.is_from_me ||
                   isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
             );
