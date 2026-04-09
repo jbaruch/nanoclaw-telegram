@@ -42,6 +42,8 @@ import {
   getLastBotMessageTimestamp,
   getMessageById,
   getMessagesSince,
+  getTaskById,
+  createTask,
   getNewMessages,
   getRouterState,
   initDatabase,
@@ -212,6 +214,34 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
       logger.warn(
         { folder: group.folder, err },
         'Failed to chown group folder',
+      );
+    }
+  }
+
+  // Auto-create a lightweight heartbeat for trigger-required groups.
+  // These groups have their own container and can only send to their own chat,
+  // preventing cross-group message routing bugs from the main heartbeat.
+  if (group.requiresTrigger !== false && !group.isMain) {
+    const heartbeatId = `heartbeat-${group.folder}`;
+    if (!getTaskById(heartbeatId)) {
+      createTask({
+        id: heartbeatId,
+        group_folder: group.folder,
+        chat_jid: jid,
+        prompt:
+          'Run the check-unanswered script only: python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/check-unanswered.py — then react and reply to each unanswered message. Do NOT query the database directly. Do NOT check email, calendar, or system health.',
+        schedule_type: 'cron',
+        schedule_value: '*/15 * * * *',
+        context_mode: 'group',
+        next_run: new Date(
+          Date.now() + 15 * 60 * 1000,
+        ).toISOString(),
+        status: 'active',
+        created_at: new Date().toISOString(),
+      });
+      logger.info(
+        { jid, folder: group.folder },
+        'Auto-created heartbeat for trigger-required group',
       );
     }
   }
