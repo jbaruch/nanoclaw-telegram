@@ -117,12 +117,15 @@ export function loadMountAllowlist(): MountAllowlist | null {
  * Expand ~ to home directory and resolve to absolute path
  */
 function expandPath(p: string): string {
-  const homeDir = process.env.HOME || os.homedir();
+  // In DooD, HOME is the orchestrator container's /root — use HOST_PROJECT_ROOT to derive host HOME
+  const hostHome = process.env.HOST_PROJECT_ROOT
+    ? path.dirname(process.env.HOST_PROJECT_ROOT)
+    : process.env.HOME || os.homedir();
   if (p.startsWith('~/')) {
-    return path.join(homeDir, p.slice(2));
+    return path.join(hostHome, p.slice(2));
   }
   if (p === '~') {
-    return homeDir;
+    return hostHome;
   }
   return path.resolve(p);
 }
@@ -272,7 +275,12 @@ export function validateMount(
 
   // Expand and resolve the host path
   const expandedPath = expandPath(mount.hostPath);
-  const realPath = getRealPath(expandedPath);
+
+  // In Docker-out-of-Docker mode, the orchestrator can't stat host paths.
+  // The paths are for `docker run -v` (executed by the Docker daemon on the host),
+  // not for the orchestrator to access directly.
+  const isDooD = !!process.env.HOST_PROJECT_ROOT;
+  const realPath = isDooD ? expandedPath : getRealPath(expandedPath);
 
   if (realPath === null) {
     return {
