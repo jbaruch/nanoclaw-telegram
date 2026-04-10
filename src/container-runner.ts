@@ -441,7 +441,10 @@ function buildVolumeMounts(
     try {
       chownRecursive(groupSessionsDir, sessionUid, sessionGid);
     } catch (err: unknown) {
-      logger.warn({ err, groupSessionsDir }, 'Failed to chown .claude session dir');
+      logger.warn(
+        { err, groupSessionsDir },
+        'Failed to chown .claude session dir',
+      );
     }
   }
   mounts.push({
@@ -542,6 +545,7 @@ function buildContainerArgs(
   group: RegisteredGroup,
   isMain: boolean,
   replyToMessageId?: string,
+  chatJid?: string,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -585,6 +589,11 @@ function buildContainerArgs(
     if (value) {
       args.push('-e', `${varName}=${value}`);
     }
+  }
+
+  // Pass chat JID so container scripts know which group they're in
+  if (chatJid) {
+    args.push('-e', `NANOCLAW_CHAT_JID=${chatJid}`);
   }
 
   // Pass reply-to message ID so the first IPC send_message appears as a Telegram reply
@@ -669,6 +678,7 @@ export async function runContainerAgent(
     group,
     input.isMain,
     input.replyToMessageId,
+    input.chatJid,
   );
 
   logger.debug(
