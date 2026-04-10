@@ -17,6 +17,8 @@ services:
       - ./.env:/app/.env:ro
       # Shared trusted directory (mounted into trusted + main agent containers)
       - ./trusted:/app/trusted
+      # NanoClaw config (mount allowlist, sender allowlist)
+      - ${HOME}/.config/nanoclaw:/root/.config/nanoclaw:ro
       # Tessl: credentials + persistent workspace for registry installs
       - ${HOME}/.tessl:/root/.tessl
       - ./tessl-workspace:/app/tessl-workspace
