@@ -366,6 +366,7 @@ export async function processTaskIpc(
     skillName?: string;
     slug?: string;
     filter?: Record<string, boolean>;
+    dryRun?: boolean;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -1132,6 +1133,71 @@ export async function processTaskIpc(
           logger.error({ error: errMsg }, 'Sessionize open CFPs fetch failed');
           fs.writeFileSync(cfpsResultPath, JSON.stringify({ error: errMsg }));
         }
+      }
+      break;
+
+    case 'audible_backup':
+      if (data.requestId) {
+        if (!isMain) {
+          logger.warn({ sourceGroup }, 'Unauthorized audible_backup attempt');
+          break;
+        }
+
+        const audibleResultPath = path.join(
+          DATA_DIR,
+          'ipc',
+          sourceGroup,
+          'input',
+          `_script_result_${data.requestId}.json`,
+        );
+
+        const dryRun = data.dryRun === true;
+        logger.info({ sourceGroup, dryRun }, 'Running audible_backup');
+
+        const dockerArgs = [
+          'run', '--rm',
+          '-v', `${process.env.HOME}/.audible:/root/.audible:ro`,
+          '-v', '/volume1/Google Drive/Audio Books:/library',
+          'audible-backup:latest',
+          '--json',
+          ...(dryRun ? ['--dry-run'] : []),
+        ];
+
+        execFile(
+          'docker',
+          dockerArgs,
+          {
+            cwd: process.cwd(),
+            env: {
+              PATH: process.env.PATH || '/usr/bin:/bin',
+              HOME: process.env.HOME || '/root',
+            },
+            timeout: 600_000,
+            maxBuffer: 10 * 1024 * 1024,
+          },
+          (error, stdout, stderr) => {
+            if (error) {
+              logger.error(
+                { sourceGroup, error: error.message, stderr },
+                'audible_backup failed',
+              );
+              fs.writeFileSync(
+                audibleResultPath,
+                JSON.stringify({
+                  error: error.message,
+                  stderr: stderr.slice(-500),
+                }),
+              );
+            } else {
+              logger.info(
+                { sourceGroup, stdoutLen: stdout.length },
+                'audible_backup completed',
+              );
+              // stdout is JSON from backup.py --json
+              fs.writeFileSync(audibleResultPath, stdout);
+            }
+          },
+        );
       }
       break;
 

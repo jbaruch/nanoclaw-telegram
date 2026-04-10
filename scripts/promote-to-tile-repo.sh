@@ -13,6 +13,12 @@
 
 set -euo pipefail
 
+# Load nvm if available (NAS has tessl via nvm-managed npm)
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+if [ -s "$NVM_DIR/nvm.sh" ]; then
+  . "$NVM_DIR/nvm.sh"
+fi
+
 STAGING_DIR="${1:?staging directory required}"
 TILE_NAME="${2:?tile name required}"
 MODE="${3:-all}"
@@ -68,6 +74,7 @@ git clone --depth 1 "$TILE_REPO_URL" "$TILE_REPO_DIR"
 
 PROMOTED=0
 BLOCKED=0
+PROMOTED_SKILLS=""
 
 # --- Pull skills into clone ---
 if [ "$MODE" != "--rules-only" ]; then
@@ -107,6 +114,7 @@ if [ "$MODE" != "--rules-only" ]; then
     mkdir -p "$dst"
     cp -r "$src/." "$dst/"
     echo "pulled: $canonical"
+    PROMOTED_SKILLS="$PROMOTED_SKILLS $canonical"
 
     # Update tile.json (add entry if new)
     python3 -c "
@@ -165,6 +173,16 @@ if [ "$PROMOTED" -eq 0 ]; then
   echo "Nothing to promote."
   rm -rf "$TILE_REPO_DIR"
   exit 0
+fi
+
+# --- Skill review + optimize (shift-left: fix before CI) ---
+if [ -n "$PROMOTED_SKILLS" ] && command -v tessl >/dev/null 2>&1; then
+  for skill_name in $PROMOTED_SKILLS; do
+    echo "reviewing: $skill_name"
+    tessl skill review --optimize --yes "$TILE_REPO_DIR/skills/$skill_name"
+  done
+elif [ -n "$PROMOTED_SKILLS" ]; then
+  echo "WARN: tessl not found, skipping local skill review"
 fi
 
 # --- Commit and push ---

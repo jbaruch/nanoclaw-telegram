@@ -653,6 +653,52 @@ server.tool(
 );
 
 server.tool(
+  'audible_backup',
+  'Back up Audible audiobooks. Checks for new purchases not in the existing library, downloads and decrypts them to M4B. The host handles authentication and file storage. Use --dry-run to preview without downloading.',
+  {
+    dryRun: z.boolean().optional().describe('Preview new books without downloading (default: false)'),
+  },
+  async (args) => {
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const data = {
+      type: 'audible_backup',
+      dryRun: args.dryRun ?? false,
+      requestId,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
+    const timeoutMs = 600_000;
+    const pollMs = 2000;
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+      if (fs.existsSync(resultPath)) {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        fs.unlinkSync(resultPath);
+        if (result.error) {
+          return {
+            content: [{ type: 'text' as const, text: `Audible backup failed: ${result.error}\n${result.stderr || ''}` }],
+            isError: true,
+          };
+        }
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+        };
+      }
+      await new Promise(r => setTimeout(r, pollMs));
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'Audible backup timed out after 10 minutes' }],
+      isError: true,
+    };
+  },
+);
+
+server.tool(
   'github_backup',
   'Commit and push the group backup repo to GitHub. Use for nightly backups or when important state changes. The host handles git credentials — the container just triggers it.',
   {
