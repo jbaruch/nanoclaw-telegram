@@ -1196,8 +1196,20 @@ export async function processTaskIpc(
                 { sourceGroup, stdoutLen: stdout.length },
                 'audible_backup completed',
               );
-              // stdout is JSON from backup.py --json
-              fs.writeFileSync(audibleResultPath, stdout);
+              // stdout is JSON from backup.py --json; merge stderr (progress logs) into it
+              try {
+                const parsed = JSON.parse(stdout);
+                if (stderr) parsed.logs = stderr.slice(-2000);
+                fs.writeFileSync(
+                  audibleResultPath,
+                  JSON.stringify(parsed),
+                );
+              } catch {
+                fs.writeFileSync(
+                  audibleResultPath,
+                  JSON.stringify({ raw: stdout, logs: stderr?.slice(-2000) }),
+                );
+              }
             }
           },
         );
