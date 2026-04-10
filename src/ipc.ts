@@ -1155,9 +1155,12 @@ export async function processTaskIpc(
         logger.info({ sourceGroup, dryRun }, 'Running audible_backup');
 
         const dockerArgs = [
-          'run', '--rm',
-          '-v', `${process.env.HOME}/.audible:/root/.audible:ro`,
-          '-v', '/volume1/Google Drive/Audio Books:/library',
+          'run',
+          '--rm',
+          '-v',
+          `${process.env.HOME}/.audible:/root/.audible`,
+          '-v',
+          '/volume1/Google Drive/Audio Books:/library',
           'audible-backup:latest',
           '--json',
           ...(dryRun ? ['--dry-run'] : []),
