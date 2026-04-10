@@ -1158,7 +1158,7 @@ export async function processTaskIpc(
           'run',
           '--rm',
           '-v',
-          `${process.env.HOME}/.audible:/root/.audible`,
+          `${path.dirname(process.env.HOST_PROJECT_ROOT || process.cwd())}/.audible:/root/.audible`,
           '-v',
           '/volume1/Google Drive/Audio Books:/library',
           'audible-backup:latest',
