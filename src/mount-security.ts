@@ -184,7 +184,8 @@ function findAllowedRoot(
       continue;
     }
     const expandedRoot = expandPath(root.path);
-    const realRoot = getRealPath(expandedRoot);
+    const isDooD = !!process.env.HOST_PROJECT_ROOT;
+    const realRoot = isDooD ? expandedRoot : getRealPath(expandedRoot);
 
     if (realRoot === null) {
       // Allowed root doesn't exist, skip it
