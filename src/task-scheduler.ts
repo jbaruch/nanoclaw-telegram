@@ -8,6 +8,7 @@ import {
   runContainerAgent,
   writeTasksSnapshot,
 } from './container-runner.js';
+import { stopContainer } from './container-runtime.js';
 import {
   getAllTasks,
   getDueTasks,
@@ -160,13 +161,33 @@ async function runTask(
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
   // query loop to time out. A short delay handles any final MCP calls.
   const TASK_CLOSE_DELAY_MS = 10000;
+  // If the container doesn't exit within this grace period after the close
+  // sentinel, force-stop it. Prevents zombie task containers from blocking
+  // the group queue (messages pile up behind a dead container).
+  const TASK_KILL_GRACE_MS = 30_000;
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
+  let killTimer: ReturnType<typeof setTimeout> | null = null;
+  let taskContainerName: string | null = null;
 
   const scheduleClose = () => {
     if (closeTimer) return; // already scheduled
     closeTimer = setTimeout(() => {
       logger.debug({ taskId: task.id }, 'Closing task container after result');
       deps.queue.closeStdin(task.chat_jid);
+      // Schedule a hard kill in case the container ignores the close sentinel
+      killTimer = setTimeout(() => {
+        if (taskContainerName) {
+          logger.warn(
+            { taskId: task.id, containerName: taskContainerName },
+            'Task container did not exit after close sentinel, force stopping',
+          );
+          try {
+            stopContainer(taskContainerName);
+          } catch {
+            // container may have already exited
+          }
+        }
+      }, TASK_KILL_GRACE_MS);
     }, TASK_CLOSE_DELAY_MS);
   };
 
@@ -183,8 +204,10 @@ async function runTask(
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
       },
-      (proc, containerName) =>
-        deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
+      (proc, containerName) => {
+        taskContainerName = containerName;
+        deps.onProcess(task.chat_jid, proc, containerName, task.group_folder);
+      },
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
@@ -209,6 +232,7 @@ async function runTask(
     );
 
     if (closeTimer) clearTimeout(closeTimer);
+    if (killTimer) clearTimeout(killTimer);
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
@@ -223,6 +247,7 @@ async function runTask(
     );
   } catch (err) {
     if (closeTimer) clearTimeout(closeTimer);
+    if (killTimer) clearTimeout(killTimer);
     error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, error }, 'Task failed');
   }
