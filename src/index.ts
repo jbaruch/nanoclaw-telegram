@@ -233,9 +233,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
         schedule_type: 'cron',
         schedule_value: '*/15 * * * *',
         context_mode: 'group',
-        next_run: new Date(
-          Date.now() + 15 * 60 * 1000,
-        ).toISOString(),
+        next_run: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
         status: 'active',
         created_at: new Date().toISOString(),
       });
@@ -1059,6 +1057,24 @@ async function main(): Promise<void> {
   startSessionCleanup();
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
+
+  // Write available_groups.json for all main/trusted groups on startup.
+  // Otherwise the snapshot only updates when a container spawns, which can
+  // leave it weeks stale if the group doesn't get traffic.
+  const startupGroups = getAvailableGroups();
+  const startupRegisteredJids = new Set(Object.keys(registeredGroups));
+  for (const [, group] of Object.entries(registeredGroups)) {
+    if (group.isMain || group.containerConfig?.trusted) {
+      writeGroupsSnapshot(
+        group.folder,
+        group.isMain === true,
+        startupGroups,
+        startupRegisteredJids,
+        !!group.containerConfig?.trusted,
+      );
+    }
+  }
+
   // Start Hubitat smart home listener (if configured)
   startHubitatListener();
 
