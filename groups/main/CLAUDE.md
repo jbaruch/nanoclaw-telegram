@@ -90,12 +90,12 @@ Main has read-only access to the project, read-write access to the store (SQLite
 | Container Path | Host Path | Access |
 |----------------|-----------|--------|
 | `/workspace/project` | Project root | read-only |
-| `/workspace/project/store` | `store/` | read-write |
+| `/workspace/store` | `store/` | read-write |
 | `/workspace/group` | `groups/main/` | read-write |
 
 Key paths inside the container:
-- `/workspace/project/store/messages.db` - SQLite database (read-write)
-- `/workspace/project/store/messages.db` (registered_groups table) - Group config
+- `/workspace/store/messages.db` - SQLite database (read-write)
+- `/workspace/store/messages.db` (registered_groups table) - Group config
 - `/workspace/project/groups/` - All group folders
 
 ---
@@ -133,7 +133,7 @@ Then wait a moment and re-read `available_groups.json`.
 **Fallback**: Query the SQLite database directly:
 
 ```bash
-sqlite3 /workspace/project/store/messages.db "
+sqlite3 /workspace/store/messages.db "
   SELECT jid, name, last_message_time
   FROM chats
   WHERE jid LIKE '%@g.us' AND jid != '__group_sync__'
