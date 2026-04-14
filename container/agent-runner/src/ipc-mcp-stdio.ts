@@ -966,8 +966,10 @@ print(json.dumps({"results": result, "count": len(result)}, indent=2))
     }
 
     const { execSync } = await import('child_process');
+    const tmpScript = '/tmp/smarthome_query.py';
     try {
-      const output = execSync(`python3 -c ${JSON.stringify(pythonCode)}`, {
+      fs.writeFileSync(tmpScript, pythonCode);
+      const output = execSync(`python3 ${tmpScript}`, {
         timeout: 15_000,
         maxBuffer: 2 * 1024 * 1024,
         encoding: 'utf-8',
@@ -979,6 +981,8 @@ print(json.dumps({"results": result, "count": len(result)}, indent=2))
         content: [{ type: 'text' as const, text: `Smart home query failed: ${msg}` }],
         isError: true,
       };
+    } finally {
+      try { fs.unlinkSync(tmpScript); } catch { /* ignore */ }
     }
   },
 );
