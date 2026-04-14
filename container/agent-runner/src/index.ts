@@ -532,21 +532,62 @@ async function runQuery(
   // Define a general-purpose subagent that inherits all skills and MCP
   // servers. When the main agent uses TeamCreate, it can reference this
   // agent type and the subagent will have full access to skills/rules.
-  // Define a general-purpose subagent with full access to all installed
-  // skills and MCP servers. The main agent spawns this via TeamCreate
-  // for background tasks (heartbeat, research, etc.). Without this,
-  // subagents are isolated processes with no skills or rules.
+  // Build subagent prompt with all rules and behavioral instructions.
+  // Subagents don't inherit settingSources, CLAUDE.md, or .tessl/RULES.md
+  // from the parent — they only get what's in their prompt + skills array.
+  // Read all rule/context files and inject them into the subagent prompt.
+  const subagentPromptParts: string[] = [
+    'You are a background agent with the same capabilities as the main agent.',
+    'Follow ALL rules below. Use skills via the Skill tool.',
+    'Report results via mcp__nanoclaw__send_message.',
+  ];
+
+  // Load rules chain: CLAUDE.md → AGENTS.md → .tessl/RULES.md
+  const ruleFiles = [
+    '/workspace/group/CLAUDE.md',
+    '/workspace/group/.tessl/RULES.md',
+    soulMdPath,
+    globalClaudeMdPath,
+  ];
+  for (const rulePath of ruleFiles) {
+    if (fs.existsSync(rulePath)) {
+      const content = fs.readFileSync(rulePath, 'utf-8').trim();
+      if (content) {
+        subagentPromptParts.push(`\n---\n# ${path.basename(rulePath)}\n${content}`);
+      }
+    }
+  }
+
+  // Also load individual rule files referenced in RULES.md
+  const tesslTilesDir = '/home/node/.claude/.tessl/tiles';
+  if (fs.existsSync(tesslTilesDir)) {
+    const walkRules = (dir: string) => {
+      for (const entry of fs.readdirSync(dir)) {
+        const fullPath = path.join(dir, entry);
+        const stat = fs.statSync(fullPath);
+        if (stat.isDirectory()) {
+          walkRules(fullPath);
+        } else if (entry.endsWith('.md') && fullPath.includes('/rules/')) {
+          const content = fs.readFileSync(fullPath, 'utf-8').trim();
+          if (content) {
+            subagentPromptParts.push(`\n---\n# Rule: ${entry}\n${content}`);
+          }
+        }
+      }
+    };
+    walkRules(tesslTilesDir);
+  }
+
+  const subagentPrompt = subagentPromptParts.join('\n');
+  log(`Subagent prompt built: ${subagentPrompt.length} chars, ${installedSkills.length} skills`);
+
   const agentDefinitions = {
     'general-purpose': {
       description:
         'General-purpose agent with full access to all skills, MCP tools, ' +
         'and rules. Use for any background task that needs the same ' +
         'capabilities as the main agent (heartbeat, research, analysis, etc.).',
-      prompt:
-        'You are a background agent with the same capabilities as the main agent. ' +
-        'Follow all rules from CLAUDE.md and .tessl/RULES.md. ' +
-        'Use skills via the Skill tool. ' +
-        'Report results via mcp__nanoclaw__send_message.',
+      prompt: subagentPrompt,
       tools: subagentTools,
       skills: installedSkills,
       mcpServers: Object.keys(mcpServersConfig),
