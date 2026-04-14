@@ -748,6 +748,241 @@ server.tool(
   },
 );
 
+// --- Smart Home ---
+
+server.tool(
+  'smarthome_status',
+  'Query smart home event data from the Hubitat EventSocket database. ' +
+  'Use for real-time house status, room activity, device states, battery levels, anomalies. ' +
+  '366 devices across 32 rooms. DB at /workspace/store/messages.db.',
+  {
+    query: z.enum([
+      'current_activity',
+      'room_status',
+      'battery_report',
+      'device_history',
+      'hub_health',
+      'custom_sql',
+    ]).describe('Query type'),
+    room: z.string().optional().describe('Room name for room_status (e.g., "Kitchen", "Master Bedroom")'),
+    device: z.string().optional().describe('Device name pattern for device_history (e.g., "Front Door Lock")'),
+    minutes: z.number().optional().describe('Lookback window in minutes (default: 5 for current_activity, 60 for history)'),
+    sql: z.string().optional().describe('Raw SQL for custom_sql query. Read-only — SELECT only.'),
+  },
+  async (args) => {
+    const DB_PATH = '/workspace/store/messages.db';
+    const minutes = args.minutes || (args.query === 'current_activity' ? 5 : 60);
+
+    let pythonCode: string;
+
+    switch (args.query) {
+      case 'current_activity':
+        pythonCode = `
+import sqlite3, json
+conn = sqlite3.connect('${DB_PATH}', timeout=5)
+conn.row_factory = sqlite3.Row
+rows = conn.execute("""
+  SELECT device_name, attribute_name, value, timestamp
+  FROM smart_home_events
+  WHERE timestamp > datetime('now', '-${minutes} minutes')
+  ORDER BY timestamp DESC LIMIT 100
+""").fetchall()
+conn.close()
+result = [dict(r) for r in rows]
+print(json.dumps({"events": result, "count": len(result), "minutes": ${minutes}}, indent=2))
+`;
+        break;
+
+      case 'room_status':
+        const room = (args.room || '').replace(/'/g, "''");
+        pythonCode = `
+import sqlite3, json
+conn = sqlite3.connect('${DB_PATH}', timeout=5)
+conn.row_factory = sqlite3.Row
+rows = conn.execute("""
+  SELECT device_name, attribute_name, value, timestamp
+  FROM smart_home_events
+  WHERE device_name LIKE '%${room}%'
+    AND timestamp > datetime('now', '-${minutes} minutes')
+  ORDER BY timestamp DESC LIMIT 50
+""").fetchall()
+conn.close()
+result = [dict(r) for r in rows]
+print(json.dumps({"room": "${room}", "events": result, "count": len(result), "minutes": ${minutes}}, indent=2))
+`;
+        break;
+
+      case 'battery_report':
+        pythonCode = `
+import sqlite3, json
+conn = sqlite3.connect('${DB_PATH}', timeout=5)
+rows = conn.execute("""
+  SELECT device_name, MIN(CAST(value AS INTEGER)) as min_battery,
+         MAX(timestamp) as last_seen
+  FROM smart_home_events
+  WHERE attribute_name = 'battery'
+  GROUP BY device_name
+  ORDER BY min_battery ASC
+""").fetchall()
+conn.close()
+critical = [{"device": r[0], "battery": r[1], "last_seen": r[2]} for r in rows if r[1] < 20]
+low = [{"device": r[0], "battery": r[1], "last_seen": r[2]} for r in rows if 20 <= r[1] < 40]
+ok = [{"device": r[0], "battery": r[1]} for r in rows if r[1] >= 40]
+print(json.dumps({"critical": critical, "low": low, "ok_count": len(ok), "total_devices": len(rows)}, indent=2))
+`;
+        break;
+
+      case 'device_history':
+        const dev = (args.device || '').replace(/'/g, "''");
+        pythonCode = `
+import sqlite3, json
+conn = sqlite3.connect('${DB_PATH}', timeout=5)
+conn.row_factory = sqlite3.Row
+rows = conn.execute("""
+  SELECT device_name, attribute_name, value, timestamp
+  FROM smart_home_events
+  WHERE device_name LIKE '%${dev}%'
+  ORDER BY timestamp DESC LIMIT 50
+""").fetchall()
+conn.close()
+result = [dict(r) for r in rows]
+print(json.dumps({"device_pattern": "${dev}", "events": result, "count": len(result)}, indent=2))
+`;
+        break;
+
+      case 'hub_health':
+        pythonCode = `
+import sqlite3, json
+conn = sqlite3.connect('${DB_PATH}', timeout=5)
+
+# Hub temperatures
+temps = conn.execute("""
+  SELECT device_name, MAX(CAST(value AS REAL)) as max_temp, MIN(CAST(value AS REAL)) as min_temp
+  FROM smart_home_events
+  WHERE attribute_name = 'temperatureF' AND device_name LIKE '%Hub Info%'
+    AND timestamp > datetime('now', '-24 hours')
+  GROUP BY device_name
+""").fetchall()
+
+# Memory
+mem = conn.execute("""
+  SELECT device_name, MIN(CAST(value AS INTEGER)) as min_mem, MAX(CAST(value AS INTEGER)) as max_mem
+  FROM smart_home_events
+  WHERE attribute_name = 'freeMemory' AND device_name LIKE '%Hub Info%'
+    AND timestamp > datetime('now', '-24 hours')
+  GROUP BY device_name
+""").fetchall()
+
+# Modes
+mode = conn.execute("""
+  SELECT value, timestamp FROM smart_home_events
+  WHERE attribute_name = 'currentMode' AND device_name LIKE 'Apps Hub Info%'
+  ORDER BY timestamp DESC LIMIT 1
+""").fetchone()
+
+hsm = conn.execute("""
+  SELECT value, timestamp FROM smart_home_events
+  WHERE attribute_name = 'currentHsmMode' AND device_name LIKE 'Apps Hub Info%'
+  ORDER BY timestamp DESC LIMIT 1
+""").fetchone()
+
+# Alerts
+alerts = conn.execute("""
+  SELECT device_name, value, timestamp FROM smart_home_events
+  WHERE attribute_name = 'hubAlerts' AND value != '[]'
+  ORDER BY timestamp DESC LIMIT 5
+""").fetchall()
+
+# OFFLINE devices
+offline = conn.execute("""
+  SELECT device_name, timestamp FROM smart_home_events
+  WHERE device_name LIKE 'OFFLINE%'
+  ORDER BY timestamp DESC LIMIT 10
+""").fetchall()
+
+# Error Monitor
+errors = conn.execute("""
+  SELECT attribute_name, value, timestamp FROM smart_home_events
+  WHERE device_name = 'Error Monitor' AND attribute_name = 'bpt-lastLogMessage'
+  ORDER BY timestamp DESC LIMIT 5
+""").fetchall()
+
+# CoCoHue disconnects in last 24h
+hue = conn.execute("""
+  SELECT COUNT(*) FROM smart_home_events
+  WHERE device_name LIKE 'CoCoHue%' AND attribute_name = 'eventStreamStatus'
+    AND value = 'disconnected' AND timestamp > datetime('now', '-24 hours')
+""").fetchone()
+
+# Total events
+total = conn.execute("SELECT COUNT(*) FROM smart_home_events").fetchone()
+
+conn.close()
+print(json.dumps({
+  "hub_temps": [{"hub": t[0], "min_F": t[1], "max_F": t[2]} for t in temps],
+  "hub_memory_KB": [{"hub": m[0], "min": m[1], "max": m[2]} for m in mem],
+  "current_mode": {"mode": mode[0] if mode else "?", "since": mode[1] if mode else "?"},
+  "hsm_mode": {"mode": hsm[0] if hsm else "?", "since": hsm[1] if hsm else "?"},
+  "recent_alerts": [{"hub": a[0], "alert": a[1], "at": a[2]} for a in alerts],
+  "offline_devices": [{"device": o[0], "since": o[1]} for o in offline],
+  "recent_errors": [{"type": e[0], "msg": str(e[1])[:200], "at": e[2]} for e in errors],
+  "hue_bridge_disconnects_24h": hue[0] if hue else 0,
+  "total_events": total[0] if total else 0,
+}, indent=2))
+`;
+        break;
+
+      case 'custom_sql':
+        if (!args.sql) {
+          return {
+            content: [{ type: 'text' as const, text: 'Error: sql parameter required for custom_sql query' }],
+            isError: true,
+          };
+        }
+        const sql = args.sql.trim();
+        if (!sql.toUpperCase().startsWith('SELECT')) {
+          return {
+            content: [{ type: 'text' as const, text: 'Error: only SELECT queries allowed (read-only)' }],
+            isError: true,
+          };
+        }
+        const safeSql = sql.replace(/'/g, "\\'");
+        pythonCode = `
+import sqlite3, json
+conn = sqlite3.connect('${DB_PATH}', timeout=5)
+conn.row_factory = sqlite3.Row
+rows = conn.execute('${safeSql}').fetchall()
+conn.close()
+result = [dict(r) for r in rows]
+print(json.dumps({"results": result, "count": len(result)}, indent=2))
+`;
+        break;
+
+      default:
+        return {
+          content: [{ type: 'text' as const, text: `Unknown query type: ${args.query}` }],
+          isError: true,
+        };
+    }
+
+    const { execSync } = await import('child_process');
+    try {
+      const output = execSync(`python3 -c ${JSON.stringify(pythonCode)}`, {
+        timeout: 15_000,
+        maxBuffer: 2 * 1024 * 1024,
+        encoding: 'utf-8',
+      });
+      return { content: [{ type: 'text' as const, text: output }] };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: 'text' as const, text: `Smart home query failed: ${msg}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
 server.tool(
   'github_backup',
   'Commit and push the group backup repo to GitHub. Use for nightly backups or when important state changes. The host handles git credentials — the container just triggers it.',
