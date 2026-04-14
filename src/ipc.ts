@@ -367,6 +367,9 @@ export async function processTaskIpc(
     slug?: string;
     filter?: Record<string, boolean>;
     dryRun?: boolean;
+    command?: string;
+    payload?: string | Record<string, unknown>;
+    confirm?: boolean;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -1200,14 +1203,94 @@ export async function processTaskIpc(
               try {
                 const parsed = JSON.parse(stdout);
                 if (stderr) parsed.logs = stderr.slice(-2000);
-                fs.writeFileSync(
-                  audibleResultPath,
-                  JSON.stringify(parsed),
-                );
+                fs.writeFileSync(audibleResultPath, JSON.stringify(parsed));
               } catch {
                 fs.writeFileSync(
                   audibleResultPath,
                   JSON.stringify({ raw: stdout, logs: stderr?.slice(-2000) }),
+                );
+              }
+            }
+          },
+        );
+      }
+      break;
+
+    case 'dominos_pizza':
+      if (data.requestId) {
+        if (!isMain) {
+          logger.warn({ sourceGroup }, 'Unauthorized dominos_pizza attempt');
+          break;
+        }
+
+        const dominosResultPath = path.join(
+          DATA_DIR,
+          'ipc',
+          sourceGroup,
+          'input',
+          `_script_result_${data.requestId}.json`,
+        );
+
+        const dominosCommand = data.command || '';
+        const dominosPayload = data.payload || '';
+        const dominosConfirm = data.confirm === true;
+        logger.info(
+          { sourceGroup, command: dominosCommand, confirm: dominosConfirm },
+          'Running dominos_pizza',
+        );
+
+        const payloadStr =
+          typeof dominosPayload === 'string'
+            ? dominosPayload
+            : JSON.stringify(dominosPayload);
+
+        const dominosArgs: string[] = [
+          'run',
+          '--rm',
+          'dominos-order:latest',
+          dominosCommand,
+          ...(payloadStr ? [payloadStr] : []),
+          ...(dominosConfirm ? ['--confirm'] : []),
+        ];
+
+        execFile(
+          'docker',
+          dominosArgs,
+          {
+            cwd: process.cwd(),
+            env: {
+              PATH: process.env.PATH || '/usr/bin:/bin',
+              HOME: process.env.HOME || '/root',
+            },
+            timeout: 120_000,
+            maxBuffer: 1024 * 1024,
+          },
+          (error, stdout, stderr) => {
+            if (error) {
+              logger.error(
+                { sourceGroup, error: error.message, stderr },
+                'dominos_pizza failed',
+              );
+              fs.writeFileSync(
+                dominosResultPath,
+                JSON.stringify({
+                  error: error.message,
+                  stderr: stderr.slice(-500),
+                }),
+              );
+            } else {
+              logger.info(
+                { sourceGroup, command: dominosCommand },
+                'dominos_pizza completed',
+              );
+              try {
+                const parsed = JSON.parse(stdout);
+                if (stderr) parsed.logs = stderr.slice(-1000);
+                fs.writeFileSync(dominosResultPath, JSON.stringify(parsed));
+              } catch {
+                fs.writeFileSync(
+                  dominosResultPath,
+                  JSON.stringify({ raw: stdout, logs: stderr?.slice(-1000) }),
                 );
               }
             }

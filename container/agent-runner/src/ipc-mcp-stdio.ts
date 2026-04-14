@@ -699,6 +699,56 @@ server.tool(
 );
 
 server.tool(
+  'dominos_pizza',
+  "Order Domino's Pizza. Commands: find-stores (by address), menu (by storeId), build-order (validate+price, dry-run), place-order (requires confirm=true). For build-order and place-order, pass orderJson with storeId, customer (address, firstName, lastName, phone, email), items (array of {code, qty}), and payment (for place-order only: number, expiration, securityCode, postalCode, tipAmount).",
+  {
+    command: z.enum(['find-stores', 'menu', 'build-order', 'place-order']).describe('Command to run'),
+    payload: z.string().describe('Address for find-stores, storeId for menu, or order JSON for build/place-order'),
+    confirm: z.boolean().optional().describe('Required for place-order. Safety gate to prevent accidental orders.'),
+  },
+  async (args) => {
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const data = {
+      type: 'dominos_pizza',
+      command: args.command,
+      payload: args.payload,
+      confirm: args.confirm ?? false,
+      requestId,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
+    const timeoutMs = 120_000;
+    const pollMs = 2000;
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+      if (fs.existsSync(resultPath)) {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        fs.unlinkSync(resultPath);
+        if (result.error) {
+          return {
+            content: [{ type: 'text' as const, text: `Dominos order failed: ${result.error}\n${result.stderr || ''}` }],
+            isError: true,
+          };
+        }
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+        };
+      }
+      await new Promise(r => setTimeout(r, pollMs));
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: "Domino's order timed out after 2 minutes" }],
+      isError: true,
+    };
+  },
+);
+
+server.tool(
   'github_backup',
   'Commit and push the group backup repo to GitHub. Use for nightly backups or when important state changes. The host handles git credentials — the container just triggers it.',
   {
