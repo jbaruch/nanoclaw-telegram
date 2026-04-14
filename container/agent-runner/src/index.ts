@@ -471,6 +471,88 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
+  // Discover installed skill names for subagent definitions.
+  // Subagents spawned via TeamCreate don't inherit the parent's skills
+  // or settingSources — they only get what's explicitly defined here.
+  const skillsDir = '/home/node/.claude/skills';
+  const installedSkills: string[] = [];
+  if (fs.existsSync(skillsDir)) {
+    for (const entry of fs.readdirSync(skillsDir)) {
+      if (fs.statSync(path.join(skillsDir, entry)).isDirectory()) {
+        installedSkills.push(entry);
+      }
+    }
+  }
+  if (installedSkills.length > 0) {
+    log(`Discovered ${installedSkills.length} skills for subagent definitions`);
+  }
+
+  // MCP servers config — shared between main agent and subagents
+  const mcpServersConfig = {
+    nanoclaw: {
+      command: 'node',
+      args: [mcpServerPath],
+      env: {
+        NANOCLAW_CHAT_JID: containerInput.chatJid,
+        NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
+        NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+        ...(containerInput.replyToMessageId
+          ? { NANOCLAW_REPLY_TO_MESSAGE_ID: containerInput.replyToMessageId }
+          : {}),
+      },
+    },
+    ...(process.env.COMPOSIO_API_KEY
+      ? {
+          composio: {
+            type: 'http' as const,
+            url: 'https://connect.composio.dev/mcp',
+            headers: {
+              'x-consumer-api-key': process.env.COMPOSIO_API_KEY,
+            },
+          },
+        }
+      : {}),
+    ...(fs.existsSync('/home/node/.tessl/api-credentials.json')
+      ? {
+          tessl: {
+            command: 'tessl',
+            args: ['mcp', 'start'],
+          },
+        }
+      : {}),
+  };
+
+  // Subagent tools — same as parent minus TeamCreate/TeamDelete (no nesting)
+  const subagentTools = [
+    'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep',
+    'WebSearch', 'WebFetch', 'TodoWrite', 'ToolSearch',
+    'Skill', 'NotebookEdit', 'mcp__nanoclaw__*',
+  ];
+
+  // Define a general-purpose subagent that inherits all skills and MCP
+  // servers. When the main agent uses TeamCreate, it can reference this
+  // agent type and the subagent will have full access to skills/rules.
+  // Define a general-purpose subagent with full access to all installed
+  // skills and MCP servers. The main agent spawns this via TeamCreate
+  // for background tasks (heartbeat, research, etc.). Without this,
+  // subagents are isolated processes with no skills or rules.
+  const agentDefinitions = {
+    'general-purpose': {
+      description:
+        'General-purpose agent with full access to all skills, MCP tools, ' +
+        'and rules. Use for any background task that needs the same ' +
+        'capabilities as the main agent (heartbeat, research, analysis, etc.).',
+      prompt:
+        'You are a background agent with the same capabilities as the main agent. ' +
+        'Follow all rules from CLAUDE.md and .tessl/RULES.md. ' +
+        'Use skills via the Skill tool. ' +
+        'Report results via mcp__nanoclaw__send_message.',
+      tools: subagentTools,
+      skills: installedSkills,
+      mcpServers: Object.keys(mcpServersConfig),
+    },
+  };
+
   for await (const message of query({
     prompt: stream,
     options: {
@@ -508,43 +590,12 @@ async function runQuery(
         'NotebookEdit',
         'mcp__nanoclaw__*',
       ],
+      agents: agentDefinitions,
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       settingSources: ['project', 'user'],
-      mcpServers: {
-        nanoclaw: {
-          command: 'node',
-          args: [mcpServerPath],
-          env: {
-            NANOCLAW_CHAT_JID: containerInput.chatJid,
-            NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
-            NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
-            ...(containerInput.replyToMessageId
-              ? { NANOCLAW_REPLY_TO_MESSAGE_ID: containerInput.replyToMessageId }
-              : {}),
-          },
-        },
-        ...(process.env.COMPOSIO_API_KEY
-          ? {
-              composio: {
-                type: 'http' as const,
-                url: 'https://connect.composio.dev/mcp',
-                headers: {
-                  'x-consumer-api-key': process.env.COMPOSIO_API_KEY,
-                },
-              },
-            }
-          : {}),
-        ...(fs.existsSync('/home/node/.tessl/api-credentials.json')
-          ? {
-              tessl: {
-                command: 'tessl',
-                args: ['mcp', 'start'],
-              },
-            }
-          : {}),
-      },
+      mcpServers: mcpServersConfig,
       hooks: {
         PreCompact: [
           { hooks: [createPreCompactHook(containerInput.assistantName)] },
