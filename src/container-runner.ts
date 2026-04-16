@@ -180,6 +180,26 @@ function buildVolumeMounts(
       containerPath: '/workspace/project',
       readonly: true,
     });
+    // Shadow .env so agents can't read host secrets (bot tokens, API keys).
+    // Without this, subagents curl the Telegram API directly, bypassing MCP.
+    // mount --bind inside the container doesn't work (needs CAP_SYS_ADMIN),
+    // so we mount /dev/null over the secret files from the orchestrator.
+    const envFile = path.join(process.cwd(), '.env');
+    if (fs.existsSync(envFile)) {
+      mounts.push({
+        hostPath: '/dev/null',
+        containerPath: '/workspace/project/.env',
+        readonly: true,
+      });
+    }
+    const dataEnvFile = path.join(process.cwd(), 'data', 'env', 'env');
+    if (fs.existsSync(dataEnvFile)) {
+      mounts.push({
+        hostPath: '/dev/null',
+        containerPath: '/workspace/project/data/env/env',
+        readonly: true,
+      });
+    }
   }
 
   // Group folder mount. Untrusted groups get read-only (disk exhaustion protection).
