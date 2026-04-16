@@ -180,25 +180,25 @@ function buildVolumeMounts(
       containerPath: '/workspace/project',
       readonly: true,
     });
-    // Shadow .env so agents can't read host secrets (bot tokens, API keys).
+    // Shadow ALL files containing secrets so agents can't read bot tokens.
     // Without this, subagents curl the Telegram API directly, bypassing MCP.
     // mount --bind inside the container doesn't work (needs CAP_SYS_ADMIN),
-    // so we mount /dev/null over the secret files from the orchestrator.
-    const envFile = path.join(process.cwd(), '.env');
-    if (fs.existsSync(envFile)) {
-      mounts.push({
-        hostPath: '/dev/null',
-        containerPath: '/workspace/project/.env',
-        readonly: true,
-      });
-    }
-    const dataEnvFile = path.join(process.cwd(), 'data', 'env', 'env');
-    if (fs.existsSync(dataEnvFile)) {
-      mounts.push({
-        hostPath: '/dev/null',
-        containerPath: '/workspace/project/data/env/env',
-        readonly: true,
-      });
+    // so we mount /dev/null over every secret file from the orchestrator.
+    const secretFiles = [
+      '.env',
+      '.env.bak',
+      'data/env/env',
+      'scripts/heartbeat-external.conf',
+    ];
+    for (const relPath of secretFiles) {
+      const absPath = path.join(process.cwd(), relPath);
+      if (fs.existsSync(absPath)) {
+        mounts.push({
+          hostPath: '/dev/null',
+          containerPath: `/workspace/project/${relPath}`,
+          readonly: true,
+        });
+      }
     }
   }
 
