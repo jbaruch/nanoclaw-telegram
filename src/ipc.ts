@@ -193,6 +193,26 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       data.caption,
                       data.replyToMessageId,
                     );
+                    // Store the caption (if any) so the message shows up in
+                    // accounting the same as text messages. Without this,
+                    // `send_file` is a bypass: captions reach Telegram but
+                    // never hit messages.db, so heartbeat unanswered-checks
+                    // think the agent never responded. Use the raw caption
+                    // (not the sanitized HTML) — storage is for semantic
+                    // content, not display.
+                    if (data.caption) {
+                      storeMessage({
+                        id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                        chat_jid: data.chatJid,
+                        sender: ASSISTANT_NAME,
+                        sender_name: ASSISTANT_NAME,
+                        content: data.caption,
+                        timestamp: new Date().toISOString(),
+                        is_from_me: true,
+                        is_bot_message: true,
+                        reply_to_message_id: data.replyToMessageId,
+                      });
+                    }
                     logger.info(
                       { chatJid: data.chatJid, hostPath, sourceGroup },
                       'IPC file sent',

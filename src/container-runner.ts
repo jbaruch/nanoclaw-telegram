@@ -405,6 +405,17 @@ export function buildVolumeMounts(
     'tiles',
     TILE_OWNER,
   );
+
+  // Wipe the group's tile-managed scripts dir before re-copying from tiles.
+  // Without this, scripts removed from a skill in a newer tile version still
+  // linger in the group folder forever, so agents read stale code. Observed
+  // case: an old `heartbeat-checks.py` (with a DB-size check we removed)
+  // stuck around and kept driving "DB size crossed X" alerts even after the
+  // skill was updated. This dir is orchestrator-managed, not user-authored —
+  // everything here comes from the tile copy loop below.
+  const groupScriptsDir = path.join(groupDir, 'scripts');
+  fs.rmSync(groupScriptsDir, { recursive: true, force: true });
+
   const rulesContent: string[] = [];
   for (const tileName of tilesToInstall) {
     const tileSrc = path.join(registryTiles, tileName);
@@ -443,10 +454,11 @@ export function buildVolumeMounts(
         fs.cpSync(skillSrcDir, path.join(skillsDst, `tessl__${skillDir}`), {
           recursive: true,
         });
-        // Copy bundled scripts to group's scripts/ dir (used by named host operations)
+        // Copy bundled scripts to group's scripts/ dir (used by named host
+        // operations). The dir was wiped above so stale scripts from prior
+        // tile versions don't linger.
         const skillScriptsDir = path.join(skillSrcDir, 'scripts');
         if (fs.existsSync(skillScriptsDir)) {
-          const groupScriptsDir = path.join(groupDir, 'scripts');
           fs.mkdirSync(groupScriptsDir, { recursive: true });
           for (const scriptFile of fs.readdirSync(skillScriptsDir)) {
             fs.cpSync(
