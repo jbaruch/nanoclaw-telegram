@@ -38,7 +38,11 @@ vi.mock('./logger.js', () => ({
   },
 }));
 
-// Mock fs
+// Mock fs. `renameSync` and `rmSync` are mocked as no-ops because the
+// scripts-dir atomic-swap in container-runner.ts calls them on paths that
+// were never created (because mkdirSync is also mocked). Previously the
+// over-broad ENOENT-is-a-race catch masked the resulting failure; the
+// fixed (narrower) catch surfaces it, so the mock needs to cover these.
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
   return {
@@ -52,6 +56,8 @@ vi.mock('fs', async () => {
       readdirSync: vi.fn(() => []),
       statSync: vi.fn(() => ({ isDirectory: () => false })),
       copyFileSync: vi.fn(),
+      renameSync: vi.fn(),
+      rmSync: vi.fn(),
     },
   };
 });

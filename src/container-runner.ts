@@ -554,7 +554,14 @@ export function buildVolumeMounts(
   //   - Unexpected errors (EACCES, EIO, etc.): something is actually broken.
   //     If we already moved the old dir aside we must restore it before
   //     failing so the group isn't left with a missing scripts/ tree.
-  const RACE_CODES = new Set(['EEXIST', 'ENOTEMPTY', 'ENOENT']);
+  // Race codes: another session renamed a dir in between our operations.
+  // - EEXIST/ENOTEMPTY on the tmp→final rename: another session already
+  //   placed its copy at `groupScriptsDir`.
+  // `ENOENT` is NOT a race for the tmp→final rename — it means our tmp is
+  // missing, which is a real filesystem error (premature cleanup, etc.).
+  // The inner try/catch around `groupScriptsDir→oldScriptsDir` handles its
+  // own ENOENT case (no existing dir on first spawn) separately.
+  const RACE_CODES = new Set(['EEXIST', 'ENOTEMPTY']);
   let oldMovedAside = false;
   try {
     // Move existing dir aside. Absent on first-ever spawn for a new group.
