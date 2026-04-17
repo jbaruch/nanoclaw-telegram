@@ -60,6 +60,11 @@ read_frontmatter_field() {
       line = $0
       sub(prefix_re, "", line)
       sub("^[[:space:]]+", "", line)   # strip leading ws after colon
+      # Value begins with `#` after trimming — the entire line after the
+      # colon is a comment, so the field has no value. Return empty.
+      # (Without this, the later `[[:space:]]+#` regex would miss it because
+      # the comment is no longer preceded by whitespace.)
+      if (substr(line, 1, 1) == "#") { print ""; exit }
       # Quoted values must be parsed BEFORE stripping `#` comments, because
       # in YAML `#` inside quotes is literal, not a comment. Detect a quoted
       # value up front and return the inner content as-is.
