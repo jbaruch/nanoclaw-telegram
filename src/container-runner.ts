@@ -54,8 +54,14 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 /**
  * Create a filtered copy of messages.db containing only one group's messages.
  * Returns the path to the filtered DB, or null if the source DB doesn't exist.
+ *
+ * @internal Exported for tests only — untrusted-group DB isolation is
+ *   security-critical and must be pinned by regression tests.
  */
-function createFilteredDb(chatJid: string, groupFolder: string): string | null {
+export function createFilteredDb(
+  chatJid: string,
+  groupFolder: string,
+): string | null {
   const srcDb = path.join(STORE_DIR, 'messages.db');
   if (!fs.existsSync(srcDb)) return null;
 
@@ -155,7 +161,26 @@ function toHostPath(localPath: string): string {
   return path.join(HOST_PROJECT_ROOT, rel);
 }
 
-function buildVolumeMounts(
+/**
+ * Files in the project root that contain secrets (bot tokens, API keys).
+ * Main-group containers get `/dev/null` mounted over each of these so agents
+ * can't read tokens and bypass the credential proxy.
+ *
+ * Security-critical: adding a new secret file ANYWHERE in the repo requires
+ * adding it to this list, or an agent in the main group can read it.
+ */
+export const SECRET_FILES = [
+  '.env',
+  '.env.bak',
+  'data/env/env',
+  'scripts/heartbeat-external.conf',
+] as const;
+
+/**
+ * @internal Exported for tests only — mount-list construction is
+ *   security-critical (trust tiers, secret shadowing, untrusted read-only).
+ */
+export function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
   chatJid: string,
@@ -184,13 +209,7 @@ function buildVolumeMounts(
     // Without this, subagents curl the Telegram API directly, bypassing MCP.
     // mount --bind inside the container doesn't work (needs CAP_SYS_ADMIN),
     // so we mount /dev/null over every secret file from the orchestrator.
-    const secretFiles = [
-      '.env',
-      '.env.bak',
-      'data/env/env',
-      'scripts/heartbeat-external.conf',
-    ];
-    for (const relPath of secretFiles) {
+    for (const relPath of SECRET_FILES) {
       const absPath = path.join(process.cwd(), relPath);
       if (fs.existsSync(absPath)) {
         mounts.push({
