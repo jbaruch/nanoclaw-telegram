@@ -81,8 +81,10 @@ function createSchema(database: Database.Database): void {
       value TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (
-      group_folder TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL
+      group_folder TEXT NOT NULL,
+      session_name TEXT NOT NULL DEFAULT 'default',
+      session_id TEXT NOT NULL,
+      PRIMARY KEY (group_folder, session_name)
     );
     CREATE TABLE IF NOT EXISTS registered_groups (
       jid TEXT PRIMARY KEY,
@@ -181,6 +183,34 @@ function createSchema(database: Database.Database): void {
     database.exec(`ALTER TABLE messages ADD COLUMN reply_to_sender_name TEXT`);
   } catch {
     /* columns already exist */
+  }
+
+  // Migrate sessions table to per-session layout (parallel-maintenance).
+  // Pre-PR-#55: PK was `(group_folder)` alone — one session per group.
+  // Post-PR-#55: PK is `(group_folder, session_name)` so each session
+  // (`default`, `maintenance`) maintains its own SDK session chain.
+  //
+  // `CREATE TABLE IF NOT EXISTS` above already defines the new shape for
+  // fresh installs. For existing DBs on the pre-migration shape we detect
+  // the missing `session_name` column and recreate the table, tagging all
+  // existing rows as `default` (they came from the user-facing container).
+  const sessionsCols = database
+    .prepare('PRAGMA table_info(sessions)')
+    .all() as Array<{ name: string }>;
+  const hasSessionName = sessionsCols.some((c) => c.name === 'session_name');
+  if (sessionsCols.length > 0 && !hasSessionName) {
+    database.exec(`
+      CREATE TABLE sessions_new (
+        group_folder TEXT NOT NULL,
+        session_name TEXT NOT NULL DEFAULT 'default',
+        session_id TEXT NOT NULL,
+        PRIMARY KEY (group_folder, session_name)
+      );
+      INSERT INTO sessions_new (group_folder, session_name, session_id)
+        SELECT group_folder, 'default', session_id FROM sessions;
+      DROP TABLE sessions;
+      ALTER TABLE sessions_new RENAME TO sessions;
+    `);
   }
 }
 
@@ -674,20 +704,38 @@ export function setRouterState(key: string, value: string): void {
 }
 
 // --- Session accessors ---
+//
+// Sessions are keyed by (groupFolder, sessionName). `sessionName` is one of
+// the canonical slot names — `default` (user-facing) or `maintenance`
+// (scheduled tasks). See `DEFAULT_SESSION_NAME` / `MAINTENANCE_SESSION_NAME`
+// exports in `src/container-runner.ts` and `src/group-queue.ts`.
 
-export function getSession(groupFolder: string): string | undefined {
+export function getSession(
+  groupFolder: string,
+  sessionName: string,
+): string | undefined {
   const row = db
-    .prepare('SELECT session_id FROM sessions WHERE group_folder = ?')
-    .get(groupFolder) as { session_id: string } | undefined;
+    .prepare(
+      'SELECT session_id FROM sessions WHERE group_folder = ? AND session_name = ?',
+    )
+    .get(groupFolder, sessionName) as { session_id: string } | undefined;
   return row?.session_id;
 }
 
-export function setSession(groupFolder: string, sessionId: string): void {
+export function setSession(
+  groupFolder: string,
+  sessionName: string,
+  sessionId: string,
+): void {
   db.prepare(
-    'INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)',
-  ).run(groupFolder, sessionId);
+    'INSERT OR REPLACE INTO sessions (group_folder, session_name, session_id) VALUES (?, ?, ?)',
+  ).run(groupFolder, sessionName, sessionId);
 }
 
+/**
+ * Delete all stored sessions for a group (both default and maintenance).
+ * Called on nuke so both containers start fresh on their next spawn.
+ */
 export function deleteSession(groupFolder: string): void {
   db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
 }
@@ -697,13 +745,25 @@ export function deleteAllSessions(): number {
   return result.changes;
 }
 
-export function getAllSessions(): Record<string, string> {
+/**
+ * Returns sessions keyed first by groupFolder then by sessionName:
+ *   { "main": { "default": "abc-123", "maintenance": "def-456" } }
+ * Callers looking up a specific session do
+ *   `sessions[folder]?.[sessionName]`
+ * and handle the missing case (fresh session chain for that slot).
+ */
+export function getAllSessions(): Record<string, Record<string, string>> {
   const rows = db
-    .prepare('SELECT group_folder, session_id FROM sessions')
-    .all() as Array<{ group_folder: string; session_id: string }>;
-  const result: Record<string, string> = {};
+    .prepare('SELECT group_folder, session_name, session_id FROM sessions')
+    .all() as Array<{
+    group_folder: string;
+    session_name: string;
+    session_id: string;
+  }>;
+  const result: Record<string, Record<string, string>> = {};
   for (const row of rows) {
-    result[row.group_folder] = row.session_id;
+    if (!result[row.group_folder]) result[row.group_folder] = {};
+    result[row.group_folder][row.session_name] = row.session_id;
   }
   return result;
 }
@@ -940,8 +1000,10 @@ function migrateJsonState(): void {
     string
   > | null;
   if (sessions) {
+    // Legacy JSON state predates parallel-maintenance; all sessions were
+    // user-facing, so they migrate to the `default` slot.
     for (const [folder, sessionId] of Object.entries(sessions)) {
-      setSession(folder, sessionId);
+      setSession(folder, 'default', sessionId);
     }
   }
 

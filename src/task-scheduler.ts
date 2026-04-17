@@ -14,6 +14,7 @@ import {
   getDueTasks,
   getTaskById,
   logTaskRun,
+  setSession,
   updateTask,
   updateTaskAfterRun,
 } from './db.js';
@@ -65,7 +66,13 @@ export function computeNextRun(task: ScheduledTask): string | null {
 
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
-  getSessions: () => Record<string, string>;
+  /**
+   * Nested session cache: `folder → sessionName → sessionId`.
+   * Scheduled tasks look up the MAINTENANCE slot's sessionId here so
+   * consecutive heartbeat/nightly runs resume their own prior session
+   * chain, not the user-facing default container's.
+   */
+  getSessions: () => Record<string, Record<string, string>>;
   queue: GroupQueue;
   onProcess: (
     groupJid: string,
@@ -153,21 +160,16 @@ async function runTask(
   let result: string | null = null;
   let error: string | null = null;
 
-  // Scheduled tasks run in the maintenance session, which has its own
-  // `.claude/` mount separate from the user-facing default session's
-  // session store. The per-group `sessions` map (via `deps.getSessions()`)
-  // is populated by the default container — those sessionIds don't exist
-  // in maintenance's `.claude/projects/` tree, so a resume attempt would
-  // fail. Until per-session session caching is added (follow-up PR that
-  // keys the sessions map by `(groupFolder, sessionName)`), scheduled
-  // tasks start fresh every time.
-  //
-  // `context_mode: 'group'` still works at the agent-runner level — the
-  // group CLAUDE.md and memory come in via the group-folder mount, not
-  // via session resume. Only SDK-transcript continuity is lost, which
-  // heartbeat, nightly-housekeeping, weekly-housekeeping, etc. don't
-  // rely on.
-  const sessionId = undefined;
+  // Scheduled tasks resume THEIR OWN session chain from the `maintenance`
+  // slot. The sessions map is keyed by `(groupFolder, sessionName)` —
+  // maintenance has its own per-session `.claude/` mount, so its
+  // sessionIds are stored and resumed separately from the user-facing
+  // default container. `context_mode: 'isolated'` starts fresh each run.
+  const sessions = deps.getSessions();
+  const sessionId =
+    task.context_mode === 'group'
+      ? sessions[task.group_folder]?.[MAINTENANCE_SESSION_NAME]
+      : undefined;
 
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
@@ -210,6 +212,21 @@ async function runTask(
           task.group_folder,
         ),
       async (streamedOutput: ContainerOutput) => {
+        if (streamedOutput.newSessionId) {
+          // Persist the maintenance session's own sessionId so the NEXT
+          // scheduled task on this group can resume the same chain. Mirrors
+          // the user-facing write-back in `src/index.ts` — without this,
+          // every maintenance run would start fresh even though its
+          // .claude/ transcript is per-session.
+          const groupSessions =
+            sessions[task.group_folder] ?? (sessions[task.group_folder] = {});
+          groupSessions[MAINTENANCE_SESSION_NAME] = streamedOutput.newSessionId;
+          setSession(
+            task.group_folder,
+            MAINTENANCE_SESSION_NAME,
+            streamedOutput.newSessionId,
+          );
+        }
         if (streamedOutput.result) {
           result = streamedOutput.result;
           // Strip <internal> tags — suppress entirely if nothing remains
@@ -237,6 +254,18 @@ async function runTask(
     );
 
     if (closeTimer) clearTimeout(closeTimer);
+
+    // Same write-back path for the terminal `output` (non-streaming case).
+    if (output.newSessionId) {
+      const groupSessions =
+        sessions[task.group_folder] ?? (sessions[task.group_folder] = {});
+      groupSessions[MAINTENANCE_SESSION_NAME] = output.newSessionId;
+      setSession(
+        task.group_folder,
+        MAINTENANCE_SESSION_NAME,
+        output.newSessionId,
+      );
+    }
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';

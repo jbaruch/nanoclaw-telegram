@@ -104,7 +104,12 @@ function isReplyToBot(msg: NewMessage): boolean {
 }
 
 let lastTimestamp = '';
-let sessions: Record<string, string> = {};
+// Nested by groupFolder → sessionName → sessionId. The `default` and
+// `maintenance` slots each maintain their own SDK session chain so that
+// maintenance tasks can resume THEIR prior run rather than inheriting the
+// user-facing container's sessionId (which wouldn't exist in maintenance's
+// per-session .claude/ mount).
+let sessions: Record<string, Record<string, string>> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 // Per-chat reply-to tracking: updated when follow-up messages are piped,
@@ -581,7 +586,8 @@ async function runAgent(
   replyToMessageId?: string,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
+  // User-facing path always uses the `default` slot's session chain.
+  const sessionId = sessions[group.folder]?.[DEFAULT_SESSION_NAME];
 
   // Update tasks snapshot for container to read (filtered by group)
   const isTrusted = !!group.containerConfig?.trusted;
@@ -616,8 +622,9 @@ async function runAgent(
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
+          if (!sessions[group.folder]) sessions[group.folder] = {};
+          sessions[group.folder][DEFAULT_SESSION_NAME] = output.newSessionId;
+          setSession(group.folder, DEFAULT_SESSION_NAME, output.newSessionId);
         }
         await onOutput(output);
       }
@@ -652,8 +659,9 @@ async function runAgent(
     );
 
     if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+      if (!sessions[group.folder]) sessions[group.folder] = {};
+      sessions[group.folder][DEFAULT_SESSION_NAME] = output.newSessionId;
+      setSession(group.folder, DEFAULT_SESSION_NAME, output.newSessionId);
     }
 
     if (output.status === 'error') {
@@ -1086,9 +1094,11 @@ async function main(): Promise<void> {
         queue.closeStdin(jid, DEFAULT_SESSION_NAME);
         queue.closeStdin(jid, MAINTENANCE_SESSION_NAME);
       }
-      // Clear session so next spawn starts fresh
+      // Clear ALL stored sessions (both default and maintenance) so the
+      // next spawn starts fresh on both slots. `deleteSession` removes
+      // every row matching the folder.
       delete sessions[groupFolder];
-      setSession(groupFolder, '');
+      deleteSession(groupFolder);
       logger.info({ groupFolder }, 'Session nuked via IPC');
     },
     onTasksChanged: () => {
