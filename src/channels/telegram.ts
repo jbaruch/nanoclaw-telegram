@@ -50,9 +50,12 @@ async function sendTelegramMessage(
     });
     return msg.message_id;
   } catch (err) {
-    // Fallback: send as plain text if HTML parsing fails
+    // Fallback: HTML parsing failed — send the ORIGINAL text without
+    // parse_mode. Sending `sanitized` here would render raw `<b>…</b>`
+    // tags literally to the user, which is strictly worse than the raw
+    // Markdown the agent produced.
     logger.debug({ err }, 'HTML send failed, falling back to plain text');
-    const msg = await api.sendMessage(chatId, sanitized, options);
+    const msg = await api.sendMessage(chatId, text, options);
     return msg.message_id;
   }
 }

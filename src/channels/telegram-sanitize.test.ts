@@ -125,3 +125,101 @@ describe('sanitizeTelegramHtml — edge cases', () => {
     );
   });
 });
+
+// --- HTML entity safety: captured text must be escaped before insertion ---
+describe('sanitizeTelegramHtml — HTML entity escaping', () => {
+  it('escapes & inside **bold** so Telegram does not reject the entity', () => {
+    expect(sanitizeTelegramHtml('**Jack & Jill**')).toBe(
+      '<b>Jack &amp; Jill</b>',
+    );
+  });
+
+  it('escapes comparison operators inside *italic* captured text', () => {
+    // Using `>` that isn't part of a tag pattern (no `<…>`) so it stays as
+    // content that Phase 2 captures and escapes.
+    expect(sanitizeTelegramHtml('say *5 > 3 && 1 < 2* today')).toBe(
+      'say <i>5 &gt; 3 &amp;&amp; 1 &lt; 2</i> today',
+    );
+  });
+
+  it('escapes quotes and special chars in link text', () => {
+    expect(sanitizeTelegramHtml('[Jack & Jill](https://example.com/a)')).toBe(
+      '<a href="https://example.com/a">Jack &amp; Jill</a>',
+    );
+  });
+
+  it('escapes & inside inline code', () => {
+    expect(sanitizeTelegramHtml('run `x && y` now')).toBe(
+      'run <code>x &amp;&amp; y</code> now',
+    );
+  });
+
+  it('escapes < > & in headings', () => {
+    expect(sanitizeTelegramHtml('# Release < v2 & later')).toBe(
+      '<b>Release &lt; v2 &amp; later</b>',
+    );
+  });
+});
+
+// --- Existing HTML element spans: contents must be preserved verbatim ---
+describe('sanitizeTelegramHtml — whole HTML spans protected', () => {
+  it('<code>*literal*</code> — Markdown inside code is not rewritten', () => {
+    const input = 'pattern: <code>*literal*</code>';
+    expect(sanitizeTelegramHtml(input)).toBe(input);
+  });
+
+  it('<pre>__init__</pre> — Python dunder survives intact', () => {
+    const input = 'see <pre>__init__</pre>';
+    expect(sanitizeTelegramHtml(input)).toBe(input);
+  });
+
+  it('<b>**already bold**</b> — inner markers are not double-processed', () => {
+    const input = '<b>**already bold**</b>';
+    expect(sanitizeTelegramHtml(input)).toBe(input);
+  });
+
+  it('<a href="...">text_with_underscores</a> — link text underscores preserved', () => {
+    const input = '<a href="https://example.com">foo_bar_baz</a>';
+    expect(sanitizeTelegramHtml(input)).toBe(input);
+  });
+
+  it('<blockquote>*italic inside quote*</blockquote> — quote contents preserved', () => {
+    const input = '<blockquote>*keep as-is*</blockquote>';
+    expect(sanitizeTelegramHtml(input)).toBe(input);
+  });
+});
+
+// --- Fenced code blocks must never be rewritten ---
+describe('sanitizeTelegramHtml — fenced code blocks', () => {
+  it('triple-backtick block is wrapped in <pre> with contents escaped', () => {
+    const input = '```\n**not bold**\n__init__\n```';
+    expect(sanitizeTelegramHtml(input)).toBe(
+      '<pre>**not bold**\n__init__</pre>',
+    );
+  });
+
+  it('fenced block with language hint is preserved', () => {
+    const input = '```python\nif x < 5:\n    print("a & b")\n```';
+    expect(sanitizeTelegramHtml(input)).toBe(
+      '<pre>if x &lt; 5:\n    print(&quot;a &amp; b&quot;)</pre>',
+    );
+  });
+
+  it('Markdown outside fenced block is still processed', () => {
+    const input = '**bold** before\n```\n**raw**\n```\n**bold** after';
+    expect(sanitizeTelegramHtml(input)).toBe(
+      '<b>bold</b> before\n<pre>**raw**</pre>\n<b>bold</b> after',
+    );
+  });
+});
+
+// --- Defensive: the `*bold*` that the old parseTextStyles used to emit
+//     is no longer reached now that telegram is passthrough. Pinned here
+//     as the definition of current behavior: lone `*foo*` is italic,
+//     NOT bold. If you ever reintroduce WhatsApp-style markers in
+//     parseTextStyles, this test tells you what breaks.
+describe('sanitizeTelegramHtml — contract with parseTextStyles', () => {
+  it('lone *foo* is italic (would be wrong if parseTextStyles emitted *bold*)', () => {
+    expect(sanitizeTelegramHtml('say *foo* now')).toBe('say <i>foo</i> now');
+  });
+});
