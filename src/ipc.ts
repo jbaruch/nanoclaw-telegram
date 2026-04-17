@@ -12,7 +12,11 @@ import {
   TIMEZONE,
 } from './config.js';
 import { sendPoolMessage } from './channels/telegram.js';
-import { AvailableGroup } from './container-runner.js';
+import {
+  AvailableGroup,
+  DEFAULT_SESSION_NAME,
+  sessionInputDirName,
+} from './container-runner.js';
 import {
   createTask,
   deleteAllSessions,
@@ -59,6 +63,35 @@ export interface IpcDeps {
 }
 
 let ipcWatcherRunning = false;
+
+/**
+ * Path to the `_script_result_<requestId>.json` reply file the host writes
+ * for an IPC request. Must land in the SAME session's input dir that the
+ * requesting container mounts at `/workspace/ipc/input/` — otherwise the
+ * container polls forever and the IPC call times out.
+ *
+ * The container-side MCP server stamps `sessionName` onto every TASKS_DIR
+ * request (see `container/agent-runner/src/ipc-mcp-stdio.ts`). Older
+ * containers that predate that change (or any request where the field is
+ * missing) fall back to the default session — matches pre-parallel
+ * behavior where only one session existed.
+ */
+function scriptResultPath(
+  sourceGroup: string,
+  data: { sessionName?: string; requestId?: string },
+): string {
+  const session =
+    typeof data.sessionName === 'string' && data.sessionName
+      ? data.sessionName
+      : DEFAULT_SESSION_NAME;
+  return path.join(
+    DATA_DIR,
+    'ipc',
+    sourceGroup,
+    sessionInputDirName(session),
+    `_script_result_${data.requestId}.json`,
+  );
+}
 
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
@@ -696,13 +729,7 @@ export async function processTaskIpc(
         const groupDir = path.resolve(process.cwd(), 'groups', sourceGroup);
         const scriptPath = path.join(groupDir, 'scripts', 'sync-tripit.sh');
         if (!fs.existsSync(scriptPath)) {
-          const errPath = path.join(
-            DATA_DIR,
-            'ipc',
-            sourceGroup,
-            'input',
-            `_script_result_${data.requestId}.json`,
-          );
+          const errPath = scriptResultPath(sourceGroup, data);
           fs.writeFileSync(
             errPath,
             JSON.stringify({ error: 'sync-tripit.sh not found' }),
@@ -747,13 +774,7 @@ export async function processTaskIpc(
             maxBuffer: 1024 * 1024,
           },
           (error, stdout, stderr) => {
-            const resultPath = path.join(
-              DATA_DIR,
-              'ipc',
-              sourceGroup,
-              'input',
-              `_script_result_${data.requestId}.json`,
-            );
+            const resultPath = scriptResultPath(sourceGroup, data);
             if (error) {
               logger.error(
                 { sourceGroup, error: error.message, stderr },
@@ -795,13 +816,7 @@ export async function processTaskIpc(
           'trakt-watch-history.py',
         );
         if (!fs.existsSync(scriptPath)) {
-          const errPath = path.join(
-            DATA_DIR,
-            'ipc',
-            sourceGroup,
-            'input',
-            `_script_result_${data.requestId}.json`,
-          );
+          const errPath = scriptResultPath(sourceGroup, data);
           fs.writeFileSync(
             errPath,
             JSON.stringify({ error: 'trakt-watch-history.py not found' }),
@@ -844,13 +859,7 @@ export async function processTaskIpc(
             maxBuffer: 1024 * 1024,
           },
           (error, stdout, stderr) => {
-            const resultPath = path.join(
-              DATA_DIR,
-              'ipc',
-              sourceGroup,
-              'input',
-              `_script_result_${data.requestId}.json`,
-            );
+            const resultPath = scriptResultPath(sourceGroup, data);
             if (error) {
               logger.error(
                 { sourceGroup, error: error.message, stderr },
@@ -891,13 +900,7 @@ export async function processTaskIpc(
           sourceGroup,
           'backup-repo',
         );
-        const resultPath = path.join(
-          DATA_DIR,
-          'ipc',
-          sourceGroup,
-          'input',
-          `_script_result_${data.requestId}.json`,
-        );
+        const resultPath = scriptResultPath(sourceGroup, data);
 
         if (!fs.existsSync(backupDir)) {
           fs.writeFileSync(
@@ -978,13 +981,7 @@ export async function processTaskIpc(
 
     case 'sessionize_get_event':
       if (data.requestId && data.slug) {
-        const sessionizeResultPath = path.join(
-          DATA_DIR,
-          'ipc',
-          sourceGroup,
-          'input',
-          `_script_result_${data.requestId}.json`,
-        );
+        const sessionizeResultPath = scriptResultPath(sourceGroup, data);
 
         const { readEnvFile: readSessionizeEnv } = await import('./env.js');
         const sessionizeVars = readSessionizeEnv(['SESSIONIZE_EVENT_API_KEY']);
@@ -1077,13 +1074,7 @@ export async function processTaskIpc(
 
     case 'sessionize_open_cfps':
       if (data.requestId) {
-        const cfpsResultPath = path.join(
-          DATA_DIR,
-          'ipc',
-          sourceGroup,
-          'input',
-          `_script_result_${data.requestId}.json`,
-        );
+        const cfpsResultPath = scriptResultPath(sourceGroup, data);
 
         const { readEnvFile: readCfpsEnv } = await import('./env.js');
         const cfpsVars = readCfpsEnv(['SESSIONIZE_SPEAKER_KEY']);
@@ -1146,13 +1137,7 @@ export async function processTaskIpc(
           break;
         }
 
-        const audibleResultPath = path.join(
-          DATA_DIR,
-          'ipc',
-          sourceGroup,
-          'input',
-          `_script_result_${data.requestId}.json`,
-        );
+        const audibleResultPath = scriptResultPath(sourceGroup, data);
 
         const dryRun = data.dryRun === true;
         logger.info({ sourceGroup, dryRun }, 'Running audible_backup');
@@ -1223,13 +1208,7 @@ export async function processTaskIpc(
           break;
         }
 
-        const dominosResultPath = path.join(
-          DATA_DIR,
-          'ipc',
-          sourceGroup,
-          'input',
-          `_script_result_${data.requestId}.json`,
-        );
+        const dominosResultPath = scriptResultPath(sourceGroup, data);
 
         const dominosCommand = data.command || '';
         const dominosPayload = data.payload || '';
@@ -1306,13 +1285,7 @@ export async function processTaskIpc(
           break;
         }
 
-        const promoteResultPath = path.join(
-          DATA_DIR,
-          'ipc',
-          sourceGroup,
-          'input',
-          `_script_result_${data.requestId}.json`,
-        );
+        const promoteResultPath = scriptResultPath(sourceGroup, data);
 
         const promoteScript = path.join(
           process.cwd(),

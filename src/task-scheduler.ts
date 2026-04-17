@@ -212,7 +212,11 @@ async function runTask(
           // Close only on final 'success' status below.
         }
         if (streamedOutput.status === 'success') {
-          deps.queue.notifyIdle(task.chat_jid);
+          // No `notifyIdle` here — `notifyIdle` targets the `default` slot
+          // only, so calling it from a maintenance-routed task would flip
+          // the wrong container's state and could preempt active user work.
+          // `scheduleClose` already winds this container down; when runTask
+          // finishes, `drainGroup` chains any pending maintenance task.
           scheduleClose();
         }
         if (streamedOutput.status === 'error') {

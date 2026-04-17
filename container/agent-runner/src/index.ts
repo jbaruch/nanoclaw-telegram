@@ -531,6 +531,12 @@ async function runQuery(
         NANOCLAW_CHAT_JID: containerInput.chatJid,
         NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
         NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+        // Session identity. The MCP stdio server stamps this onto every
+        // IPC request so the host responder knows which session's
+        // `input-<session>/` dir should receive the `_script_result_*`
+        // reply. Without it, responses to a maintenance container's
+        // requests would land in `input-default/` and never be seen.
+        NANOCLAW_SESSION_NAME: containerInput.sessionName || 'default',
         ...(containerInput.replyToMessageId
           ? { NANOCLAW_REPLY_TO_MESSAGE_ID: containerInput.replyToMessageId }
           : {}),

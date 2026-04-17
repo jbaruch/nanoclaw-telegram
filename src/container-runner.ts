@@ -870,12 +870,19 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  // Clean up stale _reply_to file from previous container runs.
-  // Scheduled tasks have no replyToMessageId — a leftover file would
-  // cause the MCP server to quote a random old message.
+  const sessionName = input.sessionName ?? DEFAULT_SESSION_NAME;
+
+  // Clean up stale _reply_to file from previous container runs in THIS
+  // session. The file must match the path the container reads — with
+  // per-session input dirs the container's `/workspace/ipc/input/_reply_to`
+  // maps to `<ipc>/<group>/input-<sessionName>/_reply_to`, so the cleanup
+  // must target the same session-scoped path. A cleanup against the legacy
+  // shared `input/` path would leave the real file in place, and a
+  // scheduled task with no replyToMessageId would quote a random old
+  // message from a prior run.
   const replyToFile = path.join(
     resolveGroupIpcPath(group.folder),
-    'input',
+    sessionInputDirName(sessionName),
     '_reply_to',
   );
   try {
@@ -884,7 +891,6 @@ export async function runContainerAgent(
     /* file doesn't exist — fine */
   }
 
-  const sessionName = input.sessionName ?? DEFAULT_SESSION_NAME;
   const mounts = buildVolumeMounts(
     group,
     input.isMain,

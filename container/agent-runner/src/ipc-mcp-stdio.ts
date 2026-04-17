@@ -19,6 +19,11 @@ const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
+// Which per-group session slot this container occupies. Stamped onto every
+// IPC request so the host responder writes `_script_result_*` replies into
+// the right `input-<session>/` host dir — the one actually bind-mounted at
+// `/workspace/ipc/input/` for this container.
+const sessionName = process.env.NANOCLAW_SESSION_NAME || 'default';
 
 function writeIpcFile(dir: string, data: object): string {
   fs.mkdirSync(dir, { recursive: true });
@@ -26,9 +31,17 @@ function writeIpcFile(dir: string, data: object): string {
   const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
   const filepath = path.join(dir, filename);
 
+  // Stamp `sessionName` onto every request written to TASKS_DIR so the host
+  // responder routes `_script_result_*` replies back into THIS session's
+  // `input-<session>/` dir (which is what's bind-mounted at
+  // `/workspace/ipc/input/` for this container). Non-TASKS writers
+  // (e.g. MESSAGES_DIR) keep their payload as-is.
+  const payload =
+    dir === TASKS_DIR ? { sessionName, ...(data as object) } : data;
+
   // Atomic write: temp file then rename
   const tempPath = `${filepath}.tmp`;
-  fs.writeFileSync(tempPath, JSON.stringify(data, null, 2));
+  fs.writeFileSync(tempPath, JSON.stringify(payload, null, 2));
   fs.renameSync(tempPath, filepath);
 
   return filename;
@@ -44,6 +57,8 @@ async function runHostOperation(
   timeoutMs = 180_000,
 ): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  // `sessionName` is stamped by `writeIpcFile` when dir === TASKS_DIR,
+  // so we don't need to include it in every caller's payload.
   writeIpcFile(TASKS_DIR, {
     type,
     groupFolder,
