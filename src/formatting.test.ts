@@ -200,10 +200,11 @@ describe('TRIGGER_PATTERN', () => {
     expect(TRIGGER_PATTERN.test(`@${upper} hello`)).toBe(true);
   });
 
-  it('does not match when embedded without a word boundary', () => {
-    // The pattern is `(?:^|\s)@NAME\b` — start OR whitespace, then trigger.
+  it('does not match when embedded without a start/whitespace separator', () => {
+    // The pattern is `(?:^|\s)@NAME\b` — the trigger must be at the start
+    // of the string or immediately preceded by whitespace.
     // `hello @AyeAye` DOES match (whitespace separator).
-    // `hello@AyeAye` does NOT match (no start, no whitespace).
+    // `hello@AyeAye` does NOT match (no start, no whitespace separator).
     expect(TRIGGER_PATTERN.test(`hello@${name}`)).toBe(false);
   });
 
