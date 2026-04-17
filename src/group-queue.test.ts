@@ -591,12 +591,7 @@ describe('GroupQueue', () => {
       order.push('second:end');
     });
 
-    queue.enqueueTask(
-      'group1@g.us',
-      'task-A',
-      MAINTENANCE_SESSION_NAME,
-      first,
-    );
+    queue.enqueueTask('group1@g.us', 'task-A', MAINTENANCE_SESSION_NAME, first);
     queue.enqueueTask(
       'group1@g.us',
       'task-B',

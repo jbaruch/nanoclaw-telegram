@@ -448,7 +448,12 @@ export class GroupQueue {
         const task = state.pendingTasks.shift()!;
         this.runTask(nextJid, nextSessionName, task).catch((err) =>
           logger.error(
-            { groupJid: nextJid, sessionName: nextSessionName, taskId: task.id, err },
+            {
+              groupJid: nextJid,
+              sessionName: nextSessionName,
+              taskId: task.id,
+              err,
+            },
             'Unhandled error in runTask (waiting)',
           ),
         );
