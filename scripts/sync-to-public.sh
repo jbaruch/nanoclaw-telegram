@@ -34,6 +34,7 @@ EXCLUDES=(
   # Secrets / private integrations
   --exclude='.env'
   --exclude='scripts/trakt-auth.py'
+  --exclude='scripts/audible-backup.sh'
   --exclude='src/hubitat-listener.ts'
 
   # Personal content
@@ -82,7 +83,7 @@ python3 -c "
 import re
 f = '$PUBLIC_DIR/src/ipc.ts'
 code = open(f).read()
-for name in ['sync_tripit', 'fetch_trakt_history', 'sessionize_get_event', 'sessionize_open_cfps']:
+for name in ['sync_tripit', 'fetch_trakt_history', 'sessionize_get_event', 'sessionize_open_cfps', 'audible_backup']:
     code = re.sub(r\"    case '\" + name + r\"':.*?\n      break;\n\n\", '', code, flags=re.DOTALL)
 open(f, 'w').write(code)
 print('  ipc.ts: removed private IPC handlers')
@@ -94,7 +95,7 @@ import re
 f = '$PUBLIC_DIR/container/agent-runner/src/ipc-mcp-stdio.ts'
 code = open(f).read()
 # Anchor closing ); at start of line (0 indent) to avoid matching inner closings
-for name in ['sync_tripit', 'fetch_trakt_history', 'sessionize_get_event', 'sessionize_open_cfps']:
+for name in ['sync_tripit', 'fetch_trakt_history', 'sessionize_get_event', 'sessionize_open_cfps', 'audible_backup']:
     code = re.sub(r\"server\.tool\(\n  '\" + name + r\"',.*?\n\);\n\n\", '', code, flags=re.DOTALL)
 open(f, 'w').write(code)
 print('  ipc-mcp-stdio.ts: removed private MCP tools')
