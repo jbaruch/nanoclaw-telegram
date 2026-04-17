@@ -73,9 +73,17 @@ const AGENT_MODEL = 'claude-opus-4-7[1m]';
 
 /**
  * Effort level the agent-runner passes to the SDK's `query()` call.
- * Forwarded as `AGENT_EFFORT` on container spawn. Tunable per deploy
- * without rebuilding the agent-runner image — useful for cost/latency
- * experimentation.
+ * Forwarded as `AGENT_EFFORT` on container spawn.
+ *
+ * Resolution order (from highest precedence):
+ *   1. `AGENT_EFFORT` environment variable on the orchestrator process
+ *   2. The hardcoded default below (`xhigh`)
+ *
+ * Operators can override at runtime by setting `AGENT_EFFORT` in the
+ * orchestrator's env (e.g. docker-compose, systemd unit), no rebuild
+ * needed. The agent-runner validates the forwarded value against the
+ * allowed set and falls back to `xhigh` on invalid input, so a typo
+ * here won't crash containers — it'll log a warning inside the runner.
  *
  * Valid values: `'low' | 'medium' | 'high' | 'xhigh' | 'max'`.
  * - On Opus 4.7: `xhigh` is Anthropic's recommended default for
@@ -84,7 +92,7 @@ const AGENT_MODEL = 'claude-opus-4-7[1m]';
  *   the SDK.
  * See https://docs.anthropic.com/en/docs/build-with-claude/effort
  */
-const AGENT_EFFORT = 'xhigh';
+const AGENT_EFFORT = process.env.AGENT_EFFORT || 'xhigh';
 
 /**
  * Create a filtered copy of messages.db containing only one group's messages.
