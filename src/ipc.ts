@@ -88,13 +88,16 @@ const VALID_REQUEST_ID_RE = /^[A-Za-z0-9_-]+$/;
  * the expected `<DATA_DIR>/ipc/<sourceGroup>/input-<session>/` subtree.
  *
  * Fail-safe strategy: malformed requestId/sessionName trigger a fallback
- * to a safe but UNUSED path (random requestId, default session). The
- * response still gets written — to a location no container polls — and
- * the malformed request effectively times out, which is the correct
- * outcome for a bad payload. The warning log surfaces the incident for
- * auditing. This keeps every caller's `fs.writeFileSync(path, ...)`
- * pattern intact (no null-checking at 10+ call sites) while still
- * blocking path traversal.
+ * to a safe but UNUSED path (fixed requestId `'invalid'`, default
+ * session). The response still gets written — to `_script_result_invalid.json`
+ * under the default session's input dir — and the malformed request
+ * effectively times out, which is the correct outcome for a bad payload.
+ * The filename is fixed (not random) so a noisy/malicious container can't
+ * fill disk by spamming unique requestIds; at most one orphan file exists
+ * per input dir and gets overwritten in place. The warning log surfaces
+ * the incident for auditing. This keeps every caller's
+ * `fs.writeFileSync(path, ...)` pattern intact (no null-checking at 10+
+ * call sites) while still blocking path traversal.
  */
 function scriptResultPath(
   sourceGroup: string,

@@ -54,9 +54,17 @@ interface GroupState {
  * concurrently — each occupies its own slot. Global concurrency is still
  * capped by `MAX_CONCURRENT_CONTAINERS` across all slots.
  *
- * User-facing paths (message check, IPC send, close stdin, idle notification)
- * target the `default` session implicitly; scheduled paths pass `sessionName`
- * explicitly via `enqueueTask`.
+ * Method surface:
+ * - `enqueueMessageCheck(groupJid)` and `sendMessage(groupJid, ...)` —
+ *   user-facing paths, hardcoded to the `default` slot (inbound messages
+ *   always route there).
+ * - `notifyIdle(groupJid)` — also default-only; only the user-facing
+ *   container runs the idle-waiting loop. Scheduled tasks exit on result.
+ * - `enqueueTask(groupJid, id, sessionName, fn)` and
+ *   `closeStdin(groupJid, sessionName?)` — session-selectable. The
+ *   scheduler passes `MAINTENANCE_SESSION_NAME` for its writes;
+ *   `closeStdin` defaults to `default` when called from a user-facing
+ *   code path.
  */
 export class GroupQueue {
   private groups = new Map<string, GroupState>();
