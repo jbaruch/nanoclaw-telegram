@@ -111,7 +111,11 @@ function scriptResultPath(
       { sourceGroup, requestId: data.requestId },
       'IPC request has missing or invalid requestId — routing response to orphan path',
     );
-    requestId = `invalid-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    // Fixed filename for all invalid requests so a noisy/malicious container
+    // can't spam unique requestIds and fill disk with orphan replies. At
+    // most one `_script_result_invalid.json` file exists per input dir, and
+    // it gets overwritten on every subsequent malformed request.
+    requestId = 'invalid';
   }
   let session = DEFAULT_SESSION_NAME;
   if (typeof data.sessionName === 'string' && data.sessionName) {

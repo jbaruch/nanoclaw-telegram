@@ -549,7 +549,7 @@ export function buildVolumeMounts(
   // of the installed tile version.
   //
   // Error handling distinguishes:
-  //   - Expected race errors (EEXIST/ENOTEMPTY/ENOENT): another session won
+  //   - Expected race errors (EEXIST/ENOTEMPTY): another session won
   //     the rename; their copy is equivalent so we just drop our tmp.
   //   - Unexpected errors (EACCES, EIO, etc.): something is actually broken.
   //     If we already moved the old dir aside we must restore it before
@@ -604,6 +604,16 @@ export function buildVolumeMounts(
         { err, groupScriptsDir },
         'scripts/ swap raced with concurrent setup; keeping winning copy',
       );
+      // The winning session already placed a correct groupScriptsDir. Our
+      // moved-aside copy is now redundant — clean it up so `groups/<folder>/`
+      // doesn't accumulate `.old.*` dirs over many concurrent spawns.
+      if (oldMovedAside) {
+        try {
+          fs.rmSync(oldScriptsDir, { recursive: true, force: true });
+        } catch {
+          /* ignore — leaves an orphaned .old dir, not a correctness issue */
+        }
+      }
     } else {
       logger.error(
         { err, code, groupScriptsDir },

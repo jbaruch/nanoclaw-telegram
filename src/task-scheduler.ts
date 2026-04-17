@@ -153,10 +153,21 @@ async function runTask(
   let result: string | null = null;
   let error: string | null = null;
 
-  // For group context mode, use the group's current session
-  const sessions = deps.getSessions();
-  const sessionId =
-    task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
+  // Scheduled tasks run in the maintenance session, which has its own
+  // `.claude/` mount separate from the user-facing default session's
+  // session store. The per-group `sessions` map (via `deps.getSessions()`)
+  // is populated by the default container — those sessionIds don't exist
+  // in maintenance's `.claude/projects/` tree, so a resume attempt would
+  // fail. Until per-session session caching is added (follow-up PR that
+  // keys the sessions map by `(groupFolder, sessionName)`), scheduled
+  // tasks start fresh every time.
+  //
+  // `context_mode: 'group'` still works at the agent-runner level — the
+  // group CLAUDE.md and memory come in via the group-folder mount, not
+  // via session resume. Only SDK-transcript continuity is lost, which
+  // heartbeat, nightly-housekeeping, weekly-housekeeping, etc. don't
+  // rely on.
+  const sessionId = undefined;
 
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
