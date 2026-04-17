@@ -33,7 +33,10 @@ function clearState(): void {
   } catch (err: any) {
     // ENOENT is expected (no state file to clear); anything else is a real bug.
     if (err?.code !== 'ENOENT') {
-      logger.warn({ err, path: STATE_FILE }, 'Failed to clear remote-control state file');
+      logger.warn(
+        { err, path: STATE_FILE },
+        'Failed to clear remote-control state file',
+      );
     }
   }
 }
@@ -71,7 +74,10 @@ export function restoreRemoteControl(): void {
       clearState();
     }
   } catch (err) {
-    logger.warn({ err, path: STATE_FILE }, 'Remote Control state file is corrupt; clearing');
+    logger.warn(
+      { err, path: STATE_FILE },
+      'Remote Control state file is corrupt; clearing',
+    );
     clearState();
   }
 }
