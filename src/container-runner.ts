@@ -314,7 +314,7 @@ export function buildVolumeMounts(
     JSON.stringify(
       {
         env: {
-          CLAUDE_CODE_MODEL: 'claude-opus-4-6',
+          CLAUDE_CODE_MODEL: 'claude-opus-4-7',
           CLAUDE_CODE_MAX_CONTEXT_WINDOW: '1000000',
           CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
           CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
