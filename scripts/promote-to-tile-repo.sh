@@ -33,9 +33,20 @@ RULES_SRC="$STAGING_DIR/rules"
 # Cross-tile duplicate check: look at registry-installed tiles
 TESSL_TILES_DIR="${TESSL_TILES_DIR:-}"
 
-# Read a single frontmatter field from a SKILL.md. Returns the value on
-# stdout, empty if unset or no frontmatter block. Frontmatter is the block
-# between the first two `---` markers at the top of the file.
+# Read a single frontmatter field from a SKILL.md. Returns the normalised
+# value on stdout (or empty if unset or no frontmatter block). Frontmatter
+# is the block between the first two `---` markers at the top of the file.
+#
+# Robust against common YAML-ish variants:
+# - `field: true`   (space after colon)
+# - `field:true`    (no space after colon)
+# - `field: true  ` (trailing whitespace)
+# - `field: true # comment` (inline comment stripped)
+# - `field: "true"` / `field: 'true'` (surrounding quotes stripped)
+#
+# Silent-fail would be dangerous here — an author who writes `skip-optimize:true`
+# thinking the flag is set and then sees their skill still being auto-trimmed
+# has no way to diagnose the mismatch. Normalise defensively.
 read_frontmatter_field() {
   local file="$1"
   local field="$2"
@@ -43,7 +54,24 @@ read_frontmatter_field() {
     NR == 1 && $0 != "---" { exit }
     NR == 1 { in_fm = 1; next }
     in_fm && $0 == "---" { exit }
-    in_fm && $1 == f ":" { sub("^[^:]*: *", ""); print; exit }
+    in_fm {
+      prefix_re = "^[[:space:]]*" f "[[:space:]]*:"
+      if ($0 !~ prefix_re) next
+      line = $0
+      sub(prefix_re, "", line)
+      sub("[[:space:]]+#.*$", "", line)      # inline comment
+      sub("^[[:space:]]+", "", line)         # leading ws
+      sub("[[:space:]]+$", "", line)         # trailing ws
+      if (length(line) >= 2) {               # strip matched surrounding quotes
+        first = substr(line, 1, 1)
+        last  = substr(line, length(line), 1)
+        if ((first == "\"" && last == "\"") || (first == "\047" && last == "\047")) {
+          line = substr(line, 2, length(line) - 2)
+        }
+      }
+      print line
+      exit
+    }
   ' "$file"
 }
 
