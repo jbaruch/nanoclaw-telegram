@@ -246,8 +246,23 @@ export const DEFAULT_SESSION_NAME = 'default';
  *
  * Exported so group-queue writes to the same path the container-runner
  * mounted — both must agree on the location. Kept in sync at compile time.
+ *
+ * Session name is validated here so every caller (orchestrator-trusted
+ * and IPC-untrusted alike) gets the same guard. A malicious container
+ * that manages to stamp `sessionName: "../default"` onto its IPC request
+ * would, without this check, redirect `scriptResultPath` or mount
+ * construction into a directory outside the expected `ipc/<group>/`
+ * subtree. The allowlist pattern is deliberately narrow — `default`,
+ * `maintenance`, and any hypothetical future slot all fit within
+ * `[A-Za-z0-9_-]+`.
  */
+const VALID_SESSION_NAME_RE = /^[A-Za-z0-9_-]+$/;
 export function sessionInputDirName(sessionName: string): string {
+  if (!VALID_SESSION_NAME_RE.test(sessionName)) {
+    throw new Error(
+      `Invalid session name: ${JSON.stringify(sessionName)} — must match ${VALID_SESSION_NAME_RE}`,
+    );
+  }
   return `input-${sessionName}`;
 }
 
@@ -522,10 +537,20 @@ export function buildVolumeMounts(
   // tree — never a half-populated intermediate. Concurrent swaps resolve
   // to "whichever finished last wins"; both end states are valid snapshots
   // of the installed tile version.
+  //
+  // Error handling distinguishes:
+  //   - Expected race errors (EEXIST/ENOTEMPTY/ENOENT): another session won
+  //     the rename; their copy is equivalent so we just drop our tmp.
+  //   - Unexpected errors (EACCES, EIO, etc.): something is actually broken.
+  //     If we already moved the old dir aside we must restore it before
+  //     failing so the group isn't left with a missing scripts/ tree.
+  const RACE_CODES = new Set(['EEXIST', 'ENOTEMPTY', 'ENOENT']);
+  let oldMovedAside = false;
   try {
     // Move existing dir aside. Absent on first-ever spawn for a new group.
     try {
       fs.renameSync(groupScriptsDir, oldScriptsDir);
+      oldMovedAside = true;
     } catch (err: unknown) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT') throw err;
@@ -538,17 +563,48 @@ export function buildVolumeMounts(
       /* ignore — leaves an orphaned .old dir, not a correctness issue */
     }
   } catch (err: unknown) {
-    // A concurrent container likely won the swap race and placed its own
-    // fresh copy; ours is no longer needed. Drop our tmp and carry on.
-    logger.debug(
-      { err, groupScriptsDir },
-      'scripts/ swap raced with concurrent setup; keeping winning copy',
-    );
+    const code = (err as NodeJS.ErrnoException).code;
+    const isRace = code ? RACE_CODES.has(code) : false;
+
+    // If we moved the old dir aside but failed the tmp→final rename, the
+    // group's scripts/ is missing RIGHT NOW. Try to restore the old dir so
+    // callers don't spawn a container with no scripts/ tree. Only for the
+    // non-race path — in a race the winning session already placed a
+    // correct groupScriptsDir.
+    if (oldMovedAside && !isRace) {
+      try {
+        fs.renameSync(oldScriptsDir, groupScriptsDir);
+      } catch (restoreErr: unknown) {
+        logger.error(
+          { err: restoreErr, groupScriptsDir, oldScriptsDir },
+          'FAILED to restore previous scripts/ after swap failure — group will spawn without scripts',
+        );
+      }
+    }
+
+    if (isRace) {
+      logger.debug(
+        { err, groupScriptsDir },
+        'scripts/ swap raced with concurrent setup; keeping winning copy',
+      );
+    } else {
+      logger.error(
+        { err, code, groupScriptsDir },
+        'scripts/ swap failed unexpectedly (not a race)',
+      );
+    }
+
+    // Always drop our tmp (either the race winner made ours redundant, or
+    // a real error means we can't trust our partial build).
     try {
       fs.rmSync(tmpScriptsDir, { recursive: true, force: true });
     } catch {
       /* ignore */
     }
+
+    // Rethrow non-race errors so the spawn fails loudly rather than
+    // limping along with a missing scripts/ tree.
+    if (!isRace) throw err;
   }
 
   // Write aggregated RULES.md

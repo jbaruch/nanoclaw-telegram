@@ -36,8 +36,13 @@ function writeIpcFile(dir: string, data: object): string {
   // `input-<session>/` dir (which is what's bind-mounted at
   // `/workspace/ipc/input/` for this container). Non-TASKS writers
   // (e.g. MESSAGES_DIR) keep their payload as-is.
+  //
+  // Spread order: `sessionName` goes AFTER `...data` so the env-derived
+  // value always wins over any caller-provided field. Without this, a
+  // caller that passes `sessionName` in `data` — even by accident —
+  // could redirect the host's reply to a different session's input dir.
   const payload =
-    dir === TASKS_DIR ? { sessionName, ...(data as object) } : data;
+    dir === TASKS_DIR ? { ...(data as object), sessionName } : data;
 
   // Atomic write: temp file then rename
   const tempPath = `${filepath}.tmp`;

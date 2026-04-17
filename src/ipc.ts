@@ -76,14 +76,29 @@ let ipcWatcherRunning = false;
  * missing) fall back to the default session — matches pre-parallel
  * behavior where only one session existed.
  */
+const VALID_SESSION_NAME_IPC_RE = /^[A-Za-z0-9_-]+$/;
 function scriptResultPath(
   sourceGroup: string,
   data: { sessionName?: string; requestId?: string },
 ): string {
-  const session =
-    typeof data.sessionName === 'string' && data.sessionName
-      ? data.sessionName
-      : DEFAULT_SESSION_NAME;
+  // `data.sessionName` arrives from the container's IPC payload — treat as
+  // untrusted. A crafted value like `../default` or `foo/../../bar` would,
+  // without validation, make `path.join` escape the expected
+  // `<DATA_DIR>/ipc/<sourceGroup>/` subtree. Values that don't match the
+  // strict allowlist fall back to the default session; the container that
+  // sent the bogus name simply times out on that request, which is the
+  // correct outcome for a malformed payload.
+  let session = DEFAULT_SESSION_NAME;
+  if (typeof data.sessionName === 'string' && data.sessionName) {
+    if (VALID_SESSION_NAME_IPC_RE.test(data.sessionName)) {
+      session = data.sessionName;
+    } else {
+      logger.warn(
+        { sourceGroup, sessionName: data.sessionName },
+        'IPC request has invalid sessionName — falling back to default',
+      );
+    }
+  }
   return path.join(
     DATA_DIR,
     'ipc',
