@@ -283,18 +283,24 @@ export class GroupQueue {
 
     // Session-scoped sentinel — writing `_close` to `input-default/` affects
     // only the default container; the maintenance container polls its own
-    // `input-maintenance/` directory and is unaffected.
-    const inputDir = path.join(
-      DATA_DIR,
-      'ipc',
-      state.groupFolder,
-      sessionInputDirName(sessionName),
-    );
+    // `input-maintenance/` directory and is unaffected. `sessionInputDirName`
+    // is called inside the try block because it throws on invalid
+    // `sessionName`; letting the throw escape here would crash the queue
+    // despite the surrounding catch being present.
     try {
+      const inputDir = path.join(
+        DATA_DIR,
+        'ipc',
+        state.groupFolder,
+        sessionInputDirName(sessionName),
+      );
       fs.mkdirSync(inputDir, { recursive: true });
       fs.writeFileSync(path.join(inputDir, '_close'), '');
-    } catch {
-      // ignore
+    } catch (err) {
+      logger.warn(
+        { err, groupJid, sessionName },
+        'closeStdin failed — stale container may linger until idle timeout',
+      );
     }
   }
 

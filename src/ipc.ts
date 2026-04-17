@@ -77,17 +77,42 @@ let ipcWatcherRunning = false;
  * behavior where only one session existed.
  */
 const VALID_SESSION_NAME_IPC_RE = /^[A-Za-z0-9_-]+$/;
+const VALID_REQUEST_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Compute the host path where an IPC response file should land.
+ *
+ * Both `data.sessionName` and `data.requestId` arrive from the container's
+ * IPC payload — treat as untrusted. Without validation, crafted values
+ * like `../default` or `../../etc/passwd` would make `path.join` escape
+ * the expected `<DATA_DIR>/ipc/<sourceGroup>/input-<session>/` subtree.
+ *
+ * Fail-safe strategy: malformed requestId/sessionName trigger a fallback
+ * to a safe but UNUSED path (random requestId, default session). The
+ * response still gets written — to a location no container polls — and
+ * the malformed request effectively times out, which is the correct
+ * outcome for a bad payload. The warning log surfaces the incident for
+ * auditing. This keeps every caller's `fs.writeFileSync(path, ...)`
+ * pattern intact (no null-checking at 10+ call sites) while still
+ * blocking path traversal.
+ */
 function scriptResultPath(
   sourceGroup: string,
   data: { sessionName?: string; requestId?: string },
 ): string {
-  // `data.sessionName` arrives from the container's IPC payload — treat as
-  // untrusted. A crafted value like `../default` or `foo/../../bar` would,
-  // without validation, make `path.join` escape the expected
-  // `<DATA_DIR>/ipc/<sourceGroup>/` subtree. Values that don't match the
-  // strict allowlist fall back to the default session; the container that
-  // sent the bogus name simply times out on that request, which is the
-  // correct outcome for a malformed payload.
+  let requestId: string;
+  if (
+    typeof data.requestId === 'string' &&
+    VALID_REQUEST_ID_RE.test(data.requestId)
+  ) {
+    requestId = data.requestId;
+  } else {
+    logger.warn(
+      { sourceGroup, requestId: data.requestId },
+      'IPC request has missing or invalid requestId — routing response to orphan path',
+    );
+    requestId = `invalid-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
   let session = DEFAULT_SESSION_NAME;
   if (typeof data.sessionName === 'string' && data.sessionName) {
     if (VALID_SESSION_NAME_IPC_RE.test(data.sessionName)) {
@@ -104,7 +129,7 @@ function scriptResultPath(
     'ipc',
     sourceGroup,
     sessionInputDirName(session),
-    `_script_result_${data.requestId}.json`,
+    `_script_result_${requestId}.json`,
   );
 }
 

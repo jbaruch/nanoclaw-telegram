@@ -276,6 +276,16 @@ export function buildVolumeMounts(
   chatJid: string,
   sessionName: string = DEFAULT_SESSION_NAME,
 ): VolumeMount[] {
+  // Validate `sessionName` at the earliest point it's used as a filesystem
+  // path segment. The same allowlist `sessionInputDirName` enforces — kept
+  // in sync so no mount can be built with a name that would later be
+  // rejected at IPC time, and no caller can smuggle `..` into the sessions
+  // dir path (which happens BEFORE `sessionInputDirName` is reached).
+  if (!VALID_SESSION_NAME_RE.test(sessionName)) {
+    throw new Error(
+      `Invalid session name: ${JSON.stringify(sessionName)} — must match ${VALID_SESSION_NAME_RE}`,
+    );
+  }
   const mounts: VolumeMount[] = [];
   const groupDir = resolveGroupFolderPath(group.folder);
 
