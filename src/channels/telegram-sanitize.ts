@@ -41,10 +41,7 @@ export function sanitizeTelegramHtml(text: string): string {
   );
   out = out.replace(/https?:\/\/[^\s<>")\]]+/g, protect);
   out = out.replace(/ftp:\/\/[^\s<>")\]]+/g, protect);
-  out = out.replace(
-    /[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+/g,
-    protect,
-  );
+  out = out.replace(/[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+/g, protect);
 
   // Phase 2: Markdown → HTML.
   // 2a. Markdown links [text](url) — url may be a placeholder from Phase 1.

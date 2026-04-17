@@ -3,7 +3,9 @@ import { sanitizeTelegramHtml } from './telegram-sanitize.js';
 
 describe('sanitizeTelegramHtml — Markdown → HTML', () => {
   it('converts **bold** to <b>', () => {
-    expect(sanitizeTelegramHtml('say **this** now')).toBe('say <b>this</b> now');
+    expect(sanitizeTelegramHtml('say **this** now')).toBe(
+      'say <b>this</b> now',
+    );
   });
 
   it('converts __bold__ to <b>', () => {
