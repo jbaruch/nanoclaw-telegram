@@ -33,6 +33,20 @@ RULES_SRC="$STAGING_DIR/rules"
 # Cross-tile duplicate check: look at registry-installed tiles
 TESSL_TILES_DIR="${TESSL_TILES_DIR:-}"
 
+# Read a single frontmatter field from a SKILL.md. Returns the value on
+# stdout, empty if unset or no frontmatter block. Frontmatter is the block
+# between the first two `---` markers at the top of the file.
+read_frontmatter_field() {
+  local file="$1"
+  local field="$2"
+  awk -v f="$field" '
+    NR == 1 && $0 != "---" { exit }
+    NR == 1 { in_fm = 1; next }
+    in_fm && $0 == "---" { exit }
+    in_fm && $1 == f ":" { sub("^[^:]*: *", ""); print; exit }
+  ' "$file"
+}
+
 # --- Tile placement validation ---
 validate_placement() {
   local skill_file="$1"
@@ -40,6 +54,18 @@ validate_placement() {
   local canonical="$3"
 
   if [ "$tile" = "nanoclaw-admin" ]; then return 0; fi
+
+  # Explicit opt-in bypass for skills that legitimately document admin-level
+  # names as reference content (e.g. scrub-list entries in `ship-code`). The
+  # regex below can't distinguish "uses these handlers" from "warns you to
+  # scrub these handlers"; the frontmatter flag is the skill author's
+  # assertion that the mentions are intentional reference material.
+  # Auditable — `grep -r 'placement-admin-content-ok: true' tiles/` lists
+  # every skill that opts out.
+  if [ "$(read_frontmatter_field "$skill_file" 'placement-admin-content-ok')" = "true" ]; then
+    echo "  placement check: bypassed by frontmatter flag for $canonical"
+    return 0
+  fi
 
   if [ "$tile" = "nanoclaw-untrusted" ]; then
     if grep -qiE 'composio|gmail|calendar|tasks|schedule_task|promote|host_script|sync_tripit|fetch_trakt' "$skill_file" 2>/dev/null; then
@@ -176,8 +202,18 @@ if [ "$PROMOTED" -eq 0 ]; then
 fi
 
 # --- Skill review + optimize (shift-left: fix before CI) ---
+# Skills can opt out of the auto-optimize pass with `skip-optimize: true` in
+# frontmatter — useful when the skill is intentionally verbose (concrete
+# examples, step-by-step narration) and auto-trimming would lose meaning.
+# The review itself still runs remotely via GHA; this flag only skips the
+# local auto-apply.
 if [ -n "$PROMOTED_SKILLS" ] && command -v tessl >/dev/null 2>&1; then
   for skill_name in $PROMOTED_SKILLS; do
+    skill_md="$TILE_REPO_DIR/skills/$skill_name/SKILL.md"
+    if [ "$(read_frontmatter_field "$skill_md" 'skip-optimize')" = "true" ]; then
+      echo "skipping optimize: $skill_name (frontmatter flag)"
+      continue
+    fi
     echo "reviewing: $skill_name"
     tessl skill review --optimize --yes "$TILE_REPO_DIR/skills/$skill_name"
   done
