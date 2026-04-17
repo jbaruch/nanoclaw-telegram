@@ -50,24 +50,27 @@ TESSL_TILES_DIR="${TESSL_TILES_DIR:-}"
 read_frontmatter_field() {
   local file="$1"
   local field="$2"
+  # Match is buffered and only emitted if we saw both opening AND closing
+  # `---` markers. Without the closing check, a malformed SKILL.md that
+  # opens with `---` but never closes it would let body-level `field:`
+  # occurrences be parsed as frontmatter — which would let an attacker
+  # smuggle `placement-admin-content-ok: true` into the body and bypass
+  # validation.
   awk -v f="$field" '
     NR == 1 && $0 != "---" { exit }
     NR == 1 { in_fm = 1; next }
-    in_fm && $0 == "---" { exit }
-    in_fm {
+    in_fm && $0 == "---" { closed = 1; exit }
+    in_fm && !found {
       prefix_re = "^[[:space:]]*" f "[[:space:]]*:"
       if ($0 !~ prefix_re) next
       line = $0
       sub(prefix_re, "", line)
       sub("^[[:space:]]+", "", line)   # strip leading ws after colon
       # Value begins with `#` after trimming — the entire line after the
-      # colon is a comment, so the field has no value. Return empty.
-      # (Without this, the later `[[:space:]]+#` regex would miss it because
-      # the comment is no longer preceded by whitespace.)
-      if (substr(line, 1, 1) == "#") { print ""; exit }
+      # colon is a comment, so the field has no value.
+      if (substr(line, 1, 1) == "#") { matched = ""; found = 1; next }
       # Quoted values must be parsed BEFORE stripping `#` comments, because
-      # in YAML `#` inside quotes is literal, not a comment. Detect a quoted
-      # value up front and return the inner content as-is.
+      # in YAML `#` inside quotes is literal, not a comment.
       if (length(line) >= 2) {
         first = substr(line, 1, 1)
         if (first == "\"" || first == "\047") {
@@ -76,8 +79,9 @@ read_frontmatter_field() {
           rest = substr(line, 2)
           for (i = length(rest); i >= 1; i--) {
             if (substr(rest, i, 1) == first) {
-              print substr(rest, 1, i - 1)
-              exit
+              matched = substr(rest, 1, i - 1)
+              found = 1
+              next
             }
           }
           # No closing quote — fall through to unquoted handling.
@@ -87,8 +91,11 @@ read_frontmatter_field() {
       # per YAML), then strip trailing whitespace.
       sub("[[:space:]]+#.*$", "", line)
       sub("[[:space:]]+$", "", line)
-      print line
-      exit
+      matched = line
+      found = 1
+    }
+    END {
+      if (closed && found) print matched
     }
   ' "$file"
 }
@@ -102,30 +109,35 @@ validate_placement() {
   if [ "$tile" = "nanoclaw-admin" ]; then return 0; fi
 
   # Explicit opt-in bypass for skills that legitimately document admin-level
-  # names as reference content (e.g. scrub-list entries in `ship-code`). The
-  # regex below can't distinguish "uses these handlers" from "warns you to
-  # scrub these handlers"; the frontmatter flag is the skill author's
-  # assertion that the mentions are intentional reference material.
-  # Auditable — `grep -r 'placement-admin-content-ok: true' tiles/` lists
-  # every skill that opts out.
+  # names as reference content (e.g. scrub-list entries in `ship-code`).
+  # Scope: this flag ONLY skips the admin-content regex checks — tile-
+  # specific structural rules (like nanoclaw-core's trusted-workspace
+  # reference block) still apply. The admin-content regex can't distinguish
+  # "uses these handlers" from "warns you to scrub these handlers"; the
+  # flag is the author's assertion that the mentions are intentional
+  # reference material. Auditable — `grep -r 'placement-admin-content-ok: true' tiles/`
+  # lists every skill that opts out.
+  local skip_admin_regex=false
   if [ "$(read_frontmatter_field "$skill_file" 'placement-admin-content-ok')" = "true" ]; then
-    echo "  placement check: bypassed by frontmatter flag for $canonical"
-    return 0
+    echo "  placement check: admin-content regex bypassed by frontmatter flag for $canonical"
+    skip_admin_regex=true
   fi
 
   if [ "$tile" = "nanoclaw-untrusted" ]; then
-    if grep -qiE 'composio|gmail|calendar|tasks|schedule_task|promote|host_script|sync_tripit|fetch_trakt' "$skill_file" 2>/dev/null; then
+    if ! $skip_admin_regex && grep -qiE 'composio|gmail|calendar|tasks|schedule_task|promote|host_script|sync_tripit|fetch_trakt' "$skill_file" 2>/dev/null; then
       echo "BLOCKED: $canonical has admin-level content but target is $tile"
       return 1
     fi
     return 0
   fi
 
-  if grep -qiE 'composio|gmail|googlecalendar|googletasks|sessionize|sync_tripit|fetch_trakt|promote_staging|github_backup|register_group' "$skill_file" 2>/dev/null; then
+  if ! $skip_admin_regex && grep -qiE 'composio|gmail|googlecalendar|googletasks|sessionize|sync_tripit|fetch_trakt|promote_staging|github_backup|register_group' "$skill_file" 2>/dev/null; then
     echo "BLOCKED: $canonical has admin-level content but target is $tile"
     return 1
   fi
 
+  # nanoclaw-core's trusted-workspace check runs regardless of the
+  # admin-content bypass — these are orthogonal concerns.
   if [ "$tile" = "nanoclaw-core" ]; then
     if grep -qiE '/workspace/trusted/|trusted.memory|cross.group' "$skill_file" 2>/dev/null; then
       echo "BLOCKED: $canonical references trusted workspace but target is core"
