@@ -612,7 +612,32 @@ async function runQuery(
       // so the model can be bumped without rebuilding the agent-runner image.
       // Fallback matches the historical hardcoded value.
       model: process.env.AGENT_MODEL || 'opus[1m]',
-      effort: 'max',
+      // Opus 4.7 rejects the old `thinking.type=enabled` shape entirely
+      // and runs with thinking OFF unless adaptive is explicitly requested.
+      // Adaptive also auto-enables interleaved thinking, which matters for
+      // our multi-tool-call agentic workflow. Safe on 4.6/Sonnet 4.6 (both
+      // support adaptive and will use it over the deprecated manual mode).
+      // See https://docs.anthropic.com/en/docs/build-with-claude/adaptive-thinking
+      thinking: { type: 'adaptive' as const },
+      // AGENT_EFFORT is set by the orchestrator alongside AGENT_MODEL so
+      // cost/latency can be tuned per deploy without rebuilding this image.
+      // xhigh is Opus 4.7's recommended default for coding/agentic work
+      // (Anthropic docs: "recommended starting point for coding and agentic
+      // work"). On 4.6 and Sonnet 4.6 the SDK silently falls back to `high`.
+      // Dropped from `max` — Anthropic recommends against max on 4.7 unless
+      // evals show measurable headroom; xhigh is the sweet spot.
+      //
+      // NOTE: `thinking` is deliberately NOT env-configurable — its valid
+      // shape is coupled to the model family (4.7 rejects `type: 'enabled'`,
+      // older models require it), so independent config would let the two
+      // drift and silently reproduce the 400-error outage. Model-family
+      // changes are a code review, not a redeploy knob.
+      effort: (process.env.AGENT_EFFORT || 'xhigh') as
+        | 'low'
+        | 'medium'
+        | 'high'
+        | 'xhigh'
+        | 'max',
       allowedTools: [
         'Bash',
         'Read',
