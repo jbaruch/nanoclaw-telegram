@@ -53,7 +53,11 @@ import {
   storeChatMetadata,
   storeMessage,
 } from './db.js';
-import { GroupQueue } from './group-queue.js';
+import {
+  DEFAULT_SESSION_NAME,
+  GroupQueue,
+  MAINTENANCE_SESSION_NAME,
+} from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { initBotPool } from './channels/telegram.js';
 import { startIpcWatcher } from './ipc.js';
@@ -240,6 +244,40 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
       logger.info(
         { jid, folder: group.folder },
         'Auto-created heartbeat for trigger-required group',
+      );
+    }
+  }
+
+  // Auto-create the parallel-maintenance heartbeat for every main group.
+  // Mirrors the non-main auto-registration above, but runs in the
+  // `maintenance` session slot so it doesn't block user-facing AyeAye.
+  // The task-scheduler fires this every 15 minutes via
+  // `MAINTENANCE_SESSION_NAME`; the prompt keeps the defensive preamble
+  // as belt-and-suspenders against improvisation.
+  if (group.isMain) {
+    const heartbeatId = `heartbeat-${group.folder}`;
+    if (!getTaskById(heartbeatId)) {
+      createTask({
+        id: heartbeatId,
+        group_folder: group.folder,
+        chat_jid: jid,
+        prompt:
+          'MANDATORY FIRST ACTION: Call Skill(skill: "tessl__heartbeat") BEFORE doing anything else. Do NOT improvise checks. Do NOT query databases. Do NOT invent thresholds. Load and execute the skill exactly as written.\n\n' +
+          'This is a scheduled heartbeat — no ACK reaction, no reply_to.\n' +
+          'Workspace: /workspace/group/\n' +
+          'Telegram HTML ONLY: <b>, <i>, <code>, <a href="url">text</a>, • for bullets. NEVER Markdown.\n' +
+          'CRITICAL: NEVER set the "sender" parameter on send_message. Always call send_message with only "text" and optionally "pin". The sender parameter routes through pool bots and bypasses the database — messages become ghosts.\n' +
+          'If nothing actionable → produce NO output at all. Silence = success.',
+        schedule_type: 'interval',
+        schedule_value: '900000', // 15 minutes in ms
+        context_mode: 'group',
+        next_run: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        status: 'active',
+        created_at: new Date().toISOString(),
+      });
+      logger.info(
+        { jid, folder: group.folder },
+        'Auto-created maintenance heartbeat for main group',
       );
     }
   }
@@ -597,9 +635,19 @@ async function runAgent(
         isTrusted: !!group.containerConfig?.trusted,
         assistantName: ASSISTANT_NAME,
         replyToMessageId,
+        // User-facing path. Invariant: inbound messages always route to
+        // `default`. `src/task-scheduler.ts` is the sole writer of
+        // `'maintenance'` — maintenance-AyeAye never reaches this code path.
+        sessionName: DEFAULT_SESSION_NAME,
       },
       (proc, containerName) =>
-        queue.registerProcess(chatJid, proc, containerName, group.folder),
+        queue.registerProcess(
+          chatJid,
+          DEFAULT_SESSION_NAME,
+          proc,
+          containerName,
+          group.folder,
+        ),
       wrappedOnOutput,
     );
 
@@ -969,8 +1017,14 @@ async function main(): Promise<void> {
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
     queue,
-    onProcess: (groupJid, proc, containerName, groupFolder) =>
-      queue.registerProcess(groupJid, proc, containerName, groupFolder),
+    onProcess: (groupJid, sessionName, proc, containerName, groupFolder) =>
+      queue.registerProcess(
+        groupJid,
+        sessionName,
+        proc,
+        containerName,
+        groupFolder,
+      ),
     sendMessage: async (jid, rawText) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
@@ -1021,12 +1075,17 @@ async function main(): Promise<void> {
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
     nukeSession: (groupFolder: string) => {
-      // Kill the running container
-      queue.closeStdin(
+      // Kill BOTH the user-facing and maintenance containers (if running).
+      // Main groups may have two active slots — nuke must clear both so the
+      // next inbound message or scheduled tick gets a fresh container pair.
+      const jid =
         Object.entries(registeredGroups).find(
           ([, g]) => g.folder === groupFolder,
-        )?.[0] || '',
-      );
+        )?.[0] || '';
+      if (jid) {
+        queue.closeStdin(jid, DEFAULT_SESSION_NAME);
+        queue.closeStdin(jid, MAINTENANCE_SESSION_NAME);
+      }
       // Clear session so next spawn starts fresh
       delete sessions[groupFolder];
       setSession(groupFolder, '');

@@ -164,6 +164,18 @@ export interface ContainerInput {
   assistantName?: string;
   script?: string;
   replyToMessageId?: string;
+  /**
+   * Which per-group session this container run belongs to. Drives the
+   * `.claude/` dir location and the group-queue slot key.
+   * - `'default'` (omitted): user-facing AyeAye, serves inbound IPC messages.
+   * - `'maintenance'`: scheduled AyeAye, runs scheduled_tasks (heartbeat,
+   *   nightly, weekly, reminders). Runs in parallel with `'default'` for the
+   *   same group so maintenance never blocks user replies.
+   *
+   * Invariant: inbound Telegram/etc. messages ALWAYS route to `'default'`.
+   * `src/task-scheduler.ts` is the sole writer of `'maintenance'`.
+   */
+  sessionName?: string;
 }
 
 export interface ContainerOutput {
@@ -220,6 +232,26 @@ export const SECRET_FILES = [
 ] as const;
 
 /**
+ * Default `sessionName` when callers don't pass one. User-facing paths
+ * (inbound IPC messages) resolve here. Scheduled tasks pass `'maintenance'`
+ * to get a parallel container slot. See `ContainerInput.sessionName` docs.
+ */
+export const DEFAULT_SESSION_NAME = 'default';
+
+/**
+ * Per-session subdir name under `<DATA_DIR>/ipc/<folder>/` for the input
+ * side of the IPC channel. Each session gets its own subdir so `_close`
+ * sentinels and follow-up JSON messages written for one session never
+ * leak into the other session's container.
+ *
+ * Exported so group-queue writes to the same path the container-runner
+ * mounted — both must agree on the location. Kept in sync at compile time.
+ */
+export function sessionInputDirName(sessionName: string): string {
+  return `input-${sessionName}`;
+}
+
+/**
  * @internal Exported for tests only — mount-list construction is
  *   security-critical (trust tiers, secret shadowing, untrusted read-only).
  */
@@ -227,6 +259,7 @@ export function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
   chatJid: string,
+  sessionName: string = DEFAULT_SESSION_NAME,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const groupDir = resolveGroupFolderPath(group.folder);
@@ -342,11 +375,15 @@ export function buildVolumeMounts(
     }
   }
 
-  // Per-group Claude sessions directory (isolated from other groups)
+  // Per-group-per-session Claude sessions directory. The extra `sessionName`
+  // segment isolates the user-facing (`default`) and scheduled (`maintenance`)
+  // AyeAyes so their SDK transcripts, `settings.json`, skills/ and .tessl/
+  // trees never collide when both run concurrently for the same group.
   const groupSessionsDir = path.join(
     DATA_DIR,
     'sessions',
     group.folder,
+    sessionName,
     '.claude',
   );
   fs.mkdirSync(groupSessionsDir, { recursive: true });
@@ -405,6 +442,24 @@ export function buildVolumeMounts(
     'tiles',
     TILE_OWNER,
   );
+
+  // Build the group's tile-managed scripts/ in a sibling tmp dir, then
+  // atomically swap it into place after the tile loop. Writing directly
+  // into `groups/<folder>/scripts/` would create two separate problems
+  // the moment two sessions (default + maintenance) run concurrently:
+  //   1. Stale scripts from removed-in-new-tile skills lingered (the bug
+  //      that drove the "DB size crossed N MB" rogue-heartbeat behaviour).
+  //   2. A naive `rmSync(groupScriptsDir)` before the copy loop opens a
+  //      race window where the other session reads a half-populated dir.
+  // The "build in tmp, then rename" pattern gives both sessions a valid
+  // snapshot at all times: whichever finishes last wins the swap, and
+  // both snapshots are equivalent (same installed tile version).
+  const groupScriptsDir = path.join(groupDir, 'scripts');
+  const scriptsTmpSuffix = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
+  const tmpScriptsDir = `${groupScriptsDir}.new.${scriptsTmpSuffix}`;
+  const oldScriptsDir = `${groupScriptsDir}.old.${scriptsTmpSuffix}`;
+  fs.mkdirSync(tmpScriptsDir, { recursive: true });
+
   const rulesContent: string[] = [];
   for (const tileName of tilesToInstall) {
     const tileSrc = path.join(registryTiles, tileName);
@@ -443,19 +498,56 @@ export function buildVolumeMounts(
         fs.cpSync(skillSrcDir, path.join(skillsDst, `tessl__${skillDir}`), {
           recursive: true,
         });
-        // Copy bundled scripts to group's scripts/ dir (used by named host operations)
+        // Copy bundled scripts into the tmp scripts dir; swap happens below,
+        // after all tiles' skills are processed. Scripts at this path are
+        // used by named host operations and referenced from skills as
+        // `/workspace/group/scripts/<name>`.
         const skillScriptsDir = path.join(skillSrcDir, 'scripts');
         if (fs.existsSync(skillScriptsDir)) {
-          const groupScriptsDir = path.join(groupDir, 'scripts');
-          fs.mkdirSync(groupScriptsDir, { recursive: true });
           for (const scriptFile of fs.readdirSync(skillScriptsDir)) {
             fs.cpSync(
               path.join(skillScriptsDir, scriptFile),
-              path.join(groupScriptsDir, scriptFile),
+              path.join(tmpScriptsDir, scriptFile),
             );
           }
         }
       }
+    }
+  }
+
+  // Atomic swap for `groups/<folder>/scripts/`. Every spawn moves the old
+  // dir (if any) aside, renames the freshly-built tmp into place, then
+  // removes the old one. POSIX `rename` is atomic on same-filesystem, so
+  // readers in a concurrent session see either the pre-swap or post-swap
+  // tree — never a half-populated intermediate. Concurrent swaps resolve
+  // to "whichever finished last wins"; both end states are valid snapshots
+  // of the installed tile version.
+  try {
+    // Move existing dir aside. Absent on first-ever spawn for a new group.
+    try {
+      fs.renameSync(groupScriptsDir, oldScriptsDir);
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') throw err;
+    }
+    fs.renameSync(tmpScriptsDir, groupScriptsDir);
+    // Best-effort cleanup of the displaced previous version.
+    try {
+      fs.rmSync(oldScriptsDir, { recursive: true, force: true });
+    } catch {
+      /* ignore — leaves an orphaned .old dir, not a correctness issue */
+    }
+  } catch (err: unknown) {
+    // A concurrent container likely won the swap race and placed its own
+    // fresh copy; ours is no longer needed. Drop our tmp and carry on.
+    logger.debug(
+      { err, groupScriptsDir },
+      'scripts/ swap raced with concurrent setup; keeping winning copy',
+    );
+    try {
+      fs.rmSync(tmpScriptsDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
     }
   }
 
@@ -542,10 +634,13 @@ export function buildVolumeMounts(
 
   // Claude Code config file — lives at /home/node/.claude.json (outside .claude/).
   // Read-only rootfs can't create it, so we bind-mount it from the sessions dir.
+  // Kept alongside the per-session `.claude/` dir so default and maintenance
+  // AyeAyes don't share Claude Code's per-session config.
   const claudeJsonPath = path.join(
     DATA_DIR,
     'sessions',
     group.folder,
+    sessionName,
     '.claude.json',
   );
   if (!fs.existsSync(claudeJsonPath)) {
@@ -567,11 +662,16 @@ export function buildVolumeMounts(
     readonly: false,
   });
 
-  // Per-group IPC namespace
+  // Per-group IPC namespace. `input/` is per-session so parallel default
+  // and maintenance containers don't step on each other's _close sentinel
+  // or follow-up JSON files. `messages/` and `tasks/` stay shared — they're
+  // outbound from the container and the host aggregates both sessions' output.
   const groupIpcDir = resolveGroupIpcPath(group.folder);
+  const sessionInputSubdir = sessionInputDirName(sessionName);
+  const sessionInputDir = path.join(groupIpcDir, sessionInputSubdir);
   const isTrustedIpc = isMain || !!group.containerConfig?.trusted;
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
-  fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+  fs.mkdirSync(sessionInputDir, { recursive: true });
   if (isTrustedIpc) {
     fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   }
@@ -581,8 +681,8 @@ export function buildVolumeMounts(
   if (ipcUid !== 0) {
     try {
       const subsToChown = isTrustedIpc
-        ? ['', 'messages', 'tasks', 'input']
-        : ['messages', 'input'];
+        ? ['', 'messages', 'tasks', sessionInputSubdir]
+        : ['messages', sessionInputSubdir];
       for (const sub of subsToChown) {
         fs.chownSync(path.join(groupIpcDir, sub), ipcUid, ipcGid);
       }
@@ -592,22 +692,31 @@ export function buildVolumeMounts(
   }
 
   if (isTrustedIpc) {
-    // Trusted/main: single mount for entire IPC directory
+    // Trusted/main: mount the whole IPC dir at /workspace/ipc, then overlay
+    // the per-session input dir onto /workspace/ipc/input. Docker applies
+    // nested bind mounts in order — the second mount replaces the dir entry
+    // from the first, giving the container a session-isolated input/ while
+    // the shared messages/tasks/ and IPC root files remain aggregated.
     mounts.push({
       hostPath: toHostPath(groupIpcDir),
       containerPath: '/workspace/ipc',
       readonly: false,
     });
+    mounts.push({
+      hostPath: toHostPath(sessionInputDir),
+      containerPath: '/workspace/ipc/input',
+      readonly: false,
+    });
   } else {
-    // Untrusted: split mounts — messages/ writable, input/ read-only, no tasks/
-    // No root IPC files (available_groups.json, current_tasks.json)
+    // Untrusted: split mounts — messages/ writable, input/ read-only, no tasks/.
+    // Per-session input dir isolates _close sentinels between sessions.
     mounts.push({
       hostPath: toHostPath(path.join(groupIpcDir, 'messages')),
       containerPath: '/workspace/ipc/messages',
       readonly: false,
     });
     mounts.push({
-      hostPath: toHostPath(path.join(groupIpcDir, 'input')),
+      hostPath: toHostPath(sessionInputDir),
       containerPath: '/workspace/ipc/input',
       readonly: true,
     });
@@ -775,9 +884,21 @@ export async function runContainerAgent(
     /* file doesn't exist — fine */
   }
 
-  const mounts = buildVolumeMounts(group, input.isMain, input.chatJid);
+  const sessionName = input.sessionName ?? DEFAULT_SESSION_NAME;
+  const mounts = buildVolumeMounts(
+    group,
+    input.isMain,
+    input.chatJid,
+    sessionName,
+  );
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
-  const containerName = `nanoclaw-${safeName}-${Date.now()}`;
+  // Suffix the container name with sessionName (when non-default) so that
+  // `docker ps` makes it obvious which slot a running container occupies.
+  // Main-group parallelism means two containers can share the group folder;
+  // the sessionName tag distinguishes them.
+  const sessionSuffix =
+    sessionName === DEFAULT_SESSION_NAME ? '' : `-${sessionName}`;
+  const containerName = `nanoclaw-${safeName}${sessionSuffix}-${Date.now()}`;
   const containerArgs = buildContainerArgs(
     mounts,
     containerName,

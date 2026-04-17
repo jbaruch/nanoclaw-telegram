@@ -35,6 +35,13 @@ interface ContainerInput {
   assistantName?: string;
   script?: string;
   replyToMessageId?: string;
+  /**
+   * Which per-group session this container run belongs to. Mirrors the
+   * orchestrator-side `ContainerInput.sessionName` in `src/container-runner.ts`.
+   * Propagated for diagnostic logging; agent-runner doesn't read it directly
+   * (session isolation happens at the mount layer via `groupSessionsDir`).
+   */
+  sessionName?: string;
 }
 
 interface ContainerOutput {

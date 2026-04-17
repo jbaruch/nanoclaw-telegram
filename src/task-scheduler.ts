@@ -8,6 +8,7 @@ import {
   runContainerAgent,
   writeTasksSnapshot,
 } from './container-runner.js';
+import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
 import {
   getAllTasks,
   getDueTasks,
@@ -68,6 +69,7 @@ export interface SchedulerDependencies {
   queue: GroupQueue;
   onProcess: (
     groupJid: string,
+    sessionName: string,
     proc: ChildProcess,
     containerName: string,
     groupFolder: string,
@@ -167,7 +169,7 @@ async function runTask(
     if (closeTimer) return; // already scheduled
     closeTimer = setTimeout(() => {
       logger.debug({ taskId: task.id }, 'Closing task container after result');
-      deps.queue.closeStdin(task.chat_jid);
+      deps.queue.closeStdin(task.chat_jid, MAINTENANCE_SESSION_NAME);
     }, TASK_CLOSE_DELAY_MS);
   };
 
@@ -183,9 +185,19 @@ async function runTask(
         isScheduledTask: true,
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
+        // Route every scheduled task into the parallel `maintenance` slot so
+        // it runs concurrently with user-facing work. Sole writer of this
+        // value — inbound paths route to `'default'` instead.
+        sessionName: MAINTENANCE_SESSION_NAME,
       },
       (proc, containerName) =>
-        deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
+        deps.onProcess(
+          task.chat_jid,
+          MAINTENANCE_SESSION_NAME,
+          proc,
+          containerName,
+          task.group_folder,
+        ),
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
@@ -281,8 +293,11 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           updateTask(currentTask.id, { status: 'completed' });
         }
 
-        deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
-          runTask(currentTask, deps),
+        deps.queue.enqueueTask(
+          currentTask.chat_jid,
+          currentTask.id,
+          MAINTENANCE_SESSION_NAME,
+          () => runTask(currentTask, deps),
         );
       }
     } catch (err) {
