@@ -59,16 +59,29 @@ read_frontmatter_field() {
       if ($0 !~ prefix_re) next
       line = $0
       sub(prefix_re, "", line)
-      sub("[[:space:]]+#.*$", "", line)      # inline comment
-      sub("^[[:space:]]+", "", line)         # leading ws
-      sub("[[:space:]]+$", "", line)         # trailing ws
-      if (length(line) >= 2) {               # strip matched surrounding quotes
+      sub("^[[:space:]]+", "", line)   # strip leading ws after colon
+      # Quoted values must be parsed BEFORE stripping `#` comments, because
+      # in YAML `#` inside quotes is literal, not a comment. Detect a quoted
+      # value up front and return the inner content as-is.
+      if (length(line) >= 2) {
         first = substr(line, 1, 1)
-        last  = substr(line, length(line), 1)
-        if ((first == "\"" && last == "\"") || (first == "\047" && last == "\047")) {
-          line = substr(line, 2, length(line) - 2)
+        if (first == "\"" || first == "\047") {
+          # Find the rightmost matching quote (naive — does not handle
+          # escaped quotes, but frontmatter boolean flags never need that).
+          rest = substr(line, 2)
+          for (i = length(rest); i >= 1; i--) {
+            if (substr(rest, i, 1) == first) {
+              print substr(rest, 1, i - 1)
+              exit
+            }
+          }
+          # No closing quote — fall through to unquoted handling.
         }
       }
+      # Unquoted value: strip `#` comments (must be preceded by whitespace,
+      # per YAML), then strip trailing whitespace.
+      sub("[[:space:]]+#.*$", "", line)
+      sub("[[:space:]]+$", "", line)
       print line
       exit
     }
