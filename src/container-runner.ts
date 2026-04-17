@@ -62,15 +62,14 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
  * (`claude-opus-4-7[1m]`). See
  * `container/agent-runner/node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts`
  * for the `model` field on `Options`.
+ *
+ * NOTE: changing the model family may require matching changes in
+ * agent-runner's `query()` call. Opus 4.7 specifically needs
+ * `thinking: { type: 'adaptive' }` (manual `type: 'enabled'` is rejected)
+ * and does not support `effort: 'max'` well. The current runner is set up
+ * for 4.7's expectations.
  */
-// Reverted from 'claude-opus-4-7[1m]' — 4.7 rejects the SDK's default
-// `thinking.type.enabled` parameter with:
-//   "\"thinking.type.enabled\" is not supported for this model.
-//    Use \"thinking.type.adaptive\" and \"output_config.effort\" to control
-//    thinking behavior."
-// Until the agent-runner's query() call is updated to use the new
-// thinking shape, stay on the 4.6-resolving alias. See issue #51 thread.
-const AGENT_MODEL = 'opus[1m]';
+const AGENT_MODEL = 'claude-opus-4-7[1m]';
 
 /**
  * Create a filtered copy of messages.db containing only one group's messages.
