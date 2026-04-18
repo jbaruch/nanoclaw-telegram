@@ -234,29 +234,39 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   if (group.requiresTrigger !== false && !group.isMain) {
     const heartbeatId = `heartbeat-${group.folder}`;
     if (!getTaskById(heartbeatId)) {
+      // Pre-check gates the LLM. `unanswered-precheck.py` runs
+      // check-unanswered.py, compares against a per-container seen-set
+      // it persists at /workspace/group/unanswered-seen.json, and
+      // returns `wakeAgent: true` only when there are genuinely NEW
+      // unanswered messages since the previous tick.
+      //
+      // But `/workspace/group` is mounted read-only for UNTRUSTED
+      // groups (container-runner.ts:376 sets `readonly: !isMain &&
+      // !trusted`), so the precheck's `open(SEEN_FILE, 'w')` raises
+      // EACCES, Python exits non-zero, agent-runner's runScript
+      // returns null, and the heartbeat skips the LLM silently. Net
+      // result: zero reactions happen on untrusted groups — strictly
+      // worse than not having the precheck at all. Gate the `script`
+      // field on trust tier until the tile-side precheck is fixed to
+      // write its seen-set to a writable path (tracked in a separate
+      // issue). Trusted non-main groups still get the short-circuit.
+      //
+      // Bash detail: the `script` field is written to /tmp/task-
+      // script.sh and run under bash (see `runScript` in container/
+      // agent-runner/src/index.ts). A bare path would only work if
+      // the target file is executable; the tile script ships without
+      // the x-bit. `python3 <path>` reads-as-source and sidesteps
+      // that, so we don't depend on tile file modes.
+      const precheckScript = group.containerConfig?.trusted
+        ? 'python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py'
+        : undefined;
       createTask({
         id: heartbeatId,
         group_folder: group.folder,
         chat_jid: jid,
         prompt:
           'Run the check-unanswered script only: python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/check-unanswered.py — then react and reply to each unanswered message. Do NOT query the database directly. Do NOT check email, calendar, or system health.',
-        // Pre-check gates the LLM. `unanswered-precheck.py` runs
-        // check-unanswered.py, compares against a per-container seen-set
-        // it persists in /workspace/group/unanswered-seen.json, and
-        // returns `wakeAgent: true` ONLY when there are genuinely NEW
-        // unanswered messages since the previous tick. Without this,
-        // the agent spawns every 15 minutes just to rediscover the same
-        // unanswered messages it already reacted to — ~100% token waste
-        // in steady state.
-        //
-        // The `script` field is written to /tmp/task-script.sh and run
-        // under bash (see `runScript` in container/agent-runner/src/
-        // index.ts). A bare path would only work if the target file is
-        // executable; the tile script ships without the x-bit. Invoking
-        // via `python3 <path>` reads-as-source and sidesteps that, so
-        // we don't depend on tile file modes.
-        script:
-          'python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py',
+        script: precheckScript,
         schedule_type: 'cron',
         schedule_value: '*/15 * * * *',
         context_mode: 'group',
