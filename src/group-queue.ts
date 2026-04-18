@@ -67,22 +67,29 @@ interface GroupState {
  *   code path.
  */
 export class GroupQueue {
-  private groups = new Map<string, GroupState>();
+  // Nested map: groupJid → sessionName → state. Two levels so we never
+  // serialise `(groupJid, sessionName)` as a string anywhere — a JID that
+  // happens to contain a delimiter like `::` would otherwise let two
+  // different (jid, session) pairs collide onto the same GroupState.
+  // Channel libs generate JIDs that don't naturally contain `::`, but
+  // defence in depth: the storage structure forbids the collision by
+  // construction.
+  private groups = new Map<string, Map<string, GroupState>>();
   private activeCount = 0;
-  // Waiting list holds composite keys (`${groupJid}::${sessionName}`) so the
-  // same group can have both a default and a maintenance slot waiting.
-  private waitingKeys: string[] = [];
+  // Waiting list as structured pairs, not serialised strings — same
+  // collision-proofing as the nested map.
+  private waitingKeys: Array<{ groupJid: string; sessionName: string }> = [];
   private processMessagesFn: ((groupJid: string) => Promise<boolean>) | null =
     null;
   private shuttingDown = false;
 
-  private keyFor(groupJid: string, sessionName: string): string {
-    return `${groupJid}::${sessionName}`;
-  }
-
   private getGroup(groupJid: string, sessionName: string): GroupState {
-    const key = this.keyFor(groupJid, sessionName);
-    let state = this.groups.get(key);
+    let sessions = this.groups.get(groupJid);
+    if (!sessions) {
+      sessions = new Map();
+      this.groups.set(groupJid, sessions);
+    }
+    let state = sessions.get(sessionName);
     if (!state) {
       state = {
         groupJid,
@@ -98,7 +105,7 @@ export class GroupQueue {
         groupFolder: null,
         retryCount: 0,
       };
-      this.groups.set(key, state);
+      sessions.set(sessionName, state);
     }
     return state;
   }
@@ -124,9 +131,13 @@ export class GroupQueue {
 
     if (this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
       state.pendingMessages = true;
-      const key = this.keyFor(groupJid, DEFAULT_SESSION_NAME);
-      if (!this.waitingKeys.includes(key)) {
-        this.waitingKeys.push(key);
+      if (
+        !this.waitingKeys.some(
+          (k) =>
+            k.groupJid === groupJid && k.sessionName === DEFAULT_SESSION_NAME,
+        )
+      ) {
+        this.waitingKeys.push({ groupJid, sessionName: DEFAULT_SESSION_NAME });
       }
       logger.debug(
         { groupJid, activeCount: this.activeCount },
@@ -190,9 +201,12 @@ export class GroupQueue {
 
     if (this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
       state.pendingTasks.push(task);
-      const key = this.keyFor(groupJid, sessionName);
-      if (!this.waitingKeys.includes(key)) {
-        this.waitingKeys.push(key);
+      if (
+        !this.waitingKeys.some(
+          (k) => k.groupJid === groupJid && k.sessionName === sessionName,
+        )
+      ) {
+        this.waitingKeys.push({ groupJid, sessionName });
       }
       logger.debug(
         { groupJid, sessionName, taskId, activeCount: this.activeCount },
@@ -458,13 +472,12 @@ export class GroupQueue {
       // maintenance task take a freed slot ahead of a queued user
       // message would invert that intent. Within each priority band we
       // preserve FIFO order.
-      const defaultIdx = this.waitingKeys.findIndex((k) =>
-        k.endsWith(`::${DEFAULT_SESSION_NAME}`),
+      const defaultIdx = this.waitingKeys.findIndex(
+        (k) => k.sessionName === DEFAULT_SESSION_NAME,
       );
       const idx = defaultIdx >= 0 ? defaultIdx : 0;
-      const nextKey = this.waitingKeys.splice(idx, 1)[0]!;
-      const [nextJid, nextSessionName] = nextKey.split('::');
-      if (!nextJid || !nextSessionName) continue;
+      const { groupJid: nextJid, sessionName: nextSessionName } =
+        this.waitingKeys.splice(idx, 1)[0]!;
       const state = this.getGroup(nextJid, nextSessionName);
 
       // Prioritize tasks over messages within the popped slot (tasks
@@ -505,9 +518,11 @@ export class GroupQueue {
     // via idle timeout or container timeout. The --rm flag cleans them up on exit.
     // This prevents WhatsApp reconnection restarts from killing working agents.
     const activeContainers: string[] = [];
-    for (const [_key, state] of this.groups) {
-      if (state.process && !state.process.killed && state.containerName) {
-        activeContainers.push(state.containerName);
+    for (const sessions of this.groups.values()) {
+      for (const state of sessions.values()) {
+        if (state.process && !state.process.killed && state.containerName) {
+          activeContainers.push(state.containerName);
+        }
       }
     }
 
