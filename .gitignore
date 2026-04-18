@@ -44,6 +44,12 @@ groups/global/*
 .tessl/tiles/
 .tessl/RULES.md
 .claude/skills/tessl__*
+# Claude Code runtime state: the scheduled-tasks lock holds the host
+# agent's pid + session id, local permission overrides belong to the
+# developer's workstation, not the repo. Kept out of git AND out of
+# the private→public sync (see scripts/sync-to-public.sh excludes).
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
 .agents/
 .codex/
 .github/skills/
