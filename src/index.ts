@@ -240,6 +240,16 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
         chat_jid: jid,
         prompt:
           'Run the check-unanswered script only: python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/check-unanswered.py — then react and reply to each unanswered message. Do NOT query the database directly. Do NOT check email, calendar, or system health.',
+        // Pre-check gates the LLM. `unanswered-precheck.py` runs
+        // check-unanswered.py, compares against a per-container seen-set
+        // it persists in /workspace/group/unanswered-seen.json, and
+        // returns `wakeAgent: true` ONLY when there are genuinely NEW
+        // unanswered messages since the previous tick. Without this,
+        // the agent spawns every 15 minutes just to rediscover the same
+        // unanswered messages it already reacted to — ~100% token waste
+        // in steady state.
+        script:
+          '/home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py',
         schedule_type: 'cron',
         schedule_value: '*/15 * * * *',
         context_mode: 'group',
