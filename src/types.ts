@@ -58,6 +58,23 @@ export interface NewMessage {
   reply_to_sender_name?: string;
 }
 
+/**
+ * Provenance of a scheduled_tasks row. Drives the agent-runner's decision
+ * to wrap the prompt in `<untrusted-input>` at fire time.
+ * - 'owner':           host code or Baruch's direct tooling — trusted
+ * - 'main_agent':      main group's agent scheduled it — trusted
+ * - 'trusted_agent':   trusted non-main group's agent — trusted
+ * - 'untrusted_agent': untrusted group's agent — NOT trusted, wrap applies
+ * The untrusted_agent case is the reason this field exists: without it,
+ * an untrusted agent could self-schedule a malicious prompt that later
+ * fires unwrapped and bypasses the trust boundary.
+ */
+export type CreatedByRole =
+  | 'owner'
+  | 'main_agent'
+  | 'trusted_agent'
+  | 'untrusted_agent';
+
 export interface ScheduledTask {
   id: string;
   group_folder: string;
@@ -72,6 +89,7 @@ export interface ScheduledTask {
   last_result: string | null;
   status: 'active' | 'paused' | 'completed';
   created_at: string;
+  created_by_role: CreatedByRole;
 }
 
 export interface TaskRunLog {

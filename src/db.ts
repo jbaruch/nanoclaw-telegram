@@ -48,7 +48,16 @@ function createSchema(database: Database.Database): void {
       last_run TEXT,
       last_result TEXT,
       status TEXT DEFAULT 'active',
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      -- Provenance of this task's creation. Drives whether the agent-runner
+      -- wraps the prompt in <untrusted-input> at fire time:
+      --   'owner'           — host code / Baruch's direct tooling (trusted)
+      --   'main_agent'      — main group's agent (trusted)
+      --   'trusted_agent'   — trusted non-main group's agent (trusted)
+      --   'untrusted_agent' — untrusted group's agent (NOT trusted, wrap applies)
+      -- Without this, an untrusted agent could self-schedule a prompt that
+      -- later fires unwrapped and bypasses the trust boundary.
+      created_by_role TEXT NOT NULL DEFAULT 'owner'
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
     CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
@@ -125,6 +134,23 @@ function createSchema(database: Database.Database): void {
     database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN script TEXT`);
   } catch {
     /* column already exists */
+  }
+
+  // Add created_by_role column (scheduled-task provenance). Existing rows
+  // backfill to 'owner' — all pre-migration tasks were either
+  // host-auto-registered (src/index.ts heartbeat seeders) or created via
+  // Baruch's direct tooling, and both of those should unwrap in the
+  // agent-runner. Using PRAGMA check instead of try/catch idiom so the
+  // migration failure mode is visible if it ever matters (the existing
+  // try/catch pattern on this table predates the no-error-suppression
+  // rule and shouldn't spread).
+  const scheduledCols = database
+    .prepare('PRAGMA table_info(scheduled_tasks)')
+    .all() as Array<{ name: string }>;
+  if (!scheduledCols.some((c) => c.name === 'created_by_role')) {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN created_by_role TEXT NOT NULL DEFAULT 'owner'`,
+    );
   }
 
   // Add is_bot_message column if it doesn't exist (migration for existing DBs)
@@ -558,8 +584,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at, created_by_role)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -573,6 +599,7 @@ export function createTask(
     task.next_run,
     task.status,
     task.created_at,
+    task.created_by_role,
   );
 }
 

@@ -56,6 +56,7 @@ describe('task scheduler', () => {
       next_run: new Date(Date.now() - 60_000).toISOString(),
       status: 'active',
       created_at: '2026-02-22T00:00:00.000Z',
+      created_by_role: 'owner' as const,
     });
 
     const enqueueTask = vi.fn(
@@ -98,6 +99,7 @@ describe('task scheduler', () => {
       last_result: null,
       status: 'active' as const,
       created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
     };
 
     const nextRun = computeNextRun(task);
@@ -122,6 +124,7 @@ describe('task scheduler', () => {
       last_result: null,
       status: 'active' as const,
       created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
     };
 
     expect(computeNextRun(task)).toBeNull();
@@ -151,6 +154,7 @@ describe('task scheduler', () => {
       next_run: new Date(Date.now() - 1000).toISOString(),
       status: 'active',
       created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
     });
 
     mockRunContainerAgent.mockImplementation(
@@ -222,6 +226,7 @@ describe('task scheduler', () => {
       next_run: new Date(Date.now() - 1000).toISOString(),
       status: 'active',
       created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
     });
 
     mockRunContainerAgent.mockImplementation(
@@ -284,6 +289,7 @@ describe('task scheduler', () => {
       last_result: null,
       status: 'active' as const,
       created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
     };
 
     const nextRun = computeNextRun(task);

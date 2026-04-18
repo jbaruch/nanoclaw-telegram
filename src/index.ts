@@ -246,6 +246,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
         next_run: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
         status: 'active',
         created_at: new Date().toISOString(),
+        created_by_role: 'owner',
       });
       logger.info(
         { jid, folder: group.folder },
@@ -280,6 +281,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
         next_run: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
         status: 'active',
         created_at: new Date().toISOString(),
+        created_by_role: 'owner',
       });
       logger.info(
         { jid, folder: group.folder },

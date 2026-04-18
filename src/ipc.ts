@@ -591,6 +591,23 @@ export async function processTaskIpc(
           data.context_mode === 'group' || data.context_mode === 'isolated'
             ? data.context_mode
             : 'isolated';
+        // Provenance: derived from the VERIFIED source group's trust tier
+        // (sourceGroup and isMain are set from the IPC directory path, not
+        // from untrusted payload fields). The agent that scheduled the
+        // task NEVER gets to claim its own role — this is the security
+        // boundary that keeps an untrusted group from self-scheduling a
+        // prompt that later fires unwrapped as if it were trusted.
+        const sourceGroupEntry = Object.values(registeredGroups).find(
+          (g) => g.folder === sourceGroup,
+        );
+        const createdByRole:
+          | 'main_agent'
+          | 'trusted_agent'
+          | 'untrusted_agent' = isMain
+          ? 'main_agent'
+          : sourceGroupEntry?.containerConfig?.trusted
+            ? 'trusted_agent'
+            : 'untrusted_agent';
         createTask({
           id: taskId,
           group_folder: targetFolder,
@@ -603,9 +620,10 @@ export async function processTaskIpc(
           next_run: nextRun,
           status: 'active',
           created_at: new Date().toISOString(),
+          created_by_role: createdByRole,
         });
         logger.info(
-          { taskId, sourceGroup, targetFolder, contextMode },
+          { taskId, sourceGroup, targetFolder, contextMode, createdByRole },
           'Task created via IPC',
         );
         deps.onTasksChanged();

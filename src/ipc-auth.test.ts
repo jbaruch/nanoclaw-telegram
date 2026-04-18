@@ -149,6 +149,95 @@ describe('schedule_task authorization', () => {
   });
 });
 
+// --- schedule_task provenance (created_by_role) ---
+
+describe('schedule_task provenance', () => {
+  it('main group schedule_task writes role=main_agent', async () => {
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'main-scheduled task',
+        schedule_type: 'once',
+        schedule_value: '2025-06-01T00:00:00',
+        targetJid: 'main@g.us',
+      },
+      'whatsapp_main',
+      true, // isMain
+      deps,
+    );
+    const tasks = getAllTasks();
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].created_by_role).toBe('main_agent');
+  });
+
+  it('trusted non-main group schedule_task writes role=trusted_agent', async () => {
+    // Promote OTHER_GROUP to trusted for this test via a local override
+    groups['other@g.us'] = {
+      ...OTHER_GROUP,
+      containerConfig: { trusted: true },
+    };
+    setRegisteredGroup('other@g.us', groups['other@g.us']);
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'trusted-scheduled task',
+        schedule_type: 'once',
+        schedule_value: '2025-06-01T00:00:00',
+        targetJid: 'other@g.us',
+      },
+      'other-group',
+      false, // isMain
+      deps,
+    );
+    const tasks = getAllTasks();
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].created_by_role).toBe('trusted_agent');
+  });
+
+  it('untrusted non-main group schedule_task writes role=untrusted_agent', async () => {
+    // OTHER_GROUP has no containerConfig → untrusted by default
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'untrusted-scheduled task',
+        schedule_type: 'once',
+        schedule_value: '2025-06-01T00:00:00',
+        targetJid: 'other@g.us',
+      },
+      'other-group',
+      false, // isMain
+      deps,
+    );
+    const tasks = getAllTasks();
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].created_by_role).toBe('untrusted_agent');
+  });
+
+  it('payload field cannot spoof the role (security boundary test)', async () => {
+    // An untrusted agent MUST NOT be able to claim 'owner' or 'main_agent'
+    // by putting it in the IPC payload. The derivation uses the VERIFIED
+    // source group's trust tier, not any payload field. Cast-to-Parameters
+    // bypasses TS's own protection (which already rejects these fields at
+    // compile time) so we can test the runtime behavior on a malicious
+    // payload that would arrive as raw JSON from a compromised container.
+    const maliciousPayload = {
+      type: 'schedule_task',
+      prompt: 'spoof attempt',
+      schedule_type: 'once',
+      schedule_value: '2025-06-01T00:00:00',
+      targetJid: 'other@g.us',
+      // Intentionally-malicious fields:
+      created_by_role: 'owner',
+      createdByRole: 'owner',
+      role: 'main_agent',
+    } as unknown as Parameters<typeof processTaskIpc>[0];
+    await processTaskIpc(maliciousPayload, 'other-group', false, deps);
+    const tasks = getAllTasks();
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].created_by_role).toBe('untrusted_agent');
+  });
+});
+
 // --- pause_task authorization ---
 
 describe('pause_task authorization', () => {
@@ -164,6 +253,7 @@ describe('pause_task authorization', () => {
       next_run: '2025-06-01T00:00:00.000Z',
       status: 'active',
       created_at: '2024-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
     });
     createTask({
       id: 'task-other',
@@ -176,6 +266,7 @@ describe('pause_task authorization', () => {
       next_run: '2025-06-01T00:00:00.000Z',
       status: 'active',
       created_at: '2024-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
     });
   });
 
@@ -225,6 +316,7 @@ describe('resume_task authorization', () => {
       next_run: '2025-06-01T00:00:00.000Z',
       status: 'paused',
       created_at: '2024-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
     });
   });
 
@@ -274,6 +366,7 @@ describe('cancel_task authorization', () => {
       next_run: null,
       status: 'active',
       created_at: '2024-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
     });
 
     await processTaskIpc(
@@ -297,6 +390,7 @@ describe('cancel_task authorization', () => {
       next_run: null,
       status: 'active',
       created_at: '2024-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
     });
 
     await processTaskIpc(
@@ -320,6 +414,7 @@ describe('cancel_task authorization', () => {
       next_run: null,
       status: 'active',
       created_at: '2024-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
     });
 
     await processTaskIpc(

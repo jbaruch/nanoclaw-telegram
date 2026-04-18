@@ -198,6 +198,11 @@ async function runTask(
         isScheduledTask: true,
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
+        // Provenance: the role that created this task, so the agent-runner
+        // can decide whether to wrap the prompt in <untrusted-input>. Only
+        // 'untrusted_agent'-created tasks get wrapped; owner/main/trusted
+        // bypass. See ContainerInput.createdByRole docs.
+        createdByRole: task.created_by_role,
         // Route every scheduled task into the parallel `maintenance` slot so
         // it runs concurrently with user-facing work. Sole writer of this
         // value — inbound paths route to `'default'` instead.

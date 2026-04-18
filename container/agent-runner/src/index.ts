@@ -36,6 +36,20 @@ interface ContainerInput {
   script?: string;
   replyToMessageId?: string;
   /**
+   * Provenance of a scheduled task (undefined on non-scheduled runs).
+   * Only `'untrusted_agent'` triggers the `<untrusted-input>` wrap below;
+   * owner / main_agent / trusted_agent bypass. Mirrors the orchestrator-
+   * side `ContainerInput.createdByRole` in `src/container-runner.ts` —
+   * the security boundary is enforced there (orchestrator derives this
+   * from the verified source-group trust tier at schedule_task time);
+   * this side just honors the decision.
+   */
+  createdByRole?:
+    | 'owner'
+    | 'main_agent'
+    | 'trusted_agent'
+    | 'untrusted_agent';
+  /**
    * Which per-group session this container run belongs to. Mirrors the
    * orchestrator-side `ContainerInput.sessionName` in `src/container-runner.ts`.
    *
@@ -1021,7 +1035,24 @@ async function main(): Promise<void> {
   // Tag untrusted group prompts with origin markers so the model (and compaction)
   // can distinguish user instructions from untrusted input. Trusted and main group
   // prompts are left untagged — they carry the same authority as system instructions.
-  if (!containerInput.isMain && !containerInput.isTrusted) {
+  //
+  // Scheduled-task provenance override: for untrusted groups, the default is
+  // still "wrap everything", but orchestrator-trusted scheduled tasks
+  // (`createdByRole` ∈ owner / main_agent / trusted_agent) are unwrapped
+  // even on untrusted containers. Without this override, an untrusted
+  // group's auto-registered heartbeat (which the host seeded) would get
+  // its own instructions flagged as untrusted and the agent would refuse
+  // to act — the task fires, costs tokens, and accomplishes nothing.
+  // The `'untrusted_agent'` case stays wrapped: if an untrusted agent
+  // self-scheduled the task, its prompt came FROM the untrusted group
+  // and the defensive wrap is still appropriate.
+  const isUntrustedContainer =
+    !containerInput.isMain && !containerInput.isTrusted;
+  const isOrchestratorTrustedTask =
+    containerInput.isScheduledTask &&
+    containerInput.createdByRole !== undefined &&
+    containerInput.createdByRole !== 'untrusted_agent';
+  if (isUntrustedContainer && !isOrchestratorTrustedTask) {
     prompt = `<untrusted-input source="${containerInput.groupFolder}">\n${prompt}\n</untrusted-input>`;
   }
 
