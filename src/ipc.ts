@@ -795,12 +795,13 @@ export async function processTaskIpc(
           sessionArg === 'default' || sessionArg === 'maintenance'
             ? sessionArg
             : 'all';
+        // `sourceGroup` is authoritative (derived from the IPC dir the
+        // request arrived in); `data.groupFolder` is only used as a
+        // "yes-really-nuke" opt-in flag above and its value isn't honoured
+        // downstream. Log sourceGroup to avoid misleading audit trails if
+        // they ever differ.
         logger.info(
-          {
-            groupFolder: data.groupFolder,
-            sourceGroup,
-            session: validSession,
-          },
+          { sourceGroup, session: validSession },
           'Session nuke requested via IPC',
         );
         deps.nukeSession(sourceGroup, validSession);

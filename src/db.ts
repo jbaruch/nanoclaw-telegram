@@ -715,8 +715,8 @@ export function setRouterState(key: string, value: string): void {
 //
 // Sessions are keyed by (groupFolder, sessionName). `sessionName` is one of
 // the canonical slot names — `default` (user-facing) or `maintenance`
-// (scheduled tasks). See `DEFAULT_SESSION_NAME` / `MAINTENANCE_SESSION_NAME`
-// exports in `src/container-runner.ts` and `src/group-queue.ts`.
+// (scheduled tasks). See `DEFAULT_SESSION_NAME` in `src/container-runner.ts`
+// and `MAINTENANCE_SESSION_NAME` in `src/group-queue.ts`.
 
 export function getSession(
   groupFolder: string,

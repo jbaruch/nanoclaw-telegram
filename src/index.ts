@@ -682,24 +682,31 @@ async function runAgent(
           { group: group.name, staleSessionId: sessionId, error: output.error },
           'Stale session detected — clearing for next retry',
         );
-        delete sessions[group.folder];
-        deleteSession(group.folder);
+        // Only clear the DEFAULT slot — this path runs the user-facing
+        // container, so a stale session here is default's problem, not
+        // maintenance's. Wiping both would force maintenance to restart
+        // its own session chain for no reason.
+        if (sessions[group.folder])
+          delete sessions[group.folder][DEFAULT_SESSION_NAME];
+        deleteSessionName(group.folder, DEFAULT_SESSION_NAME);
       }
 
       logger.error(
         { group: group.name, error: output.error },
         'Container agent error',
       );
-      // Detect stale session — clear so next invocation starts fresh
+      // Detect stale session — clear so next invocation starts fresh.
+      // Same scope: user-facing path, only touch the default slot.
       if (
         output.error &&
         /session|conversation not found|resume/i.test(output.error)
       ) {
-        delete sessions[group.folder];
-        deleteSession(group.folder);
+        if (sessions[group.folder])
+          delete sessions[group.folder][DEFAULT_SESSION_NAME];
+        deleteSessionName(group.folder, DEFAULT_SESSION_NAME);
         logger.info(
           { group: group.name },
-          'Cleared stale session after resume error',
+          'Cleared stale default session after resume error',
         );
       }
       return 'error';
