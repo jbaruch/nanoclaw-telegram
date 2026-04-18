@@ -799,6 +799,34 @@ export function buildVolumeMounts(
     );
     fs.mkdirSync(sharedMemoryDir, { recursive: true });
 
+    // Pre-create the overlay mount target inside the `.claude` bind. Docker
+    // applies the shared-memory mount at
+    // `/home/node/.claude/projects/<slug>/memory` on top of the outer `.claude`
+    // mount, which requires the mountpoint path to exist on the lower
+    // filesystem. Without this pre-creation Docker auto-mkdirs the missing
+    // ancestors as uid 0, leaving `projects/` and `projects/<slug>/` root-owned
+    // on the host — which breaks node-user writes to per-session transcripts
+    // that the SDK writes alongside `memory/` (e.g. `projects/<slug>/*.jsonl`).
+    // The outer `chownRecursive(groupSessionsDir, ...)` above already ran, so
+    // we chown the new subtree explicitly here.
+    const projectsDir = path.join(groupSessionsDir, 'projects');
+    const memoryMountTarget = path.join(
+      projectsDir,
+      CLAUDE_PROJECT_SLUG,
+      'memory',
+    );
+    fs.mkdirSync(memoryMountTarget, { recursive: true });
+    if (sessionUid !== 0) {
+      try {
+        chownRecursive(projectsDir, sessionUid, sessionGid);
+      } catch (err: unknown) {
+        logger.warn(
+          { err, projectsDir },
+          'Failed to chown projects/ overlay mount-target tree',
+        );
+      }
+    }
+
     // One-shot migration: for installations upgrading from PR #55 (per-session
     // memory) to #57 (shared memory), scan each per-session `memory/` dir for
     // files that haven't made it into shared-memory yet and copy them over.
