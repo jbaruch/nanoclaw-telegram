@@ -413,8 +413,25 @@ export function buildVolumeMounts(
   // stuck around and kept driving "DB size crossed X" alerts even after the
   // skill was updated. This dir is orchestrator-managed, not user-authored —
   // everything here comes from the tile copy loop below.
+  //
+  // Guard: only wipe if at least one tile source is actually available.
+  // If the registry is missing/misconfigured (tessl install failed, mount
+  // glitched, first-boot race), wiping would leave the container with no
+  // scripts at all until the next successful install — worse than stale.
+  // The existing per-tile `fs.existsSync(tileSrc)` check inside the loop
+  // still handles partial degradation (some tiles present, others not).
   const groupScriptsDir = path.join(groupDir, 'scripts');
-  fs.rmSync(groupScriptsDir, { recursive: true, force: true });
+  const anyTileAvailable = tilesToInstall.some((tileName) =>
+    fs.existsSync(path.join(registryTiles, tileName)),
+  );
+  if (anyTileAvailable) {
+    fs.rmSync(groupScriptsDir, { recursive: true, force: true });
+  } else {
+    logger.warn(
+      { registryTiles, tilesToInstall, groupScriptsDir },
+      'No tile sources available — keeping existing groupScriptsDir. Investigate tessl install state.',
+    );
+  }
 
   const rulesContent: string[] = [];
   for (const tileName of tilesToInstall) {
