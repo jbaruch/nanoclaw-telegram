@@ -38,6 +38,7 @@ import {
   getAllSessions,
   deleteAllSessions,
   deleteSession,
+  deleteSessionName,
   getAllTasks,
   getLastBotMessageTimestamp,
   getMessageById,
@@ -53,7 +54,11 @@ import {
   storeChatMetadata,
   storeMessage,
 } from './db.js';
-import { GroupQueue } from './group-queue.js';
+import {
+  DEFAULT_SESSION_NAME,
+  GroupQueue,
+  MAINTENANCE_SESSION_NAME,
+} from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { initBotPool } from './channels/telegram.js';
 import { startIpcWatcher } from './ipc.js';
@@ -100,7 +105,12 @@ function isReplyToBot(msg: NewMessage): boolean {
 }
 
 let lastTimestamp = '';
-let sessions: Record<string, string> = {};
+// Nested by groupFolder → sessionName → sessionId. The `default` and
+// `maintenance` slots each maintain their own SDK session chain so that
+// maintenance tasks can resume THEIR prior run rather than inheriting the
+// user-facing container's sessionId (which wouldn't exist in maintenance's
+// per-session .claude/ mount).
+let sessions: Record<string, Record<string, string>> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 // Per-chat reply-to tracking: updated when follow-up messages are piped,
@@ -240,6 +250,40 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
       logger.info(
         { jid, folder: group.folder },
         'Auto-created heartbeat for trigger-required group',
+      );
+    }
+  }
+
+  // Auto-create the parallel-maintenance heartbeat for every main group.
+  // Mirrors the non-main auto-registration above, but runs in the
+  // `maintenance` session slot so it doesn't block user-facing AyeAye.
+  // The task-scheduler fires this every 15 minutes via
+  // `MAINTENANCE_SESSION_NAME`; the prompt keeps the defensive preamble
+  // as belt-and-suspenders against improvisation.
+  if (group.isMain) {
+    const heartbeatId = `heartbeat-${group.folder}`;
+    if (!getTaskById(heartbeatId)) {
+      createTask({
+        id: heartbeatId,
+        group_folder: group.folder,
+        chat_jid: jid,
+        prompt:
+          'MANDATORY FIRST ACTION: Call Skill(skill: "tessl__heartbeat") BEFORE doing anything else. Do NOT improvise checks. Do NOT query databases. Do NOT invent thresholds. Load and execute the skill exactly as written.\n\n' +
+          'This is a scheduled heartbeat — no ACK reaction, no reply_to.\n' +
+          'Workspace: /workspace/group/\n' +
+          'Telegram HTML ONLY: <b>, <i>, <code>, <a href="url">text</a>, • for bullets. NEVER Markdown.\n' +
+          'CRITICAL: NEVER set the "sender" parameter on send_message. Always call send_message with only "text" and optionally "pin". The sender parameter routes through pool bots and bypasses the database — messages become ghosts.\n' +
+          'If nothing actionable → produce NO output at all. Silence = success.',
+        schedule_type: 'interval',
+        schedule_value: '900000', // 15 minutes in ms
+        context_mode: 'group',
+        next_run: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        status: 'active',
+        created_at: new Date().toISOString(),
+      });
+      logger.info(
+        { jid, folder: group.folder },
+        'Auto-created maintenance heartbeat for main group',
       );
     }
   }
@@ -543,7 +587,8 @@ async function runAgent(
   replyToMessageId?: string,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
+  // User-facing path always uses the `default` slot's session chain.
+  const sessionId = sessions[group.folder]?.[DEFAULT_SESSION_NAME];
 
   // Update tasks snapshot for container to read (filtered by group)
   const isTrusted = !!group.containerConfig?.trusted;
@@ -578,8 +623,9 @@ async function runAgent(
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
+          if (!sessions[group.folder]) sessions[group.folder] = {};
+          sessions[group.folder][DEFAULT_SESSION_NAME] = output.newSessionId;
+          setSession(group.folder, DEFAULT_SESSION_NAME, output.newSessionId);
         }
         await onOutput(output);
       }
@@ -597,15 +643,26 @@ async function runAgent(
         isTrusted: !!group.containerConfig?.trusted,
         assistantName: ASSISTANT_NAME,
         replyToMessageId,
+        // User-facing path. Invariant: inbound messages always route to
+        // `default`. `src/task-scheduler.ts` is the sole writer of
+        // `'maintenance'` — maintenance-AyeAye never reaches this code path.
+        sessionName: DEFAULT_SESSION_NAME,
       },
       (proc, containerName) =>
-        queue.registerProcess(chatJid, proc, containerName, group.folder),
+        queue.registerProcess(
+          chatJid,
+          DEFAULT_SESSION_NAME,
+          proc,
+          containerName,
+          group.folder,
+        ),
       wrappedOnOutput,
     );
 
     if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+      if (!sessions[group.folder]) sessions[group.folder] = {};
+      sessions[group.folder][DEFAULT_SESSION_NAME] = output.newSessionId;
+      setSession(group.folder, DEFAULT_SESSION_NAME, output.newSessionId);
     }
 
     if (output.status === 'error') {
@@ -625,24 +682,31 @@ async function runAgent(
           { group: group.name, staleSessionId: sessionId, error: output.error },
           'Stale session detected — clearing for next retry',
         );
-        delete sessions[group.folder];
-        deleteSession(group.folder);
+        // Only clear the DEFAULT slot — this path runs the user-facing
+        // container, so a stale session here is default's problem, not
+        // maintenance's. Wiping both would force maintenance to restart
+        // its own session chain for no reason.
+        if (sessions[group.folder])
+          delete sessions[group.folder][DEFAULT_SESSION_NAME];
+        deleteSessionName(group.folder, DEFAULT_SESSION_NAME);
       }
 
       logger.error(
         { group: group.name, error: output.error },
         'Container agent error',
       );
-      // Detect stale session — clear so next invocation starts fresh
+      // Detect stale session — clear so next invocation starts fresh.
+      // Same scope: user-facing path, only touch the default slot.
       if (
         output.error &&
         /session|conversation not found|resume/i.test(output.error)
       ) {
-        delete sessions[group.folder];
-        deleteSession(group.folder);
+        if (sessions[group.folder])
+          delete sessions[group.folder][DEFAULT_SESSION_NAME];
+        deleteSessionName(group.folder, DEFAULT_SESSION_NAME);
         logger.info(
           { group: group.name },
-          'Cleared stale session after resume error',
+          'Cleared stale default session after resume error',
         );
       }
       return 'error';
@@ -969,8 +1033,14 @@ async function main(): Promise<void> {
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
     queue,
-    onProcess: (groupJid, proc, containerName, groupFolder) =>
-      queue.registerProcess(groupJid, proc, containerName, groupFolder),
+    onProcess: (groupJid, sessionName, proc, containerName, groupFolder) =>
+      queue.registerProcess(
+        groupJid,
+        sessionName,
+        proc,
+        containerName,
+        groupFolder,
+      ),
     sendMessage: async (jid, rawText) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
@@ -1020,17 +1090,45 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
-    nukeSession: (groupFolder: string) => {
-      // Kill the running container
-      queue.closeStdin(
+    nukeSession: (
+      groupFolder: string,
+      session: 'default' | 'maintenance' | 'all',
+    ) => {
+      // Granular nuke: `session` narrows which slot(s) to kill.
+      //   'all'         → kill default + maintenance (pre-parallel default)
+      //   'default'     → kill only user-facing container
+      //   'maintenance' → kill only scheduled-task container
+      // Useful when one session is wedged (e.g. a hung heartbeat in
+      // maintenance) and we don't want to drop the user's default
+      // conversation state as collateral damage.
+      const jid =
         Object.entries(registeredGroups).find(
           ([, g]) => g.folder === groupFolder,
-        )?.[0] || '',
-      );
-      // Clear session so next spawn starts fresh
-      delete sessions[groupFolder];
-      setSession(groupFolder, '');
-      logger.info({ groupFolder }, 'Session nuked via IPC');
+        )?.[0] || '';
+      if (jid) {
+        if (session === 'default' || session === 'all') {
+          queue.closeStdin(jid, DEFAULT_SESSION_NAME);
+        }
+        if (session === 'maintenance' || session === 'all') {
+          queue.closeStdin(jid, MAINTENANCE_SESSION_NAME);
+        }
+      }
+      // Clear stored sessionIds for the killed slot(s). `deleteSession`
+      // removes every row for the folder — reuse for 'all'. For
+      // single-slot nukes we use the new `deleteSessionName` helper so
+      // the surviving slot keeps its session chain.
+      if (session === 'all') {
+        delete sessions[groupFolder];
+        deleteSession(groupFolder);
+      } else {
+        const sessionName =
+          session === 'default'
+            ? DEFAULT_SESSION_NAME
+            : MAINTENANCE_SESSION_NAME;
+        if (sessions[groupFolder]) delete sessions[groupFolder][sessionName];
+        deleteSessionName(groupFolder, sessionName);
+      }
+      logger.info({ groupFolder, session }, 'Session nuked via IPC');
     },
     onTasksChanged: () => {
       const tasks = getAllTasks();
