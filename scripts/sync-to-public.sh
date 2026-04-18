@@ -83,12 +83,18 @@ rm -rf "$PUBLIC_DIR/dist/"
 echo "Scrubbing files..."
 
 # Private handlers and MCP tools that must be scrubbed before the sync
-# reaches public. Keep these lists in sync with each other and with the
-# allowlist-verification block at the bottom of this script. When adding
-# a new private integration to the codebase, add its name here AND to
-# the allowlist verifier — the verifier fails the sync if it finds any
-# handler/tool not explicitly permitted, so even forgetting this list
-# won't cause a silent leak.
+# reaches public. These are TWO INDEPENDENT SURFACES:
+#   - IPC handlers live in `src/ipc.ts` (the switch in the IPC dispatcher)
+#   - MCP tools live in `container/agent-runner/src/ipc-mcp-stdio.ts`
+#     (the `server.tool()` calls the containerized agent exposes)
+# A given private integration may expose one, the other, or both — list
+# its name in each list that applies. The two lists are NOT required to
+# be identical (e.g. `smarthome_status` is an MCP tool with no matching
+# IPC handler). Defense in depth: the allowlist verifier at the bottom
+# of this script enumerates every handler/tool in the scrubbed tree and
+# aborts the sync if anything isn't explicitly approved — so even if
+# you forget to add a name here, the verifier catches it before the
+# export lands on public.
 PRIVATE_IPC_HANDLERS=(
   'sync_tripit'
   'fetch_trakt_history'
@@ -295,15 +301,49 @@ APPROVED_PUBLIC_MCP_TOOLS=(
   'update_task'
 )
 
-actual_handlers=$(
-  grep -oE "^    case '[a-z_]+'" "$PUBLIC_DIR/src/ipc.ts" \
-    | awk -F"'" '{print $2}' | sort -u
+# Extract actual handler/tool names via Python so the enumeration is
+# tolerant of indentation changes. A pure-grep approach that anchors on
+# a fixed number of leading spaces silently returns empty if a
+# formatter or contributor ever reflows the source — which would let
+# the `comm -23` comparison below approve an empty "actual" set
+# against the allowlist, defeating the entire leak check.
+actual_handlers=$(python3 <<PY
+import re
+with open("$PUBLIC_DIR/src/ipc.ts") as f:
+    text = f.read()
+# `case '<name>':` at the start of a line (any amount of leading
+# whitespace, spaces or tabs). Anchoring at line start excludes
+# occurrences embedded in strings/comments.
+names = sorted(set(re.findall(r"^[ \t]*case '([a-z_]+)':", text, re.MULTILINE)))
+print("\n".join(names))
+PY
 )
-actual_tools=$(
-  grep -oE "^  '[a-z_]+',[[:space:]]*$" \
-    "$PUBLIC_DIR/container/agent-runner/src/ipc-mcp-stdio.ts" \
-    | awk -F"'" '{print $2}' | sort -u
+actual_tools=$(python3 <<PY
+import re
+with open("$PUBLIC_DIR/container/agent-runner/src/ipc-mcp-stdio.ts") as f:
+    text = f.read()
+# `server.tool('<name>', ...)` — tolerant of any whitespace/newlines
+# between the opening paren and the first argument, so a reformat that
+# inlines or re-indents the call site doesn't hide tools from the
+# verifier.
+names = sorted(set(re.findall(r"server\.tool\(\s*'([a-z_]+)'", text)))
+print("\n".join(names))
+PY
 )
+
+# Sanity check: if either enumeration comes back empty, something broke
+# upstream (source file layout changed beyond the regex, file missing,
+# Python error). Fail loud rather than silently comparing an empty
+# "actual" set against the allowlist — which would let every handler
+# through unnoticed.
+if [ -z "$actual_handlers" ] || [ -z "$actual_tools" ]; then
+  echo "LEAK verifier enumerated zero entries — parser broken or files missing:"
+  [ -z "$actual_handlers" ] && echo "  handlers: none found in $PUBLIC_DIR/src/ipc.ts"
+  [ -z "$actual_tools" ] && echo "  tools:    none found in $PUBLIC_DIR/container/agent-runner/src/ipc-mcp-stdio.ts"
+  echo "Aborting sync. Inspect the scrubbed tree at $PUBLIC_DIR and"
+  echo "update the extraction patterns in scripts/sync-to-public.sh."
+  exit 1
+fi
 approved_handlers=$(printf '%s\n' "${APPROVED_PUBLIC_IPC_HANDLERS[@]}" | sort -u)
 approved_tools=$(printf '%s\n' "${APPROVED_PUBLIC_MCP_TOOLS[@]}" | sort -u)
 
