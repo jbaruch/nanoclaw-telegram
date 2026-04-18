@@ -59,7 +59,10 @@ export interface IpcDeps {
     isTrusted?: boolean,
   ) => void;
   onTasksChanged: () => void;
-  nukeSession: (groupFolder: string) => void;
+  nukeSession: (
+    groupFolder: string,
+    session: 'default' | 'maintenance' | 'all',
+  ) => void;
 }
 
 let ipcWatcherRunning = false;
@@ -773,11 +776,25 @@ export async function processTaskIpc(
 
     case 'nuke_session':
       if (data.groupFolder) {
+        // Optional `session` arg narrows the nuke to one slot. Accepted
+        // values: 'default', 'maintenance', 'all'. Anything else (or
+        // missing) falls back to 'all' — the safe default that preserves
+        // pre-parallel behaviour. The value comes from the container's
+        // IPC payload so we cast from `unknown` and allowlist.
+        const sessionArg = (data as Record<string, unknown>).session;
+        const validSession: 'default' | 'maintenance' | 'all' =
+          sessionArg === 'default' || sessionArg === 'maintenance'
+            ? sessionArg
+            : 'all';
         logger.info(
-          { groupFolder: data.groupFolder, sourceGroup },
+          {
+            groupFolder: data.groupFolder,
+            sourceGroup,
+            session: validSession,
+          },
           'Session nuke requested via IPC',
         );
-        deps.nukeSession(sourceGroup);
+        deps.nukeSession(sourceGroup, validSession);
       }
       break;
 

@@ -38,6 +38,7 @@ import {
   getAllSessions,
   deleteAllSessions,
   deleteSession,
+  deleteSessionName,
   getAllTasks,
   getLastBotMessageTimestamp,
   getMessageById,
@@ -1082,24 +1083,45 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
-    nukeSession: (groupFolder: string) => {
-      // Kill BOTH the user-facing and maintenance containers (if running).
-      // Main groups may have two active slots — nuke must clear both so the
-      // next inbound message or scheduled tick gets a fresh container pair.
+    nukeSession: (
+      groupFolder: string,
+      session: 'default' | 'maintenance' | 'all',
+    ) => {
+      // Granular nuke: `session` narrows which slot(s) to kill.
+      //   'all'         → kill default + maintenance (pre-parallel default)
+      //   'default'     → kill only user-facing container
+      //   'maintenance' → kill only scheduled-task container
+      // Useful when one session is wedged (e.g. a hung heartbeat in
+      // maintenance) and we don't want to drop the user's default
+      // conversation state as collateral damage.
       const jid =
         Object.entries(registeredGroups).find(
           ([, g]) => g.folder === groupFolder,
         )?.[0] || '';
       if (jid) {
-        queue.closeStdin(jid, DEFAULT_SESSION_NAME);
-        queue.closeStdin(jid, MAINTENANCE_SESSION_NAME);
+        if (session === 'default' || session === 'all') {
+          queue.closeStdin(jid, DEFAULT_SESSION_NAME);
+        }
+        if (session === 'maintenance' || session === 'all') {
+          queue.closeStdin(jid, MAINTENANCE_SESSION_NAME);
+        }
       }
-      // Clear ALL stored sessions (both default and maintenance) so the
-      // next spawn starts fresh on both slots. `deleteSession` removes
-      // every row matching the folder.
-      delete sessions[groupFolder];
-      deleteSession(groupFolder);
-      logger.info({ groupFolder }, 'Session nuked via IPC');
+      // Clear stored sessionIds for the killed slot(s). `deleteSession`
+      // removes every row for the folder — reuse for 'all'. For
+      // single-slot nukes we use the new `deleteSessionName` helper so
+      // the surviving slot keeps its session chain.
+      if (session === 'all') {
+        delete sessions[groupFolder];
+        deleteSession(groupFolder);
+      } else {
+        const sessionName =
+          session === 'default'
+            ? DEFAULT_SESSION_NAME
+            : MAINTENANCE_SESSION_NAME;
+        if (sessions[groupFolder]) delete sessions[groupFolder][sessionName];
+        deleteSessionName(groupFolder, sessionName);
+      }
+      logger.info({ groupFolder, session }, 'Session nuked via IPC');
     },
     onTasksChanged: () => {
       const tasks = getAllTasks();

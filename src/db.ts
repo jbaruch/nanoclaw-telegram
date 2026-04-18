@@ -742,10 +742,25 @@ export function setSession(
 
 /**
  * Delete all stored sessions for a group (both default and maintenance).
- * Called on nuke so both containers start fresh on their next spawn.
+ * Called on nuke(session='all') so both containers start fresh on their
+ * next spawn.
  */
 export function deleteSession(groupFolder: string): void {
   db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
+}
+
+/**
+ * Delete a single session slot for a group. Called on granular nuke
+ * (`nuke_session(session: "default" | "maintenance")`) so the surviving
+ * slot keeps its session chain intact.
+ */
+export function deleteSessionName(
+  groupFolder: string,
+  sessionName: string,
+): void {
+  db.prepare(
+    'DELETE FROM sessions WHERE group_folder = ? AND session_name = ?',
+  ).run(groupFolder, sessionName);
 }
 
 export function deleteAllSessions(): number {
