@@ -514,6 +514,7 @@ describe('task CRUD', () => {
       next_run: '2024-06-01T00:00:00.000Z',
       status: 'active',
       created_at: '2024-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
     });
 
     const task = getTaskById('task-1');
@@ -534,6 +535,7 @@ describe('task CRUD', () => {
       next_run: null,
       status: 'active',
       created_at: '2024-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
     });
 
     updateTask('task-2', { status: 'paused' });
@@ -552,6 +554,7 @@ describe('task CRUD', () => {
       next_run: null,
       status: 'active',
       created_at: '2024-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
     });
 
     deleteTask('task-3');

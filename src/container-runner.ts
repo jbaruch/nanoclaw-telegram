@@ -165,6 +165,24 @@ export interface ContainerInput {
   script?: string;
   replyToMessageId?: string;
   /**
+   * Provenance of a scheduled task (undefined for non-scheduled runs).
+   * Drives whether the agent-runner wraps the prompt in `<untrusted-input>`.
+   * Only `'untrusted_agent'` triggers the wrap; owner/main/trusted bypass
+   * because their content originates from a trusted source.
+   *
+   * Security boundary: the task-scheduler passes this from the DB row's
+   * `created_by_role` column, which was itself set by ipc.ts from the
+   * VERIFIED source-group trust tier at schedule_task time. The agent
+   * that scheduled the task never got to claim its own role — so an
+   * untrusted agent that self-scheduled a prompt sees it come back
+   * wrapped on the next fire.
+   */
+  createdByRole?:
+    | 'owner'
+    | 'main_agent'
+    | 'trusted_agent'
+    | 'untrusted_agent';
+  /**
    * Which per-group session this container run belongs to. Drives the
    * `.claude/` dir location and the group-queue slot key.
    * - `'default'` (omitted): user-facing AyeAye, serves inbound IPC messages.
