@@ -234,21 +234,19 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   if (group.requiresTrigger !== false && !group.isMain) {
     const heartbeatId = `heartbeat-${group.folder}`;
     if (!getTaskById(heartbeatId)) {
-      // Pre-check gates the LLM, but it's only enabled for trusted
-      // non-main groups for now because it needs to persist a seen-set
-      // file and untrusted groups mount `/workspace/group` read-only.
-      // Keep the precheck disabled there until the tracked fix (#72)
-      // moves that state to a writable location.
-      const precheckScript = group.containerConfig?.trusted
-        ? 'python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py'
-        : undefined;
+      // Pre-check gates the LLM: `unanswered-precheck.py` runs
+      // check-unanswered, diffs against a per-container seen-set, and
+      // returns `wakeAgent: false` when nothing's new. #72 moved the
+      // seen-set under /home/node/.claude/ so it works across all
+      // trust tiers — the earlier trusted-only gate is gone.
       createTask({
         id: heartbeatId,
         group_folder: group.folder,
         chat_jid: jid,
         prompt:
           'Run the check-unanswered script only: python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/check-unanswered.py — then react and reply to each unanswered message. Do NOT query the database directly. Do NOT check email, calendar, or system health.',
-        script: precheckScript,
+        script:
+          'python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py',
         schedule_type: 'cron',
         schedule_value: '*/15 * * * *',
         context_mode: 'group',
