@@ -600,12 +600,14 @@ export async function processTaskIpc(
         const sourceGroupEntry = Object.values(registeredGroups).find(
           (g) => g.folder === sourceGroup,
         );
-        const createdByRole: 'main_agent' | 'trusted_agent' | 'untrusted_agent' =
-          isMain
-            ? 'main_agent'
-            : sourceGroupEntry?.containerConfig?.trusted
-              ? 'trusted_agent'
-              : 'untrusted_agent';
+        const createdByRole:
+          | 'main_agent'
+          | 'trusted_agent'
+          | 'untrusted_agent' = isMain
+          ? 'main_agent'
+          : sourceGroupEntry?.containerConfig?.trusted
+            ? 'trusted_agent'
+            : 'untrusted_agent';
         createTask({
           id: taskId,
           group_folder: targetFolder,

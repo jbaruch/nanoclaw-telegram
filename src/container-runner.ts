@@ -177,11 +177,7 @@ export interface ContainerInput {
    * untrusted agent that self-scheduled a prompt sees it come back
    * wrapped on the next fire.
    */
-  createdByRole?:
-    | 'owner'
-    | 'main_agent'
-    | 'trusted_agent'
-    | 'untrusted_agent';
+  createdByRole?: 'owner' | 'main_agent' | 'trusted_agent' | 'untrusted_agent';
   /**
    * Which per-group session this container run belongs to. Drives the
    * `.claude/` dir location and the group-queue slot key.
