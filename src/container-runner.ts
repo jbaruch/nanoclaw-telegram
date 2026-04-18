@@ -267,6 +267,24 @@ export function sessionInputDirName(sessionName: string): string {
 }
 
 /**
+ * Claude Code's SDK slugifies each project's working directory path into a
+ * subdirectory name under `~/.claude/projects/`. For our container the
+ * project root is `/workspace/group`, so the slug is `-workspace-group`
+ * (slashes replaced with leading dashes). The SDK writes transcripts,
+ * feedback, and memory under this path.
+ *
+ * We bind-mount a shared `memory/` subdir inside it (see `buildVolumeMounts`)
+ * so auto-memory is owner-level state, not per-session — otherwise feedback
+ * written to one session's `.claude/` is invisible to the other.
+ *
+ * If Claude Code ever changes its slug convention, update this const.
+ * Graceful degradation if it does drift: the mount target mismatches the
+ * SDK's path and auto-memory falls back to per-session (pre-PR-#57
+ * behaviour) — annoying, not broken.
+ */
+const CLAUDE_PROJECT_SLUG = '-workspace-group';
+
+/**
  * @internal Exported for tests only — mount-list construction is
  *   security-critical (trust tiers, secret shadowing, untrusted read-only).
  */
@@ -732,6 +750,91 @@ export function buildVolumeMounts(
   mounts.push({
     hostPath: toHostPath(groupSessionsDir),
     containerPath: '/home/node/.claude',
+    readonly: false,
+  });
+
+  // Shared auto-memory mount (issue #57). Claude Code's SDK writes
+  // accumulated feedback and owner-profile memory to
+  // ~/.claude/projects/<slug>/memory/. PR #55 mounted `.claude/` per-session,
+  // which also split memory between `default` and `maintenance` — feedback
+  // from one was invisible to the other. Memory describes the owner, not a
+  // session, so it belongs shared.
+  //
+  // Overlay pattern: the per-session `.claude/` mount above gives each
+  // container its own `projects/<slug>/*.jsonl` transcripts. This second
+  // bind mount overlays only the `memory/` subdirectory with the shared
+  // dir. Docker applies nested bind mounts in order; the later mount
+  // replaces the contents at its path. Result: transcripts stay
+  // per-session, memory is shared.
+  const sharedMemoryDir = path.join(
+    DATA_DIR,
+    'sessions',
+    group.folder,
+    'shared-memory',
+  );
+  fs.mkdirSync(sharedMemoryDir, { recursive: true });
+
+  // One-shot migration: for installations upgrading from PR #55 (per-session
+  // memory) to #57 (shared memory), scan each per-session `memory/` dir for
+  // files that haven't made it into shared-memory yet and copy them over.
+  // Shared-memory wins on conflict (it's the newer source of truth); the
+  // per-session copy is left in place but orphaned — subsequent reads go
+  // through the shared mount. Safe to run every spawn: only acts on files
+  // that exist per-session but NOT in shared.
+  // Hardcoded rather than importing MAINTENANCE_SESSION_NAME from
+  // group-queue (that would add a circular dep — group-queue already
+  // imports from here). These are the two session names that existed
+  // before this migration lands, so the list is fixed by history.
+  for (const otherSession of ['default', 'maintenance']) {
+    const perSessionMemoryDir = path.join(
+      DATA_DIR,
+      'sessions',
+      group.folder,
+      otherSession,
+      '.claude',
+      'projects',
+      CLAUDE_PROJECT_SLUG,
+      'memory',
+    );
+    if (!fs.existsSync(perSessionMemoryDir)) continue;
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(perSessionMemoryDir);
+    } catch {
+      continue;
+    }
+    for (const file of entries) {
+      const src = path.join(perSessionMemoryDir, file);
+      const dst = path.join(sharedMemoryDir, file);
+      if (fs.existsSync(dst)) continue;
+      try {
+        fs.cpSync(src, dst, { recursive: true, force: false });
+        logger.info(
+          { group: group.folder, file, fromSession: otherSession },
+          'Migrated per-session memory file to shared-memory',
+        );
+      } catch (err: unknown) {
+        logger.warn(
+          { err, src, dst },
+          'Failed to migrate per-session memory file',
+        );
+      }
+    }
+  }
+
+  if (sessionUid !== 0) {
+    try {
+      chownRecursive(sharedMemoryDir, sessionUid, sessionGid);
+    } catch (err: unknown) {
+      logger.warn(
+        { err, sharedMemoryDir },
+        'Failed to chown shared-memory dir',
+      );
+    }
+  }
+  mounts.push({
+    hostPath: toHostPath(sharedMemoryDir),
+    containerPath: `/home/node/.claude/projects/${CLAUDE_PROJECT_SLUG}/memory`,
     readonly: false,
   });
 
