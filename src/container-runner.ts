@@ -193,11 +193,6 @@ interface VolumeMount {
 }
 
 /**
- * Translate a local container path to a host path for docker -v arguments.
- * In Docker-out-of-Docker, the orchestrator's filesystem (/app/...) differs
- * from the host's (HOST_PROJECT_ROOT/...). Mount paths must use host paths.
- */
-/**
  * Recursively chown a host-side directory, NEVER following symlinks.
  *
  * Security: earlier implementation used `fs.chownSync` which follows
@@ -223,6 +218,11 @@ function chownRecursive(dir: string, uid: number, gid: number): void {
   }
 }
 
+/**
+ * Translate a local container path to a host path for docker -v arguments.
+ * In Docker-out-of-Docker, the orchestrator's filesystem (/app/...) differs
+ * from the host's (HOST_PROJECT_ROOT/...). Mount paths must use host paths.
+ */
 function toHostPath(localPath: string): string {
   const projectRoot = process.cwd();
   if (HOST_PROJECT_ROOT === projectRoot) return localPath; // running directly on host
@@ -781,89 +781,100 @@ export function buildVolumeMounts(
   // dir. Docker applies nested bind mounts in order; the later mount
   // replaces the contents at its path. Result: transcripts stay
   // per-session, memory is shared.
-  const sharedMemoryDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    'shared-memory',
-  );
-  fs.mkdirSync(sharedMemoryDir, { recursive: true });
-
-  // One-shot migration: for installations upgrading from PR #55 (per-session
-  // memory) to #57 (shared memory), scan each per-session `memory/` dir for
-  // files that haven't made it into shared-memory yet and copy them over.
-  // Shared-memory wins on conflict (it's the newer source of truth); the
-  // per-session copy is left in place but orphaned — subsequent reads go
-  // through the shared mount. Safe to run every spawn: only acts on files
-  // that exist per-session but NOT in shared.
-  // Hardcoded rather than importing MAINTENANCE_SESSION_NAME from
-  // group-queue (that would add a circular dep — group-queue already
-  // imports from here). These are the two session names that existed
-  // before this migration lands, so the list is fixed by history.
-  for (const otherSession of ['default', 'maintenance']) {
-    const perSessionMemoryDir = path.join(
+  //
+  // Trust-tier gate: settings.json above sets
+  // `CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1'` on untrusted containers to
+  // block persistent prompt injection. We must NOT give those containers
+  // a shared writable owner-state dir — an untrusted container that
+  // bypassed the env var (direct fs write, SDK bug, etc.) would poison
+  // the owner-memory that main/trusted containers read. Gate the mount,
+  // mkdir, migration, and chown behind the same trust condition.
+  const autoMemoryEnabled = isMain || !!group.containerConfig?.trusted;
+  if (autoMemoryEnabled) {
+    const sharedMemoryDir = path.join(
       DATA_DIR,
       'sessions',
       group.folder,
-      otherSession,
-      '.claude',
-      'projects',
-      CLAUDE_PROJECT_SLUG,
-      'memory',
+      'shared-memory',
     );
-    if (!fs.existsSync(perSessionMemoryDir)) continue;
-    let entries: string[];
-    try {
-      entries = fs.readdirSync(perSessionMemoryDir);
-    } catch {
-      continue;
-    }
-    for (const file of entries) {
-      const src = path.join(perSessionMemoryDir, file);
-      const dst = path.join(sharedMemoryDir, file);
-      if (fs.existsSync(dst)) continue;
+    fs.mkdirSync(sharedMemoryDir, { recursive: true });
+
+    // One-shot migration: for installations upgrading from PR #55 (per-session
+    // memory) to #57 (shared memory), scan each per-session `memory/` dir for
+    // files that haven't made it into shared-memory yet and copy them over.
+    // Shared-memory wins on conflict (it's the newer source of truth); the
+    // per-session copy is left in place but orphaned — subsequent reads go
+    // through the shared mount. Safe to run every spawn: only acts on files
+    // that exist per-session but NOT in shared.
+    // Hardcoded rather than importing MAINTENANCE_SESSION_NAME from
+    // group-queue (that would add a circular dep — group-queue already
+    // imports from here). These are the two session names that existed
+    // before this migration lands, so the list is fixed by history.
+    for (const otherSession of ['default', 'maintenance']) {
+      const perSessionMemoryDir = path.join(
+        DATA_DIR,
+        'sessions',
+        group.folder,
+        otherSession,
+        '.claude',
+        'projects',
+        CLAUDE_PROJECT_SLUG,
+        'memory',
+      );
+      if (!fs.existsSync(perSessionMemoryDir)) continue;
+      let entries: string[];
       try {
-        fs.cpSync(src, dst, { recursive: true, force: false });
-        logger.info(
-          { group: group.folder, file, fromSession: otherSession },
-          'Migrated per-session memory file to shared-memory',
-        );
-      } catch (err: unknown) {
-        const code = (err as NodeJS.ErrnoException).code;
-        // EEXIST / ERR_FS_CP_EEXIST: another session spawning concurrently
-        // won the cpSync — our copy is redundant, their content is valid
-        // (same source file, same target). Expected race in steady state;
-        // log at debug so parallel startup doesn't spam warn logs.
-        if (code === 'EEXIST' || code === 'ERR_FS_CP_EEXIST') {
-          logger.debug(
-            { src, dst },
-            'Concurrent session won the shared-memory migration — keeping winner',
+        entries = fs.readdirSync(perSessionMemoryDir);
+      } catch {
+        continue;
+      }
+      for (const file of entries) {
+        const src = path.join(perSessionMemoryDir, file);
+        const dst = path.join(sharedMemoryDir, file);
+        if (fs.existsSync(dst)) continue;
+        try {
+          fs.cpSync(src, dst, { recursive: true, force: false });
+          logger.info(
+            { group: group.folder, file, fromSession: otherSession },
+            'Migrated per-session memory file to shared-memory',
           );
-        } else {
-          logger.warn(
-            { err, src, dst },
-            'Failed to migrate per-session memory file',
-          );
+        } catch (err: unknown) {
+          const code = (err as NodeJS.ErrnoException).code;
+          // EEXIST / ERR_FS_CP_EEXIST: another session spawning concurrently
+          // won the cpSync — our copy is redundant, their content is valid
+          // (same source file, same target). Expected race in steady state;
+          // log at debug so parallel startup doesn't spam warn logs.
+          if (code === 'EEXIST' || code === 'ERR_FS_CP_EEXIST') {
+            logger.debug(
+              { src, dst },
+              'Concurrent session won the shared-memory migration — keeping winner',
+            );
+          } else {
+            logger.warn(
+              { err, src, dst },
+              'Failed to migrate per-session memory file',
+            );
+          }
         }
       }
     }
-  }
 
-  if (sessionUid !== 0) {
-    try {
-      chownRecursive(sharedMemoryDir, sessionUid, sessionGid);
-    } catch (err: unknown) {
-      logger.warn(
-        { err, sharedMemoryDir },
-        'Failed to chown shared-memory dir',
-      );
+    if (sessionUid !== 0) {
+      try {
+        chownRecursive(sharedMemoryDir, sessionUid, sessionGid);
+      } catch (err: unknown) {
+        logger.warn(
+          { err, sharedMemoryDir },
+          'Failed to chown shared-memory dir',
+        );
+      }
     }
-  }
-  mounts.push({
-    hostPath: toHostPath(sharedMemoryDir),
-    containerPath: `/home/node/.claude/projects/${CLAUDE_PROJECT_SLUG}/memory`,
-    readonly: false,
-  });
+    mounts.push({
+      hostPath: toHostPath(sharedMemoryDir),
+      containerPath: `/home/node/.claude/projects/${CLAUDE_PROJECT_SLUG}/memory`,
+      readonly: false,
+    });
+  } // end autoMemoryEnabled
 
   // Claude Code config file — lives at /home/node/.claude.json (outside .claude/).
   // Read-only rootfs can't create it, so we bind-mount it from the sessions dir.

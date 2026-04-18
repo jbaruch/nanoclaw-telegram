@@ -579,4 +579,51 @@ describe('buildVolumeMounts — shared-memory mount', () => {
       expect(fs.readFileSync(sharedFile, 'utf-8')).toBe('shared wins');
     });
   });
+
+  it('untrusted group gets NO shared-memory mount (auto-memory disabled, shared writable owner state would be a poisoning vector)', () => {
+    withProjectCwd(() => {
+      // Untrusted tier — settings.json sets CLAUDE_CODE_DISABLE_AUTO_MEMORY=1.
+      // The shared-memory mount MUST be skipped so this container has no
+      // shared writable owner-state dir to poison.
+      const untrustedGroup: RegisteredGroup = {
+        name: 'Untrusted',
+        folder: 'untrusted-memory-test',
+        trigger: '@U',
+        added_at: new Date().toISOString(),
+        // no isMain, no containerConfig.trusted → untrusted tier
+      };
+      fs.mkdirSync(path.join(GROUPS_DIR, 'untrusted-memory-test'), {
+        recursive: true,
+      });
+      fs.mkdirSync(path.join(GROUPS_DIR, 'global'), { recursive: true });
+      fs.writeFileSync(
+        path.join(GROUPS_DIR, 'global', 'SOUL-untrusted.md'),
+        '# stub',
+      );
+
+      const mounts = buildVolumeMounts(
+        untrustedGroup,
+        false,
+        'untrusted@g.us',
+        'default',
+      );
+
+      const memoryMount = mounts.find(
+        (m) =>
+          m.containerPath ===
+          '/home/node/.claude/projects/-workspace-group/memory',
+      );
+      expect(memoryMount).toBeUndefined();
+
+      // And the host dir wasn't created either — untrusted doesn't need
+      // any shared-memory state at all.
+      const sharedMemoryDir = path.join(
+        DATA_DIR,
+        'sessions',
+        'untrusted-memory-test',
+        'shared-memory',
+      );
+      expect(fs.existsSync(sharedMemoryDir)).toBe(false);
+    });
+  });
 });
