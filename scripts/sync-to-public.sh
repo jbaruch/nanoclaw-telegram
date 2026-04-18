@@ -276,24 +276,34 @@ open(f, 'w').write(code)
 # strips that tile from tessl.json deps so public users never install
 # its content — but a plain-text path reference in a JSDoc still leaks
 # the existence of a specific skill and script inside that tile.
-# Replace the full path with neutral attribution that preserves the
+# Replace that JSDoc line with neutral attribution that preserves the
 # 'ported from a prototype' intent without naming the private tile
 # contents.
 #
-# Bracketed by pre/post asserts because silent \`code.replace\` misses
-# are exactly how security-sensitive scrubs regress: if private drifts
-# the path (formatter reflow, filename change, whatever), the replace
-# becomes a no-op, the leak ships, and nothing in the pipeline fails.
+# Match structurally on the generic prefix \`* tessl-workspace/.tessl/
+# tiles/\` instead of the full private path as a literal. Embedding
+# the private path as a hardcoded string HERE would reintroduce the
+# same leak: this script itself rsyncs into public, so any private
+# content in its source text ships. The prefix we match on is a
+# generic path to the tessl cache and carries no private information.
+#
+# Bracketed by pre/post asserts because silent scrub misses are
+# exactly how security-sensitive scrubs regress: if private drifts
+# (formatter reflow, filename change, whatever), the replace becomes
+# a no-op, the leak ships, and nothing in the pipeline fails.
 f = '$PUBLIC_DIR/src/channels/telegram-sanitize.ts'
-code = open(f).read()
-old = 'tessl-workspace/.tessl/tiles/jbaruch/nanoclaw-admin/skills/heartbeat/scripts/sanitize-html.py'
-new = 'an internal prototype'
-if old not in code:
-    raise SystemExit(f'ERROR: expected private-tile path not found in {f} — scrub target has drifted, investigate before syncing')
-code = code.replace(old, new)
-if old in code:
-    raise SystemExit(f'ERROR: private-tile path still present in {f} after scrub')
-open(f, 'w').write(code)
+lines = open(f).read().splitlines(keepends=True)
+prefix = '* tessl-workspace/.tessl/tiles/'
+matches = [i for i, line in enumerate(lines) if line.lstrip().startswith(prefix)]
+if len(matches) != 1:
+    raise SystemExit(f'ERROR: expected exactly one private-tile JSDoc line in {f}, found {len(matches)} — scrub target has drifted, investigate before syncing')
+idx = matches[0]
+newline = '\n' if lines[idx].endswith('\n') else ''
+lines[idx] = ' * Ported from an internal prototype' + newline
+remaining = [line for line in lines if line.lstrip().startswith(prefix)]
+if remaining:
+    raise SystemExit(f'ERROR: private-tile JSDoc line still present in {f} after scrub')
+open(f, 'w').write(''.join(lines))
 
 # promote-to-tile-repo.sh: remove private integration names from grep patterns
 f = '$PUBLIC_DIR/scripts/promote-to-tile-repo.sh'
