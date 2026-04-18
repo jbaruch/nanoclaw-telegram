@@ -419,3 +419,211 @@ describe('buildVolumeMounts — untrusted group isolation', () => {
     }
   });
 });
+
+// -----------------------------------------------------------------------------
+// Shared auto-memory mount (issue #57): both session containers must see the
+// same `/home/node/.claude/projects/-workspace-group/memory/` path. Owner-
+// level state (feedback files) doesn't belong split per-session.
+// -----------------------------------------------------------------------------
+describe('buildVolumeMounts — shared-memory mount', () => {
+  function makeMainGroup(): RegisteredGroup {
+    return {
+      name: 'Main',
+      folder: 'shared-memory-test-group',
+      trigger: '@Main',
+      added_at: new Date().toISOString(),
+      isMain: true,
+    };
+  }
+
+  beforeEach(() => {
+    seedMessagesDb();
+    fs.mkdirSync(path.join(GROUPS_DIR, 'shared-memory-test-group'), {
+      recursive: true,
+    });
+  });
+
+  // Wrapper: `buildVolumeMounts` resolves several paths via `process.cwd()`
+  // (trusted/, store/, tessl-workspace/). Without this chdir the test
+  // would touch the real repo working dir and become environment-dependent
+  // (e.g. would behave differently if the dev has a top-level `.env`).
+  function withProjectCwd<T>(fn: () => T): T {
+    const originalCwd = process.cwd();
+    process.chdir(PROJECT_DIR);
+    try {
+      return fn();
+    } finally {
+      process.chdir(originalCwd);
+    }
+  }
+
+  it('both default and maintenance sessions mount the SAME shared-memory host dir over the project memory/ path', () => {
+    withProjectCwd(() => {
+      const group = makeMainGroup();
+
+      const defaultMounts = buildVolumeMounts(
+        group,
+        true,
+        'main@g.us',
+        'default',
+      );
+      const maintenanceMounts = buildVolumeMounts(
+        group,
+        true,
+        'main@g.us',
+        'maintenance',
+      );
+
+      const expectedContainerPath =
+        '/home/node/.claude/projects/-workspace-group/memory';
+      const defaultMemoryMount = defaultMounts.find(
+        (m) => m.containerPath === expectedContainerPath,
+      );
+      const maintenanceMemoryMount = maintenanceMounts.find(
+        (m) => m.containerPath === expectedContainerPath,
+      );
+
+      expect(defaultMemoryMount).toBeDefined();
+      expect(maintenanceMemoryMount).toBeDefined();
+      expect(defaultMemoryMount!.readonly).toBe(false);
+      expect(maintenanceMemoryMount!.readonly).toBe(false);
+
+      // Same host dir for both sessions — this is the whole point.
+      expect(defaultMemoryMount!.hostPath).toBe(
+        maintenanceMemoryMount!.hostPath,
+      );
+      // And the host dir is session-independent (lives under the group's
+      // sessions/ root, not under a per-session subdir).
+      expect(defaultMemoryMount!.hostPath).toMatch(
+        /sessions\/shared-memory-test-group\/shared-memory$/,
+      );
+    });
+  });
+
+  it('migrates pre-existing per-session memory files into shared-memory on spawn', () => {
+    withProjectCwd(() => {
+      const group = makeMainGroup();
+
+      // Simulate a pre-#57 deployment: the default session has an accumulated
+      // feedback file under its per-session .claude/.
+      const perSessionMemoryDir = path.join(
+        DATA_DIR,
+        'sessions',
+        group.folder,
+        'default',
+        '.claude',
+        'projects',
+        '-workspace-group',
+        'memory',
+      );
+      fs.mkdirSync(perSessionMemoryDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(perSessionMemoryDir, 'feedback_no_day_zero_debt.md'),
+        '# pre-#57 feedback file',
+      );
+
+      // Build mounts (which runs the migration loop).
+      buildVolumeMounts(group, true, 'main@g.us', 'default');
+
+      const sharedMemoryDir = path.join(
+        DATA_DIR,
+        'sessions',
+        group.folder,
+        'shared-memory',
+      );
+      const migratedFile = path.join(
+        sharedMemoryDir,
+        'feedback_no_day_zero_debt.md',
+      );
+      expect(fs.existsSync(migratedFile)).toBe(true);
+      expect(fs.readFileSync(migratedFile, 'utf-8')).toBe(
+        '# pre-#57 feedback file',
+      );
+    });
+  });
+
+  it('migration prefers existing shared-memory content over per-session (shared wins on conflict)', () => {
+    withProjectCwd(() => {
+      const group = makeMainGroup();
+
+      const sharedMemoryDir = path.join(
+        DATA_DIR,
+        'sessions',
+        group.folder,
+        'shared-memory',
+      );
+      fs.mkdirSync(sharedMemoryDir, { recursive: true });
+      const sharedFile = path.join(sharedMemoryDir, 'feedback.md');
+      fs.writeFileSync(sharedFile, 'shared wins');
+
+      // Per-session has a DIFFERENT copy of the same file.
+      const perSessionMemoryDir = path.join(
+        DATA_DIR,
+        'sessions',
+        group.folder,
+        'maintenance',
+        '.claude',
+        'projects',
+        '-workspace-group',
+        'memory',
+      );
+      fs.mkdirSync(perSessionMemoryDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(perSessionMemoryDir, 'feedback.md'),
+        'per-session stale content',
+      );
+
+      buildVolumeMounts(group, true, 'main@g.us', 'maintenance');
+
+      // Shared copy was NOT overwritten.
+      expect(fs.readFileSync(sharedFile, 'utf-8')).toBe('shared wins');
+    });
+  });
+
+  it('untrusted group gets NO shared-memory mount (auto-memory disabled, shared writable owner state would be a poisoning vector)', () => {
+    withProjectCwd(() => {
+      // Untrusted tier — settings.json sets CLAUDE_CODE_DISABLE_AUTO_MEMORY=1.
+      // The shared-memory mount MUST be skipped so this container has no
+      // shared writable owner-state dir to poison.
+      const untrustedGroup: RegisteredGroup = {
+        name: 'Untrusted',
+        folder: 'untrusted-memory-test',
+        trigger: '@U',
+        added_at: new Date().toISOString(),
+        // no isMain, no containerConfig.trusted → untrusted tier
+      };
+      fs.mkdirSync(path.join(GROUPS_DIR, 'untrusted-memory-test'), {
+        recursive: true,
+      });
+      fs.mkdirSync(path.join(GROUPS_DIR, 'global'), { recursive: true });
+      fs.writeFileSync(
+        path.join(GROUPS_DIR, 'global', 'SOUL-untrusted.md'),
+        '# stub',
+      );
+
+      const mounts = buildVolumeMounts(
+        untrustedGroup,
+        false,
+        'untrusted@g.us',
+        'default',
+      );
+
+      const memoryMount = mounts.find(
+        (m) =>
+          m.containerPath ===
+          '/home/node/.claude/projects/-workspace-group/memory',
+      );
+      expect(memoryMount).toBeUndefined();
+
+      // And the host dir wasn't created either — untrusted doesn't need
+      // any shared-memory state at all.
+      const sharedMemoryDir = path.join(
+        DATA_DIR,
+        'sessions',
+        'untrusted-memory-test',
+        'shared-memory',
+      );
+      expect(fs.existsSync(sharedMemoryDir)).toBe(false);
+    });
+  });
+});

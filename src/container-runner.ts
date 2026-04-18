@@ -193,21 +193,36 @@ interface VolumeMount {
 }
 
 /**
- * Translate a local container path to a host path for docker -v arguments.
- * In Docker-out-of-Docker, the orchestrator's filesystem (/app/...) differs
- * from the host's (HOST_PROJECT_ROOT/...). Mount paths must use host paths.
+ * Recursively chown a host-side directory, NEVER following symlinks.
+ *
+ * Security: earlier implementation used `fs.chownSync` which follows
+ * symlinks. If a container could create a symlink inside one of its
+ * writable mounts (e.g. `shared-memory/evil` → `/etc/passwd`), the next
+ * spawn's chown would change ownership of the target — a privilege
+ * escalation path out of the container into the host. `lchownSync`
+ * operates on the link itself; `withFileTypes: true` + `entry.isDirectory()`
+ * only recurses into real directories, so symlinks are chowned but not
+ * traversed.
  */
 function chownRecursive(dir: string, uid: number, gid: number): void {
-  fs.chownSync(dir, uid, gid);
+  fs.lchownSync(dir, uid, gid);
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const fullPath = path.join(dir, entry.name);
-    fs.chownSync(fullPath, uid, gid);
+    fs.lchownSync(fullPath, uid, gid);
+    // `isDirectory()` returns false for symlinks (even symlinks to dirs)
+    // because we used `withFileTypes: true`, which reads the dirent type
+    // without resolving the link. Recursion is therefore symlink-safe.
     if (entry.isDirectory()) {
       chownRecursive(fullPath, uid, gid);
     }
   }
 }
 
+/**
+ * Translate a local container path to a host path for docker -v arguments.
+ * In Docker-out-of-Docker, the orchestrator's filesystem (/app/...) differs
+ * from the host's (HOST_PROJECT_ROOT/...). Mount paths must use host paths.
+ */
 function toHostPath(localPath: string): string {
   const projectRoot = process.cwd();
   if (HOST_PROJECT_ROOT === projectRoot) return localPath; // running directly on host
@@ -265,6 +280,24 @@ export function sessionInputDirName(sessionName: string): string {
   }
   return `input-${sessionName}`;
 }
+
+/**
+ * Claude Code's SDK slugifies each project's working directory path into a
+ * subdirectory name under `~/.claude/projects/`. For our container the
+ * project root is `/workspace/group`, so the slug is `-workspace-group`
+ * (slashes replaced with leading dashes). The SDK writes transcripts,
+ * feedback, and memory under this path.
+ *
+ * We bind-mount a shared `memory/` subdir inside it (see `buildVolumeMounts`)
+ * so auto-memory is owner-level state, not per-session — otherwise feedback
+ * written to one session's `.claude/` is invisible to the other.
+ *
+ * If Claude Code ever changes its slug convention, update this const.
+ * Graceful degradation if it does drift: the mount target mismatches the
+ * SDK's path and auto-memory falls back to per-session (pre-PR-#57
+ * behaviour) — annoying, not broken.
+ */
+const CLAUDE_PROJECT_SLUG = '-workspace-group';
 
 /**
  * @internal Exported for tests only — mount-list construction is
@@ -734,6 +767,142 @@ export function buildVolumeMounts(
     containerPath: '/home/node/.claude',
     readonly: false,
   });
+
+  // Shared auto-memory mount (issue #57). Claude Code's SDK writes
+  // accumulated feedback and owner-profile memory to
+  // ~/.claude/projects/<slug>/memory/. PR #55 mounted `.claude/` per-session,
+  // which also split memory between `default` and `maintenance` — feedback
+  // from one was invisible to the other. Memory describes the owner, not a
+  // session, so it belongs shared.
+  //
+  // Overlay pattern: the per-session `.claude/` mount above gives each
+  // container its own `projects/<slug>/*.jsonl` transcripts. This second
+  // bind mount overlays only the `memory/` subdirectory with the shared
+  // dir. Docker applies nested bind mounts in order; the later mount
+  // replaces the contents at its path. Result: transcripts stay
+  // per-session, memory is shared.
+  //
+  // Trust-tier gate: settings.json above sets
+  // `CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1'` on untrusted containers to
+  // block persistent prompt injection. We must NOT give those containers
+  // a shared writable owner-state dir — an untrusted container that
+  // bypassed the env var (direct fs write, SDK bug, etc.) would poison
+  // the owner-memory that main/trusted containers read. Gate the mount,
+  // mkdir, migration, and chown behind the same trust condition.
+  const autoMemoryEnabled = isMain || !!group.containerConfig?.trusted;
+  if (autoMemoryEnabled) {
+    const sharedMemoryDir = path.join(
+      DATA_DIR,
+      'sessions',
+      group.folder,
+      'shared-memory',
+    );
+    fs.mkdirSync(sharedMemoryDir, { recursive: true });
+
+    // Pre-create the overlay mount target inside the `.claude` bind. Docker
+    // applies the shared-memory mount at
+    // `/home/node/.claude/projects/<slug>/memory` on top of the outer `.claude`
+    // mount, which requires the mountpoint path to exist on the lower
+    // filesystem. Without this pre-creation Docker auto-mkdirs the missing
+    // ancestors as uid 0, leaving `projects/` and `projects/<slug>/` root-owned
+    // on the host — which breaks node-user writes to per-session transcripts
+    // that the SDK writes alongside `memory/` (e.g. `projects/<slug>/*.jsonl`).
+    // The outer `chownRecursive(groupSessionsDir, ...)` above already ran, so
+    // we chown the new subtree explicitly here.
+    const projectsDir = path.join(groupSessionsDir, 'projects');
+    const memoryMountTarget = path.join(
+      projectsDir,
+      CLAUDE_PROJECT_SLUG,
+      'memory',
+    );
+    fs.mkdirSync(memoryMountTarget, { recursive: true });
+    if (sessionUid !== 0) {
+      try {
+        chownRecursive(projectsDir, sessionUid, sessionGid);
+      } catch (err: unknown) {
+        logger.warn(
+          { err, projectsDir },
+          'Failed to chown projects/ overlay mount-target tree',
+        );
+      }
+    }
+
+    // One-shot migration: for installations upgrading from PR #55 (per-session
+    // memory) to #57 (shared memory), scan each per-session `memory/` dir for
+    // files that haven't made it into shared-memory yet and copy them over.
+    // Shared-memory wins on conflict (it's the newer source of truth); the
+    // per-session copy is left in place but orphaned — subsequent reads go
+    // through the shared mount. Safe to run every spawn: only acts on files
+    // that exist per-session but NOT in shared.
+    // Hardcoded rather than importing MAINTENANCE_SESSION_NAME from
+    // group-queue (that would add a circular dep — group-queue already
+    // imports from here). These are the two session names that existed
+    // before this migration lands, so the list is fixed by history.
+    for (const otherSession of ['default', 'maintenance']) {
+      const perSessionMemoryDir = path.join(
+        DATA_DIR,
+        'sessions',
+        group.folder,
+        otherSession,
+        '.claude',
+        'projects',
+        CLAUDE_PROJECT_SLUG,
+        'memory',
+      );
+      if (!fs.existsSync(perSessionMemoryDir)) continue;
+      let entries: string[];
+      try {
+        entries = fs.readdirSync(perSessionMemoryDir);
+      } catch {
+        continue;
+      }
+      for (const file of entries) {
+        const src = path.join(perSessionMemoryDir, file);
+        const dst = path.join(sharedMemoryDir, file);
+        if (fs.existsSync(dst)) continue;
+        try {
+          fs.cpSync(src, dst, { recursive: true, force: false });
+          logger.info(
+            { group: group.folder, file, fromSession: otherSession },
+            'Migrated per-session memory file to shared-memory',
+          );
+        } catch (err: unknown) {
+          const code = (err as NodeJS.ErrnoException).code;
+          // EEXIST / ERR_FS_CP_EEXIST: another session spawning concurrently
+          // won the cpSync — our copy is redundant, their content is valid
+          // (same source file, same target). Expected race in steady state;
+          // log at debug so parallel startup doesn't spam warn logs.
+          if (code === 'EEXIST' || code === 'ERR_FS_CP_EEXIST') {
+            logger.debug(
+              { src, dst },
+              'Concurrent session won the shared-memory migration — keeping winner',
+            );
+          } else {
+            logger.warn(
+              { err, src, dst },
+              'Failed to migrate per-session memory file',
+            );
+          }
+        }
+      }
+    }
+
+    if (sessionUid !== 0) {
+      try {
+        chownRecursive(sharedMemoryDir, sessionUid, sessionGid);
+      } catch (err: unknown) {
+        logger.warn(
+          { err, sharedMemoryDir },
+          'Failed to chown shared-memory dir',
+        );
+      }
+    }
+    mounts.push({
+      hostPath: toHostPath(sharedMemoryDir),
+      containerPath: `/home/node/.claude/projects/${CLAUDE_PROJECT_SLUG}/memory`,
+      readonly: false,
+    });
+  } // end autoMemoryEnabled
 
   // Claude Code config file — lives at /home/node/.claude.json (outside .claude/).
   // Read-only rootfs can't create it, so we bind-mount it from the sessions dir.
