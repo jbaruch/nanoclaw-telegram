@@ -977,6 +977,13 @@ export class TelegramChannel implements Channel {
           options,
         );
       } catch (err) {
+        // Fallback only makes sense when the first attempt used
+        // `parse_mode: 'HTML'` — i.e. a caption was provided and
+        // sanitized. Without that, the retry payload would be
+        // identical to the first attempt, so retrying just doubles
+        // API traffic on transient/network failures. Let the error
+        // bubble to the outer catch/logger instead.
+        if (options.parse_mode !== 'HTML') throw err;
         // Mirror sendTelegramMessage's fallback: if HTML parse fails on the
         // caption, resend with the ORIGINAL caption and no parse_mode. Raw
         // text is strictly better than literal `<b>…</b>` tags in the UI.

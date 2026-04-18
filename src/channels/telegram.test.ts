@@ -69,7 +69,13 @@ vi.mock('grammy', () => ({
       this.errorHandler = handler;
     }
 
-    start(opts: { onStart: (botInfo: any) => void }) {
+    async start(opts: { onStart: (botInfo: any) => void }) {
+      // Real grammy Bot.start() returns a Promise; connect() attaches
+      // a `.catch(...)` to it. Returning void would throw TypeError on
+      // `.catch` access synchronously — tests pass today only because
+      // onStart resolves the outer Promise before the TypeError
+      // surfaces. Match the real API shape so stricter runtimes don't
+      // trip.
       opts.onStart({ username: 'andy_ai_bot', id: 12345 });
     }
 
@@ -886,6 +892,26 @@ describe('TelegramChannel', () => {
       const plainOptions = currentBot().api.sendDocument.mock.calls[1][2];
       expect(plainOptions.parse_mode).toBeUndefined();
       expect(plainOptions.caption).toBe('feeling _great_ today');
+    });
+
+    it('does not retry sendDocument when no caption was provided', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      // Caption-less sends can't benefit from the plain-caption
+      // fallback (payload would be identical). A retry would just
+      // double API traffic on transient network errors.
+      currentBot().api.sendDocument.mockRejectedValue(
+        new Error('network blip'),
+      );
+
+      // Should not throw — outer catch swallows.
+      await expect(
+        channel.sendFile('tg:100200300', '/tmp/nanoclaw-test.png'),
+      ).resolves.toBeUndefined();
+
+      expect(currentBot().api.sendDocument).toHaveBeenCalledTimes(1);
     });
 
     it('includes reply_parameters when replyToMessageId is provided', async () => {
