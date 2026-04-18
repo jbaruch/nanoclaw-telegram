@@ -513,179 +513,197 @@ export function buildVolumeMounts(
   // whichever session finishes last wins the publish, and both end states
   // are equivalent (same installed tile version).
   const groupScriptsDir = path.join(groupDir, 'scripts');
-  const scriptsTmpSuffix = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
-  const tmpScriptsDir = `${groupScriptsDir}.new.${scriptsTmpSuffix}`;
-  fs.mkdirSync(tmpScriptsDir, { recursive: true });
-
   const rulesContent: string[] = [];
-  for (const tileName of tilesToInstall) {
-    const tileSrc = path.join(registryTiles, tileName);
-    if (!fs.existsSync(tileSrc)) {
-      logger.warn(
-        { tileName, path: tileSrc },
-        'Tile not found — run tessl install in orchestrator',
-      );
-      continue;
-    }
+  // Registry-availability guard: if not a single tile in `tilesToInstall`
+  // actually exists under `registryTiles`, skip the whole build-and-swap.
+  // Otherwise the tmpdir + atomic flip would publish an EMPTY scripts/
+  // symlink, wiping the previous version — which is worse than stale.
+  // Root causes this defends against: tessl install failed on this spawn,
+  // the registry mount glitched, a first-boot race. The per-tile
+  // `fs.existsSync(tileSrc)` check inside the loop still handles partial
+  // degradation (some tiles present, others missing).
+  const anyTileAvailable = tilesToInstall.some((tileName) =>
+    fs.existsSync(path.join(registryTiles, tileName)),
+  );
+  if (!anyTileAvailable) {
+    logger.warn(
+      { registryTiles, tilesToInstall, groupScriptsDir },
+      'No tile sources available — keeping existing groupScriptsDir and .tessl/RULES.md intact. Investigate tessl install state.',
+    );
+  } else {
+    const scriptsTmpSuffix = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
+    const tmpScriptsDir = `${groupScriptsDir}.new.${scriptsTmpSuffix}`;
+    fs.mkdirSync(tmpScriptsDir, { recursive: true });
 
-    const dstTileDir = path.join(dstTessl, 'tiles', TILE_OWNER, tileName);
-
-    // Copy rules
-    const rulesDir = path.join(tileSrc, 'rules');
-    if (fs.existsSync(rulesDir)) {
-      for (const ruleFile of fs.readdirSync(rulesDir)) {
-        if (!ruleFile.endsWith('.md')) continue;
-        const ruleSrcFile = path.join(rulesDir, ruleFile);
-        const ruleDst = path.join(dstTileDir, 'rules', ruleFile);
-        fs.mkdirSync(path.dirname(ruleDst), { recursive: true });
-        fs.cpSync(ruleSrcFile, ruleDst);
-        rulesContent.push(fs.readFileSync(ruleSrcFile, 'utf8'));
+    for (const tileName of tilesToInstall) {
+      const tileSrc = path.join(registryTiles, tileName);
+      if (!fs.existsSync(tileSrc)) {
+        logger.warn(
+          { tileName, path: tileSrc },
+          'Tile not found — run tessl install in orchestrator',
+        );
+        continue;
       }
-    }
 
-    // Copy skills and their scripts
-    const tileSkillsDir = path.join(tileSrc, 'skills');
-    if (fs.existsSync(tileSkillsDir)) {
-      for (const skillDir of fs.readdirSync(tileSkillsDir)) {
-        const skillSrcDir = path.join(tileSkillsDir, skillDir);
-        if (!fs.statSync(skillSrcDir).isDirectory()) continue;
-        fs.cpSync(skillSrcDir, path.join(dstTileDir, 'skills', skillDir), {
-          recursive: true,
-        });
-        fs.cpSync(skillSrcDir, path.join(skillsDst, `tessl__${skillDir}`), {
-          recursive: true,
-        });
-        // Copy bundled scripts into the tmp scripts dir; swap happens below,
-        // after all tiles' skills are processed. Scripts at this path are
-        // used by named host operations and referenced from skills as
-        // `/workspace/group/scripts/<name>`.
-        const skillScriptsDir = path.join(skillSrcDir, 'scripts');
-        if (fs.existsSync(skillScriptsDir)) {
-          for (const scriptFile of fs.readdirSync(skillScriptsDir)) {
-            fs.cpSync(
-              path.join(skillScriptsDir, scriptFile),
-              path.join(tmpScriptsDir, scriptFile),
-            );
+      const dstTileDir = path.join(dstTessl, 'tiles', TILE_OWNER, tileName);
+
+      // Copy rules
+      const rulesDir = path.join(tileSrc, 'rules');
+      if (fs.existsSync(rulesDir)) {
+        for (const ruleFile of fs.readdirSync(rulesDir)) {
+          if (!ruleFile.endsWith('.md')) continue;
+          const ruleSrcFile = path.join(rulesDir, ruleFile);
+          const ruleDst = path.join(dstTileDir, 'rules', ruleFile);
+          fs.mkdirSync(path.dirname(ruleDst), { recursive: true });
+          fs.cpSync(ruleSrcFile, ruleDst);
+          rulesContent.push(fs.readFileSync(ruleSrcFile, 'utf8'));
+        }
+      }
+
+      // Copy skills and their scripts
+      const tileSkillsDir = path.join(tileSrc, 'skills');
+      if (fs.existsSync(tileSkillsDir)) {
+        for (const skillDir of fs.readdirSync(tileSkillsDir)) {
+          const skillSrcDir = path.join(tileSkillsDir, skillDir);
+          if (!fs.statSync(skillSrcDir).isDirectory()) continue;
+          fs.cpSync(skillSrcDir, path.join(dstTileDir, 'skills', skillDir), {
+            recursive: true,
+          });
+          fs.cpSync(skillSrcDir, path.join(skillsDst, `tessl__${skillDir}`), {
+            recursive: true,
+          });
+          // Copy bundled scripts into the tmp scripts dir; swap happens below,
+          // after all tiles' skills are processed. Scripts at this path are
+          // used by named host operations and referenced from skills as
+          // `/workspace/group/scripts/<name>`.
+          const skillScriptsDir = path.join(skillSrcDir, 'scripts');
+          if (fs.existsSync(skillScriptsDir)) {
+            for (const scriptFile of fs.readdirSync(skillScriptsDir)) {
+              fs.cpSync(
+                path.join(skillScriptsDir, scriptFile),
+                path.join(tmpScriptsDir, scriptFile),
+              );
+            }
           }
         }
       }
     }
-  }
 
-  // Atomic symlink-based publish for `groups/<folder>/scripts/`. Readers
-  // must ALWAYS find `groupScriptsDir` present — the previous "rename old
-  // aside, rename new into place" design had a brief ENOENT window between
-  // the two renames where a concurrent agent running `/workspace/group/
-  // scripts/<file>` would fail (CodeQL correctness finding).
-  //
-  // New layout:
-  //   groups/<folder>/scripts             ──► symlink
-  //   groups/<folder>/scripts.version.<id> ──► real directory (one per publish)
-  //
-  // Publish steps:
-  //   1. rename `tmpScriptsDir` → `scripts.version.<id>` (a unique sibling)
-  //   2. create a temporary symlink `scripts.link.<id>` → that version
-  //   3. atomically rename the symlink over `groupScriptsDir` (POSIX rename
-  //      on a symlink replaces an existing symlink atomically)
-  //   4. delete the previous version dir (if any)
-  //
-  // First-install path: no `groupScriptsDir` exists; we just rename the
-  // temp symlink into place — still atomic, no window.
-  //
-  // Legacy path: pre-this-commit installs have a REAL directory at
-  // `groupScriptsDir` (not a symlink). We can't atomically replace a
-  // non-empty directory with a symlink. For that one-time transition we
-  // do `rm -rf <dir>` + `symlink` — has a brief window, but runs exactly
-  // once per group, ever, and is bounded.
-  const RACE_CODES = new Set(['EEXIST', 'ENOTEMPTY']);
-  const swapId = `${Date.now()}.${process.pid}.${Math.random().toString(36).slice(2, 10)}`;
-  const newVersionDir = `${groupScriptsDir}.version.${swapId}`;
-  const tmpLink = `${groupScriptsDir}.link.${swapId}`;
-  let previousVersionDir: string | null = null;
+    // Atomic symlink-based publish for `groups/<folder>/scripts/`. Readers
+    // must ALWAYS find `groupScriptsDir` present — the previous "rename old
+    // aside, rename new into place" design had a brief ENOENT window between
+    // the two renames where a concurrent agent running `/workspace/group/
+    // scripts/<file>` would fail (CodeQL correctness finding).
+    //
+    // New layout:
+    //   groups/<folder>/scripts             ──► symlink
+    //   groups/<folder>/scripts.version.<id> ──► real directory (one per publish)
+    //
+    // Publish steps:
+    //   1. rename `tmpScriptsDir` → `scripts.version.<id>` (a unique sibling)
+    //   2. create a temporary symlink `scripts.link.<id>` → that version
+    //   3. atomically rename the symlink over `groupScriptsDir` (POSIX rename
+    //      on a symlink replaces an existing symlink atomically)
+    //   4. delete the previous version dir (if any)
+    //
+    // First-install path: no `groupScriptsDir` exists; we just rename the
+    // temp symlink into place — still atomic, no window.
+    //
+    // Legacy path: pre-this-commit installs have a REAL directory at
+    // `groupScriptsDir` (not a symlink). We can't atomically replace a
+    // non-empty directory with a symlink. For that one-time transition we
+    // do `rm -rf <dir>` + `symlink` — has a brief window, but runs exactly
+    // once per group, ever, and is bounded.
+    const RACE_CODES = new Set(['EEXIST', 'ENOTEMPTY']);
+    const swapId = `${Date.now()}.${process.pid}.${Math.random().toString(36).slice(2, 10)}`;
+    const newVersionDir = `${groupScriptsDir}.version.${swapId}`;
+    const tmpLink = `${groupScriptsDir}.link.${swapId}`;
+    let previousVersionDir: string | null = null;
 
-  const rmBestEffort = (target: string): void => {
+    const rmBestEffort = (target: string): void => {
+      try {
+        fs.rmSync(target, { recursive: true, force: true });
+      } catch {
+        /* ignore — orphaned artefacts don't affect correctness */
+      }
+    };
+
     try {
-      fs.rmSync(target, { recursive: true, force: true });
-    } catch {
-      /* ignore — orphaned artefacts don't affect correctness */
-    }
-  };
+      // 1. Publish our tmp build as a versioned sibling.
+      fs.renameSync(tmpScriptsDir, newVersionDir);
 
-  try {
-    // 1. Publish our tmp build as a versioned sibling.
-    fs.renameSync(tmpScriptsDir, newVersionDir);
+      // 2. Inspect what's currently at `groupScriptsDir` (symlink, real dir,
+      //    or missing).
+      let liveStat: fs.Stats | null = null;
+      try {
+        liveStat = fs.lstatSync(groupScriptsDir);
+      } catch (err: unknown) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT') throw err;
+      }
+      if (liveStat && liveStat.isSymbolicLink()) {
+        // Remember the previous version so we can clean it up after the flip.
+        try {
+          const currentTarget = fs.readlinkSync(groupScriptsDir);
+          previousVersionDir = path.isAbsolute(currentTarget)
+            ? currentTarget
+            : path.resolve(path.dirname(groupScriptsDir), currentTarget);
+        } catch {
+          /* ignore — if we can't read the link we just won't clean it up */
+        }
+      }
 
-    // 2. Inspect what's currently at `groupScriptsDir` (symlink, real dir,
-    //    or missing).
-    let liveStat: fs.Stats | null = null;
-    try {
-      liveStat = fs.lstatSync(groupScriptsDir);
+      // 3. Create the temp symlink. Relative target so moves of the parent
+      //    dir don't break the link. `'dir'` hint matters only on Windows.
+      fs.symlinkSync(path.basename(newVersionDir), tmpLink, 'dir');
+
+      if (liveStat && !liveStat.isSymbolicLink()) {
+        // Legacy layout: real dir at `groupScriptsDir`. Can't atomically
+        // replace a non-empty directory with a symlink; remove it first.
+        // This is the one-time per-group transition; steady state uses
+        // the pure atomic rename below.
+        fs.rmSync(groupScriptsDir, { recursive: true, force: true });
+      }
+
+      // 4. Atomic flip: POSIX rename on a symlink replaces an existing
+      //    symlink atomically. On the first-install path (no prior
+      //    symlink) this just creates the symlink. Either way
+      //    `groupScriptsDir` resolves to a valid versioned dir from
+      //    here on.
+      fs.renameSync(tmpLink, groupScriptsDir);
+
+      // 5. Clean up the previous versioned dir (if any).
+      if (previousVersionDir) rmBestEffort(previousVersionDir);
     } catch (err: unknown) {
       const code = (err as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') throw err;
-    }
-    if (liveStat && liveStat.isSymbolicLink()) {
-      // Remember the previous version so we can clean it up after the flip.
-      try {
-        const currentTarget = fs.readlinkSync(groupScriptsDir);
-        previousVersionDir = path.isAbsolute(currentTarget)
-          ? currentTarget
-          : path.resolve(path.dirname(groupScriptsDir), currentTarget);
-      } catch {
-        /* ignore — if we can't read the link we just won't clean it up */
+      const isRace = code ? RACE_CODES.has(code) : false;
+
+      // Always drop our publish artefacts: if the race winner placed a
+      // correct `groupScriptsDir` our versioned dir is redundant; on a
+      // real error we can't trust our partial build.
+      rmBestEffort(tmpLink);
+      rmBestEffort(newVersionDir);
+      rmBestEffort(tmpScriptsDir);
+
+      if (isRace) {
+        logger.debug(
+          { err, groupScriptsDir },
+          'scripts/ publish raced with concurrent setup; keeping winning copy',
+        );
+      } else {
+        logger.error(
+          { err, code, groupScriptsDir },
+          'scripts/ publish failed unexpectedly (not a race)',
+        );
+        // Rethrow non-race errors so the spawn fails loudly. Unlike the
+        // previous design, `groupScriptsDir` (if it existed) is still
+        // present — either still a symlink pointing at the previous
+        // version, or still the legacy real dir — so even a failed
+        // publish doesn't leave the group with missing scripts.
+        throw err;
       }
     }
-
-    // 3. Create the temp symlink. Relative target so moves of the parent
-    //    dir don't break the link. `'dir'` hint matters only on Windows.
-    fs.symlinkSync(path.basename(newVersionDir), tmpLink, 'dir');
-
-    if (liveStat && !liveStat.isSymbolicLink()) {
-      // Legacy layout: real dir at `groupScriptsDir`. Can't atomically
-      // replace a non-empty directory with a symlink; remove it first.
-      // This is the one-time per-group transition; steady state uses
-      // the pure atomic rename below.
-      fs.rmSync(groupScriptsDir, { recursive: true, force: true });
-    }
-
-    // 4. Atomic flip: POSIX rename on a symlink replaces an existing
-    //    symlink atomically. On the first-install path (no prior
-    //    symlink) this just creates the symlink. Either way
-    //    `groupScriptsDir` resolves to a valid versioned dir from
-    //    here on.
-    fs.renameSync(tmpLink, groupScriptsDir);
-
-    // 5. Clean up the previous versioned dir (if any).
-    if (previousVersionDir) rmBestEffort(previousVersionDir);
-  } catch (err: unknown) {
-    const code = (err as NodeJS.ErrnoException).code;
-    const isRace = code ? RACE_CODES.has(code) : false;
-
-    // Always drop our publish artefacts: if the race winner placed a
-    // correct `groupScriptsDir` our versioned dir is redundant; on a
-    // real error we can't trust our partial build.
-    rmBestEffort(tmpLink);
-    rmBestEffort(newVersionDir);
-    rmBestEffort(tmpScriptsDir);
-
-    if (isRace) {
-      logger.debug(
-        { err, groupScriptsDir },
-        'scripts/ publish raced with concurrent setup; keeping winning copy',
-      );
-    } else {
-      logger.error(
-        { err, code, groupScriptsDir },
-        'scripts/ publish failed unexpectedly (not a race)',
-      );
-      // Rethrow non-race errors so the spawn fails loudly. Unlike the
-      // previous design, `groupScriptsDir` (if it existed) is still
-      // present — either still a symlink pointing at the previous
-      // version, or still the legacy real dir — so even a failed
-      // publish doesn't leave the group with missing scripts.
-      throw err;
-    }
-  }
+  } // end registry-availability guard
 
   // Write aggregated RULES.md
   if (rulesContent.length > 0) {
