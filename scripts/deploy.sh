@@ -56,8 +56,12 @@ if [[ "$TILES_ONLY" == false ]]; then
     echo "2. Rebuilding orchestrator + agent-runner..."
     docker compose up -d --build
     AGENT_IMAGE="${CONTAINER_IMAGE:-nanoclaw-agent:latest}"
+    # build.sh reads the tag from the first POSITIONAL arg, not env var
+    # (`TAG="${1:-latest}"`). Passing as env var would be silently
+    # ignored and default to `latest` — the exact stale-image bug this
+    # PR is meant to prevent.
     if [[ "$AGENT_IMAGE" == nanoclaw-agent:* ]]; then
-        TAG="${AGENT_IMAGE#nanoclaw-agent:}" ./container/build.sh
+        ./container/build.sh "${AGENT_IMAGE#nanoclaw-agent:}"
     elif [[ "$AGENT_IMAGE" == "nanoclaw-agent" ]]; then
         ./container/build.sh
     else
