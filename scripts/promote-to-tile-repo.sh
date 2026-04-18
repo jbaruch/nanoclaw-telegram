@@ -259,38 +259,83 @@ if [ "$PROMOTED" -eq 0 ]; then
   exit 0
 fi
 
-# --- Skill review + optimize (shift-left: fix before CI) ---
-# Skills can opt out of the auto-optimize pass with `skip-optimize: true` in
-# frontmatter — useful when the skill is intentionally verbose (concrete
-# examples, step-by-step narration) and auto-trimming would lose meaning.
-# The review itself still runs remotely via GHA; this flag only skips the
-# local auto-apply.
-if [ -n "$PROMOTED_SKILLS" ] && command -v tessl >/dev/null 2>&1; then
-  for skill_name in $PROMOTED_SKILLS; do
-    skill_md="$TILE_REPO_DIR/skills/$skill_name/SKILL.md"
-    if [ "$(read_frontmatter_field "$skill_md" 'skip-optimize')" = "true" ]; then
-      echo "skipping optimize: $skill_name (frontmatter flag)"
-      continue
-    fi
-    echo "reviewing: $skill_name"
-    tessl skill review --optimize --yes "$TILE_REPO_DIR/skills/$skill_name"
-  done
-elif [ -n "$PROMOTED_SKILLS" ]; then
-  echo "WARN: tessl not found, skipping local skill review"
-fi
+# --- Local skill review + optimize: DROPPED ---
+# Previous flow ran `tessl skill review --optimize` on each promoted
+# skill before pushing to main. Two problems:
+#   1. One-minute-per-skill × N staged skills routinely blew past the
+#      IPC handler's timeout for bulk promotes (observed with
+#      nanoclaw-admin's 10+ staged skills).
+#   2. The "review" feedback landed in stdout nobody reads. Real
+#      humans wanted PR-based review with comments.
+# Review now happens on the PR: Copilot posts inline findings (see
+# the GraphQL requestReviews call below), and GHA runs its own
+# review gate at merge time. Local optimize step removed entirely.
+# The `skip-optimize` frontmatter flag is obsolete but harmless —
+# it's ignored by the new flow.
 
-# --- Commit and push ---
+# --- Commit, push branch, open PR, request Copilot review ---
 cd "$TILE_REPO_DIR"
 git config user.email "nanoclaw@bot.local"
 git config user.name "$ASSISTANT_NAME"
 git add -A
 if git diff --cached --quiet; then
   echo "Tile repo already up to date."
-else
-  git commit -m "feat: promote $PROMOTED item(s) from $ASSISTANT_NAME staging"
-  git push origin main
-  echo "Pushed to ${TILE_OWNER}/${TILE_NAME} — GHA will review, lint, and publish."
+  rm -rf "$TILE_REPO_DIR"
+  echo "Done! $PROMOTED promoted, $BLOCKED blocked."
+  exit 0
 fi
+
+# Branch named with UTC timestamp + tile so concurrent promotes don't
+# collide. Short enough to scan in the GitHub UI.
+BRANCH="promote/$(date -u +%Y%m%dT%H%M%SZ)-${TILE_NAME}"
+git checkout -b "$BRANCH"
+COMMIT_MSG="feat: promote $PROMOTED item(s) from $ASSISTANT_NAME staging"
+git commit -m "$COMMIT_MSG"
+
+# Push branch. gh inherits GITHUB_TOKEN → GH_TOKEN via the env below.
+git push -u origin "$BRANCH"
+
+PR_BODY="Promoted by nanoclaw's promote-to-tile-repo.sh. $PROMOTED item(s) staged by $ASSISTANT_NAME.
+
+## Review gate
+Copilot review requested below. Merge after the review is clean and any findings are addressed. GHA (tessl publish, lint) runs at merge time on main.
+
+## Iteration
+If Copilot finds issues, restage the fix in \`groups/<group>/staging/${TILE_NAME}/\` and call promote again — that opens a new PR. Close or delete the stale branch after the clean one merges."
+
+# --repo pinned explicitly per repo-chain.md: gh otherwise defaults to
+# the upstream fork in some environments and would leak tile updates
+# to the wrong repo.
+PR_URL=$(GH_TOKEN="$TOKEN" gh pr create \
+  --repo "$TILE_OWNER/$TILE_NAME" \
+  --base main \
+  --head "$BRANCH" \
+  --title "$COMMIT_MSG" \
+  --body "$PR_BODY")
+
+echo "PR opened: $PR_URL"
+
+# Summon Copilot via GraphQL `requestReviews` with the bot's node ID.
+# REST /requested_reviewers silently drops bot reviewers and returns
+# 201 with an empty requested_reviewers array — the GraphQL path is
+# the only one that sticks. BOT_kgDOCnlnWA is
+# copilot-pull-request-reviewer; stable across repos.
+PR_NUMBER="${PR_URL##*/}"
+PR_NODE_ID=$(GH_TOKEN="$TOKEN" gh api graphql -f query='
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { id }
+  }
+}' -f owner="$TILE_OWNER" -f name="$TILE_NAME" -F number="$PR_NUMBER" --jq .data.repository.pullRequest.id)
+
+GH_TOKEN="$TOKEN" gh api graphql -f query='
+mutation($prId: ID!, $botIds: [ID!]!) {
+  requestReviews(input: { pullRequestId: $prId, botIds: $botIds, union: true }) {
+    pullRequest { number }
+  }
+}' -F prId="$PR_NODE_ID" -F 'botIds[]=BOT_kgDOCnlnWA' >/dev/null
+
+echo "Copilot review requested on PR #$PR_NUMBER"
 
 rm -rf "$TILE_REPO_DIR"
 echo "Done! $PROMOTED promoted, $BLOCKED blocked."

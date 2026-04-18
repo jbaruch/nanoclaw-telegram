@@ -20,7 +20,6 @@ import {
 import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
 import {
   createTask,
-  deleteAllSessions,
   deleteTask,
   getTaskById,
   storeMessage,
@@ -1509,42 +1508,25 @@ export async function processTaskIpc(
             } else {
               logger.info(
                 { sourceGroup },
-                'promote_staging pushed to tile repo',
+                'promote_staging opened PR on tile repo',
               );
               fs.writeFileSync(
                 promoteResultPath,
                 JSON.stringify({ stdout: stdout.trim() }),
               );
 
-              // Schedule tessl update + session clear after GHA completes (~5 min)
-              setTimeout(() => {
-                logger.info('Running post-promote tessl update');
-                execFile(
-                  'bash',
-                  [
-                    '-c',
-                    'cd /app/tessl-workspace && tessl update --yes --dangerously-ignore-security --agent claude-code 2>&1',
-                  ],
-                  { timeout: 120_000 },
-                  (updateErr, updateStdout) => {
-                    if (updateErr) {
-                      logger.error(
-                        { error: updateErr.message },
-                        'Post-promote tessl update failed',
-                      );
-                    } else {
-                      const cleared = deleteAllSessions();
-                      logger.info(
-                        {
-                          sessionsCleared: cleared,
-                          output: updateStdout.trim().slice(-200),
-                        },
-                        'Post-promote tessl update completed — sessions cleared',
-                      );
-                    }
-                  },
-                );
-              }, 300_000); // 5 minutes
+              // Post-promote `tessl update` + session clear used to
+              // run here on a 5-minute delay, predicated on the old
+              // flow that pushed directly to tile main and triggered
+              // GHA publish within ~5min. New flow opens a PR and
+              // requests Copilot review; publish only happens after
+              // the PR is merged (which could be minutes, hours, or
+              // never if Copilot/human rejects it). The auto-update
+              // would fire against a registry that hasn't changed
+              // yet — at best a no-op, at worst tearing down sessions
+              // for no reason. Operator runs `tessl update` after
+              // merging the PR (or a future MCP tool can trigger it
+              // on merge webhook).
             }
           },
         );
