@@ -6,14 +6,14 @@
 #
 # Steps:
 #   1. Pull latest code from origin
-#   2. Rebuild orchestrator container
+#   2. Rebuild orchestrator + agent-runner images
 #   3. Update tiles from registry
 #   4. Kill ALL running agent containers (forces fresh tile load)
 #   5. Clear ALL sessions from DB
 #   6. Restart orchestrator
 #
-# The --tiles-only flag skips the git pull and orchestrator rebuild
-# (for when only tile content changed, not source code).
+# The --tiles-only flag skips the git pull and image rebuilds (for when
+# only tile content changed, not source code).
 
 set -euo pipefail
 
@@ -35,9 +35,18 @@ if [[ "$TILES_ONLY" == false ]]; then
     git pull --no-rebase origin main
     echo ""
 
-    # 2. Rebuild orchestrator
-    echo "2. Rebuilding orchestrator..."
+    # 2. Rebuild orchestrator + agent-runner.
+    # Orchestrator image bakes the host-side TypeScript compiled output;
+    # agent-runner image bakes container-side source (MCP tools, IPC
+    # bridge). Both need rebuilding after a source-code pull — previous
+    # versions of this script only built the orchestrator, which left
+    # the agent image stale (last observed when `nuke_session` got a
+    # new `session` parameter on the schema: the schema was in git but
+    # AyeAye's container still saw the old parameterless tool until
+    # someone remembered to run `./container/build.sh` separately).
+    echo "2. Rebuilding orchestrator + agent-runner..."
     docker compose up -d --build
+    ./container/build.sh
     echo ""
 else
     echo "1-2. Skipped (--tiles-only)"
