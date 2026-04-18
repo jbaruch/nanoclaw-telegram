@@ -344,11 +344,20 @@ if [ -z "$actual_handlers" ] || [ -z "$actual_tools" ]; then
   echo "update the extraction patterns in scripts/sync-to-public.sh."
   exit 1
 fi
-approved_handlers=$(printf '%s\n' "${APPROVED_PUBLIC_IPC_HANDLERS[@]}" | sort -u)
-approved_tools=$(printf '%s\n' "${APPROVED_PUBLIC_MCP_TOOLS[@]}" | sort -u)
+# `comm` requires BOTH inputs sorted under the same collation, and the
+# two sides come from different sort engines: `actual_*` is sorted by
+# Python's `sorted()` (always Unicode code-point order), `approved_*`
+# is sorted by `sort -u` (locale-dependent — e.g. en_US.UTF-8 treats
+# `_` and letters differently from C). Force `LC_ALL=C` on both the
+# shell sort and `comm` so the ordering is byte-wise code-point and
+# matches Python's output. Without this, running under a non-C locale
+# could reorder one side and yield false leaks — or, much worse,
+# silently miss a real unexpected handler/tool.
+approved_handlers=$(printf '%s\n' "${APPROVED_PUBLIC_IPC_HANDLERS[@]}" | LC_ALL=C sort -u)
+approved_tools=$(printf '%s\n' "${APPROVED_PUBLIC_MCP_TOOLS[@]}" | LC_ALL=C sort -u)
 
-unexpected_handlers=$(comm -23 <(echo "$actual_handlers") <(echo "$approved_handlers"))
-unexpected_tools=$(comm -23 <(echo "$actual_tools") <(echo "$approved_tools"))
+unexpected_handlers=$(LC_ALL=C comm -23 <(echo "$actual_handlers") <(echo "$approved_handlers"))
+unexpected_tools=$(LC_ALL=C comm -23 <(echo "$actual_tools") <(echo "$approved_tools"))
 
 leak_detected=false
 if [ -n "$unexpected_handlers" ]; then
