@@ -61,7 +61,18 @@ if [[ "$TILES_ONLY" == false ]]; then
     # ignored and default to `latest` — the exact stale-image bug this
     # PR is meant to prevent.
     if [[ "$AGENT_IMAGE" == nanoclaw-agent:* ]]; then
-        ./container/build.sh "${AGENT_IMAGE#nanoclaw-agent:}"
+        AGENT_TAG="${AGENT_IMAGE#nanoclaw-agent:}"
+        # Guard against CONTAINER_IMAGE="nanoclaw-agent:" (trailing colon,
+        # empty tag). build.sh's `${1:-latest}` only defaults on UNSET/
+        # missing — an explicitly-passed empty string stays empty and
+        # would build the invalid reference `nanoclaw-agent:`. Fall back
+        # to latest with a warning so the operator notices the typo.
+        if [[ -z "$AGENT_TAG" ]]; then
+            echo "WARNING: CONTAINER_IMAGE='$AGENT_IMAGE' has an empty tag; building nanoclaw-agent:latest instead."
+            ./container/build.sh
+        else
+            ./container/build.sh "$AGENT_TAG"
+        fi
     elif [[ "$AGENT_IMAGE" == "nanoclaw-agent" ]]; then
         ./container/build.sh
     else
