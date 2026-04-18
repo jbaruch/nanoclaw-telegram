@@ -1469,7 +1469,18 @@ export async function processTaskIpc(
           'bash',
           [promoteScript, stagingDir, data.tileName, data.skillName],
           {
-            timeout: 300_000,
+            // 15 minutes. promote-to-tile-repo.sh runs `tessl skill
+            // review --optimize` on each staged skill, and tessl
+            // itself tells you that each review "can take up to 1
+            // minute." A bulk promote (`skillName=all`) against a tile
+            // with 10+ staged skills easily blows past the old
+            // 5-minute cap, which observably killed every bulk promote
+            // AyeAye tried and returned a mid-run truncated error. 15
+            // min fits the typical 10-15 skill worst case with
+            // headroom; larger bulk promotes should either split or
+            // set `skip-optimize: true` on individual skill
+            // frontmatter.
+            timeout: 900_000,
             maxBuffer: 5 * 1024 * 1024,
             env: {
               ...process.env,
