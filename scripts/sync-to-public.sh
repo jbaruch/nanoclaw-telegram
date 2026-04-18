@@ -271,6 +271,21 @@ code = open(f).read()
 code = code.replace('/ github_backup / promote_staging / sessionize', '/ github_backup / promote_staging')
 open(f, 'w').write(code)
 
+# telegram-sanitize.ts: the JSDoc attributes this module to a script that
+# lives inside the private nanoclaw-admin tile (the scrub above already
+# removes that tile from tessl.json deps, so public users never install
+# its content — but a plain-text path reference still leaks the existence
+# of a specific skill and script inside that tile). Replace the full path
+# with neutral attribution that preserves the \"ported from a prototype\"
+# intent without naming the private tile contents.
+f = '$PUBLIC_DIR/src/channels/telegram-sanitize.ts'
+code = open(f).read()
+code = code.replace(
+    'tessl-workspace/.tessl/tiles/jbaruch/nanoclaw-admin/skills/heartbeat/scripts/sanitize-html.py',
+    'an internal prototype',
+)
+open(f, 'w').write(code)
+
 # promote-to-tile-repo.sh: remove private integration names from grep patterns
 f = '$PUBLIC_DIR/scripts/promote-to-tile-repo.sh'
 code = open(f).read()
