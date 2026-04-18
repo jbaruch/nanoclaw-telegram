@@ -1,5 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import fs from 'fs';
+import path from 'path';
 
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+
+import { DATA_DIR } from './config.js';
 import {
   _initTestDatabase,
   createTask,
@@ -774,5 +778,150 @@ describe('register_group success', () => {
     );
 
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
+  });
+});
+
+// --- tessl_update / push_staged_to_branch authorization ---
+//
+// These handlers are main-only because they touch the global tile
+// registry / open commits against shared tile repos. On unauthorized
+// calls, processTaskIpc writes an error response to the requesting
+// group's input dir so the container-side MCP caller doesn't just hang
+// until its own timeout. The tests below assert both the write and the
+// message content — if someone accidentally drops the `!isMain` guard,
+// we want vitest to fail, not a runtime CVE.
+//
+// We run these with a real filesystem write into `DATA_DIR/ipc/...`
+// because the handler uses `fs.writeFileSync` directly (no mockable
+// seam). `afterEach` cleans up the resulting files.
+
+const UNAUTH_GROUP = 'other-group';
+const unauthInputDir = path.join(
+  DATA_DIR,
+  'ipc',
+  UNAUTH_GROUP,
+  'input-default',
+);
+const unauthCreatedDirs: string[] = [];
+const unauthCreatedFiles: string[] = [];
+
+function ensureUnauthInputDir(): void {
+  // Track what we create so afterEach can clean up without blowing
+  // away a pre-existing real orchestrator data dir (unlikely in CI,
+  // possible locally).
+  let p = unauthInputDir;
+  while (!fs.existsSync(p) && p !== path.dirname(p)) {
+    unauthCreatedDirs.unshift(p);
+    p = path.dirname(p);
+  }
+  fs.mkdirSync(unauthInputDir, { recursive: true });
+}
+
+function resultPathFor(requestId: string): string {
+  const p = path.join(unauthInputDir, `_script_result_${requestId}.json`);
+  unauthCreatedFiles.push(p);
+  return p;
+}
+
+describe('tessl_update authorization', () => {
+  beforeEach(() => {
+    ensureUnauthInputDir();
+  });
+
+  afterEach(() => {
+    for (const f of unauthCreatedFiles.splice(0)) {
+      if (fs.existsSync(f)) fs.unlinkSync(f);
+    }
+    for (const d of unauthCreatedDirs.splice(0)) {
+      if (fs.existsSync(d) && fs.readdirSync(d).length === 0) {
+        fs.rmdirSync(d);
+      }
+    }
+  });
+
+  it('non-main group is rejected with an error response', async () => {
+    const resultPath = resultPathFor('test-tessl-unauth');
+
+    await processTaskIpc(
+      { type: 'tessl_update', requestId: 'test-tessl-unauth' },
+      UNAUTH_GROUP,
+      false,
+      deps,
+    );
+
+    expect(fs.existsSync(resultPath)).toBe(true);
+    const body = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+    expect(body.error).toMatch(/Only the main group/);
+  });
+
+  it('request without requestId writes nothing and returns', async () => {
+    await processTaskIpc(
+      { type: 'tessl_update' },
+      UNAUTH_GROUP,
+      false,
+      deps,
+    );
+    // No assertion on files — the handler must not spawn execFile
+    // or write anything. The test passes if processTaskIpc returns
+    // without throwing.
+  });
+});
+
+describe('push_staged_to_branch authorization', () => {
+  beforeEach(() => {
+    ensureUnauthInputDir();
+  });
+
+  afterEach(() => {
+    for (const f of unauthCreatedFiles.splice(0)) {
+      if (fs.existsSync(f)) fs.unlinkSync(f);
+    }
+    for (const d of unauthCreatedDirs.splice(0)) {
+      if (fs.existsSync(d) && fs.readdirSync(d).length === 0) {
+        fs.rmdirSync(d);
+      }
+    }
+  });
+
+  it('non-main group is rejected with an error response', async () => {
+    const resultPath = resultPathFor('test-push-unauth');
+
+    await processTaskIpc(
+      {
+        type: 'push_staged_to_branch',
+        requestId: 'test-push-unauth',
+        tileName: 'nanoclaw-admin',
+        branch: 'promote/20260101T000000Z-nanoclaw-admin',
+        commitMessage: 'fix: test',
+      },
+      UNAUTH_GROUP,
+      false,
+      deps,
+    );
+
+    expect(fs.existsSync(resultPath)).toBe(true);
+    const body = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+    expect(body.error).toMatch(/Only the main group/);
+  });
+
+  it('request missing required fields is a no-op (no result file)', async () => {
+    const resultPath = resultPathFor('test-push-incomplete');
+
+    await processTaskIpc(
+      {
+        type: 'push_staged_to_branch',
+        requestId: 'test-push-incomplete',
+        tileName: 'nanoclaw-admin',
+        // missing branch, commitMessage — the outer `if` guard drops the request
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // No result file: handler validates required fields before acting
+    // and the request is silently dropped. (Silent-drop-on-missing-field
+    // matches the `promote_staging` pattern already in the code.)
+    expect(fs.existsSync(resultPath)).toBe(false);
   });
 });

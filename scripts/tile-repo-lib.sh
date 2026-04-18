@@ -77,9 +77,30 @@ read_frontmatter_field() {
 # Tile placement validation. Returns 0 if placement is legal for the tile,
 # 1 (with a "BLOCKED: ..." line on stdout) if the skill should be rejected.
 #
-# Callers must pre-verify `$skill_file` exists — we don't re-check, and a
-# missing file would cause grep to error out noisily (which is what we want
-# rather than a silent skip).
+# Callers must pre-verify `$skill_file` exists — we don't re-check.
+#
+# `grep_check <pattern> <file>` is a private helper that distinguishes grep's
+# three exit codes: 0 (match) → "match", 1 (no match) → "nomatch", 2+
+# (read error) → abort with a loud error and return 2. We can't rely on
+# `set -e` alone for the error-out path: errexit is suppressed when a
+# command runs inside an `if`/`&&`/`||` conditional, so a bare
+# `if grep -q ... ; then` would treat rc 2 (error) identically to rc 1
+# (no match) and silently let the skill through.
+grep_check() {
+  local pattern="$1"
+  local file="$2"
+  local rc=0
+  grep -qiE "$pattern" "$file" || rc=$?
+  case $rc in
+    0) echo match ;;
+    1) echo nomatch ;;
+    *)
+      echo "ERROR: grep failed to read $file (rc=$rc)" >&2
+      return 2
+      ;;
+  esac
+}
+
 validate_placement() {
   local skill_file="$1"
   local tile="$2"
@@ -102,27 +123,32 @@ validate_placement() {
     skip_admin_regex=true
   fi
 
-  # Admin-content regex. We invert `grep -q`'s exit via `if`, so a successful
-  # match (exit 0) enters the BLOCKED branch. grep exit 1 (no match) skips
-  # the block; grep exit 2 (read error) propagates under `set -e`, which is
-  # the intended loud failure.
+  local admin_pattern
   if [ "$tile" = "nanoclaw-untrusted" ]; then
-    if ! $skip_admin_regex && grep -qiE 'composio|gmail|calendar|tasks|schedule_task|promote|host_script|sync_tripit|fetch_trakt' "$skill_file"; then
+    admin_pattern='composio|gmail|calendar|tasks|schedule_task|promote|host_script|sync_tripit|fetch_trakt'
+  else
+    admin_pattern='composio|gmail|googlecalendar|googletasks|sessionize|sync_tripit|fetch_trakt|promote_staging|github_backup|register_group'
+  fi
+
+  if ! $skip_admin_regex; then
+    local admin_rc
+    admin_rc=$(grep_check "$admin_pattern" "$skill_file") || return 2
+    if [ "$admin_rc" = "match" ]; then
       echo "BLOCKED: $canonical has admin-level content but target is $tile"
       return 1
     fi
-    return 0
   fi
 
-  if ! $skip_admin_regex && grep -qiE 'composio|gmail|googlecalendar|googletasks|sessionize|sync_tripit|fetch_trakt|promote_staging|github_backup|register_group' "$skill_file"; then
-    echo "BLOCKED: $canonical has admin-level content but target is $tile"
-    return 1
+  if [ "$tile" = "nanoclaw-untrusted" ]; then
+    return 0
   fi
 
   # nanoclaw-core's trusted-workspace check runs regardless of the
   # admin-content bypass — these are orthogonal concerns.
   if [ "$tile" = "nanoclaw-core" ]; then
-    if grep -qiE '/workspace/trusted/|trusted.memory|cross.group' "$skill_file"; then
+    local trusted_rc
+    trusted_rc=$(grep_check '/workspace/trusted/|trusted.memory|cross.group' "$skill_file") || return 2
+    if [ "$trusted_rc" = "match" ]; then
       echo "BLOCKED: $canonical references trusted workspace but target is core"
       return 1
     fi

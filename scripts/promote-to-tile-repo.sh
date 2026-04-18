@@ -117,21 +117,24 @@ if [ "$MODE" != "--rules-only" ]; then
     echo "pulled: $canonical"
     PROMOTED_SKILLS="$PROMOTED_SKILLS $canonical"
 
-    # Update tile.json (add entry if new)
-    python3 -c "
+    # Update tile.json (add entry if new). Values pass through argv to
+    # Python — never interpolate skill names into the script body (a
+    # directory with a quote would break the snippet or enable injection).
+    python3 - "$TILE_REPO_DIR/tile.json" "$canonical" <<'PY'
 import json, sys
-with open('$TILE_REPO_DIR/tile.json') as f:
+tile_path, canonical = sys.argv[1], sys.argv[2]
+with open(tile_path) as f:
     tile = json.load(f)
 skills = tile.setdefault('skills', {})
-if '$canonical' not in skills:
-    skills['$canonical'] = {'path': 'skills/$canonical/SKILL.md'}
-    print('  added: $canonical')
+if canonical not in skills:
+    skills[canonical] = {'path': f'skills/{canonical}/SKILL.md'}
+    print(f'  added: {canonical}')
 else:
-    print('  exists: $canonical')
-with open('$TILE_REPO_DIR/tile.json', 'w') as f:
+    print(f'  exists: {canonical}')
+with open(tile_path, 'w') as f:
     json.dump(tile, f, indent=2)
     f.write('\n')
-"
+PY
     PROMOTED=$((PROMOTED + 1))
   done
 fi
@@ -146,20 +149,21 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "--rules-only" ]; then
       cp "$rule_file" "$TILE_REPO_DIR/rules/$name.md"
       echo "pulled rule: $name"
 
-      python3 -c "
-import json
-with open('$TILE_REPO_DIR/tile.json') as f:
+      python3 - "$TILE_REPO_DIR/tile.json" "$name" <<'PY'
+import json, sys
+tile_path, name = sys.argv[1], sys.argv[2]
+with open(tile_path) as f:
     tile = json.load(f)
 rules = tile.setdefault('rules', {})
-if '$name' not in rules:
-    rules['$name'] = {'rules': 'rules/$name.md'}
-    print('  added: $name')
+if name not in rules:
+    rules[name] = {'rules': f'rules/{name}.md'}
+    print(f'  added: {name}')
 else:
-    print('  exists: $name')
-with open('$TILE_REPO_DIR/tile.json', 'w') as f:
+    print(f'  exists: {name}')
+with open(tile_path, 'w') as f:
     json.dump(tile, f, indent=2)
     f.write('\n')
-"
+PY
       PROMOTED=$((PROMOTED + 1))
     done
   fi
