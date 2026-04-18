@@ -131,13 +131,21 @@ function scriptResultPath(
       );
     }
   }
-  return path.join(
+  const inputDir = path.join(
     DATA_DIR,
     'ipc',
     sourceGroup,
     sessionInputDirName(session),
-    `_script_result_${requestId}.json`,
   );
+  // Ensure the session's input dir exists before the caller writes into it.
+  // In the common path both sessions have already spawned at least once and
+  // the dir exists — but a maintenance-only group (or a container that has
+  // never gone through default) won't have `input-default/`, and our
+  // fallback routes here for malformed payloads. Creating the dir
+  // defensively keeps `fs.writeFileSync(resultPath, ...)` from throwing
+  // ENOENT at every caller.
+  fs.mkdirSync(inputDir, { recursive: true });
+  return path.join(inputDir, `_script_result_${requestId}.json`);
 }
 
 export function startIpcWatcher(deps: IpcDeps): void {

@@ -573,6 +573,63 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10);
   });
 
+  it('drainWaiting under saturation prefers default slots over maintenance', async () => {
+    // MAX_CONCURRENT_CONTAINERS is mocked to 2. Fill both slots with
+    // blocking maintenance tasks, then queue BOTH a maintenance task AND a
+    // user message (for different groups). When ONE slot frees, the queue
+    // must drain the USER-FACING message ahead of the queued maintenance
+    // task — that's the whole point of parallel maintenance: scheduled
+    // work doesn't block user replies under contention.
+    const release: Array<() => void> = [];
+    const blockingTask = () =>
+      vi.fn(async () => {
+        await new Promise<void>((r) => release.push(r));
+      });
+
+    // Fill both concurrent slots.
+    queue.enqueueTask('a@g.us', 'block-a', MAINTENANCE_SESSION_NAME, blockingTask());
+    queue.enqueueTask('b@g.us', 'block-b', MAINTENANCE_SESSION_NAME, blockingTask());
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Queue maintenance FIRST (older entry), then user message — priority
+    // logic must override FIFO insertion order.
+    let maintRan = false;
+    let msgRan = false;
+    queue.enqueueTask(
+      'c@g.us',
+      'queued-maint',
+      MAINTENANCE_SESSION_NAME,
+      vi.fn(async () => {
+        maintRan = true;
+      }),
+    );
+    // processMessages must block so the freed slot stays occupied while we
+    // observe — otherwise the message finishes synchronously, frees the
+    // slot, and drainWaiting would pick up the maintenance task too.
+    let releaseMsg: (() => void) | undefined;
+    queue.setProcessMessagesFn(async () => {
+      msgRan = true;
+      await new Promise<void>((r) => {
+        releaseMsg = r;
+      });
+      return true;
+    });
+    queue.enqueueMessageCheck('d@g.us');
+
+    // Release ONE blocking slot — only the user message should be drained.
+    release[0]!();
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(msgRan).toBe(true);
+    expect(maintRan).toBe(false);
+
+    // Release the message, then the second blocking task → maintenance runs.
+    releaseMsg!();
+    release[1]!();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(maintRan).toBe(true);
+  });
+
   it('two tasks on the same group with the same sessionName serialize', async () => {
     // Within a session the slot is still single-serial — same as before,
     // just keyed by (groupJid, sessionName) instead of groupJid alone.

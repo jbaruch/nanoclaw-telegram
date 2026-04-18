@@ -199,18 +199,26 @@ function createSchema(database: Database.Database): void {
     .all() as Array<{ name: string }>;
   const hasSessionName = sessionsCols.some((c) => c.name === 'session_name');
   if (sessionsCols.length > 0 && !hasSessionName) {
-    database.exec(`
-      CREATE TABLE sessions_new (
-        group_folder TEXT NOT NULL,
-        session_name TEXT NOT NULL DEFAULT 'default',
-        session_id TEXT NOT NULL,
-        PRIMARY KEY (group_folder, session_name)
-      );
-      INSERT INTO sessions_new (group_folder, session_name, session_id)
-        SELECT group_folder, 'default', session_id FROM sessions;
-      DROP TABLE sessions;
-      ALTER TABLE sessions_new RENAME TO sessions;
-    `);
+    // Wrap in a transaction: the CREATE/INSERT/DROP/RENAME sequence must be
+    // atomic. A crash between `DROP TABLE sessions` and
+    // `ALTER TABLE sessions_new RENAME TO sessions` would leave the DB
+    // without a `sessions` table at all — next startup would find it missing
+    // and blow up on any session lookup. `database.transaction()` in
+    // better-sqlite3 implicitly rolls back on thrown exceptions.
+    database.transaction(() => {
+      database.exec(`
+        CREATE TABLE sessions_new (
+          group_folder TEXT NOT NULL,
+          session_name TEXT NOT NULL DEFAULT 'default',
+          session_id TEXT NOT NULL,
+          PRIMARY KEY (group_folder, session_name)
+        );
+        INSERT INTO sessions_new (group_folder, session_name, session_id)
+          SELECT group_folder, 'default', session_id FROM sessions;
+        DROP TABLE sessions;
+        ALTER TABLE sessions_new RENAME TO sessions;
+      `);
+    })();
   }
 }
 

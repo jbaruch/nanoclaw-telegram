@@ -452,12 +452,24 @@ export class GroupQueue {
       this.waitingKeys.length > 0 &&
       this.activeCount < MAX_CONCURRENT_CONTAINERS
     ) {
-      const nextKey = this.waitingKeys.shift()!;
+      // Under saturation (global cap reached), user-facing work MUST
+      // preempt scheduled maintenance. The whole point of parallel
+      // maintenance is to keep user replies fast; letting a queued
+      // maintenance task take a freed slot ahead of a queued user
+      // message would invert that intent. Within each priority band we
+      // preserve FIFO order.
+      const defaultIdx = this.waitingKeys.findIndex((k) =>
+        k.endsWith(`::${DEFAULT_SESSION_NAME}`),
+      );
+      const idx = defaultIdx >= 0 ? defaultIdx : 0;
+      const nextKey = this.waitingKeys.splice(idx, 1)[0]!;
       const [nextJid, nextSessionName] = nextKey.split('::');
       if (!nextJid || !nextSessionName) continue;
       const state = this.getGroup(nextJid, nextSessionName);
 
-      // Prioritize tasks over messages
+      // Prioritize tasks over messages within the popped slot (tasks
+      // aren't re-discovered from SQLite on the next poll the way
+      // messages are — dropping a task here loses its runTask context).
       if (state.pendingTasks.length > 0) {
         const task = state.pendingTasks.shift()!;
         this.runTask(nextJid, nextSessionName, task).catch((err) =>
