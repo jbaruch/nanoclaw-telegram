@@ -56,8 +56,13 @@ EXCLUDES=(
   --exclude='logs/'
   --exclude='dist/'
   --exclude='.claude-memory/'
-  --exclude='.claude/projects/'
-  --exclude='.claude/worktrees/'
+  # Whole `.claude/` dir: mix of Claude Code settings (sandbox config,
+  # local permissions) and runtime state (scheduled_tasks.lock with pid
+  # + session id). None of it is NanoClaw source — users installing
+  # NanoClaw create their own on first run. Pre-existing `.claude/`
+  # content on public main (e.g. feature-skill SKILL.md files) is
+  # preserved by the rsync-exclude semantics (neither added nor deleted).
+  --exclude='.claude/'
   --exclude='container/agent-runner/dist/'
   --exclude='.DS_Store'
   --exclude='._*'
@@ -77,13 +82,38 @@ rm -rf "$PUBLIC_DIR/dist/"
 # --- Apply in-file scrubs ---
 echo "Scrubbing files..."
 
+# Private handlers and MCP tools that must be scrubbed before the sync
+# reaches public. Keep these lists in sync with each other and with the
+# allowlist-verification block at the bottom of this script. When adding
+# a new private integration to the codebase, add its name here AND to
+# the allowlist verifier — the verifier fails the sync if it finds any
+# handler/tool not explicitly permitted, so even forgetting this list
+# won't cause a silent leak.
+PRIVATE_IPC_HANDLERS=(
+  'sync_tripit'
+  'fetch_trakt_history'
+  'sessionize_get_event'
+  'sessionize_open_cfps'
+  'audible_backup'
+  'dominos_pizza'
+)
+PRIVATE_MCP_TOOLS=(
+  'sync_tripit'
+  'fetch_trakt_history'
+  'sessionize_get_event'
+  'sessionize_open_cfps'
+  'audible_backup'
+  'dominos_pizza'
+  'smarthome_status'
+)
+
 # 1. Remove private case blocks from ipc.ts
 # Anchor on 6-space break (case-level) + blank line to avoid matching inner breaks
 python3 -c "
 import re
 f = '$PUBLIC_DIR/src/ipc.ts'
 code = open(f).read()
-for name in ['sync_tripit', 'fetch_trakt_history', 'sessionize_get_event', 'sessionize_open_cfps', 'audible_backup']:
+for name in $(printf "'%s', " "${PRIVATE_IPC_HANDLERS[@]}" | python3 -c "import sys; print('[' + sys.stdin.read().rstrip(', ') + ']')"):
     code = re.sub(r\"    case '\" + name + r\"':.*?\n      break;\n\n\", '', code, flags=re.DOTALL)
 open(f, 'w').write(code)
 print('  ipc.ts: removed private IPC handlers')
@@ -95,7 +125,7 @@ import re
 f = '$PUBLIC_DIR/container/agent-runner/src/ipc-mcp-stdio.ts'
 code = open(f).read()
 # Anchor closing ); at start of line (0 indent) to avoid matching inner closings
-for name in ['sync_tripit', 'fetch_trakt_history', 'sessionize_get_event', 'sessionize_open_cfps', 'audible_backup']:
+for name in $(printf "'%s', " "${PRIVATE_MCP_TOOLS[@]}" | python3 -c "import sys; print('[' + sys.stdin.read().rstrip(', ') + ']')"):
     code = re.sub(r\"server\.tool\(\n  '\" + name + r\"',.*?\n\);\n\n\", '', code, flags=re.DOTALL)
 open(f, 'w').write(code)
 print('  ipc-mcp-stdio.ts: removed private MCP tools')
@@ -227,6 +257,78 @@ print('  tessl.json: removed private tile dependencies')
 "
 fi
 
+echo ""
+
+# --- Leak-prevention allowlist check -----------------------------------------
+# Enumerate every IPC handler / MCP tool in the scrubbed public tree and
+# compare against an explicit allowlist. Anything unknown aborts the sync
+# BEFORE we commit or push — so adding a new private integration without
+# updating the scrub regex (as happened with `dominos_pizza` and
+# `smarthome_status` in the first round of PR #24) can no longer leak
+# silently. To add a new public-safe handler/tool, add its name to the
+# corresponding allowlist below.
+APPROVED_PUBLIC_IPC_HANDLERS=(
+  'cancel_task'
+  'github_backup'
+  'nuke_session'
+  'pause_task'
+  'promote_staging'
+  'refresh_groups'
+  'register_group'
+  'resume_task'
+  'schedule_task'
+  'update_task'
+)
+APPROVED_PUBLIC_MCP_TOOLS=(
+  'cancel_task'
+  'github_backup'
+  'list_tasks'
+  'nuke_session'
+  'pause_task'
+  'promote_staging'
+  'react_to_message'
+  'register_group'
+  'resume_task'
+  'schedule_task'
+  'send_file'
+  'send_message'
+  'update_task'
+)
+
+actual_handlers=$(
+  grep -oE "^    case '[a-z_]+'" "$PUBLIC_DIR/src/ipc.ts" \
+    | awk -F"'" '{print $2}' | sort -u
+)
+actual_tools=$(
+  grep -oE "^  '[a-z_]+',[[:space:]]*$" \
+    "$PUBLIC_DIR/container/agent-runner/src/ipc-mcp-stdio.ts" \
+    | awk -F"'" '{print $2}' | sort -u
+)
+approved_handlers=$(printf '%s\n' "${APPROVED_PUBLIC_IPC_HANDLERS[@]}" | sort -u)
+approved_tools=$(printf '%s\n' "${APPROVED_PUBLIC_MCP_TOOLS[@]}" | sort -u)
+
+unexpected_handlers=$(comm -23 <(echo "$actual_handlers") <(echo "$approved_handlers"))
+unexpected_tools=$(comm -23 <(echo "$actual_tools") <(echo "$approved_tools"))
+
+leak_detected=false
+if [ -n "$unexpected_handlers" ]; then
+  echo "LEAK: unexpected IPC handlers in scrubbed public tree:"
+  echo "$unexpected_handlers" | sed 's/^/  - /'
+  echo "Either add them to PRIVATE_IPC_HANDLERS (to scrub) or APPROVED_PUBLIC_IPC_HANDLERS (to allow)."
+  leak_detected=true
+fi
+if [ -n "$unexpected_tools" ]; then
+  echo "LEAK: unexpected MCP tools in scrubbed public tree:"
+  echo "$unexpected_tools" | sed 's/^/  - /'
+  echo "Either add them to PRIVATE_MCP_TOOLS (to scrub) or APPROVED_PUBLIC_MCP_TOOLS (to allow)."
+  leak_detected=true
+fi
+if [ "$leak_detected" = true ]; then
+  echo ""
+  echo "Aborting sync. No changes pushed. Public repo untouched."
+  exit 1
+fi
+echo "Leak check: clean."
 echo ""
 
 # --- Diff summary ---
