@@ -38,8 +38,14 @@ interface ContainerInput {
   /**
    * Which per-group session this container run belongs to. Mirrors the
    * orchestrator-side `ContainerInput.sessionName` in `src/container-runner.ts`.
-   * Propagated for diagnostic logging; agent-runner doesn't read it directly
-   * (session isolation happens at the mount layer via `groupSessionsDir`).
+   *
+   * Consumed here to set the `NANOCLAW_SESSION_NAME` env var on the MCP
+   * stdio server (see the `mcpServersConfig.nanoclaw.env` block below),
+   * which stamps `sessionName` onto every TASKS_DIR IPC request so the
+   * host responder routes `_script_result_*` replies back to THIS
+   * session's `input-<session>/` dir. Mount-based session isolation
+   * (`groupSessionsDir`, `input/` overlay) is set up by the orchestrator
+   * before spawn; this value flows through to the MCP env at runtime.
    */
   sessionName?: string;
 }

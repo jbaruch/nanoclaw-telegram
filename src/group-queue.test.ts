@@ -587,8 +587,18 @@ describe('GroupQueue', () => {
       });
 
     // Fill both concurrent slots.
-    queue.enqueueTask('a@g.us', 'block-a', MAINTENANCE_SESSION_NAME, blockingTask());
-    queue.enqueueTask('b@g.us', 'block-b', MAINTENANCE_SESSION_NAME, blockingTask());
+    queue.enqueueTask(
+      'a@g.us',
+      'block-a',
+      MAINTENANCE_SESSION_NAME,
+      blockingTask(),
+    );
+    queue.enqueueTask(
+      'b@g.us',
+      'block-b',
+      MAINTENANCE_SESSION_NAME,
+      blockingTask(),
+    );
     await vi.advanceTimersByTimeAsync(10);
 
     // Queue maintenance FIRST (older entry), then user message — priority

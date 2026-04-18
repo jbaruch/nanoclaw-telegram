@@ -87,17 +87,21 @@ const VALID_REQUEST_ID_RE = /^[A-Za-z0-9_-]+$/;
  * like `../default` or `../../etc/passwd` would make `path.join` escape
  * the expected `<DATA_DIR>/ipc/<sourceGroup>/input-<session>/` subtree.
  *
- * Fail-safe strategy: malformed requestId/sessionName trigger a fallback
- * to a safe but UNUSED path (fixed requestId `'invalid'`, default
- * session). The response still gets written — to `_script_result_invalid.json`
- * under the default session's input dir — and the malformed request
- * effectively times out, which is the correct outcome for a bad payload.
- * The filename is fixed (not random) so a noisy/malicious container can't
- * fill disk by spamming unique requestIds; at most one orphan file exists
- * per input dir and gets overwritten in place. The warning log surfaces
- * the incident for auditing. This keeps every caller's
- * `fs.writeFileSync(path, ...)` pattern intact (no null-checking at 10+
- * call sites) while still blocking path traversal.
+ * Fail-safe strategy, two independent fallbacks:
+ * - Invalid `requestId` → fixed filename `_script_result_invalid.json`.
+ *   Keeps path traversal out of the filename AND prevents a noisy/
+ *   malicious container from filling disk by spamming unique ids —
+ *   at most one orphan file per session's input dir, overwritten in
+ *   place each time. The SESSION dir is still whatever was validated
+ *   from the payload (the `sessionName` check is separate).
+ * - Invalid `sessionName` → fall back to `DEFAULT_SESSION_NAME`. Blocks
+ *   `..`-style path-segment escape into a different group's subtree.
+ *
+ * Both fallbacks log at warn level for auditing. The malformed request
+ * effectively times out (its response lands where no container polls),
+ * which is the correct outcome for a bad payload. This keeps every
+ * caller's `fs.writeFileSync(resultPath, ...)` pattern intact (no null-
+ * checking at 10+ call sites) while still blocking path traversal.
  */
 function scriptResultPath(
   sourceGroup: string,
