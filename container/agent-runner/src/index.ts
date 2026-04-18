@@ -35,6 +35,19 @@ interface ContainerInput {
   assistantName?: string;
   script?: string;
   replyToMessageId?: string;
+  /**
+   * Which per-group session this container run belongs to. Mirrors the
+   * orchestrator-side `ContainerInput.sessionName` in `src/container-runner.ts`.
+   *
+   * Consumed here to set the `NANOCLAW_SESSION_NAME` env var on the MCP
+   * stdio server (see the `mcpServersConfig.nanoclaw.env` block below),
+   * which stamps `sessionName` onto every TASKS_DIR IPC request so the
+   * host responder routes `_script_result_*` replies back to THIS
+   * session's `input-<session>/` dir. Mount-based session isolation
+   * (`groupSessionsDir`, `input/` overlay) is set up by the orchestrator
+   * before spawn; this value flows through to the MCP env at runtime.
+   */
+  sessionName?: string;
 }
 
 interface ContainerOutput {
@@ -524,6 +537,12 @@ async function runQuery(
         NANOCLAW_CHAT_JID: containerInput.chatJid,
         NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
         NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+        // Session identity. The MCP stdio server stamps this onto every
+        // IPC request so the host responder knows which session's
+        // `input-<session>/` dir should receive the `_script_result_*`
+        // reply. Without it, responses to a maintenance container's
+        // requests would land in `input-default/` and never be seen.
+        NANOCLAW_SESSION_NAME: containerInput.sessionName || 'default',
         ...(containerInput.replyToMessageId
           ? { NANOCLAW_REPLY_TO_MESSAGE_ID: containerInput.replyToMessageId }
           : {}),
