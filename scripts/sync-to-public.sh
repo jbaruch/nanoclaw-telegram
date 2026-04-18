@@ -67,6 +67,16 @@ EXCLUDES=(
   --exclude='.DS_Store'
   --exclude='._*'
 
+  # Tessl vendored tile content + generated RULES.md. These are
+  # host-operational artifacts (the nanoclaw-host tile documents the
+  # private/public repo-chain, promote pipeline, host conventions) and
+  # don't belong in the public source tree. Both are gitignored on
+  # private and in main via .gitignore, but rsync doesn't read
+  # .gitignore — without these excludes the host-side tree leaks into
+  # public on every sync.
+  --exclude='.tessl/tiles/'
+  --exclude='.tessl/RULES.md'
+
   # Keep .git in public untouched
   --exclude='.git/'
 )
@@ -78,6 +88,27 @@ rsync -a --delete \
 
 # Remove build output (rsync --exclude prevents --delete from touching it)
 rm -rf "$PUBLIC_DIR/dist/"
+
+# Retire stale host-tile content from public's git history. Public was
+# syncing `.tessl/tiles/jbaruch/nanoclaw-host/` and `.tessl/RULES.md`
+# before the excludes above were added, so those paths are still
+# tracked in public's git tree even though rsync no longer touches
+# them. The file contents are host-operational (repo-chain, promote,
+# etc.) and don't belong in the public fork. `git rm` stages the
+# removal for the sync commit; the `git ls-files | wc -l` guard makes
+# this idempotent — first sync removes them, subsequent syncs see
+# zero tracked paths and no-op.
+(
+  cd "$PUBLIC_DIR"
+  if [ -n "$(git ls-files .tessl/tiles/jbaruch/nanoclaw-host/)" ]; then
+    git rm -rf .tessl/tiles/jbaruch/nanoclaw-host/
+    echo "  .tessl/: retired host-tile directory from public git"
+  fi
+  if [ -n "$(git ls-files .tessl/RULES.md)" ]; then
+    git rm .tessl/RULES.md
+    echo "  .tessl/: retired RULES.md from public git"
+  fi
+)
 
 # --- Apply in-file scrubs ---
 echo "Scrubbing files..."
@@ -263,6 +294,57 @@ print('  tessl.json: removed private tile dependencies')
 "
 fi
 
+# 11. Rename private assistant identity 'AyeAye' → 'Andy' in source
+# code and container content. The private deployment's assistant is
+# named AyeAye; public ships with the generic 'Andy' template (see
+# public main's groups/*/CLAUDE.md, which already uses 'Andy'). When
+# private code comments reference AyeAye — as PR #55's parallel-
+# maintenance work does — naive rsync copies that name into public's
+# source tree, inconsistent with its own templates and leaking the
+# private assistant identity. Word-substring replace is safe: no
+# public-safe code references 'AyeAye' in any other meaning.
+#
+# Plain string substitution covers plural (AyeAyes → Andys) and
+# hyphenated (maintenance-AyeAye → maintenance-Andy) forms in one pass.
+PUBLIC_DIR="$PUBLIC_DIR" python3 <<'PY'
+import os
+import pathlib
+root = pathlib.Path(os.environ["PUBLIC_DIR"])
+# Limit to source trees where private identity leaks are plausible —
+# keeps the scrub scoped and avoids touching e.g. node_modules.
+search_roots = ["src", "container/agent-runner/src", "scripts", "docs"]
+touched = 0
+for sub in search_roots:
+    d = root / sub
+    if not d.is_dir():
+        continue
+    for path in d.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in {".ts", ".js", ".py", ".sh", ".md", ".json"}:
+            continue
+        # Skip this script itself — its AyeAye references are
+        # meta-descriptions of the scrub (comment text, the literal
+        # `.replace("AyeAye", "Andy")` call). Renaming them would turn
+        # the scrub into a no-op on the next run from the public side
+        # and trash the self-documenting comments. No real identity
+        # leak lives here; the script is about how scrubbing works.
+        if path.name == "sync-to-public.sh":
+            continue
+        try:
+            original = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            # Binary or non-utf8 file slipped into a text-y extension;
+            # skip rather than corrupt it.
+            continue
+        if "AyeAye" not in original:
+            continue
+        updated = original.replace("AyeAye", "Andy")
+        path.write_text(updated, encoding="utf-8")
+        touched += 1
+print(f"  AyeAye → Andy: renamed in {touched} file(s)")
+PY
+
 echo ""
 
 # --- Leak-prevention allowlist check -----------------------------------------
@@ -307,22 +389,30 @@ APPROVED_PUBLIC_MCP_TOOLS=(
 # formatter or contributor ever reflows the source — which would let
 # the `comm -23` comparison below approve an empty "actual" set
 # against the allowlist, defeating the entire leak check.
-actual_handlers=$(python3 <<PY
+#
+# Heredoc delimiter is QUOTED (<<'PY') so bash does NOT expand the body.
+# Unquoted <<PY would trigger command-substitution on the backtick pairs
+# inside our comments (the case/server.tool examples) and mangle the
+# Python program that finally reaches `python3`. We pass $PUBLIC_DIR via
+# an env var instead of shell interpolation — keeps the body bash-inert.
+actual_handlers=$(PUBLIC_DIR="$PUBLIC_DIR" python3 <<'PY'
+import os
 import re
-with open("$PUBLIC_DIR/src/ipc.ts") as f:
+with open(os.environ["PUBLIC_DIR"] + "/src/ipc.ts") as f:
     text = f.read()
-# `case '<name>':` at the start of a line (any amount of leading
+# Match case 'name': at the start of a line (any amount of leading
 # whitespace, spaces or tabs). Anchoring at line start excludes
 # occurrences embedded in strings/comments.
 names = sorted(set(re.findall(r"^[ \t]*case '([a-z_]+)':", text, re.MULTILINE)))
 print("\n".join(names))
 PY
 )
-actual_tools=$(python3 <<PY
+actual_tools=$(PUBLIC_DIR="$PUBLIC_DIR" python3 <<'PY'
+import os
 import re
-with open("$PUBLIC_DIR/container/agent-runner/src/ipc-mcp-stdio.ts") as f:
+with open(os.environ["PUBLIC_DIR"] + "/container/agent-runner/src/ipc-mcp-stdio.ts") as f:
     text = f.read()
-# `server.tool('<name>', ...)` — tolerant of any whitespace/newlines
+# Match server.tool('name', ...) — tolerant of any whitespace/newlines
 # between the opening paren and the first argument, so a reformat that
 # inlines or re-indents the call site doesn't hide tools from the
 # verifier.
