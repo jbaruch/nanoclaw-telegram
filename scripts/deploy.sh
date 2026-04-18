@@ -8,9 +8,10 @@
 #   1. Pull latest code from origin
 #   2. Rebuild orchestrator + agent-runner images
 #   3. Update tiles from registry
-#   4. Kill ALL running agent containers (forces fresh tile load)
-#   5. Clear ALL sessions from DB
-#   6. Restart orchestrator
+#   4. Clear runtime skill overrides from all groups
+#   5. Kill ALL running agent containers (forces fresh tile load)
+#   6. Clear ALL sessions from DB
+#   7. Restart orchestrator
 #
 # The --tiles-only flag skips the git pull and image rebuilds (for when
 # only tile content changed, not source code).
@@ -44,9 +45,28 @@ if [[ "$TILES_ONLY" == false ]]; then
     # new `session` parameter on the schema: the schema was in git but
     # AyeAye's container still saw the old parameterless tool until
     # someone remembered to run `./container/build.sh` separately).
+    #
+    # Agent-image tag comes from $CONTAINER_IMAGE (the same env var the
+    # orchestrator reads in src/config.ts to decide which image to spawn
+    # agent containers from). Default is nanoclaw-agent:latest. If an
+    # operator overrode CONTAINER_IMAGE — say to a versioned tag or a
+    # private registry path — we match their choice where we can, and
+    # warn loudly if we can't so they know the local rebuild won't hit
+    # the image the orchestrator actually spawns.
     echo "2. Rebuilding orchestrator + agent-runner..."
     docker compose up -d --build
-    ./container/build.sh
+    AGENT_IMAGE="${CONTAINER_IMAGE:-nanoclaw-agent:latest}"
+    if [[ "$AGENT_IMAGE" == nanoclaw-agent:* ]]; then
+        TAG="${AGENT_IMAGE#nanoclaw-agent:}" ./container/build.sh
+    elif [[ "$AGENT_IMAGE" == "nanoclaw-agent" ]]; then
+        ./container/build.sh
+    else
+        echo "WARNING: CONTAINER_IMAGE='$AGENT_IMAGE' is not local nanoclaw-agent:*"
+        echo "WARNING: ./container/build.sh will rebuild nanoclaw-agent:latest,"
+        echo "WARNING: which is NOT the image the orchestrator will spawn from."
+        echo "WARNING: Push/tag your own build pipeline for '$AGENT_IMAGE' separately."
+        ./container/build.sh
+    fi
     echo ""
 else
     echo "1-2. Skipped (--tiles-only)"
