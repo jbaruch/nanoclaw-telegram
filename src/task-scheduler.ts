@@ -212,12 +212,12 @@ async function runTask(
           task.group_folder,
         ),
       async (streamedOutput: ContainerOutput) => {
-        if (streamedOutput.newSessionId) {
-          // Persist the maintenance session's own sessionId so the NEXT
-          // scheduled task on this group can resume the same chain. Mirrors
-          // the user-facing write-back in `src/index.ts` — without this,
-          // every maintenance run would start fresh even though its
-          // .claude/ transcript is per-session.
+        // Persist the maintenance session's own sessionId so the NEXT
+        // scheduled task on this group can resume the same chain. Only
+        // for `context_mode: 'group'` tasks — an isolated task wants a
+        // fresh SDK session and its newSessionId would otherwise overwrite
+        // the slot and contaminate the next 'group' task's resume.
+        if (streamedOutput.newSessionId && task.context_mode === 'group') {
           const groupSessions =
             sessions[task.group_folder] ?? (sessions[task.group_folder] = {});
           groupSessions[MAINTENANCE_SESSION_NAME] = streamedOutput.newSessionId;
@@ -256,7 +256,9 @@ async function runTask(
     if (closeTimer) clearTimeout(closeTimer);
 
     // Same write-back path for the terminal `output` (non-streaming case).
-    if (output.newSessionId) {
+    // Same `'group'`-only gate as the streaming path above — don't let an
+    // isolated task overwrite the maintenance slot's session chain.
+    if (output.newSessionId && task.context_mode === 'group') {
       const groupSessions =
         sessions[task.group_folder] ?? (sessions[task.group_folder] = {});
       groupSessions[MAINTENANCE_SESSION_NAME] = output.newSessionId;
