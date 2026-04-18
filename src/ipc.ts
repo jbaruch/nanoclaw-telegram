@@ -20,6 +20,7 @@ import {
 import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
 import {
   createTask,
+  deleteAllSessions,
   deleteTask,
   getTaskById,
   storeMessage,
@@ -500,6 +501,9 @@ export async function processTaskIpc(
     message?: string;
     tileName?: string;
     skillName?: string;
+    // push_staged_to_branch
+    branch?: string;
+    commitMessage?: string;
     slug?: string;
     filter?: Record<string, boolean>;
     dryRun?: boolean;
@@ -1476,9 +1480,9 @@ export async function processTaskIpc(
             // 5-minute cap, which observably killed every bulk promote
             // AyeAye tried and returned a mid-run truncated error. 15
             // min fits the typical 10-15 skill worst case with
-            // headroom; larger bulk promotes should either split or
-            // set `skip-optimize: true` on individual skill
-            // frontmatter.
+            // headroom; larger bulk promotes should split the staging
+            // directory into smaller batches — every skill is reviewed
+            // (no per-skill opt-out).
             timeout: 900_000,
             maxBuffer: 5 * 1024 * 1024,
             env: {
@@ -1524,10 +1528,210 @@ export async function processTaskIpc(
               // never if Copilot/human rejects it). The auto-update
               // would fire against a registry that hasn't changed
               // yet — at best a no-op, at worst tearing down sessions
-              // for no reason. Operator runs `tessl update` after
-              // merging the PR (or a future MCP tool can trigger it
-              // on merge webhook).
+              // for no reason. The agent now calls the `tessl_update`
+              // MCP tool explicitly after the PR merges; a periodic
+              // 15-min catch-up in index.ts covers missed invocations.
             }
+          },
+        );
+      }
+      break;
+
+    case 'tessl_update':
+      if (data.requestId) {
+        const tesslResultPath = scriptResultPath(sourceGroup, data);
+        if (!isMain) {
+          logger.warn({ sourceGroup }, 'Unauthorized tessl_update attempt');
+          fs.writeFileSync(
+            tesslResultPath,
+            JSON.stringify({
+              error: 'Only the main group can trigger tessl_update.',
+            }),
+          );
+          break;
+        }
+
+        logger.info({ sourceGroup }, 'Running tessl_update');
+
+        execFile(
+          'bash',
+          [
+            '-c',
+            'cd /app/tessl-workspace && tessl update --yes --dangerously-ignore-security --agent claude-code 2>&1',
+          ],
+          { timeout: 150_000, maxBuffer: 2 * 1024 * 1024 },
+          (error, stdout) => {
+            if (error) {
+              logger.error(
+                {
+                  sourceGroup,
+                  error: error.message,
+                  output: stdout.slice(-500),
+                },
+                'tessl_update failed',
+              );
+              fs.writeFileSync(
+                tesslResultPath,
+                JSON.stringify({
+                  error: error.message,
+                  stdout: stdout.slice(-2000),
+                }),
+              );
+              return;
+            }
+            const output = stdout.trim();
+            // `tessl update` prints "Updated ..." when a tile actually
+            // moved forward. No-op runs don't, and clearing sessions on a
+            // no-op would nuke conversation state for nothing — hence
+            // the string check instead of an unconditional clear.
+            if (/\bUpdated\b/.test(output)) {
+              const cleared = deleteAllSessions();
+              logger.info(
+                { sourceGroup, sessionsCleared: cleared },
+                'tessl_update found new tiles — sessions cleared',
+              );
+              fs.writeFileSync(
+                tesslResultPath,
+                JSON.stringify({
+                  stdout: `${output}\n\nSessions cleared: ${cleared}`,
+                }),
+              );
+            } else {
+              logger.info(
+                { sourceGroup },
+                'tessl_update completed — no new tiles',
+              );
+              fs.writeFileSync(
+                tesslResultPath,
+                JSON.stringify({ stdout: output || '(no output)' }),
+              );
+            }
+          },
+        );
+      }
+      break;
+
+    case 'push_staged_to_branch':
+      if (
+        data.requestId &&
+        data.tileName &&
+        data.branch &&
+        data.commitMessage
+      ) {
+        const pushResultPath = scriptResultPath(sourceGroup, data);
+        if (!isMain) {
+          logger.warn(
+            { sourceGroup },
+            'Unauthorized push_staged_to_branch attempt',
+          );
+          fs.writeFileSync(
+            pushResultPath,
+            JSON.stringify({
+              error: 'Only the main group can push to tile branches.',
+            }),
+          );
+          break;
+        }
+
+        const pushScript = path.join(
+          process.cwd(),
+          'scripts',
+          'push-staged-to-branch.sh',
+        );
+
+        if (!fs.existsSync(pushScript)) {
+          fs.writeFileSync(
+            pushResultPath,
+            JSON.stringify({ error: 'push-staged-to-branch.sh not found' }),
+          );
+          break;
+        }
+
+        const stagingDir = path.join(
+          GROUPS_DIR,
+          sourceGroup,
+          'staging',
+          data.tileName,
+        );
+
+        // Same .env reader pattern as promote_staging — the orchestrator
+        // holds the tile-repo credentials, containers never see them.
+        const envPath = path.join(process.cwd(), '.env');
+        const envContent = fs.existsSync(envPath)
+          ? fs.readFileSync(envPath, 'utf-8')
+          : '';
+        const getEnv = (key: string) =>
+          envContent
+            .split('\n')
+            .find((l) => l.startsWith(`${key}=`))
+            ?.split('=')
+            .slice(1)
+            .join('=') || '';
+
+        logger.info(
+          {
+            sourceGroup,
+            tileName: data.tileName,
+            branch: data.branch,
+            skillName: data.skillName || 'all',
+          },
+          'Running push_staged_to_branch',
+        );
+
+        execFile(
+          'bash',
+          [
+            pushScript,
+            stagingDir,
+            data.tileName,
+            data.branch,
+            data.commitMessage,
+            data.skillName || 'all',
+          ],
+          {
+            // 5 min is enough for a clone-branch + copy + commit +
+            // push. No tessl review loop here — fixups don't re-trigger
+            // the local optimize pass.
+            timeout: 300_000,
+            maxBuffer: 2 * 1024 * 1024,
+            env: {
+              ...process.env,
+              GITHUB_TOKEN: getEnv('GITHUB_TOKEN'),
+              TILE_OWNER: getEnv('TILE_OWNER') || 'jbaruch',
+              ASSISTANT_NAME: getEnv('ASSISTANT_NAME') || 'AyeAye',
+            },
+          },
+          (error, stdout, stderr) => {
+            if (error) {
+              logger.error(
+                {
+                  sourceGroup,
+                  error: error.message,
+                  stderr: stderr.slice(-500),
+                },
+                'push_staged_to_branch failed',
+              );
+              fs.writeFileSync(
+                pushResultPath,
+                JSON.stringify({
+                  error: error.message,
+                  stderr: stderr.slice(-500),
+                }),
+              );
+              return;
+            }
+            logger.info(
+              {
+                sourceGroup,
+                tileName: data.tileName,
+                branch: data.branch,
+              },
+              'push_staged_to_branch pushed fixup',
+            );
+            fs.writeFileSync(
+              pushResultPath,
+              JSON.stringify({ stdout: stdout.trim() }),
+            );
           },
         );
       }

@@ -1244,6 +1244,110 @@ server.tool(
   },
 );
 
+server.tool(
+  'push_staged_to_branch',
+  `Push fixups from this group's staging directory to an existing tile-repo PR branch. Use after a promote PR gets review comments: fix the skill back in staging, then call this with the branch name that promote_staging printed ("Branch: promote/...-<tile>"). No new PR is opened — the existing PR auto-updates. Main group only.
+
+skillName options:
+- omit → push everything currently in staging
+- specific skill (e.g. "tessl__check-unanswered") → push only that skill
+- "--rules-only" → push only rules`,
+  {
+    tileName: z
+      .enum(['nanoclaw-admin', 'nanoclaw-core', 'nanoclaw-untrusted'])
+      .describe('Target tile repo (same one the PR is against)'),
+    branch: z
+      .string()
+      .describe(
+        'Existing PR branch, e.g. "promote/20260418T224156Z-nanoclaw-core". Parse it from the `Branch: ...` line in promote_staging output.',
+      ),
+    commitMessage: z
+      .string()
+      .describe(
+        'Short commit message describing the fixup (e.g. "fix: address Copilot comment on unanswered-precheck.py").',
+      ),
+    skillName: z
+      .string()
+      .optional()
+      .describe(
+        'Specific skill to push. Omit for all staging items. Use "--rules-only" to push only rules.',
+      ),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          { type: 'text' as const, text: 'Only the main group can push to tile branches.' },
+        ],
+        isError: true,
+      };
+    }
+
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const data = {
+      type: 'push_staged_to_branch',
+      groupFolder,
+      tileName: args.tileName,
+      branch: args.branch,
+      commitMessage: args.commitMessage,
+      skillName: args.skillName || 'all',
+      requestId,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
+    const timeoutMs = 300_000;
+    const pollMs = 1000;
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+      if (fs.existsSync(resultPath)) {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        fs.unlinkSync(resultPath);
+        if (result.error) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `push_staged_to_branch failed: ${result.error}\n${result.stderr || ''}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        return {
+          content: [{ type: 'text' as const, text: result.stdout || 'Fixup pushed.' }],
+        };
+      }
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'push_staged_to_branch timed out after 5 minutes.' }],
+      isError: true,
+    };
+  },
+);
+
+server.tool(
+  'tessl_update',
+  'Run `tessl update` on the host to pull the latest tile versions from the registry. Call this after a promote PR merges (GHA publishes on merge, then the agent triggers this to get the new version). If new tiles land, sessions are cleared automatically so the next message picks them up. A periodic 15-min catch-up runs in the orchestrator as a safety net. Main group only.',
+  {},
+  async () => {
+    if (!isMain) {
+      return {
+        content: [
+          { type: 'text' as const, text: 'Only the main group can trigger tessl_update.' },
+        ],
+        isError: true,
+      };
+    }
+    return runHostOperation('tessl_update');
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);
