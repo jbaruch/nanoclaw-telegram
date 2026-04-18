@@ -89,15 +89,18 @@ rsync -a --delete \
 # Remove build output (rsync --exclude prevents --delete from touching it)
 rm -rf "$PUBLIC_DIR/dist/"
 
-# Retire stale host-tile content from public's git history. Public was
-# syncing `.tessl/tiles/jbaruch/nanoclaw-host/` and `.tessl/RULES.md`
-# before the excludes above were added, so those paths are still
-# tracked in public's git tree even though rsync no longer touches
-# them. The file contents are host-operational (repo-chain, promote,
-# etc.) and don't belong in the public fork. `git rm` stages the
-# removal for the sync commit; the `git ls-files | wc -l` guard makes
-# this idempotent — first sync removes them, subsequent syncs see
-# zero tracked paths and no-op.
+# Retire stale host-tile content from the public repo's tracked files.
+# Public used to sync `.tessl/tiles/jbaruch/nanoclaw-host/` and
+# `.tessl/RULES.md` before the excludes above were added, so those
+# paths may still be tracked in the public repo even though rsync no
+# longer updates them. The file contents are host-operational
+# (repo-chain, promote, etc.) and don't belong in the public fork.
+# `git rm` stages their removal from the working tree/index for the
+# next sync commit — `git rm` does NOT rewrite history, so older
+# commits on public still contain them; only going-forward commits do
+# not. The `[ -n "$(git ls-files ...)" ]` checks make this idempotent:
+# first sync stages the removals, subsequent syncs see zero tracked
+# paths and no-op.
 (
   cd "$PUBLIC_DIR"
   if [ -n "$(git ls-files .tessl/tiles/jbaruch/nanoclaw-host/)" ]; then
@@ -332,14 +335,13 @@ for sub in search_roots:
             continue
         if path.suffix.lower() not in {".ts", ".js", ".py", ".sh", ".md", ".json"}:
             continue
-        # Skip this script itself — its AyeAye references are
-        # meta-descriptions of the scrub (comment text, the literal
-        # `.replace("AyeAye", "Andy")` call). Renaming them would turn
-        # the scrub into a no-op on the next run from the public side
-        # and trash the self-documenting comments. No real identity
-        # leak lives here; the script is about how scrubbing works.
-        if path.name == "sync-to-public.sh":
-            continue
+        # Note: this scrub deliberately runs over sync-to-public.sh
+        # itself. Public's copy of that script will end up with
+        # `.replace("Andy", "Andy")` (a no-op) and AyeAye-less
+        # comments — intentionally non-functional. Nobody runs the
+        # scrubber FROM public (public is the scrub's target, not
+        # its source), so public carrying a degenerate copy beats
+        # public carrying literal "AyeAye" strings.
         try:
             original = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
