@@ -235,10 +235,21 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     const heartbeatId = `heartbeat-${group.folder}`;
     if (!getTaskById(heartbeatId)) {
       // Pre-check gates the LLM: `unanswered-precheck.py` runs
-      // check-unanswered, diffs against a per-container seen-set, and
+      // check-unanswered, diffs against a per-maintenance-session
+      // seen-set (scheduled tasks always fire in that slot), and
       // returns `wakeAgent: false` when nothing's new. #72 moved the
       // seen-set under /home/node/.claude/ so it works across all
       // trust tiers — the earlier trusted-only gate is gone.
+      //
+      // `|| echo '...'` is a fail-open safety net: if the precheck
+      // Python crashes (bad interpreter, missing file, runtime
+      // error), bash's `||` catches the non-zero exit and emits
+      // `wakeAgent: true` with an error marker. Without this, a
+      // broken precheck would make agent-runner's runScript return
+      // null, which the caller treats as "skip LLM" — silently
+      // suppressing every heartbeat tick until someone notices
+      // reactions have stopped appearing. Fail-open errs on the
+      // side of visible wakes over silent skips.
       createTask({
         id: heartbeatId,
         group_folder: group.folder,
@@ -246,7 +257,8 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
         prompt:
           'Run the check-unanswered script only: python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/check-unanswered.py — then react and reply to each unanswered message. Do NOT query the database directly. Do NOT check email, calendar, or system health.',
         script:
-          'python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py',
+          'python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py' +
+          ' || echo \'{"wakeAgent":true,"data":{"error":"precheck failed (non-zero exit) — check container logs"}}\'',
         schedule_type: 'cron',
         schedule_value: '*/15 * * * *',
         context_mode: 'group',
