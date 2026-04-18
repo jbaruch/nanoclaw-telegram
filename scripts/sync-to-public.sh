@@ -299,7 +299,11 @@ if len(matches) != 1:
     raise SystemExit(f'ERROR: expected exactly one private-tile JSDoc line in {f}, found {len(matches)} — scrub target has drifted, investigate before syncing')
 idx = matches[0]
 newline = '\n' if lines[idx].endswith('\n') else ''
-lines[idx] = ' * Ported from an internal prototype' + newline
+# Replace with continuation text (no \"Ported from\" — the preceding
+# JSDoc line already reads \"ported from and hardened beyond\"). Final
+# period preserved so the sentence reads as one coherent thought after
+# scrubbing: \"ported from and hardened beyond an internal prototype.\"
+lines[idx] = ' * an internal prototype.' + newline
 remaining = [line for line in lines if line.lstrip().startswith(prefix)]
 if remaining:
     raise SystemExit(f'ERROR: private-tile JSDoc line still present in {f} after scrub')
