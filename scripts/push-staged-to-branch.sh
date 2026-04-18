@@ -29,6 +29,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./tile-repo-lib.sh
 source "$SCRIPT_DIR/tile-repo-lib.sh"
 
+# gh is required for the post-push Copilot re-summon. Fail fast here
+# rather than after the commit+push has already landed — under
+# `set -euo pipefail` a missing `gh` downstream would make the script
+# exit non-zero AFTER the fixup has been pushed, which would make the
+# MCP caller report failure even though the fixup is already live on
+# the branch. Mirror the preflight in promote-to-tile-repo.sh.
+if ! command -v gh >/dev/null; then
+  echo "ERROR: push_staged_to_branch requires the GitHub CLI (gh) for the post-push Copilot re-summon." >&2
+  echo "Install: https://cli.github.com/manual/installation" >&2
+  echo "In the orchestrator container image, ensure gh is part of Dockerfile.orchestrator." >&2
+  exit 1
+fi
+
 STAGING_DIR="${1:?staging directory required}"
 TILE_NAME="${2:?tile name required}"
 BRANCH="${3:?branch required}"
@@ -83,10 +96,18 @@ if [ "$MODE" != "--rules-only" ]; then
 
     canonical="${skill_dir#tessl__}"
 
-    if ! validate_placement "$src/SKILL.md" "$TILE_NAME" "$canonical"; then
-      BLOCKED=$((BLOCKED + 1))
-      continue
-    fi
+    # See matching comment in promote-to-tile-repo.sh — rc 1 is a policy
+    # block, rc ≥ 2 is a read/grep error that must abort the whole push.
+    validate_rc=0
+    validate_placement "$src/SKILL.md" "$TILE_NAME" "$canonical" || validate_rc=$?
+    case $validate_rc in
+      0) ;;
+      1) BLOCKED=$((BLOCKED + 1)); continue ;;
+      *)
+        echo "ERROR: validate_placement returned rc=$validate_rc for $canonical — aborting" >&2
+        exit "$validate_rc"
+        ;;
+    esac
 
     # Cross-tile duplicate check: if the author somehow renamed a skill
     # into a slot already owned by another tile, block the push — same

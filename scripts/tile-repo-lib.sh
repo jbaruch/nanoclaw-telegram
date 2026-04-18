@@ -80,12 +80,19 @@ read_frontmatter_field() {
 # Callers must pre-verify `$skill_file` exists — we don't re-check.
 #
 # `grep_check <pattern> <file>` is a private helper that distinguishes grep's
-# three exit codes: 0 (match) → "match", 1 (no match) → "nomatch", 2+
-# (read error) → abort with a loud error and return 2. We can't rely on
-# `set -e` alone for the error-out path: errexit is suppressed when a
-# command runs inside an `if`/`&&`/`||` conditional, so a bare
-# `if grep -q ... ; then` would treat rc 2 (error) identically to rc 1
+# three exit codes: 0 (match) → "match" on stdout, 1 (no match) → "nomatch"
+# on stdout, 2+ (read error) → abort with a loud stderr line and return 2.
+# We can't rely on `set -e` alone for the error-out path: errexit is
+# suppressed when a command runs inside an `if`/`&&`/`||` conditional, so a
+# bare `if grep -q ... ; then` would treat rc 2 (error) identically to rc 1
 # (no match) and silently let the skill through.
+#
+# `validate_placement` propagates this rc 2 to ITS caller. Callers of
+# `validate_placement` must NOT lump rc 2 in with rc 1 (policy block) —
+# the promote/push loops in `promote-to-tile-repo.sh` and
+# `push-staged-to-branch.sh` explicitly case-match on the rc and `exit`
+# on rc ≥ 2 rather than `continue`, so read errors abort the whole run
+# instead of silently skipping a skill.
 grep_check() {
   local pattern="$1"
   local file="$2"

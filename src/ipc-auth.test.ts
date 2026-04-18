@@ -832,7 +832,12 @@ describe('tessl_update authorization', () => {
     for (const f of unauthCreatedFiles.splice(0)) {
       if (fs.existsSync(f)) fs.unlinkSync(f);
     }
-    for (const d of unauthCreatedDirs.splice(0)) {
+    // Iterate deepest-first so each rmdirSync sees an empty directory.
+    // `ensureUnauthInputDir` unshifts parents onto the array as it walks
+    // upward, so the raw array is parent-to-child; reversing puts the
+    // leaf directory first, and by the time we reach its parent the
+    // leaf is already gone.
+    for (const d of unauthCreatedDirs.splice(0).reverse()) {
       if (fs.existsSync(d) && fs.readdirSync(d).length === 0) {
         fs.rmdirSync(d);
       }
@@ -855,12 +860,7 @@ describe('tessl_update authorization', () => {
   });
 
   it('request without requestId writes nothing and returns', async () => {
-    await processTaskIpc(
-      { type: 'tessl_update' },
-      UNAUTH_GROUP,
-      false,
-      deps,
-    );
+    await processTaskIpc({ type: 'tessl_update' }, UNAUTH_GROUP, false, deps);
     // No assertion on files — the handler must not spawn execFile
     // or write anything. The test passes if processTaskIpc returns
     // without throwing.
@@ -876,7 +876,12 @@ describe('push_staged_to_branch authorization', () => {
     for (const f of unauthCreatedFiles.splice(0)) {
       if (fs.existsSync(f)) fs.unlinkSync(f);
     }
-    for (const d of unauthCreatedDirs.splice(0)) {
+    // Iterate deepest-first so each rmdirSync sees an empty directory.
+    // `ensureUnauthInputDir` unshifts parents onto the array as it walks
+    // upward, so the raw array is parent-to-child; reversing puts the
+    // leaf directory first, and by the time we reach its parent the
+    // leaf is already gone.
+    for (const d of unauthCreatedDirs.splice(0).reverse()) {
       if (fs.existsSync(d) && fs.readdirSync(d).length === 0) {
         fs.rmdirSync(d);
       }

@@ -23,7 +23,7 @@ fi
 # clear install pointer rather than hitting a cryptic "gh: command
 # not found" deep inside the script after we've already cloned the
 # tile repo.
-if ! command -v gh >/dev/null 2>&1; then
+if ! command -v gh >/dev/null; then
   echo "ERROR: promote flow requires the GitHub CLI (gh)." >&2
   echo "Install: https://cli.github.com/manual/installation" >&2
   echo "In the orchestrator container image, add gh to Dockerfile.orchestrator." >&2
@@ -93,10 +93,21 @@ if [ "$MODE" != "--rules-only" ]; then
 
     canonical="${skill_dir#tessl__}"
 
-    if ! validate_placement "$src/SKILL.md" "$TILE_NAME" "$canonical"; then
-      BLOCKED=$((BLOCKED + 1))
-      continue
-    fi
+    # Distinguish policy block (rc 1 → BLOCKED, continue) from hard failure
+    # (rc ≥ 2 → grep read error, unreadable SKILL.md, etc. → abort). The
+    # naive `if ! validate_placement ...` pattern collapses both into
+    # "continue", which would silently skip a skill whose file we can't
+    # read instead of failing the promote loudly.
+    validate_rc=0
+    validate_placement "$src/SKILL.md" "$TILE_NAME" "$canonical" || validate_rc=$?
+    case $validate_rc in
+      0) ;;
+      1) BLOCKED=$((BLOCKED + 1)); continue ;;
+      *)
+        echo "ERROR: validate_placement returned rc=$validate_rc for $canonical — aborting" >&2
+        exit "$validate_rc"
+        ;;
+    esac
 
     # Cross-tile duplicate check
     if [ -n "$TESSL_TILES_DIR" ]; then
