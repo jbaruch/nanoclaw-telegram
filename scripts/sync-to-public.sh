@@ -401,11 +401,16 @@ APPROVED_PUBLIC_MCP_TOOLS=(
 # the `comm -23` comparison below approve an empty "actual" set
 # against the allowlist, defeating the entire leak check.
 #
-# Heredoc delimiter is QUOTED (<<'PY') so bash does NOT expand the body.
-# Unquoted <<PY would trigger command-substitution on the backtick pairs
-# inside our comments (the case/server.tool examples) and mangle the
-# Python program that finally reaches `python3`. We pass $PUBLIC_DIR via
-# an env var instead of shell interpolation — keeps the body bash-inert.
+# Heredoc delimiter is QUOTED (<<'PY') so bash treats the body
+# literally. That prevents shell expansion of $... / ${...} / $(...),
+# backtick command substitution, and backslash processing before the
+# embedded Python reaches `python3`. (The original bug that motivated
+# this was backticks inside comments — `case '<name>':` and
+# `server.tool('<name>', ...)` — being parsed as command-sub by
+# bash. Those specific refs were also removed, but the quoting guard
+# stays as future-proofing against further edits.) We pass $PUBLIC_DIR
+# via an env var instead of shell interpolation to keep the body
+# bash-inert.
 actual_handlers=$(PUBLIC_DIR="$PUBLIC_DIR" python3 <<'PY'
 import os
 import re
