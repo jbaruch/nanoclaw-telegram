@@ -469,20 +469,19 @@ export function buildVolumeMounts(
   );
 
   // Build the group's tile-managed scripts/ in a sibling tmp dir, then
-  // atomically swap it into place after the tile loop. Writing directly
-  // into `groups/<folder>/scripts/` would create two separate problems
-  // the moment two sessions (default + maintenance) run concurrently:
+  // publish it atomically via a symlink flip (see the swap block below).
+  // Writing directly into `groups/<folder>/scripts/` would create two
+  // separate problems the moment two sessions run concurrently:
   //   1. Stale scripts from removed-in-new-tile skills lingered (the bug
   //      that drove the "DB size crossed N MB" rogue-heartbeat behaviour).
   //   2. A naive `rmSync(groupScriptsDir)` before the copy loop opens a
   //      race window where the other session reads a half-populated dir.
-  // The "build in tmp, then rename" pattern gives both sessions a valid
-  // snapshot at all times: whichever finishes last wins the swap, and
-  // both snapshots are equivalent (same installed tile version).
+  // Tmp-then-publish gives both sessions a valid snapshot at all times:
+  // whichever session finishes last wins the publish, and both end states
+  // are equivalent (same installed tile version).
   const groupScriptsDir = path.join(groupDir, 'scripts');
   const scriptsTmpSuffix = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
   const tmpScriptsDir = `${groupScriptsDir}.new.${scriptsTmpSuffix}`;
-  const oldScriptsDir = `${groupScriptsDir}.old.${scriptsTmpSuffix}`;
   fs.mkdirSync(tmpScriptsDir, { recursive: true });
 
   const rulesContent: string[] = [];
@@ -540,98 +539,119 @@ export function buildVolumeMounts(
     }
   }
 
-  // Atomic swap for `groups/<folder>/scripts/`. Every spawn moves the old
-  // dir (if any) aside, renames the freshly-built tmp into place, then
-  // removes the old one. POSIX `rename` is atomic on same-filesystem, so
-  // readers in a concurrent session see either the pre-swap or post-swap
-  // tree — never a half-populated intermediate. Concurrent swaps resolve
-  // to "whichever finished last wins"; both end states are valid snapshots
-  // of the installed tile version.
+  // Atomic symlink-based publish for `groups/<folder>/scripts/`. Readers
+  // must ALWAYS find `groupScriptsDir` present — the previous "rename old
+  // aside, rename new into place" design had a brief ENOENT window between
+  // the two renames where a concurrent agent running `/workspace/group/
+  // scripts/<file>` would fail (CodeQL correctness finding).
   //
-  // Error handling distinguishes:
-  //   - Expected race errors (EEXIST/ENOTEMPTY): another session won
-  //     the rename; their copy is equivalent so we just drop our tmp.
-  //   - Unexpected errors (EACCES, EIO, etc.): something is actually broken.
-  //     If we already moved the old dir aside we must restore it before
-  //     failing so the group isn't left with a missing scripts/ tree.
-  // Race codes: another session renamed a dir in between our operations.
-  // - EEXIST/ENOTEMPTY on the tmp→final rename: another session already
-  //   placed its copy at `groupScriptsDir`.
-  // `ENOENT` is NOT a race for the tmp→final rename — it means our tmp is
-  // missing, which is a real filesystem error (premature cleanup, etc.).
-  // The inner try/catch around `groupScriptsDir→oldScriptsDir` handles its
-  // own ENOENT case (no existing dir on first spawn) separately.
+  // New layout:
+  //   groups/<folder>/scripts             ──► symlink
+  //   groups/<folder>/scripts.version.<id> ──► real directory (one per publish)
+  //
+  // Publish steps:
+  //   1. rename `tmpScriptsDir` → `scripts.version.<id>` (a unique sibling)
+  //   2. create a temporary symlink `scripts.link.<id>` → that version
+  //   3. atomically rename the symlink over `groupScriptsDir` (POSIX rename
+  //      on a symlink replaces an existing symlink atomically)
+  //   4. delete the previous version dir (if any)
+  //
+  // First-install path: no `groupScriptsDir` exists; we just rename the
+  // temp symlink into place — still atomic, no window.
+  //
+  // Legacy path: pre-this-commit installs have a REAL directory at
+  // `groupScriptsDir` (not a symlink). We can't atomically replace a
+  // non-empty directory with a symlink. For that one-time transition we
+  // do `rm -rf <dir>` + `symlink` — has a brief window, but runs exactly
+  // once per group, ever, and is bounded.
   const RACE_CODES = new Set(['EEXIST', 'ENOTEMPTY']);
-  let oldMovedAside = false;
-  try {
-    // Move existing dir aside. Absent on first-ever spawn for a new group.
+  const swapId = `${Date.now()}.${process.pid}.${Math.random().toString(36).slice(2, 10)}`;
+  const newVersionDir = `${groupScriptsDir}.version.${swapId}`;
+  const tmpLink = `${groupScriptsDir}.link.${swapId}`;
+  let previousVersionDir: string | null = null;
+
+  const rmBestEffort = (target: string): void => {
     try {
-      fs.renameSync(groupScriptsDir, oldScriptsDir);
-      oldMovedAside = true;
+      fs.rmSync(target, { recursive: true, force: true });
+    } catch {
+      /* ignore — orphaned artefacts don't affect correctness */
+    }
+  };
+
+  try {
+    // 1. Publish our tmp build as a versioned sibling.
+    fs.renameSync(tmpScriptsDir, newVersionDir);
+
+    // 2. Inspect what's currently at `groupScriptsDir` (symlink, real dir,
+    //    or missing).
+    let liveStat: fs.Stats | null = null;
+    try {
+      liveStat = fs.lstatSync(groupScriptsDir);
     } catch (err: unknown) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT') throw err;
     }
-    fs.renameSync(tmpScriptsDir, groupScriptsDir);
-    // Best-effort cleanup of the displaced previous version.
-    try {
-      fs.rmSync(oldScriptsDir, { recursive: true, force: true });
-    } catch {
-      /* ignore — leaves an orphaned .old dir, not a correctness issue */
+    if (liveStat && liveStat.isSymbolicLink()) {
+      // Remember the previous version so we can clean it up after the flip.
+      try {
+        const currentTarget = fs.readlinkSync(groupScriptsDir);
+        previousVersionDir = path.isAbsolute(currentTarget)
+          ? currentTarget
+          : path.resolve(path.dirname(groupScriptsDir), currentTarget);
+      } catch {
+        /* ignore — if we can't read the link we just won't clean it up */
+      }
     }
+
+    // 3. Create the temp symlink. Relative target so moves of the parent
+    //    dir don't break the link. `'dir'` hint matters only on Windows.
+    fs.symlinkSync(path.basename(newVersionDir), tmpLink, 'dir');
+
+    if (liveStat && !liveStat.isSymbolicLink()) {
+      // Legacy layout: real dir at `groupScriptsDir`. Can't atomically
+      // replace a non-empty directory with a symlink; remove it first.
+      // This is the one-time per-group transition; steady state uses
+      // the pure atomic rename below.
+      fs.rmSync(groupScriptsDir, { recursive: true, force: true });
+    }
+
+    // 4. Atomic flip: POSIX rename on a symlink replaces an existing
+    //    symlink atomically. On the first-install path (no prior
+    //    symlink) this just creates the symlink. Either way
+    //    `groupScriptsDir` resolves to a valid versioned dir from
+    //    here on.
+    fs.renameSync(tmpLink, groupScriptsDir);
+
+    // 5. Clean up the previous versioned dir (if any).
+    if (previousVersionDir) rmBestEffort(previousVersionDir);
   } catch (err: unknown) {
     const code = (err as NodeJS.ErrnoException).code;
     const isRace = code ? RACE_CODES.has(code) : false;
 
-    // If we moved the old dir aside but failed the tmp→final rename, the
-    // group's scripts/ is missing RIGHT NOW. Try to restore the old dir so
-    // callers don't spawn a container with no scripts/ tree. Only for the
-    // non-race path — in a race the winning session already placed a
-    // correct groupScriptsDir.
-    if (oldMovedAside && !isRace) {
-      try {
-        fs.renameSync(oldScriptsDir, groupScriptsDir);
-      } catch (restoreErr: unknown) {
-        logger.error(
-          { err: restoreErr, groupScriptsDir, oldScriptsDir },
-          'FAILED to restore previous scripts/ after swap failure — group will spawn without scripts',
-        );
-      }
-    }
+    // Always drop our publish artefacts: if the race winner placed a
+    // correct `groupScriptsDir` our versioned dir is redundant; on a
+    // real error we can't trust our partial build.
+    rmBestEffort(tmpLink);
+    rmBestEffort(newVersionDir);
+    rmBestEffort(tmpScriptsDir);
 
     if (isRace) {
       logger.debug(
         { err, groupScriptsDir },
-        'scripts/ swap raced with concurrent setup; keeping winning copy',
+        'scripts/ publish raced with concurrent setup; keeping winning copy',
       );
-      // The winning session already placed a correct groupScriptsDir. Our
-      // moved-aside copy is now redundant — clean it up so `groups/<folder>/`
-      // doesn't accumulate `.old.*` dirs over many concurrent spawns.
-      if (oldMovedAside) {
-        try {
-          fs.rmSync(oldScriptsDir, { recursive: true, force: true });
-        } catch {
-          /* ignore — leaves an orphaned .old dir, not a correctness issue */
-        }
-      }
     } else {
       logger.error(
         { err, code, groupScriptsDir },
-        'scripts/ swap failed unexpectedly (not a race)',
+        'scripts/ publish failed unexpectedly (not a race)',
       );
+      // Rethrow non-race errors so the spawn fails loudly. Unlike the
+      // previous design, `groupScriptsDir` (if it existed) is still
+      // present — either still a symlink pointing at the previous
+      // version, or still the legacy real dir — so even a failed
+      // publish doesn't leave the group with missing scripts.
+      throw err;
     }
-
-    // Always drop our tmp (either the race winner made ours redundant, or
-    // a real error means we can't trust our partial build).
-    try {
-      fs.rmSync(tmpScriptsDir, { recursive: true, force: true });
-    } catch {
-      /* ignore */
-    }
-
-    // Rethrow non-race errors so the spawn fails loudly rather than
-    // limping along with a missing scripts/ tree.
-    if (!isRace) throw err;
   }
 
   // Write aggregated RULES.md
