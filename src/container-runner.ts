@@ -197,11 +197,26 @@ interface VolumeMount {
  * In Docker-out-of-Docker, the orchestrator's filesystem (/app/...) differs
  * from the host's (HOST_PROJECT_ROOT/...). Mount paths must use host paths.
  */
+/**
+ * Recursively chown a host-side directory, NEVER following symlinks.
+ *
+ * Security: earlier implementation used `fs.chownSync` which follows
+ * symlinks. If a container could create a symlink inside one of its
+ * writable mounts (e.g. `shared-memory/evil` → `/etc/passwd`), the next
+ * spawn's chown would change ownership of the target — a privilege
+ * escalation path out of the container into the host. `lchownSync`
+ * operates on the link itself; `withFileTypes: true` + `entry.isDirectory()`
+ * only recurses into real directories, so symlinks are chowned but not
+ * traversed.
+ */
 function chownRecursive(dir: string, uid: number, gid: number): void {
-  fs.chownSync(dir, uid, gid);
+  fs.lchownSync(dir, uid, gid);
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const fullPath = path.join(dir, entry.name);
-    fs.chownSync(fullPath, uid, gid);
+    fs.lchownSync(fullPath, uid, gid);
+    // `isDirectory()` returns false for symlinks (even symlinks to dirs)
+    // because we used `withFileTypes: true`, which reads the dirent type
+    // without resolving the link. Recursion is therefore symlink-safe.
     if (entry.isDirectory()) {
       chownRecursive(fullPath, uid, gid);
     }
@@ -814,10 +829,22 @@ export function buildVolumeMounts(
           'Migrated per-session memory file to shared-memory',
         );
       } catch (err: unknown) {
-        logger.warn(
-          { err, src, dst },
-          'Failed to migrate per-session memory file',
-        );
+        const code = (err as NodeJS.ErrnoException).code;
+        // EEXIST / ERR_FS_CP_EEXIST: another session spawning concurrently
+        // won the cpSync — our copy is redundant, their content is valid
+        // (same source file, same target). Expected race in steady state;
+        // log at debug so parallel startup doesn't spam warn logs.
+        if (code === 'EEXIST' || code === 'ERR_FS_CP_EEXIST') {
+          logger.debug(
+            { src, dst },
+            'Concurrent session won the shared-memory migration — keeping winner',
+          );
+        } else {
+          logger.warn(
+            { err, src, dst },
+            'Failed to migrate per-session memory file',
+          );
+        }
       }
     }
   }
