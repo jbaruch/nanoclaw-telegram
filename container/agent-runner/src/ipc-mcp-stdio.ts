@@ -641,18 +641,38 @@ Use available_groups.json to find the JID for a group. The folder name must be c
 
 server.tool(
   'nuke_session',
-  'Kill this container and start a fresh session on the next message. Use when context is corrupted, rules are stale, or user asks to start fresh. The current conversation will end immediately.',
-  {},
-  async () => {
+  "Kill this group's container(s) and start fresh on the next message/scheduled tick. Use when context is corrupted, rules are stale, or user asks to start fresh. Parallel-maintenance groups run two containers per group (user-facing `default` + scheduled-task `maintenance`) — pass `session` to narrow the nuke: 'default' keeps maintenance running, 'maintenance' keeps user-facing running, 'all' (default) kills both. Omit `session` for pre-parallel behaviour.",
+  {
+    session: z
+      .enum(['default', 'maintenance', 'all'])
+      .optional()
+      .describe(
+        "Which session slot to kill. 'default' = user-facing container only (preserves scheduled-task session chain). 'maintenance' = scheduled-task container only (preserves user-facing conversation state). 'all' or omitted = both.",
+      ),
+  },
+  async (args) => {
+    const session = args.session ?? 'all';
     const data = {
       type: 'nuke_session',
       groupFolder,
+      session,
       timestamp: new Date().toISOString(),
     };
 
     writeIpcFile(TASKS_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: 'Session nuked. Container will be killed. Next message starts fresh.' }] };
+    const scopeText =
+      session === 'all'
+        ? 'Both containers will be killed'
+        : `The ${session} container will be killed`;
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Session nuked (scope: ${session}). ${scopeText}. Next ${session === 'maintenance' ? 'scheduled task' : 'message'} starts fresh.`,
+        },
+      ],
+    };
   },
 );
 
