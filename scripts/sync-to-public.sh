@@ -325,7 +325,10 @@ if [ -n "$unexpected_tools" ]; then
 fi
 if [ "$leak_detected" = true ]; then
   echo ""
-  echo "Aborting sync. No changes pushed. Public repo untouched."
+  echo "Aborting sync. No commit or push happened — but the local public"
+  echo "repo working tree at $PUBLIC_DIR already has rsync'd + scrubbed"
+  echo "changes from this run. Inspect with 'git diff' there; reset with"
+  echo "'git checkout . && git clean -fd' before retrying."
   exit 1
 fi
 echo "Leak check: clean."
