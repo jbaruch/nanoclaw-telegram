@@ -248,8 +248,15 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
         // the agent spawns every 15 minutes just to rediscover the same
         // unanswered messages it already reacted to — ~100% token waste
         // in steady state.
+        //
+        // The `script` field is written to /tmp/task-script.sh and run
+        // under bash (see `runScript` in container/agent-runner/src/
+        // index.ts). A bare path would only work if the target file is
+        // executable; the tile script ships without the x-bit. Invoking
+        // via `python3 <path>` reads-as-source and sidesteps that, so
+        // we don't depend on tile file modes.
         script:
-          '/home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py',
+          'python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py',
         schedule_type: 'cron',
         schedule_value: '*/15 * * * *',
         context_mode: 'group',
