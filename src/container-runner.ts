@@ -232,20 +232,12 @@ function toHostPath(localPath: string): string {
 }
 
 /**
-/**
  * Files in the project root that contain secrets (bot tokens, API keys).
  * Main-group containers get `/dev/null` mounted over each of these so agents
  * can't read tokens and bypass the credential proxy.
  *
  * Security-critical: adding a new secret file ANYWHERE in the repo requires
  * adding it to this list, or an agent in the main group can read it.
- *
- * DOCKERFILE MIRROR: `container/Dockerfile` bakes an inline entrypoint that
- * loops over the same list. On Apple Container runtime (VirtioFS), host-side
- * file bind mounts don't work — the entrypoint's in-container `mount --bind`
- * is the only effective shadow. Keep the two lists in sync: an addition here
- * that isn't also added to the Dockerfile leaves the new file readable on
- * macOS Container runtime.
  */
 export const SECRET_FILES = [
   '.env',
