@@ -665,11 +665,17 @@ server.tool(
       session === 'all'
         ? 'Both containers will be killed'
         : `The ${session} container will be killed`;
+    const nextStartText =
+      session === 'all'
+        ? 'message / scheduled task'
+        : session === 'maintenance'
+          ? 'scheduled task'
+          : 'message';
     return {
       content: [
         {
           type: 'text' as const,
-          text: `Session nuked (scope: ${session}). ${scopeText}. Next ${session === 'maintenance' ? 'scheduled task' : 'message'} starts fresh.`,
+          text: `Session nuked (scope: ${session}). ${scopeText}. Next ${nextStartText} starts fresh.`,
         },
       ],
     };
