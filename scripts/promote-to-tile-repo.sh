@@ -247,40 +247,10 @@ PR_URL=$(GH_TOKEN="$TOKEN" gh pr create \
 
 echo "PR opened: $PR_URL"
 
-# Summon Copilot — best-effort. If the GraphQL lookup/mutation fails
-# (API flake, permissions glitch, whatever), the PR is already pushed
-# and visible. We log a warning with instructions to summon manually
-# rather than failing the whole promote and leaving the operator
-# wondering whether the PR landed. The exit-EXIT trap still cleans
-# up the temp clone either way.
-#
-# REST /requested_reviewers silently drops bot reviewers and returns
-# 201 with an empty requested_reviewers array — GraphQL is the only
-# path that sticks. BOT_kgDOCnlnWA is copilot-pull-request-reviewer;
-# stable across repos.
+# Summon Copilot. `summon_copilot_or_warn` lives in tile-repo-lib.sh so
+# the fixup-push script can call the same code — consistency here matters
+# because every branch update should get the same reviewer treatment.
 PR_NUMBER="${PR_URL##*/}"
-summon_copilot() {
-  local pr_node_id
-  pr_node_id=$(GH_TOKEN="$TOKEN" gh api graphql -f query='
-  query($owner: String!, $name: String!, $number: Int!) {
-    repository(owner: $owner, name: $name) {
-      pullRequest(number: $number) { id }
-    }
-  }' -f owner="$TILE_OWNER" -f name="$TILE_NAME" -F number="$PR_NUMBER" --jq .data.repository.pullRequest.id) \
-    || return 1
-  [ -n "$pr_node_id" ] || return 1
-  GH_TOKEN="$TOKEN" gh api graphql -f query='
-  mutation($prId: ID!, $botIds: [ID!]!) {
-    requestReviews(input: { pullRequestId: $prId, botIds: $botIds, union: true }) {
-      pullRequest { number }
-    }
-  }' -F prId="$pr_node_id" -F 'botIds[]=BOT_kgDOCnlnWA' >/dev/null
-}
-if summon_copilot; then
-  echo "Copilot review requested on PR #$PR_NUMBER"
-else
-  echo "WARN: could not summon Copilot on PR #$PR_NUMBER — summon manually via:"
-  echo "  gh api graphql -f query='mutation { requestReviews(input: { pullRequestId: <node_id>, botIds: [\"BOT_kgDOCnlnWA\"], union: true }) { pullRequest { number } } }' --repo $TILE_OWNER/$TILE_NAME"
-fi
+GH_TOKEN="$TOKEN" summon_copilot_or_warn "$TILE_OWNER" "$TILE_NAME" "$PR_NUMBER"
 
 echo "Done! $PROMOTED promoted, $BLOCKED blocked."

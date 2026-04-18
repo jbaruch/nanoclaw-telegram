@@ -156,3 +156,55 @@ validate_placement() {
 
   return 0
 }
+
+# Summon the Copilot pull-request reviewer on <owner>/<repo> PR #<number>.
+# Best-effort: on API flake / missing token scope we log a manual-summon
+# hint and return non-zero, but never abort the caller — by the time we
+# get here, the branch is already pushed and the PR already open/updated,
+# and failing the whole script over a summon flake would leave the
+# operator uncertain whether the work landed.
+#
+# REST /requested_reviewers silently drops bot reviewers (HTTP 201, empty
+# requested_reviewers array). Only the GraphQL `requestReviews` mutation
+# with `botIds` sticks. BOT_kgDOCnlnWA is copilot-pull-request-reviewer;
+# the bot node ID is stable across repos.
+#
+# Callers must export GH_TOKEN (or GITHUB_TOKEN — `gh` accepts either)
+# with `pull_requests: write` on the target repo. Without that, both the
+# lookup and the mutation fail with "Resource not accessible by personal
+# access token" and we log the usual manual-summon hint.
+summon_copilot() {
+  local owner="$1"
+  local repo="$2"
+  local pr_number="$3"
+  local pr_node_id
+  pr_node_id=$(gh api graphql -f query='
+  query($owner: String!, $name: String!, $number: Int!) {
+    repository(owner: $owner, name: $name) {
+      pullRequest(number: $number) { id }
+    }
+  }' -f owner="$owner" -f name="$repo" -F number="$pr_number" --jq .data.repository.pullRequest.id) \
+    || return 1
+  [ -n "$pr_node_id" ] || return 1
+  gh api graphql -f query='
+  mutation($prId: ID!, $botIds: [ID!]!) {
+    requestReviews(input: { pullRequestId: $prId, botIds: $botIds, union: true }) {
+      pullRequest { number }
+    }
+  }' -F prId="$pr_node_id" -F 'botIds[]=BOT_kgDOCnlnWA' >/dev/null
+}
+
+# Convenience wrapper: call summon_copilot and log a result line either
+# way so operators can tell at a glance whether the summon stuck.
+# Arguments: <owner> <repo> <pr_number>
+summon_copilot_or_warn() {
+  local owner="$1"
+  local repo="$2"
+  local pr_number="$3"
+  if summon_copilot "$owner" "$repo" "$pr_number"; then
+    echo "Copilot review requested on $owner/$repo#$pr_number"
+  else
+    echo "WARN: could not summon Copilot on $owner/$repo#$pr_number — the PR is up; summon manually via:"
+    echo "  gh api graphql -f query='mutation { requestReviews(input: { pullRequestId: <node_id>, botIds: [\"BOT_kgDOCnlnWA\"], union: true }) { pullRequest { number } } }'"
+  fi
+}

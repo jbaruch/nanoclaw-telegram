@@ -184,4 +184,24 @@ git commit -m "$COMMIT_MSG"
 git push origin "$BRANCH"
 
 echo "Pushed $PROMOTED item(s) to $BRANCH on $TILE_OWNER/$TILE_NAME."
+
+# Re-summon Copilot on the open PR for this branch. GitHub's automatic
+# re-review on new commits is unreliable (observed flakiness on
+# nanoclaw#75 during this PR's own bootstrap); explicit summon keeps
+# the iteration-in-one-PR loop tight. If no PR exists for the branch
+# (caller pushed to a branch that was never opened as a PR), skip
+# with a hint — we don't want to silently no-op.
+PR_NUMBER=$(GH_TOKEN="$TOKEN" gh pr list \
+  --repo "$TILE_OWNER/$TILE_NAME" \
+  --head "$BRANCH" \
+  --state open \
+  --json number \
+  --jq '.[0].number // empty')
+if [ -n "$PR_NUMBER" ]; then
+  GH_TOKEN="$TOKEN" summon_copilot_or_warn "$TILE_OWNER" "$TILE_NAME" "$PR_NUMBER"
+else
+  echo "WARN: no open PR found for branch $BRANCH on $TILE_OWNER/$TILE_NAME — skipping Copilot re-summon."
+  echo "      If this branch was created by promote_staging, the PR may have been closed or merged."
+fi
+
 echo "Done! $PROMOTED pushed, $BLOCKED blocked."
