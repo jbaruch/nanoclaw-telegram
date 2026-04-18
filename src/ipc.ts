@@ -23,6 +23,7 @@ import {
 } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+import { stripInternalTags } from './router.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -187,26 +188,38 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   }
 
                   if (fs.existsSync(hostPath)) {
+                    // Strip <internal>…</internal> blocks from the caption
+                    // so agent-written internal reasoning never leaks —
+                    // neither to Telegram (display) nor to messages.db
+                    // (which feeds heartbeat's answered-check accounting).
+                    // Mirrors the message-payload stripping below. If the
+                    // caption is fully internal, send the file with no
+                    // caption; the file itself is still useful payload.
+                    const cleanCaption = data.caption
+                      ? stripInternalTags(data.caption)
+                      : '';
                     await deps.sendFile(
                       data.chatJid,
                       hostPath,
-                      data.caption,
+                      cleanCaption || undefined,
                       data.replyToMessageId,
                     );
-                    // Store the caption (if any) so the message shows up in
-                    // accounting the same as text messages. Without this,
-                    // `send_file` is a bypass: captions reach Telegram but
-                    // never hit messages.db, so heartbeat unanswered-checks
-                    // think the agent never responded. Use the raw caption
-                    // (not the sanitized HTML) — storage is for semantic
-                    // content, not display.
-                    if (data.caption) {
+                    // Store the cleaned caption (if any) so the message
+                    // shows up in accounting the same as text messages.
+                    // Without this, `send_file` is a bypass: captions
+                    // reach Telegram but never hit messages.db, so
+                    // heartbeat unanswered-checks think the agent never
+                    // responded. Store the cleaned version — storing the
+                    // raw caption would let a caption whose visible text
+                    // was empty after stripping count as an "answered"
+                    // response.
+                    if (cleanCaption) {
                       storeMessage({
                         id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
                         chat_jid: data.chatJid,
                         sender: ASSISTANT_NAME,
                         sender_name: ASSISTANT_NAME,
-                        content: data.caption,
+                        content: cleanCaption,
                         timestamp: new Date().toISOString(),
                         is_from_me: true,
                         is_bot_message: true,
