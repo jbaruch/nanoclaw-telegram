@@ -241,15 +241,22 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
       // seen-set under /home/node/.claude/ so it works across all
       // trust tiers — the earlier trusted-only gate is gone.
       //
-      // `|| echo '...'` is a fail-open safety net: if the precheck
-      // Python crashes (bad interpreter, missing file, runtime
-      // error), bash's `||` catches the non-zero exit and emits
-      // `wakeAgent: true` with an error marker. Without this, a
-      // broken precheck would make agent-runner's runScript return
-      // null, which the caller treats as "skip LLM" — silently
-      // suppressing every heartbeat tick until someone notices
-      // reactions have stopped appearing. Fail-open errs on the
-      // side of visible wakes over silent skips.
+      // `timeout 25s ... || echo '...'` is a two-layer fail-open:
+      //   - `timeout 25s` kills the Python if it hangs, exiting 124.
+      //     This matters because agent-runner's runScript has a 30s
+      //     execFile timeout — if Python hangs until then, runScript
+      //     resolves null and the heartbeat is silently skipped. The
+      //     25s shell-level timeout lets us exit non-zero FIRST so
+      //     the `||` below can fire.
+      //   - `|| echo` catches any non-zero exit (Python crash, bash
+      //     error, timeout above) and emits `wakeAgent: true` with
+      //     an error marker so the agent wakes to investigate
+      //     instead of silently stopping.
+      // Without both layers, a broken or hung precheck would make
+      // agent-runner return null, which the caller treats as "skip
+      // LLM" — silently suppressing every heartbeat tick until
+      // someone notices reactions have stopped. Fail-open errs on
+      // the side of visible wakes over silent skips.
       createTask({
         id: heartbeatId,
         group_folder: group.folder,
@@ -257,8 +264,8 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
         prompt:
           'Run the check-unanswered script only: python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/check-unanswered.py — then react and reply to each unanswered message. Do NOT query the database directly. Do NOT check email, calendar, or system health.',
         script:
-          'python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py' +
-          ' || echo \'{"wakeAgent":true,"data":{"error":"precheck failed (non-zero exit) — check container logs"}}\'',
+          'timeout 25s python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py' +
+          ' || echo \'{"wakeAgent":true,"data":{"error":"precheck failed or timed out — check container logs"}}\'',
         schedule_type: 'cron',
         schedule_value: '*/15 * * * *',
         context_mode: 'group',
