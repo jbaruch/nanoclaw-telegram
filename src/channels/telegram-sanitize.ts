@@ -239,8 +239,34 @@ export function sanitizeTelegramHtml(text: string): string {
   // the ones that were NOT inside a Phase 2 capture. Bounds-checked so
   // a crafted `\u0000PH<big>\u0000` token in the input doesn't emit
   // "undefined".
+  //
+  // Protect placeholders (Phase 0/1a/1c — fenced code, already-valid
+  // span HTML, URLs, emails) restore VERBATIM: these are intentionally
+  // opaque regions and their contents are already valid Telegram HTML
+  // (or deliberately pass-through, like a URL).
+  //
+  // Stray placeholders (Phase 1b — tokens like `<analysis>`, `<bar>`,
+  // `<N>` that we couldn't fold into a protected span) get
+  // HTML-ESCAPED here rather than restored raw. Telegram's HTML parser
+  // rejects any tag not in its narrow allowlist (b/i/u/s/code/pre/
+  // blockquote/a/tg-spoiler) and fails the entire message with a 400
+  // "Unsupported start tag" error. That 400 drops
+  // `sendTelegramMessage` into its plain-text fallback, which ships
+  // the ORIGINAL unsanitized text with no parse mode — so the user
+  // sees raw Markdown (`_foo_`, `**bar**`) instead of the rendered
+  // italic/bold the sanitizer was about to produce. Escaping stray
+  // tags keeps HTML valid: the user sees literal `<analysis>` text,
+  // but Markdown formatting elsewhere in the message renders
+  // correctly. Root cause of jbaruch/nanoclaw#81's 2026-04-19
+  // recurrence — heartbeat emitted Claude-reasoning wrappers
+  // (`<analysis>`) at the top of its reply text.
   out = out.replace(PH_RE, resolveFrom(placeholders));
-  out = out.replace(PH_STRAY_RE, resolveFrom(strayPlaceholders));
+  out = out.replace(PH_STRAY_RE, (_m, idx: string): string => {
+    const n = Number(idx);
+    return n >= 0 && n < strayPlaceholders.length
+      ? htmlEscape(strayPlaceholders[n])
+      : _m;
+  });
 
   return out;
 }

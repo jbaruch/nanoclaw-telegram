@@ -261,6 +261,37 @@ describe('sanitizeTelegramHtml — HTML entity escaping', () => {
     const input = 'some \u0000PH99\u0000 thing';
     expect(sanitizeTelegramHtml(input)).toBe(input);
   });
+
+  // --- Regression for jbaruch/nanoclaw#81 (2026-04-19 recurrence):
+  // heartbeat's Claude-SDK reply started with `<analysis>` (a reasoning
+  // artifact, not in Telegram's HTML allowlist). Old behaviour: Phase 1b
+  // stashed it as a stray placeholder and Phase 3 restored the literal
+  // `<analysis>` tag, which Telegram rejected with 400 "Unsupported
+  // start tag". `sendTelegramMessage` then fell back to sending the raw
+  // unsanitized text, so the user saw `<analysis>` AND raw Markdown
+  // formatting markers. New behaviour: Phase 3 HTML-escapes stray tags
+  // so the full message remains valid Telegram HTML and Markdown
+  // elsewhere in the text (`_foo_` → `<i>foo</i>`) still renders.
+
+  it('top-level <analysis> tag outside any Markdown capture is escaped, not preserved raw', () => {
+    expect(sanitizeTelegramHtml('<analysis>reasoning</analysis>')).toBe(
+      '&lt;analysis&gt;reasoning&lt;/analysis&gt;',
+    );
+  });
+
+  it('top-level stray tag with Markdown elsewhere: tag is escaped, Markdown is converted', () => {
+    expect(
+      sanitizeTelegramHtml('<analysis>hi</analysis>\n_Email alert_ here'),
+    ).toBe('&lt;analysis&gt;hi&lt;/analysis&gt;\n<i>Email alert</i> here');
+  });
+
+  it('stray tag at byte 0 (exact shape of the production failure) is escaped', () => {
+    const input =
+      '<analysis>\nCycle 34 precheck at 18:40:00Z.\n- Step 2: Skipped\n';
+    const out = sanitizeTelegramHtml(input);
+    expect(out.startsWith('&lt;analysis&gt;')).toBe(true);
+    expect(out.includes('• Step 2: Skipped')).toBe(true);
+  });
 });
 
 // --- Existing HTML element spans: contents must be preserved verbatim ---
