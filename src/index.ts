@@ -44,6 +44,7 @@ import {
   getMessageById,
   getMessagesSince,
   getTaskById,
+  updateTask,
   createTask,
   getNewMessages,
   getRouterState,
@@ -233,7 +234,17 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   // preventing cross-group message routing bugs from the main heartbeat.
   if (group.requiresTrigger !== false && !group.isMain) {
     const heartbeatId = `heartbeat-${group.folder}`;
-    if (!getTaskById(heartbeatId)) {
+    // The non-main heartbeat prompt delegates to the `check-unanswered`
+    // skill's two-phase workflow (SQL candidate filter + LLM reasoning
+    // over conversation context). Kept as a named constant so the
+    // create-and-migrate paths below use the same string — without
+    // that, adding phrasing here wouldn't propagate to heartbeat rows
+    // already in the DB.
+    const NON_MAIN_HEARTBEAT_PROMPT =
+      'Invoke the `check-unanswered` skill and follow its full workflow. The skill runs the deterministic script to find candidate orphans, then does LLM reasoning over the conversation-since context to decide per candidate whether the bot already addressed it inline (react with 👍) or it genuinely needs a threaded reply. Do NOT skip the reasoning step — blind react+reply duplicates answers whenever the bot answered conversationally without threading. Do NOT query the database directly outside the skill. Do NOT check email, calendar, or system health.';
+
+    const existingHeartbeat = getTaskById(heartbeatId);
+    if (!existingHeartbeat) {
       // Pre-check gates the LLM, but it's only enabled for trusted
       // non-main groups for now because it needs to persist a seen-set
       // file and untrusted groups mount `/workspace/group` read-only.
@@ -246,8 +257,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
         id: heartbeatId,
         group_folder: group.folder,
         chat_jid: jid,
-        prompt:
-          'Run the check-unanswered script only: python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/check-unanswered.py — then react and reply to each unanswered message. Do NOT query the database directly. Do NOT check email, calendar, or system health.',
+        prompt: NON_MAIN_HEARTBEAT_PROMPT,
         script: precheckScript,
         schedule_type: 'cron',
         schedule_value: '*/15 * * * *',
@@ -260,6 +270,18 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
       logger.info(
         { jid, folder: group.folder },
         'Auto-created heartbeat for trigger-required group',
+      );
+    } else if (existingHeartbeat.prompt !== NON_MAIN_HEARTBEAT_PROMPT) {
+      // Prompt drift: a prior orchestrator version wrote a different
+      // string into the DB. Sync to the current canonical prompt so
+      // existing groups pick up workflow changes (e.g. the Phase-2
+      // LLM-reasoning layer in check-unanswered) without requiring a
+      // manual delete+recreate. Schedule/status fields are left
+      // untouched — only the prompt is managed here.
+      updateTask(heartbeatId, { prompt: NON_MAIN_HEARTBEAT_PROMPT });
+      logger.info(
+        { jid, folder: group.folder },
+        'Synced non-main heartbeat prompt to current workflow',
       );
     }
   }
