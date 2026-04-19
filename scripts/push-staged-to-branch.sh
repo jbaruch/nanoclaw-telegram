@@ -124,7 +124,15 @@ if [ "$MODE" != "--rules-only" ]; then
       done
     fi
 
+    # Wipe the destination before copying so file-level deletions in
+    # staging (author removed a helper script between the initial
+    # promote and this fixup) actually propagate into the branch. The
+    # old mkdir+cp approach only overwrote — `git add -A` would see
+    # no deletion because the file still existed in the clone, leaving
+    # stale artifacts on the PR branch that the fixup flow couldn't
+    # clean up.
     dst="$TILE_REPO_DIR/skills/$canonical"
+    rm -rf "$dst"
     mkdir -p "$dst"
     cp -r "$src/." "$dst/"
     echo "pushed: $canonical"

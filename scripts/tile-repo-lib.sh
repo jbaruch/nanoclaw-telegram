@@ -74,8 +74,15 @@ read_frontmatter_field() {
   ' "$file"
 }
 
-# Tile placement validation. Returns 0 if placement is legal for the tile,
-# 1 (with a "BLOCKED: ..." line on stdout) if the skill should be rejected.
+# Tile placement validation. Exit codes:
+#   0  → placement is legal, caller should proceed
+#   1  → policy block (BLOCKED: line on stdout), caller should skip+log
+#   ≥2 → hard failure propagated from `grep_check` (read error on the
+#        skill file, or any future internal invariant break). Caller
+#        MUST NOT treat this like rc 1; the promote/push loops case-
+#        match explicitly and `exit` on rc ≥2 rather than `continue`,
+#        so an unreadable SKILL.md aborts the run loudly instead of
+#        quietly being skipped.
 #
 # Callers must pre-verify `$skill_file` exists — we don't re-check.
 #

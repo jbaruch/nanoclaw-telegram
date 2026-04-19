@@ -1,9 +1,38 @@
 import fs from 'fs';
+
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
+
+// Isolate filesystem writes to a per-process tempdir so running this test
+// file doesn't leave artifacts in the developer's real `data/` tree (or
+// collide with a local orchestrator that actually uses `DATA_DIR`).
+//
+// `vi.mock` is hoisted to the very top of the file, ABOVE regular
+// top-level const declarations. To share the tempdir path between the
+// mock factory and the rest of the file we compute it inside
+// `vi.hoisted`, which runs in the same hoisting pass as the mocks.
+const { TEST_DATA_DIR } = vi.hoisted(() => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const osMod = require('os') as typeof import('os');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const pathMod = require('path') as typeof import('path');
+  return {
+    TEST_DATA_DIR: pathMod.join(
+      osMod.tmpdir(),
+      `nanoclaw-ipc-auth-test-${process.pid}`,
+    ),
+  };
+});
+vi.mock('./config.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('./config.js')>('./config.js');
+  return {
+    ...actual,
+    DATA_DIR: TEST_DATA_DIR,
+  };
+});
+
 import path from 'path';
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-
-import { DATA_DIR } from './config.js';
 import {
   _initTestDatabase,
   createTask,
@@ -797,11 +826,21 @@ describe('register_group success', () => {
 
 const UNAUTH_GROUP = 'other-group';
 const unauthInputDir = path.join(
-  DATA_DIR,
+  TEST_DATA_DIR,
   'ipc',
   UNAUTH_GROUP,
   'input-default',
 );
+
+// Last-resort cleanup after the whole file finishes. Individual afterEach
+// calls remove dirs they explicitly created, but a test that crashes
+// mid-run could leave the tempdir behind — wiping it on afterAll keeps
+// /tmp tidy across repeated test runs.
+afterAll(() => {
+  if (fs.existsSync(TEST_DATA_DIR)) {
+    fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+  }
+});
 const unauthCreatedDirs: string[] = [];
 const unauthCreatedFiles: string[] = [];
 

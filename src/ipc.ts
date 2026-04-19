@@ -93,13 +93,14 @@ const KNOWN_SESSION_NAMES: ReadonlySet<string> = new Set([
 const VALID_REQUEST_ID_RE = /^[A-Za-z0-9_-]+$/;
 
 // Host-side allowlist for the five tile-repo names the promote flow is
-// wired against. The MCP tool's zod schema already restricts callers to
-// three of these, but the IPC handler is reachable by any payload
-// dropped into the tasks dir — a compromised container could send
-// `{tileName: "../../etc"}` and escape GROUPS_DIR via `path.join` or
-// point the bash scripts at an attacker-controlled git URL. Keeping
-// the allowlist here (and not trusting the zod schema) defends the
-// security boundary at the actual trust boundary.
+// wired against. The MCP tools' zod enums (ipc-mcp-stdio.ts::TILE_NAMES)
+// mirror this list client-side for a clean schema error at tool-call
+// time, but the IPC handler is reachable by any payload dropped into
+// the tasks dir — a compromised container could skip the MCP path and
+// write `{tileName: "../../etc"}` directly, escaping GROUPS_DIR via
+// `path.join` or pointing the bash scripts at an attacker-controlled
+// git URL. This set is the actual trust boundary; keeping it in sync
+// with the client-side enum is a release-hygiene concern.
 const KNOWN_TILE_NAMES: ReadonlySet<string> = new Set([
   'nanoclaw-admin',
   'nanoclaw-core',
