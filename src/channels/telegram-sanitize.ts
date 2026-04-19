@@ -26,7 +26,26 @@
  *   - item / * item  → • item (line-start bullet)
  */
 
+// Two separate placeholder namespaces.
+//
+// `PH_PREFIX` ("protect and preserve") is used for regions whose content
+// must be passed to Telegram verbatim inside the final output — fenced
+// code blocks (Phase 0), already-valid HTML element spans (Phase 1a),
+// and URLs / email addresses (Phase 1c). These are RESTORED by Phase 3
+// and MUST survive through Phase 2 Markdown captures intact, so a
+// `**<code>x</code>**` input still ships `<b><code>x</code></b>` with
+// the inner span untouched.
+//
+// `PH_STRAY_PREFIX` ("protect until Phase 2 decides") is used only for
+// stray tag tokens (Phase 1b) like `<N>` or `<bar>`. Inside a Phase 2
+// capture (`` ` … ` ``, `**…**`, etc.) the stray token must be
+// RESOLVED and HTML-escaped so the captured content ends up like
+// `<code>&lt;N&gt;</code>` — otherwise Telegram sees a bare `<N>`,
+// rejects the message, and the send falls back to raw Markdown.
+// Outside of a capture, stray placeholders are restored in Phase 3
+// just like protect placeholders (pre-existing behavior).
 const PH_PREFIX = '\u0000PH';
+const PH_STRAY_PREFIX = '\u0000ST';
 const PH_SUFFIX = '\u0000';
 
 /** Escape `&`, `<`, `>`, `"` so captured text is safe inside HTML content / attributes. */
@@ -58,37 +77,49 @@ export function sanitizeTelegramHtml(text: string): string {
   if (!text) return text;
 
   const placeholders: string[] = [];
+  const strayPlaceholders: string[] = [];
+
   const protect = (match: string): string => {
     const idx = placeholders.length;
     placeholders.push(match);
     return `${PH_PREFIX}${idx}${PH_SUFFIX}`;
   };
+  const protectStray = (match: string): string => {
+    const idx = strayPlaceholders.length;
+    strayPlaceholders.push(match);
+    return `${PH_STRAY_PREFIX}${idx}${PH_SUFFIX}`;
+  };
 
-  // Regex for the NUL-delimited placeholder tokens we inject during
-  // Phases 0/1a/1b/1c. Reused in `escapeCaptured` below AND in Phase 3.
   const PH_RE = new RegExp(`${PH_PREFIX}(\\d+)${PH_SUFFIX}`, 'g');
+  const PH_STRAY_RE = new RegExp(`${PH_STRAY_PREFIX}(\\d+)${PH_SUFFIX}`, 'g');
 
   // Phase 2 conversions (`[…](…)`, `` `…` ``, `**…**`, etc.) capture
   // content and wrap it in Telegram HTML tags. That captured content may
-  // contain placeholders injected earlier (Phase 1b protected stray tag
-  // tokens like `<N>`). A plain `htmlEscape` on the captured text sees
-  // only the opaque `\u0000PH<idx>\u0000` markers — no `<`, `>`, `&`, or
-  // `"` to escape — so it's a no-op, and Phase 3 restores the raw `<N>`
-  // INSIDE our freshly-created `<code>`/`<b>`/etc. tag. Telegram then
-  // chokes on the unknown `<N>` tag, rejects the whole message with 400,
-  // and `sendTelegramMessage`'s catch fires the plain-text fallback —
-  // which sends the original Markdown literally and is exactly the
-  // "`**foo**` leaked through the preprocessor" symptom.
+  // contain placeholders injected earlier. A plain `htmlEscape` on the
+  // captured text sees only the opaque `\u0000…\u0000` markers — no `<`,
+  // `>`, `&`, or `"` to escape — so it's a no-op, and Phase 3 restores
+  // the raw text INSIDE our freshly-created `<code>`/`<b>`/etc. tag.
   //
-  // Fix: inside Phase 2 captures, resolve the placeholder to its
-  // underlying text BEFORE HTML-escaping, so the stray tag becomes
-  // `&lt;N&gt;` inside the final `<code>…</code>` span. Placeholders
-  // outside any Phase 2 capture (stray tags in plain prose) still
-  // survive through Phase 3 unchanged — that's pre-existing behavior
-  // and out of scope for this fix.
+  // For stray-tag placeholders this is a bug: Telegram would see a raw
+  // `<N>` inside `<code>`, reject the whole message with 400, and
+  // `sendTelegramMessage`'s catch would fire the plain-text fallback —
+  // which ships the original Markdown verbatim. That's the exact
+  // "`**foo**` leaked through the preprocessor" symptom the fix
+  // addresses: resolve stray-tag placeholders inside the capture and
+  // HTML-escape them, so the output is `<code>&lt;N&gt;</code>`.
+  //
+  // For protect placeholders (Phase 0/1a/1c — fenced code, already-
+  // valid HTML spans, URLs, emails) the old no-op was INTENTIONAL: the
+  // "Protected regions (never rewritten)" contract says inputs like
+  // `**<code>x</code>**` must preserve the inner `<code>x</code>` span
+  // verbatim inside `<b>…</b>`. So only stray placeholders get
+  // resolved here; protect ones keep surviving through to Phase 3.
   const escapeCaptured = (s: string): string =>
     htmlEscape(
-      s.replace(PH_RE, (_m, idx: string) => placeholders[Number(idx)]),
+      s.replace(
+        PH_STRAY_RE,
+        (_m, idx: string) => strayPlaceholders[Number(idx)],
+      ),
     );
 
   let out = text;
@@ -114,9 +145,15 @@ export function sanitizeTelegramHtml(text: string): string {
   }
 
   // Phase 1b: protect stray tag tokens (self-closing, mismatched, or tags
-  // we don't recognise as span-ful). This keeps any remaining raw HTML from
-  // being touched, even if we can't pair it.
-  out = out.replace(/<\/?[a-zA-Z][a-zA-Z0-9-]*(?:\s[^>]*)?\s*\/?>/g, protect);
+  // we don't recognise as span-ful). Uses `protectStray` so a token that
+  // ends up inside a Phase 2 capture gets resolved+escaped there
+  // (`escapeCaptured`) instead of restored raw in Phase 3 — otherwise
+  // Telegram rejects the unknown tag and the send falls back to plain
+  // text.
+  out = out.replace(
+    /<\/?[a-zA-Z][a-zA-Z0-9-]*(?:\s[^>]*)?\s*\/?>/g,
+    protectStray,
+  );
 
   // Phase 1c: protect URLs and email addresses so their underscores/dots
   // don't get mistaken for Markdown formatting.
@@ -173,10 +210,17 @@ export function sanitizeTelegramHtml(text: string): string {
   // 2f. Bullets: - item / * item at line start → • item
   out = out.replace(/^[-*]\s+/gm, '\u2022 ');
 
-  // Phase 3: restore any placeholders that were NOT inside a Phase 2
-  // capture (stray tags in plain prose, full HTML spans from Phase 1a,
-  // fenced blocks from Phase 0, raw URLs/emails from Phase 1c).
+  // Phase 3: restore any placeholders still in the text — these are
+  // the ones that were NOT inside a Phase 2 capture. Restore protect
+  // placeholders first (Phase 0/1a/1c) and then stray placeholders
+  // (Phase 1b). Order doesn't matter in practice — placeholder markers
+  // don't overlap — but doing protect first keeps the more-common case
+  // first.
   out = out.replace(PH_RE, (_m, idx: string) => placeholders[Number(idx)]);
+  out = out.replace(
+    PH_STRAY_RE,
+    (_m, idx: string) => strayPlaceholders[Number(idx)],
+  );
 
   return out;
 }

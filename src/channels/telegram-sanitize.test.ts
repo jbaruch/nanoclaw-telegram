@@ -206,14 +206,39 @@ describe('sanitizeTelegramHtml — HTML entity escaping', () => {
   });
 
   it('stray tag token inside [link text](url) is escaped', () => {
-    expect(
-      sanitizeTelegramHtml('[see <N> docs](https://example.com/n)'),
-    ).toBe('<a href="https://example.com/n">see &lt;N&gt; docs</a>');
+    expect(sanitizeTelegramHtml('[see <N> docs](https://example.com/n)')).toBe(
+      '<a href="https://example.com/n">see &lt;N&gt; docs</a>',
+    );
   });
 
   it('stray tag token inside # heading is escaped', () => {
     expect(sanitizeTelegramHtml('# About <N> placeholders')).toBe(
       '<b>About &lt;N&gt; placeholders</b>',
+    );
+  });
+
+  // --- Contract from the header doc: "Protected regions (never
+  // rewritten)" — if the stray-tag-escape logic ever starts resolving
+  // Phase 0/1a/1c placeholders too, these regress. An existing
+  // `<code>…</code>`, `<pre>…</pre>`, URL, or email inside a Markdown
+  // capture must survive to the output verbatim, NOT get
+  // double-escaped.
+
+  it('protected `<code>x</code>` inside **bold** is preserved, not double-escaped', () => {
+    expect(sanitizeTelegramHtml('**pre: <code>x</code> done**')).toBe(
+      '<b>pre: <code>x</code> done</b>',
+    );
+  });
+
+  it('protected `<pre>…</pre>` inside *italic* is preserved', () => {
+    expect(sanitizeTelegramHtml('look at *<pre>code</pre>* carefully')).toBe(
+      'look at <i><pre>code</pre></i> carefully',
+    );
+  });
+
+  it('URL inside **bold** is restored, not escaped', () => {
+    expect(sanitizeTelegramHtml('**visit https://example.com now**')).toBe(
+      '<b>visit https://example.com now</b>',
     );
   });
 });
