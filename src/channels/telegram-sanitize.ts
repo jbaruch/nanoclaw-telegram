@@ -16,18 +16,35 @@
  *     pre-formatted HTML (e.g. `<code>*literal*</code>`) aren't rewritten.
  *   - http / https / ftp URLs, email addresses.
  *
- * Conditionally-protected regions (rewritten ONLY inside a Markdown
- * capture, passed through unchanged in plain prose):
- *   - Stray tag tokens (self-closing, mismatched, or tags we can't
- *     pair, e.g. `<N>` or `<bar>`). In plain prose they pass through
- *     so the agent can emit literal HTML if it needs to. Inside a
- *     Phase 2 capture (`` `<N>` `` or `**<foo>**`) the token gets
- *     HTML-escaped so the output is `<code>&lt;N&gt;</code>` rather
- *     than `<code><N></code>`. Telegram's HTML parser only accepts a
- *     fixed tag whitelist; leaving the raw `<N>` inside our freshly-
- *     created `<code>`/`<b>`/etc. span causes a 400 rejection and
- *     dumps the whole message into the plain-text fallback in
- *     src/channels/telegram.ts, shipping literal Markdown to the user.
+ * Stray tag tokens (self-closing, mismatched, or tags not in
+ * Telegram's allowlist — e.g. `<N>`, `<bar>`, `<analysis>`):
+ *   - HTML-escaped in the output when they appear in plain prose or
+ *     inside a Markdown capture. ONE important exception: content
+ *     already protected as an allowlisted HTML span in Phase 1a
+ *     (`<code>…</code>`, `<pre>…</pre>`, `<b>…</b>`, and the other
+ *     PROTECTED_SPAN_TAGS entries) is restored verbatim in Phase 3,
+ *     so stray tags INSIDE such a span survive as-is. That's by
+ *     design for the "already-valid HTML passes through" contract —
+ *     e.g. `<code><analysis>x</analysis></code>` keeps the inner
+ *     `<analysis>` visible as literal code. If the content inside a
+ *     protected span contains a tag Telegram rejects, the send will
+ *     fall back to raw text for that message (same failure mode as
+ *     pre-fix top-level strays); authors of `<code>…</code>`-wrapped
+ *     snippets should escape inner angle brackets themselves.
+ *   - Earlier behavior let stray tags in plain prose pass through
+ *     verbatim, which produced the same failure mode the inside-
+ *     capture escaping was designed to prevent: Telegram's HTML
+ *     parser rejects any tag not in its allowlist with a 400
+ *     "Unsupported start tag" error, which dumps the whole message
+ *     into `sendTelegramMessage`'s plain-text fallback (see
+ *     src/channels/telegram.ts) — the fallback ships the ORIGINAL
+ *     unsanitized text with no `parse_mode`, so the user sees raw
+ *     Markdown markers (`_foo_`, `**bar**`) instead of rendered
+ *     italics/bold. Escaping stray tags at the top level keeps
+ *     HTML-send on the happy path; agents that need literal HTML
+ *     should use the supported allowlist intentionally. See
+ *     jbaruch/nanoclaw#81 for the production recurrence that forced
+ *     this unification.
  *
  * Converted patterns (captured text is HTML-escaped before insertion so
  * characters like `&`, `<`, `>`, `"` in content don't produce invalid entities):
@@ -50,13 +67,16 @@
 // the inner span untouched.
 //
 // `PH_STRAY_PREFIX` ("protect until Phase 2 decides") is used only for
-// stray tag tokens (Phase 1b) like `<N>` or `<bar>`. Inside a Phase 2
-// capture (`` ` … ` ``, `**…**`, etc.) the stray token must be
-// RESOLVED and HTML-escaped so the captured content ends up like
-// `<code>&lt;N&gt;</code>` — otherwise Telegram sees a bare `<N>`,
-// rejects the message, and the send falls back to raw Markdown.
-// Outside of a capture, stray placeholders are restored in Phase 3
-// just like protect placeholders (pre-existing behavior).
+// stray tag tokens (Phase 1b) like `<N>`, `<bar>`, or `<analysis>`.
+// Inside a Phase 2 capture (`` ` … ` ``, `**…**`, etc.) the stray
+// token is RESOLVED and HTML-escaped via `escapeCaptured`, so the
+// captured content ends up like `<code>&lt;N&gt;</code>`. Outside of
+// a capture, Phase 3 ALSO HTML-escapes the stray token — the earlier
+// behavior (restoring raw) caused `<analysis>` / other
+// non-whitelisted tags to reject Telegram's HTML parse and drop the
+// send into the raw-text fallback. Both code paths now produce
+// escape-safe output for Telegram's HTML allowlist; agents that need
+// literal HTML must use the supported tag set.
 const PH_PREFIX = '\u0000PH';
 const PH_STRAY_PREFIX = '\u0000ST';
 const PH_SUFFIX = '\u0000';
@@ -239,8 +259,34 @@ export function sanitizeTelegramHtml(text: string): string {
   // the ones that were NOT inside a Phase 2 capture. Bounds-checked so
   // a crafted `\u0000PH<big>\u0000` token in the input doesn't emit
   // "undefined".
+  //
+  // Protect placeholders (Phase 0/1a/1c — fenced code, already-valid
+  // span HTML, URLs, emails) restore VERBATIM: these are intentionally
+  // opaque regions and their contents are already valid Telegram HTML
+  // (or deliberately pass-through, like a URL).
+  //
+  // Stray placeholders (Phase 1b — tokens like `<analysis>`, `<bar>`,
+  // `<N>` that we couldn't fold into a protected span) get
+  // HTML-ESCAPED here rather than restored raw. Telegram's HTML parser
+  // rejects any tag not in its narrow allowlist (b/i/u/s/code/pre/
+  // blockquote/a/tg-spoiler) and fails the entire message with a 400
+  // "Unsupported start tag" error. That 400 drops
+  // `sendTelegramMessage` into its plain-text fallback, which ships
+  // the ORIGINAL unsanitized text with no parse mode — so the user
+  // sees raw Markdown (`_foo_`, `**bar**`) instead of the rendered
+  // italic/bold the sanitizer was about to produce. Escaping stray
+  // tags keeps HTML valid: the user sees literal `<analysis>` text,
+  // but Markdown formatting elsewhere in the message renders
+  // correctly. Root cause of jbaruch/nanoclaw#81's 2026-04-19
+  // recurrence — heartbeat emitted Claude-reasoning wrappers
+  // (`<analysis>`) at the top of its reply text.
   out = out.replace(PH_RE, resolveFrom(placeholders));
-  out = out.replace(PH_STRAY_RE, resolveFrom(strayPlaceholders));
+  out = out.replace(PH_STRAY_RE, (_m, idx: string): string => {
+    const n = Number(idx);
+    return n >= 0 && n < strayPlaceholders.length
+      ? htmlEscape(strayPlaceholders[n])
+      : _m;
+  });
 
   return out;
 }
