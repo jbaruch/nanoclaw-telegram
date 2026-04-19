@@ -521,6 +521,72 @@ describe('task scheduler', () => {
     expect(dm!.is_group).toBe(0);
   });
 
+  it('streamed scheduled-task to a WhatsApp DM (@s.whatsapp.net) upserts chats as whatsapp+dm', async () => {
+    // Extension of the TG-group/TG-DM test for WhatsApp's DM JID
+    // shape. Matches the db.ts legacy backfill convention
+    // (`@s.whatsapp.net` → whatsapp + is_group=0). Without this
+    // branch, a first send to a WA DM would land with channel/is_group
+    // NULL and the chat would be invisible to getAvailableGroups().
+    const GROUP_REG = {
+      name: 'WA DM',
+      folder: 'wadm',
+      trigger: 'always',
+      added_at: '2026-01-01T00:00:00.000Z',
+      isMain: true,
+    };
+    const chatJid = '15555555555@s.whatsapp.net';
+
+    createTask({
+      id: 'wa-dm-task',
+      group_folder: 'wadm',
+      chat_jid: chatJid,
+      prompt: 'run',
+      schedule_type: 'once',
+      schedule_value: '2026-01-01T00:00:00.000Z',
+      context_mode: 'group',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result: 'ok',
+        } as ContainerOutput);
+        return { status: 'success', result: 'ok' };
+      },
+    );
+
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+
+    startSchedulerLoop({
+      registeredGroups: () => ({ [chatJid]: GROUP_REG }),
+      getSessions: () => ({}),
+      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    const chat = getAllChats().find((c) => c.jid === chatJid);
+    expect(chat).toBeTruthy();
+    expect(chat!.channel).toBe('whatsapp');
+    expect(chat!.is_group).toBe(0);
+  });
+
   it('streamed scheduled-task with all-internal result does NOT write a bot row', async () => {
     // Sibling regression: if the streamed text is ENTIRELY wrapped in
     // `<internal>…</internal>` tags, the stripped `cleanResult` is

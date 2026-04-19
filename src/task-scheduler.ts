@@ -273,6 +273,9 @@ async function runTask(
             //   - `tg:<id>` — Telegram. Negative id = group/channel,
             //     positive = private 1:1.
             //   - `<id>@g.us` — WhatsApp group (no `wa:` prefix).
+            //   - `<id>@s.whatsapp.net` — WhatsApp DM.
+            // Matches the conventions `db.ts`'s legacy-chat backfill
+            // uses (`@g.us` → group, `@s.whatsapp.net` → DM).
             // Anything else: leave both undefined so COALESCE in
             // storeChatMetadata preserves existing values rather than
             // writing NULL or an abbreviated channel string.
@@ -285,6 +288,9 @@ async function runTask(
             } else if (task.chat_jid.endsWith('@g.us')) {
               inferredChannel = 'whatsapp';
               inferredIsGroup = true;
+            } else if (task.chat_jid.endsWith('@s.whatsapp.net')) {
+              inferredChannel = 'whatsapp';
+              inferredIsGroup = false;
             }
             // Wrap the DB writes so a SQLite error (FK constraint,
             // disk full, schema mid-migration) never rejects the
