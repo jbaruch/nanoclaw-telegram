@@ -358,6 +358,77 @@ describe('task scheduler', () => {
     expect(botTs).toBeTruthy();
   });
 
+  it('streamed scheduled-task writes a bot row even when no prior chats row exists', async () => {
+    // The FK from `messages.chat_jid` to `chats.jid` means storeMessage
+    // throws if no chats row exists for the target chat (scheduled task
+    // firing before any inbound message / metadata sync would create
+    // one). Verifies the task-scheduler upserts chat metadata before
+    // storeMessage so the bot row actually lands in the DB instead of
+    // raising a FOREIGN KEY constraint error and recording the run as
+    // an error.
+    const FRESH_GROUP = {
+      name: 'Fresh',
+      folder: 'fresh',
+      trigger: 'always',
+      added_at: '2026-01-01T00:00:00.000Z',
+      isMain: true,
+    };
+    const chatJid = 'fresh-no-metadata@g.us';
+    // NOTE: NOT calling storeChatMetadata here. The task-scheduler fix
+    // must handle the missing-chats-row case on its own.
+
+    createTask({
+      id: 'fresh-chat-task',
+      group_folder: 'fresh',
+      chat_jid: chatJid,
+      prompt: 'run',
+      schedule_type: 'once',
+      schedule_value: '2026-01-01T00:00:00.000Z',
+      context_mode: 'group',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    const streamedText = 'first send in a fresh chat';
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result: streamedText,
+        } as ContainerOutput);
+        return { status: 'success', result: streamedText };
+      },
+    );
+
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+
+    startSchedulerLoop({
+      registeredGroups: () => ({ [chatJid]: FRESH_GROUP }),
+      getSessions: () => ({}),
+      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Bot row landed despite no pre-existing chats row. If the
+    // storeChatMetadata upsert gets dropped, storeMessage will throw
+    // FOREIGN KEY constraint failed and this assertion fails.
+    expect(getLastBotMessageTimestamp(chatJid, 'bot')).toBeTruthy();
+  });
+
   it('streamed scheduled-task with all-internal result does NOT write a bot row', async () => {
     // Sibling regression: if the streamed text is ENTIRELY wrapped in
     // `<internal>…</internal>` tags, the stripped `cleanResult` is

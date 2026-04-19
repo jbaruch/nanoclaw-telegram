@@ -15,6 +15,7 @@ import {
   getTaskById,
   logTaskRun,
   setSession,
+  storeChatMetadata,
   storeMessage,
   updateTask,
   updateTaskAfterRun,
@@ -249,13 +250,25 @@ async function runTask(
             // The IPC-path `send_message` handler in src/ipc.ts writes
             // the same shape; this mirrors it so heartbeat's answered-
             // check accounting and forensic greps both see the row.
+            //
+            // Upsert chat metadata first so the `messages.chat_jid →
+            // chats.jid` FK doesn't reject the insert on a chat that
+            // has no prior metadata (task fires before any user
+            // message, or chat was manually registered without the
+            // normal group-sync write-through). Idempotent: existing
+            // rows keep their name and channel via COALESCE in
+            // storeChatMetadata; `last_message_time` advances to the
+            // outgoing send's timestamp, same as the IPC path would
+            // effectively do by chaining a chat-metadata update.
+            const sendTimestamp = new Date().toISOString();
+            storeChatMetadata(task.chat_jid, sendTimestamp);
             storeMessage({
               id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
               chat_jid: task.chat_jid,
               sender: ASSISTANT_NAME,
               sender_name: ASSISTANT_NAME,
               content: cleanResult,
-              timestamp: new Date().toISOString(),
+              timestamp: sendTimestamp,
               is_from_me: true,
               is_bot_message: true,
             });
