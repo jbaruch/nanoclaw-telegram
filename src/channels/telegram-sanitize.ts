@@ -6,7 +6,8 @@
  * (or a subagent, or a forgetful prompt) produces Markdown, we convert it to
  * Telegram-flavored HTML here. Idempotent — already-valid HTML passes through.
  *
- * Protected regions (never rewritten):
+ * Always-protected regions (never rewritten, whether inside a Markdown
+ * capture or not):
  *   - Fenced code blocks (```...```) — preserved as <pre> with contents escaped.
  *   - Whole inline HTML element spans (`<code>…</code>`, `<pre>…</pre>`,
  *     `<b>…</b>`, `<i>…</i>`, `<u>…</u>`, `<s>…</s>`, `<a>…</a>`,
@@ -15,16 +16,18 @@
  *     pre-formatted HTML (e.g. `<code>*literal*</code>`) aren't rewritten.
  *   - http / https / ftp URLs, email addresses.
  *
- * Stray tag tokens (self-closing, mismatched, or tags we can't pair)
- * are HANDLED CONDITIONALLY: in plain prose they pass through unchanged
- * like the protected regions above, but when one lands inside a Phase 2
- * Markdown capture (e.g. `` `<N>` `` or `**<foo>**`) the tag gets
- * HTML-escaped so the output is `<code>&lt;N&gt;</code>` rather than
- * `<code><N></code>`. Telegram's HTML parser only accepts a fixed tag
- * whitelist; leaving the raw `<N>` inside our freshly-created
- * `<code>`/`<b>`/etc. span causes a 400 rejection and dumps the whole
- * message into the plain-text fallback in src/channels/telegram.ts,
- * shipping literal Markdown to the user.
+ * Conditionally-protected regions (rewritten ONLY inside a Markdown
+ * capture, passed through unchanged in plain prose):
+ *   - Stray tag tokens (self-closing, mismatched, or tags we can't
+ *     pair, e.g. `<N>` or `<bar>`). In plain prose they pass through
+ *     so the agent can emit literal HTML if it needs to. Inside a
+ *     Phase 2 capture (`` `<N>` `` or `**<foo>**`) the token gets
+ *     HTML-escaped so the output is `<code>&lt;N&gt;</code>` rather
+ *     than `<code><N></code>`. Telegram's HTML parser only accepts a
+ *     fixed tag whitelist; leaving the raw `<N>` inside our freshly-
+ *     created `<code>`/`<b>`/etc. span causes a 400 rejection and
+ *     dumps the whole message into the plain-text fallback in
+ *     src/channels/telegram.ts, shipping literal Markdown to the user.
  *
  * Converted patterns (captured text is HTML-escaped before insertion so
  * characters like `&`, `<`, `>`, `"` in content don't produce invalid entities):
@@ -124,15 +127,18 @@ export function sanitizeTelegramHtml(text: string): string {
   // `**<code>x</code>**` must preserve the inner `<code>x</code>` span
   // verbatim inside `<b>…</b>`. So only stray placeholders get
   // resolved here; protect ones keep surviving through to Phase 3.
-  // Bounds-checked array lookup. Paranoid-safe: if the input ever
-  // contains a literal `\u0000ST<digits>\u0000` or `\u0000PH<digits>\u0000`
-  // sequence (e.g. adversarial text, or someone round-tripped a
-  // previous sanitizer output through it) that didn't come from our
-  // own `protect`/`protectStray` calls, the index can point past the
-  // end of the array. `arr[n] ?? match` would still fail on sparse
-  // arrays; the explicit range check leaves the literal text as-is
-  // rather than emitting "undefined".
-  const resolveFrom = (arr: string[]) =>
+  // Bounds-checked array lookup. When we emit placeholders ourselves
+  // via `protect`/`protectStray`, the index is always `arr.length` at
+  // emit time, so the round-trip is safe by construction. The range
+  // check is defense against INPUTS that happen to contain a NUL-
+  // delimited PH/ST-shaped sequence we didn't produce — e.g.
+  // adversarial text, or a previous sanitizer output round-tripped
+  // through this one. In that case the extracted index can point
+  // well past `arr.length` (or be a multi-digit number we never
+  // pushed). Returning `match` preserves the literal bytes rather
+  // than emitting "undefined".
+  const resolveFrom =
+    (arr: string[]) =>
     (match: string, idx: string): string => {
       const n = Number(idx);
       return n >= 0 && n < arr.length ? arr[n] : match;
