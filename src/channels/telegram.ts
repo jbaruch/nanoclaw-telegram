@@ -463,10 +463,16 @@ export async function sendPoolMessage(
     '[send] sendPoolMessage entered',
   );
   if (poolApis.length === 0) {
-    // No pool bots — fall back to main bot sendMessage via channel
+    // No pool bots configured — return undefined without sending.
+    // Earlier comment claimed "fall back to main bot sendMessage via
+    // channel" but no such fallback is implemented here; callers that
+    // observe undefined must treat it as a hard send failure for the
+    // pool path (the IPC handler in `src/ipc.ts` logs the returned id
+    // and stores it on the bot row, so `undefined` correctly surfaces
+    // as "no Telegram id recorded" rather than a silent drop).
     logger.warn(
       { chatId, sender, groupFolder },
-      '[send] sendPoolMessage called with empty pool — returning (message NOT sent)',
+      '[send] sendPoolMessage called with empty pool — returning undefined (message NOT sent; pool-identity sends require TELEGRAM_BOT_POOL to be configured)',
     );
     return undefined;
   }

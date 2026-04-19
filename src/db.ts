@@ -492,7 +492,8 @@ export function getBotMessageByTelegramId(
               reply_to_message_content, reply_to_sender_name,
               telegram_message_id
          FROM messages
-        WHERE chat_jid = ? AND telegram_message_id = ?`,
+        WHERE chat_jid = ? AND telegram_message_id = ?
+          AND is_bot_message = 1`,
     )
     .get(chatJid, telegramMessageId) as
     | {
