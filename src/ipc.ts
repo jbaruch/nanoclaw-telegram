@@ -75,11 +75,12 @@ let ipcWatcherRunning = false;
  * requesting container mounts at `/workspace/ipc/input/` — otherwise the
  * container polls forever and the IPC call times out.
  *
- * The container-side MCP server stamps `sessionName` onto every TASKS_DIR
- * request (see `container/agent-runner/src/ipc-mcp-stdio.ts`). Older
- * containers that predate that change (or any request where the field is
- * missing) fall back to the default session — matches pre-parallel
- * behavior where only one session existed.
+ * The container-side MCP server stamps `sessionName` onto every IPC
+ * payload (both TASKS and MESSAGES — see
+ * `container/agent-runner/src/ipc-mcp-stdio.ts`). Older containers that
+ * predate that change (or any request where the field is missing) fall
+ * back to the default session — matches pre-parallel behavior where
+ * only one session existed.
  */
 // Session names accepted on IPC requests: ONLY the two the orchestrator
 // ever creates. A broader regex (e.g. `[A-Za-z0-9_-]+`) would let a

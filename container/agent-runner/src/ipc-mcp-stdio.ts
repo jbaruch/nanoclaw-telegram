@@ -73,8 +73,10 @@ async function runHostOperation(
   timeoutMs = 180_000,
 ): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  // `sessionName` is stamped by `writeIpcFile` when dir === TASKS_DIR,
-  // so we don't need to include it in every caller's payload.
+  // `sessionName` is stamped by `writeIpcFile` on every IPC payload
+  // (both TASKS_DIR and MESSAGES_DIR), so we don't need to include it
+  // in every caller's payload — and shouldn't, since the env-derived
+  // stamp wins over caller-provided values by design.
   writeIpcFile(TASKS_DIR, {
     type,
     groupFolder,
