@@ -278,21 +278,18 @@ function syncNonMainHeartbeat(jid: string, group: RegisteredGroup): void {
  * after initial setup.
  */
 function syncNonMainHeartbeatPrompts(): void {
-  for (const [, group] of Object.entries(registeredGroups)) {
+  // Delegate to `syncNonMainHeartbeat` for each eligible group that
+  // already has a heartbeat task — DRY with the register-group code
+  // path so a future edit to the migration logic can't silently
+  // diverge. The existing-heartbeat guard ABOVE `syncNonMainHeartbeat`
+  // here is what gives us "never re-create a deleted heartbeat" at
+  // startup: if an operator deleted the row to disable automatic
+  // checks for a group, this startup pass respects that and skips.
+  for (const [jid, group] of Object.entries(registeredGroups)) {
     if (group.requiresTrigger === false || group.isMain) continue;
     const heartbeatId = `heartbeat-${group.folder}`;
-    const existingHeartbeat = getTaskById(heartbeatId);
-    if (!existingHeartbeat) continue; // don't recreate deleted heartbeats
-    if (
-      existingHeartbeat.prompt !== NON_MAIN_HEARTBEAT_PROMPT &&
-      LEGACY_NON_MAIN_HEARTBEAT_PROMPTS.has(existingHeartbeat.prompt)
-    ) {
-      updateTask(heartbeatId, { prompt: NON_MAIN_HEARTBEAT_PROMPT });
-      logger.info(
-        { folder: group.folder },
-        'Migrated legacy non-main heartbeat prompt to current workflow',
-      );
-    }
+    if (!getTaskById(heartbeatId)) continue; // don't recreate deleted heartbeats
+    syncNonMainHeartbeat(jid, group);
   }
 }
 
