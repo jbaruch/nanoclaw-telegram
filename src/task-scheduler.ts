@@ -15,6 +15,7 @@ import {
   getTaskById,
   logTaskRun,
   setSession,
+  storeMessage,
   updateTask,
   updateTaskAfterRun,
 } from './db.js';
@@ -240,6 +241,24 @@ async function runTask(
             .trim();
           if (cleanResult) {
             await deps.sendMessage(task.chat_jid, cleanResult);
+            // Store the bot send so `messages.db` reflects every send
+            // out of this session. Without this, scheduled-task sends
+            // (heartbeat, housekeeping, morning-brief, etc.) reach
+            // Telegram but leave no DB row — the "ghost heartbeat" /
+            // "no trace in messages.db" class of jbaruch/nanoclaw#81.
+            // The IPC-path `send_message` handler in src/ipc.ts writes
+            // the same shape; this mirrors it so heartbeat's answered-
+            // check accounting and forensic greps both see the row.
+            storeMessage({
+              id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+              chat_jid: task.chat_jid,
+              sender: ASSISTANT_NAME,
+              sender_name: ASSISTANT_NAME,
+              content: cleanResult,
+              timestamp: new Date().toISOString(),
+              is_from_me: true,
+              is_bot_message: true,
+            });
           }
           // Don't close here — agent may still be polling for host script results.
           // Close only on final 'success' status below.
