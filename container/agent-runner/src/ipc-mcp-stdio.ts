@@ -1258,11 +1258,13 @@ skillName options:
       .describe('Target tile repo (same one the PR is against)'),
     branch: z
       .string()
+      .min(1)
       .describe(
-        'Existing PR branch, e.g. "promote/20260418T224156Z-nanoclaw-core". Parse it from the `Branch: ...` line in promote_staging output.',
+        'Existing PR branch, e.g. "promote/20260418T224156Z-nanoclaw-core-a3b2". Parse it from the `Branch: ...` line in promote_staging output.',
       ),
     commitMessage: z
       .string()
+      .min(1)
       .describe(
         'Short commit message describing the fixup (e.g. "fix: address Copilot comment on unanswered-precheck.py").',
       ),

@@ -223,15 +223,20 @@ if git diff --cached --quiet; then
   exit 0
 fi
 
-# Branch named with UTC timestamp + tile so concurrent promotes don't
-# collide. Short enough to scan in the GitHub UI.
-BRANCH="promote/$(date -u +%Y%m%dT%H%M%SZ)-${TILE_NAME}"
+# Branch named with UTC timestamp + tile + 4-hex-char random suffix so
+# two promotes targeting the same tile within the same second can't
+# collide at `git checkout -b` / `git push`. Short enough to scan in
+# the GitHub UI.
+BRANCH="promote/$(date -u +%Y%m%dT%H%M%SZ)-${TILE_NAME}-$(printf '%04x' $((RANDOM * RANDOM & 0xffff)))"
 git checkout -b "$BRANCH"
 COMMIT_MSG="feat: promote $PROMOTED item(s) from $ASSISTANT_NAME staging"
 git commit -m "$COMMIT_MSG"
 
-# Push branch. gh inherits GITHUB_TOKEN → GH_TOKEN via the env below.
-git push -u origin "$BRANCH"
+# Push branch. `--` before the refspec guards against a pathological
+# branch name starting with `-` getting reparsed as a git-push option.
+# Not currently possible because BRANCH is constructed above, but future
+# refactors should inherit the safety without thinking.
+git push -u origin -- "$BRANCH"
 
 # Print the branch name on its own line so the agent can parse it out of
 # stdout and feed it back to the `push_staged_to_branch` MCP tool for
@@ -249,19 +254,39 @@ Fixups land on THIS branch via the \`push_staged_to_branch\` MCP tool: read PR c
 # --repo pinned explicitly per repo-chain.md: gh otherwise defaults to
 # the upstream fork in some environments and would leak tile updates
 # to the wrong repo.
-PR_URL=$(GH_TOKEN="$TOKEN" gh pr create \
+GH_TOKEN="$TOKEN" gh pr create \
   --repo "$TILE_OWNER/$TILE_NAME" \
   --base main \
   --head "$BRANCH" \
   --title "$COMMIT_MSG" \
-  --body "$PR_BODY")
+  --body "$PR_BODY" \
+  >/dev/null
+
+# Look up URL + number via structured JSON rather than parsing `gh pr
+# create`'s stdout. The create command prints a bare URL today, but if
+# its human-output format ever drifts (extra status lines, color codes,
+# whatever) the previous `${PR_URL##*/}` parse would quietly break and
+# we'd silently skip the Copilot summon. Querying by head ref via gh's
+# own --jq is stable and needs no external parser (no jq binary in the
+# orchestrator image).
+PR_URL=$(GH_TOKEN="$TOKEN" gh pr list \
+  --repo "$TILE_OWNER/$TILE_NAME" \
+  --head "$BRANCH" \
+  --state open \
+  --json url \
+  --jq '.[0].url')
+PR_NUMBER=$(GH_TOKEN="$TOKEN" gh pr list \
+  --repo "$TILE_OWNER/$TILE_NAME" \
+  --head "$BRANCH" \
+  --state open \
+  --json number \
+  --jq '.[0].number')
 
 echo "PR opened: $PR_URL"
 
 # Summon Copilot. `summon_copilot_or_warn` lives in tile-repo-lib.sh so
 # the fixup-push script can call the same code — consistency here matters
 # because every branch update should get the same reviewer treatment.
-PR_NUMBER="${PR_URL##*/}"
 GH_TOKEN="$TOKEN" summon_copilot_or_warn "$TILE_OWNER" "$TILE_NAME" "$PR_NUMBER"
 
 echo "Done! $PROMOTED promoted, $BLOCKED blocked."

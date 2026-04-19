@@ -202,7 +202,9 @@ if git diff --cached --quiet; then
 fi
 
 git commit -m "$COMMIT_MSG"
-git push origin "$BRANCH"
+# `--` before refspec so a branch name starting with `-` can't be
+# reparsed as a git-push option.
+git push origin -- "$BRANCH"
 
 echo "Pushed $PROMOTED item(s) to $BRANCH on $TILE_OWNER/$TILE_NAME."
 

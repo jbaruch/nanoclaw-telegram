@@ -823,25 +823,35 @@ function resultPathFor(requestId: string): string {
   return p;
 }
 
+// Shared afterEach body for the auth describes below. The logic was
+// originally duplicated across blocks; extracting it means the two
+// describes can't silently drift (e.g. one forgets the `.reverse()` and
+// starts leaving orphan dirs). Kept as a plain function rather than a
+// hook so each describe decides when to register it — right now that's
+// just `afterEach(cleanupUnauthFixtures)`.
+function cleanupUnauthFixtures(): void {
+  for (const f of unauthCreatedFiles.splice(0)) {
+    if (fs.existsSync(f)) fs.unlinkSync(f);
+  }
+  // Iterate deepest-first so each rmdirSync sees an empty directory.
+  // `ensureUnauthInputDir` unshifts parents onto the array as it walks
+  // upward, so the raw array is parent-to-child; reversing puts the
+  // leaf directory first, and by the time we reach its parent the
+  // leaf is already gone.
+  for (const d of unauthCreatedDirs.splice(0).reverse()) {
+    if (fs.existsSync(d) && fs.readdirSync(d).length === 0) {
+      fs.rmdirSync(d);
+    }
+  }
+}
+
 describe('tessl_update authorization', () => {
   beforeEach(() => {
     ensureUnauthInputDir();
   });
 
   afterEach(() => {
-    for (const f of unauthCreatedFiles.splice(0)) {
-      if (fs.existsSync(f)) fs.unlinkSync(f);
-    }
-    // Iterate deepest-first so each rmdirSync sees an empty directory.
-    // `ensureUnauthInputDir` unshifts parents onto the array as it walks
-    // upward, so the raw array is parent-to-child; reversing puts the
-    // leaf directory first, and by the time we reach its parent the
-    // leaf is already gone.
-    for (const d of unauthCreatedDirs.splice(0).reverse()) {
-      if (fs.existsSync(d) && fs.readdirSync(d).length === 0) {
-        fs.rmdirSync(d);
-      }
-    }
+    cleanupUnauthFixtures();
   });
 
   it('non-main group is rejected with an error response', async () => {
@@ -873,19 +883,7 @@ describe('push_staged_to_branch authorization', () => {
   });
 
   afterEach(() => {
-    for (const f of unauthCreatedFiles.splice(0)) {
-      if (fs.existsSync(f)) fs.unlinkSync(f);
-    }
-    // Iterate deepest-first so each rmdirSync sees an empty directory.
-    // `ensureUnauthInputDir` unshifts parents onto the array as it walks
-    // upward, so the raw array is parent-to-child; reversing puts the
-    // leaf directory first, and by the time we reach its parent the
-    // leaf is already gone.
-    for (const d of unauthCreatedDirs.splice(0).reverse()) {
-      if (fs.existsSync(d) && fs.readdirSync(d).length === 0) {
-        fs.rmdirSync(d);
-      }
-    }
+    cleanupUnauthFixtures();
   });
 
   it('non-main group is rejected with an error response', async () => {
