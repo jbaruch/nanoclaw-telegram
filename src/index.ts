@@ -171,6 +171,92 @@ function saveState(): void {
   setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
 }
 
+// The non-main heartbeat prompt delegates to the `check-unanswered`
+// skill's two-phase workflow (SQL candidate filter + LLM reasoning
+// over conversation context). Kept at module scope so the create path
+// (registerGroup / syncNonMainHeartbeat) and the startup migration
+// (syncNonMainHeartbeatPrompts) reference the same string — otherwise
+// drift between them defeats the whole point of migrating.
+const NON_MAIN_HEARTBEAT_PROMPT =
+  'Invoke the `check-unanswered` skill and follow its full workflow. The skill runs the deterministic script to find candidate orphans, then does LLM reasoning over the conversation-since context to decide per candidate whether the bot already addressed it inline (react with 👍) or it genuinely needs a threaded reply. Do NOT skip the reasoning step — blind react+reply duplicates answers whenever the bot answered conversationally without threading. Do NOT query the database directly outside the skill. Do NOT check email, calendar, or system health.';
+
+/**
+ * Ensure a non-main, trigger-required group has the correct heartbeat
+ * task in the DB. Creates it if missing; otherwise, if the stored
+ * prompt differs from the canonical `NON_MAIN_HEARTBEAT_PROMPT`, syncs
+ * just the prompt via `updateTask`. Schedule / status / next_run are
+ * preserved — this is a prompt-drift migration, not a reset.
+ *
+ * Called from two places:
+ *   - `registerGroup` (IPC register_group flow, when a group joins or
+ *     re-registers).
+ *   - `syncNonMainHeartbeatPrompts` at startup (iterates already-
+ *     registered groups loaded from the DB, since startup doesn't
+ *     re-call `registerGroup` for them).
+ */
+function syncNonMainHeartbeat(
+  jid: string,
+  group: RegisteredGroup,
+): void {
+  const heartbeatId = `heartbeat-${group.folder}`;
+  const existingHeartbeat = getTaskById(heartbeatId);
+  if (!existingHeartbeat) {
+    // Pre-check gates the LLM, but it's only enabled for trusted
+    // non-main groups for now because it needs to persist a seen-set
+    // file and untrusted groups mount `/workspace/group` read-only.
+    // Keep the precheck disabled there until the tracked fix (#72)
+    // moves that state to a writable location.
+    const precheckScript = group.containerConfig?.trusted
+      ? 'python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py'
+      : undefined;
+    createTask({
+      id: heartbeatId,
+      group_folder: group.folder,
+      chat_jid: jid,
+      prompt: NON_MAIN_HEARTBEAT_PROMPT,
+      script: precheckScript,
+      schedule_type: 'cron',
+      schedule_value: '*/15 * * * *',
+      context_mode: 'group',
+      next_run: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+      status: 'active',
+      created_at: new Date().toISOString(),
+      created_by_role: 'owner',
+    });
+    logger.info(
+      { jid, folder: group.folder },
+      'Auto-created heartbeat for trigger-required group',
+    );
+  } else if (existingHeartbeat.prompt !== NON_MAIN_HEARTBEAT_PROMPT) {
+    // Prompt drift: a prior orchestrator version wrote a different
+    // string into the DB. Sync to the current canonical prompt so
+    // existing groups pick up workflow changes (e.g. the Phase-2
+    // LLM-reasoning layer in check-unanswered) without requiring a
+    // manual delete+recreate.
+    updateTask(heartbeatId, { prompt: NON_MAIN_HEARTBEAT_PROMPT });
+    logger.info(
+      { jid, folder: group.folder },
+      'Synced non-main heartbeat prompt to current workflow',
+    );
+  }
+}
+
+/**
+ * Startup migration: iterate every non-main, trigger-required group
+ * already in the DB and sync its heartbeat prompt. Handles the case
+ * where orchestrator code upgraded but the group hasn't re-registered
+ * via IPC — without this, `syncNonMainHeartbeat`'s drift check only
+ * fires on register_group events, which rarely happen after initial
+ * setup.
+ */
+function syncNonMainHeartbeatPrompts(): void {
+  for (const [jid, group] of Object.entries(registeredGroups)) {
+    if (group.requiresTrigger !== false && !group.isMain) {
+      syncNonMainHeartbeat(jid, group);
+    }
+  }
+}
+
 function registerGroup(jid: string, group: RegisteredGroup): void {
   let groupDir: string;
   try {
@@ -233,57 +319,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   // These groups have their own container and can only send to their own chat,
   // preventing cross-group message routing bugs from the main heartbeat.
   if (group.requiresTrigger !== false && !group.isMain) {
-    const heartbeatId = `heartbeat-${group.folder}`;
-    // The non-main heartbeat prompt delegates to the `check-unanswered`
-    // skill's two-phase workflow (SQL candidate filter + LLM reasoning
-    // over conversation context). Kept as a named constant so the
-    // create-and-migrate paths below use the same string — without
-    // that, adding phrasing here wouldn't propagate to heartbeat rows
-    // already in the DB.
-    const NON_MAIN_HEARTBEAT_PROMPT =
-      'Invoke the `check-unanswered` skill and follow its full workflow. The skill runs the deterministic script to find candidate orphans, then does LLM reasoning over the conversation-since context to decide per candidate whether the bot already addressed it inline (react with 👍) or it genuinely needs a threaded reply. Do NOT skip the reasoning step — blind react+reply duplicates answers whenever the bot answered conversationally without threading. Do NOT query the database directly outside the skill. Do NOT check email, calendar, or system health.';
-
-    const existingHeartbeat = getTaskById(heartbeatId);
-    if (!existingHeartbeat) {
-      // Pre-check gates the LLM, but it's only enabled for trusted
-      // non-main groups for now because it needs to persist a seen-set
-      // file and untrusted groups mount `/workspace/group` read-only.
-      // Keep the precheck disabled there until the tracked fix (#72)
-      // moves that state to a writable location.
-      const precheckScript = group.containerConfig?.trusted
-        ? 'python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py'
-        : undefined;
-      createTask({
-        id: heartbeatId,
-        group_folder: group.folder,
-        chat_jid: jid,
-        prompt: NON_MAIN_HEARTBEAT_PROMPT,
-        script: precheckScript,
-        schedule_type: 'cron',
-        schedule_value: '*/15 * * * *',
-        context_mode: 'group',
-        next_run: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-        status: 'active',
-        created_at: new Date().toISOString(),
-        created_by_role: 'owner',
-      });
-      logger.info(
-        { jid, folder: group.folder },
-        'Auto-created heartbeat for trigger-required group',
-      );
-    } else if (existingHeartbeat.prompt !== NON_MAIN_HEARTBEAT_PROMPT) {
-      // Prompt drift: a prior orchestrator version wrote a different
-      // string into the DB. Sync to the current canonical prompt so
-      // existing groups pick up workflow changes (e.g. the Phase-2
-      // LLM-reasoning layer in check-unanswered) without requiring a
-      // manual delete+recreate. Schedule/status fields are left
-      // untouched — only the prompt is managed here.
-      updateTask(heartbeatId, { prompt: NON_MAIN_HEARTBEAT_PROMPT });
-      logger.info(
-        { jid, folder: group.folder },
-        'Synced non-main heartbeat prompt to current workflow',
-      );
-    }
+    syncNonMainHeartbeat(jid, group);
   }
 
   // Auto-create the parallel-maintenance heartbeat for every main group.
@@ -1188,6 +1224,13 @@ async function main(): Promise<void> {
   startSessionCleanup();
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
+
+  // Prompt-drift migration for non-main heartbeats. Syncs any stored
+  // heartbeat task whose prompt differs from the current canonical
+  // NON_MAIN_HEARTBEAT_PROMPT — catches orchestrator code upgrades
+  // that change the prompt (e.g. when check-unanswered grew its
+  // Phase-2 LLM-reasoning workflow). Runs once per startup, idempotent.
+  syncNonMainHeartbeatPrompts();
 
   // Write available_groups.json for all main/trusted groups on startup.
   // Otherwise the snapshot only updates when a container spawns, which can
