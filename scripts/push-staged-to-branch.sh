@@ -96,6 +96,17 @@ if [ "$MODE" != "--rules-only" ]; then
 
     canonical="${skill_dir#tessl__}"
 
+    # Guard: a staging dir literally named `tessl__` would leave
+    # canonical empty, making later `dst="$TILE_REPO_DIR/skills/"` point
+    # at the skills-root directory — the subsequent `rm -rf $dst` would
+    # wipe every sibling skill on the branch, and the `cp -r "$src/." ..`
+    # would flatten the staged tree directly under skills/. Same
+    # defense applies to any future canonical that picks up a `/`.
+    if [ -z "$canonical" ] || [ "$canonical" != "${canonical#*/}" ]; then
+      echo "ERROR: refusing to operate on empty or path-bearing canonical '$canonical' (from staging dir '$skill_dir')" >&2
+      exit 2
+    fi
+
     # See matching comment in promote-to-tile-repo.sh — rc 1 is a policy
     # block, rc ≥ 2 is a read/grep error that must abort the whole push.
     validate_rc=0
@@ -130,7 +141,7 @@ if [ "$MODE" != "--rules-only" ]; then
     # old mkdir+cp approach only overwrote — `git add -A` would see
     # no deletion because the file still existed in the clone, leaving
     # stale artifacts on the PR branch that the fixup flow couldn't
-    # clean up.
+    # clean up. The canonical-name guard above makes the `rm -rf` safe.
     dst="$TILE_REPO_DIR/skills/$canonical"
     rm -rf "$dst"
     mkdir -p "$dst"

@@ -93,6 +93,17 @@ if [ "$MODE" != "--rules-only" ]; then
 
     canonical="${skill_dir#tessl__}"
 
+    # Guard: empty canonical (staging dir literally named `tessl__`) or
+    # any canonical containing a `/` would make `$TILE_REPO_DIR/skills/
+    # $canonical` point somewhere unexpected — either the skills-root
+    # directory (flat cp clobbers siblings) or an arbitrary subpath.
+    # Refuse. Mirrors the same guard in push-staged-to-branch.sh, where
+    # the downstream `rm -rf` makes this load-bearing for safety.
+    if [ -z "$canonical" ] || [ "$canonical" != "${canonical#*/}" ]; then
+      echo "ERROR: refusing to operate on empty or path-bearing canonical '$canonical' (from staging dir '$skill_dir')" >&2
+      exit 2
+    fi
+
     # Distinguish policy block (rc 1 → BLOCKED, continue) from hard failure
     # (rc ≥ 2 → grep read error, unreadable SKILL.md, etc. → abort). The
     # naive `if ! validate_placement ...` pattern collapses both into
