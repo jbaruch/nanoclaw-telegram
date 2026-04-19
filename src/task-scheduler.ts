@@ -15,6 +15,8 @@ import {
   getTaskById,
   logTaskRun,
   setSession,
+  storeChatMetadata,
+  storeMessage,
   updateTask,
   updateTaskAfterRun,
 } from './db.js';
@@ -240,6 +242,94 @@ async function runTask(
             .trim();
           if (cleanResult) {
             await deps.sendMessage(task.chat_jid, cleanResult);
+            // Store the bot send so `messages.db` reflects every send
+            // out of this session. Without this, scheduled-task sends
+            // (heartbeat, housekeeping, morning-brief, etc.) reach
+            // Telegram but leave no DB row — the "ghost heartbeat" /
+            // "no trace in messages.db" class of jbaruch/nanoclaw#81.
+            // The IPC-path `send_message` handler in src/ipc.ts writes
+            // the same shape; this mirrors it so heartbeat's answered-
+            // check accounting and forensic greps both see the row.
+            //
+            // Upsert chat metadata first so the `messages.chat_jid →
+            // chats.jid` FK doesn't reject the insert on a chat that
+            // has no prior metadata (task fires before any user
+            // message, or chat was manually registered without the
+            // normal group-sync write-through). Idempotent: existing
+            // rows keep their `name` because we pass `name` as
+            // undefined and `storeChatMetadata` omits `name` from the
+            // UPDATE in that branch (not COALESCE); `channel` and
+            // `is_group` are preserved via COALESCE when we pass
+            // undefined for them. `last_message_time` advances to the
+            // outgoing send's timestamp, same as the IPC path would
+            // effectively do by chaining a chat-metadata update.
+            //
+            // Pass inferred `channel` + `isGroup` so a NEW chat row
+            // (first-ever metadata write) has the right shape for
+            // `getAvailableGroups()`, which filters on `is_group`.
+            // Match the channel-name convention the codebase already
+            // uses everywhere else (`'telegram'`, `'whatsapp'`) — NOT
+            // the JID prefix abbreviation. JID shapes in this repo:
+            //   - `tg:<id>` — Telegram. Negative id = group/channel,
+            //     positive = private 1:1.
+            //   - `<id>@g.us` — WhatsApp group (no `wa:` prefix).
+            //   - `<id>@s.whatsapp.net` — WhatsApp DM.
+            // Matches the conventions `db.ts`'s legacy-chat backfill
+            // uses (`@g.us` → group, `@s.whatsapp.net` → DM).
+            // Anything else: leave both undefined so COALESCE in
+            // storeChatMetadata preserves existing values rather than
+            // writing NULL or an abbreviated channel string.
+            const sendTimestamp = new Date().toISOString();
+            let inferredChannel: string | undefined;
+            let inferredIsGroup: boolean | undefined;
+            if (task.chat_jid.startsWith('tg:')) {
+              inferredChannel = 'telegram';
+              inferredIsGroup = task.chat_jid.startsWith('tg:-');
+            } else if (task.chat_jid.endsWith('@g.us')) {
+              inferredChannel = 'whatsapp';
+              inferredIsGroup = true;
+            } else if (task.chat_jid.endsWith('@s.whatsapp.net')) {
+              inferredChannel = 'whatsapp';
+              inferredIsGroup = false;
+            }
+            // Wrap the DB writes so a SQLite error (FK constraint,
+            // disk full, schema mid-migration) never rejects the
+            // `onOutput` promise. The streaming output chain in
+            // `container-runner.ts` awaits this via `.then(...)` with
+            // no `.catch(...)`, so a throw here can wedge the run
+            // from ever resolving and stall the scheduler loop. The
+            // send already succeeded; a missing DB row is recoverable
+            // (at worst we'd get a duplicate in `unanswered` on the
+            // next cycle) — stalling the scheduler is not.
+            try {
+              storeChatMetadata(
+                task.chat_jid,
+                sendTimestamp,
+                undefined,
+                inferredChannel,
+                inferredIsGroup,
+              );
+              storeMessage({
+                id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                chat_jid: task.chat_jid,
+                sender: ASSISTANT_NAME,
+                sender_name: ASSISTANT_NAME,
+                content: cleanResult,
+                timestamp: sendTimestamp,
+                is_from_me: true,
+                is_bot_message: true,
+              });
+            } catch (dbErr) {
+              logger.error(
+                {
+                  taskId: task.id,
+                  chatJid: task.chat_jid,
+                  err: dbErr,
+                  preview: cleanResult.slice(0, 200),
+                },
+                '[task-scheduler] storeChatMetadata/storeMessage failed after send — continuing, send already landed in Telegram',
+              );
+            }
           }
           // Don't close here — agent may still be polling for host script results.
           // Close only on final 'success' status below.

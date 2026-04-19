@@ -43,20 +43,71 @@ async function sendTelegramMessage(
   // `[text](url)` despite being told to use HTML. Well-formed HTML passes
   // through unchanged; URLs/emails/existing tags are protected.
   const sanitized = sanitizeTelegramHtml(text);
+  const rawChanged = sanitized !== text;
+  logger.debug(
+    {
+      chatId,
+      rawLen: text.length,
+      rawPreview: text.slice(0, 80),
+      sanitizedLen: sanitized.length,
+      sanitizedPreview: sanitized.slice(0, 80),
+      rawChanged,
+      hasReplyTo: Boolean(options.reply_parameters?.message_id),
+    },
+    '[send] sendTelegramMessage entered',
+  );
   try {
     const msg = await api.sendMessage(chatId, sanitized, {
       ...options,
       parse_mode: 'HTML',
     });
+    logger.debug(
+      { chatId, messageId: msg.message_id, sanitizedLen: sanitized.length },
+      '[send] HTML send OK',
+    );
     return msg.message_id;
   } catch (err) {
     // Fallback: HTML parsing failed — send the ORIGINAL text without
     // parse_mode. Sending `sanitized` here would render raw `<b>…</b>`
     // tags literally to the user, which is strictly worse than the raw
     // Markdown the agent produced.
-    logger.debug({ err }, 'HTML send failed, falling back to plain text');
-    const msg = await api.sendMessage(chatId, text, options);
-    return msg.message_id;
+    //
+    // Logged at WARN (not debug) so production info-level logs capture
+    // this: when the fallback fires the user sees raw Markdown, which is
+    // a user-visible symptom we want visible without flipping log level.
+    // `rawPreview` identifies the actual text delivered to Telegram.
+    logger.warn(
+      {
+        err,
+        chatId,
+        rawLen: text.length,
+        rawPreview: text.slice(0, 200),
+        sanitizedPreview: sanitized.slice(0, 200),
+      },
+      '[send] HTML send failed, falling back to plain text (user will see raw Markdown)',
+    );
+    try {
+      const msg = await api.sendMessage(chatId, text, options);
+      logger.warn(
+        { chatId, messageId: msg.message_id },
+        '[send] Plain-text fallback OK — DB row will still be written by the caller',
+      );
+      return msg.message_id;
+    } catch (fallbackErr) {
+      // BOTH sends failed. The message may or may not have reached
+      // Telegram (depending on where the second failure occurred). Log
+      // loudly and re-throw so the caller's try/catch can decide.
+      logger.error(
+        {
+          err: fallbackErr,
+          chatId,
+          rawPreview: text.slice(0, 200),
+          originalHtmlErr: err,
+        },
+        '[send] Both HTML and plain-text sends failed — message may be lost',
+      );
+      throw fallbackErr;
+    }
   }
 }
 
@@ -400,8 +451,23 @@ export async function sendPoolMessage(
   sender: string,
   groupFolder: string,
 ): Promise<void> {
+  logger.debug(
+    {
+      chatId,
+      sender,
+      groupFolder,
+      textLen: text.length,
+      preview: text.slice(0, 80),
+      poolSize: poolApis.length,
+    },
+    '[send] sendPoolMessage entered',
+  );
   if (poolApis.length === 0) {
     // No pool bots — fall back to main bot sendMessage via channel
+    logger.warn(
+      { chatId, sender, groupFolder },
+      '[send] sendPoolMessage called with empty pool — returning (message NOT sent)',
+    );
     return;
   }
 
@@ -431,8 +497,16 @@ export async function sendPoolMessage(
   try {
     const numericId = chatId.replace(/^tg:/, '');
     const chunks = splitMessage(text);
-    for (const chunk of chunks) {
-      await sendTelegramMessage(api, numericId, chunk);
+    logger.debug(
+      { chatId, sender, poolIndex: idx, chunkCount: chunks.length },
+      '[send] sendPoolMessage: sending chunks',
+    );
+    for (let i = 0; i < chunks.length; i++) {
+      await sendTelegramMessage(api, numericId, chunks[i]);
+      logger.debug(
+        { chatId, sender, poolIndex: idx, chunkIndex: i },
+        '[send] sendPoolMessage: chunk sent',
+      );
     }
     logger.info(
       {
@@ -445,7 +519,21 @@ export async function sendPoolMessage(
       'Pool message sent',
     );
   } catch (err) {
-    logger.error({ chatId, sender, err }, 'Failed to send pool message');
+    // Swallowed — caller won't know. Log at ERROR so at least the
+    // operator sees it. The message MAY have reached Telegram before
+    // the failure (e.g. fallback succeeded but Grammy threw post-send);
+    // if no DB row lands, correlate this error with what appears in the
+    // chat.
+    logger.error(
+      {
+        chatId,
+        sender,
+        poolIndex: idx,
+        err,
+        preview: text.slice(0, 200),
+      },
+      '[send] Failed to send pool message — caller will still call storeMessage, but the send may have partially landed in Telegram',
+    );
   }
 }
 
@@ -898,6 +986,15 @@ export class TelegramChannel implements Channel {
     text: string,
     replyToMessageId?: string,
   ): Promise<string | void> {
+    logger.debug(
+      {
+        jid,
+        textLen: text.length,
+        preview: text.slice(0, 80),
+        replyToMessageId,
+      },
+      '[send] TelegramChannel.sendMessage entered',
+    );
     if (!this.bot) {
       logger.warn('Telegram bot not initialized');
       return;
@@ -918,6 +1015,10 @@ export class TelegramChannel implements Channel {
 
       // Split respecting content boundaries (code blocks, paragraphs, etc.)
       const chunks = splitMessage(text);
+      logger.debug(
+        { jid, chunkCount: chunks.length },
+        '[send] TelegramChannel.sendMessage: sending chunks',
+      );
       let lastMsgId: number | undefined;
       for (let i = 0; i < chunks.length; i++) {
         const chunkOptions = i === 0 ? options : {};
@@ -929,12 +1030,29 @@ export class TelegramChannel implements Channel {
         );
       }
       logger.info(
-        { jid, length: text.length, replyToMessageId, chunks: chunks.length },
+        {
+          jid,
+          length: text.length,
+          replyToMessageId,
+          chunks: chunks.length,
+          lastMsgId,
+        },
         'Telegram message sent',
       );
       return lastMsgId?.toString();
     } catch (err) {
-      logger.error({ jid, err }, 'Failed to send Telegram message');
+      // Err here only if sendTelegramMessage's fallback catch re-threw
+      // (i.e. both HTML and plain-text sends failed). Return undefined
+      // so the caller's `if (sentMsgId)` guards skip the post-send
+      // work. The message did NOT reach Telegram in this path.
+      logger.error(
+        {
+          jid,
+          err,
+          preview: text.slice(0, 200),
+        },
+        '[send] Failed to send Telegram message — returning undefined (message NOT delivered)',
+      );
     }
   }
 
