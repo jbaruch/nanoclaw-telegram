@@ -178,7 +178,7 @@ function saveState(): void {
 // (syncNonMainHeartbeatPrompts) reference the same string — otherwise
 // drift between them defeats the whole point of migrating.
 const NON_MAIN_HEARTBEAT_PROMPT =
-  'Invoke the `check-unanswered` skill and follow its full workflow. The skill runs the deterministic script to find candidate orphans, then does LLM reasoning over the conversation-since context to decide per candidate whether the bot already addressed it inline (react with 👍) or it genuinely needs a threaded reply. Do NOT skip the reasoning step — blind react+reply duplicates answers whenever the bot answered conversationally without threading. Do NOT query the database directly outside the skill. Do NOT check email, calendar, or system health.';
+  'MANDATORY FIRST ACTION: Call Skill(skill: "tessl__check-unanswered") BEFORE doing anything else. Follow the skill\'s full two-phase workflow: the deterministic script finds candidate orphans, then LLM reasoning over the conversation-since context decides per candidate whether the bot already addressed it inline (react with 👍) or it genuinely needs a threaded reply. Do NOT skip the reasoning step — blind react+reply duplicates answers whenever the bot answered conversationally without threading. Do NOT query the database directly outside the skill. Do NOT check email, calendar, or system health.';
 
 /**
  * Ensure a non-main, trigger-required group has the correct heartbeat
@@ -194,10 +194,7 @@ const NON_MAIN_HEARTBEAT_PROMPT =
  *     registered groups loaded from the DB, since startup doesn't
  *     re-call `registerGroup` for them).
  */
-function syncNonMainHeartbeat(
-  jid: string,
-  group: RegisteredGroup,
-): void {
+function syncNonMainHeartbeat(jid: string, group: RegisteredGroup): void {
   const heartbeatId = `heartbeat-${group.folder}`;
   const existingHeartbeat = getTaskById(heartbeatId);
   if (!existingHeartbeat) {
@@ -1097,6 +1094,14 @@ async function main(): Promise<void> {
     await initBotPool(TELEGRAM_BOT_POOL);
   }
 
+  // Prompt-drift migration MUST run before the scheduler starts.
+  // `startSchedulerLoop` below kicks off its first `loop()` immediately,
+  // and if any non-main heartbeat has `next_run <= now` from orchestrator
+  // downtime, it'll dispatch with the OLD prompt before the migration
+  // gets a chance to rewrite it. Running the sync first makes the first
+  // post-deploy heartbeat use the current canonical prompt.
+  syncNonMainHeartbeatPrompts();
+
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
@@ -1224,13 +1229,6 @@ async function main(): Promise<void> {
   startSessionCleanup();
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
-
-  // Prompt-drift migration for non-main heartbeats. Syncs any stored
-  // heartbeat task whose prompt differs from the current canonical
-  // NON_MAIN_HEARTBEAT_PROMPT — catches orchestrator code upgrades
-  // that change the prompt (e.g. when check-unanswered grew its
-  // Phase-2 LLM-reasoning workflow). Runs once per startup, idempotent.
-  syncNonMainHeartbeatPrompts();
 
   // Write available_groups.json for all main/trusted groups on startup.
   // Otherwise the snapshot only updates when a container spawns, which can
