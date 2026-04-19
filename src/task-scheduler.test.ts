@@ -20,6 +20,7 @@ vi.mock('./container-runner.js', () => ({
 import {
   _initTestDatabase,
   createTask,
+  getAllChats,
   getLastBotMessageTimestamp,
   getSession,
   getTaskById,
@@ -375,7 +376,9 @@ describe('task scheduler', () => {
     };
     const chatJid = 'fresh-no-metadata@g.us';
     // NOTE: NOT calling storeChatMetadata here. The task-scheduler fix
-    // must handle the missing-chats-row case on its own.
+    // must handle the missing-chats-row case on its own AND must write
+    // a correctly-shaped chats row (channel='whatsapp', is_group=true
+    // for `@g.us` JIDs) so the chat shows up in `getAvailableGroups()`.
 
     createTask({
       id: 'fresh-chat-task',
@@ -427,6 +430,95 @@ describe('task scheduler', () => {
     // storeChatMetadata upsert gets dropped, storeMessage will throw
     // FOREIGN KEY constraint failed and this assertion fails.
     expect(getLastBotMessageTimestamp(chatJid, 'bot')).toBeTruthy();
+
+    // And the chats row itself has the right shape — a `@g.us` JID
+    // infers `channel: 'whatsapp'`, `is_group: true`, so the chat
+    // appears in `getAvailableGroups()` (which filters on
+    // `c.is_group`). Missing/NULL here would hide the group from
+    // every downstream consumer — the exact behavior Copilot
+    // flagged on #83 round 3.
+    const chat = getAllChats().find((c) => c.jid === chatJid);
+    expect(chat).toBeTruthy();
+    expect(chat!.channel).toBe('whatsapp');
+    expect(chat!.is_group).toBe(1);
+  });
+
+  it('streamed scheduled-task to a Telegram group upserts chats as telegram+group', async () => {
+    // Mirror of the `@g.us` test for the Telegram path: negative id
+    // after `tg:` indicates a group/channel, positive indicates a
+    // private 1:1 — both should infer `channel: 'telegram'`, and
+    // only the negative-id case should set `is_group: true`. Guards
+    // against channel-prefix abbreviations (`'tg'`) ever landing in
+    // the DB.
+    const GROUP_REG = {
+      name: 'TG Group',
+      folder: 'tgg',
+      trigger: 'always',
+      added_at: '2026-01-01T00:00:00.000Z',
+      isMain: true,
+    };
+    const groupJid = 'tg:-1003000000001';
+    const dmJid = 'tg:42';
+
+    for (const [jid, taskId] of [
+      [groupJid, 'tg-group-task'],
+      [dmJid, 'tg-dm-task'],
+    ]) {
+      createTask({
+        id: taskId,
+        group_folder: 'tgg',
+        chat_jid: jid,
+        prompt: 'run',
+        schedule_type: 'once',
+        schedule_value: '2026-01-01T00:00:00.000Z',
+        context_mode: 'group',
+        next_run: new Date(Date.now() - 1000).toISOString(),
+        status: 'active',
+        created_at: '2026-01-01T00:00:00.000Z',
+        created_by_role: 'owner' as const,
+      });
+    }
+
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result: 'ok',
+        } as ContainerOutput);
+        return { status: 'success', result: 'ok' };
+      },
+    );
+
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+
+    startSchedulerLoop({
+      registeredGroups: () => ({ [groupJid]: GROUP_REG, [dmJid]: GROUP_REG }),
+      getSessions: () => ({}),
+      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    const group = getAllChats().find((c) => c.jid === groupJid);
+    expect(group).toBeTruthy();
+    expect(group!.channel).toBe('telegram');
+    expect(group!.is_group).toBe(1);
+
+    const dm = getAllChats().find((c) => c.jid === dmJid);
+    expect(dm).toBeTruthy();
+    expect(dm!.channel).toBe('telegram');
+    expect(dm!.is_group).toBe(0);
   });
 
   it('streamed scheduled-task with all-internal result does NOT write a bot row', async () => {

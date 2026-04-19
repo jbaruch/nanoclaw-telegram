@@ -264,20 +264,25 @@ async function runTask(
             // Pass inferred `channel` + `isGroup` so a NEW chat row
             // (first-ever metadata write) has the right shape for
             // `getAvailableGroups()`, which filters on `is_group`.
-            // JID format is `<channel>:<native_id>` by project
-            // convention (e.g. `tg:-100...`, `wa:...@g.us`); negative
-            // native IDs on Telegram indicate groups. For channels we
-            // don't recognise or JIDs that don't match the pattern,
-            // leave the fields undefined so COALESCE preserves
-            // existing values instead of writing NULL over them.
+            // Match the channel-name convention the codebase already
+            // uses everywhere else (`'telegram'`, `'whatsapp'`) — NOT
+            // the JID prefix abbreviation. JID shapes in this repo:
+            //   - `tg:<id>` — Telegram. Negative id = group/channel,
+            //     positive = private 1:1.
+            //   - `<id>@g.us` — WhatsApp group (no `wa:` prefix).
+            // Anything else: leave both undefined so COALESCE in
+            // storeChatMetadata preserves existing values rather than
+            // writing NULL or an abbreviated channel string.
             const sendTimestamp = new Date().toISOString();
-            const jidMatch = task.chat_jid.match(/^([a-z]+):(.+)$/);
-            const inferredChannel = jidMatch ? jidMatch[1] : undefined;
-            const inferredIsGroup = jidMatch
-              ? jidMatch[1] === 'tg'
-                ? jidMatch[2].startsWith('-')
-                : jidMatch[2].endsWith('@g.us')
-              : undefined;
+            let inferredChannel: string | undefined;
+            let inferredIsGroup: boolean | undefined;
+            if (task.chat_jid.startsWith('tg:')) {
+              inferredChannel = 'telegram';
+              inferredIsGroup = task.chat_jid.startsWith('tg:-');
+            } else if (task.chat_jid.endsWith('@g.us')) {
+              inferredChannel = 'whatsapp';
+              inferredIsGroup = true;
+            }
             storeChatMetadata(
               task.chat_jid,
               sendTimestamp,
