@@ -265,16 +265,33 @@ function syncNonMainHeartbeat(jid: string, group: RegisteredGroup): void {
 
 /**
  * Startup migration: iterate every non-main, trigger-required group
- * already in the DB and sync its heartbeat prompt. Handles the case
- * where orchestrator code upgraded but the group hasn't re-registered
- * via IPC — without this, `syncNonMainHeartbeat`'s drift check only
- * fires on register_group events, which rarely happen after initial
- * setup.
+ * already in the DB and migrate its heartbeat prompt IF one exists.
+ * Does NOT create missing heartbeats — that's intentional. An operator
+ * who manually deleted a heartbeat task (to disable automatic checks
+ * for a group) would be thwarted every orchestrator restart if startup
+ * recreated it. Creation stays bound to the register-group IPC flow,
+ * which only fires when a group explicitly joins/re-registers.
+ *
+ * Handles the case where orchestrator code upgraded but the group
+ * hasn't re-registered via IPC — without this, `syncNonMainHeartbeat`'s
+ * drift check only fires on register_group events, which rarely happen
+ * after initial setup.
  */
 function syncNonMainHeartbeatPrompts(): void {
-  for (const [jid, group] of Object.entries(registeredGroups)) {
-    if (group.requiresTrigger !== false && !group.isMain) {
-      syncNonMainHeartbeat(jid, group);
+  for (const [, group] of Object.entries(registeredGroups)) {
+    if (group.requiresTrigger === false || group.isMain) continue;
+    const heartbeatId = `heartbeat-${group.folder}`;
+    const existingHeartbeat = getTaskById(heartbeatId);
+    if (!existingHeartbeat) continue; // don't recreate deleted heartbeats
+    if (
+      existingHeartbeat.prompt !== NON_MAIN_HEARTBEAT_PROMPT &&
+      LEGACY_NON_MAIN_HEARTBEAT_PROMPTS.has(existingHeartbeat.prompt)
+    ) {
+      updateTask(heartbeatId, { prompt: NON_MAIN_HEARTBEAT_PROMPT });
+      logger.info(
+        { folder: group.folder },
+        'Migrated legacy non-main heartbeat prompt to current workflow',
+      );
     }
   }
 }
