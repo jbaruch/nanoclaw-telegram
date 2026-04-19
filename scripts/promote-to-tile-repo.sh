@@ -269,18 +269,37 @@ GH_TOKEN="$TOKEN" gh pr create \
 # we'd silently skip the Copilot summon. Querying by head ref via gh's
 # own --jq is stable and needs no external parser (no jq binary in the
 # orchestrator image).
-PR_URL=$(GH_TOKEN="$TOKEN" gh pr list \
-  --repo "$TILE_OWNER/$TILE_NAME" \
-  --head "$BRANCH" \
-  --state open \
-  --json url \
-  --jq '.[0].url')
+#
+# Retry for GitHub's eventual consistency between `gh pr create`
+# completing and `gh pr list --head` reflecting it — usually instant,
+# but we've observed ~5s lags. jq's `// ""` turns an empty array into
+# an empty string, so the `-z` check is a single condition.
+PR_URL=""
+for _ in 1 2 3 4 5; do
+  PR_URL=$(GH_TOKEN="$TOKEN" gh pr list \
+    --repo "$TILE_OWNER/$TILE_NAME" \
+    --head "$BRANCH" \
+    --state open \
+    --json url \
+    --jq '.[0].url // ""')
+  [ -n "$PR_URL" ] && break
+  sleep 2
+done
+if [ -z "$PR_URL" ]; then
+  echo "ERROR: branch $BRANCH was pushed but no matching open PR is visible on $TILE_OWNER/$TILE_NAME after 5 retries." >&2
+  echo "Check https://github.com/$TILE_OWNER/$TILE_NAME/pulls and open/summon manually." >&2
+  exit 1
+fi
 PR_NUMBER=$(GH_TOKEN="$TOKEN" gh pr list \
   --repo "$TILE_OWNER/$TILE_NAME" \
   --head "$BRANCH" \
   --state open \
   --json number \
-  --jq '.[0].number')
+  --jq '.[0].number // ""')
+if [ -z "$PR_NUMBER" ]; then
+  echo "ERROR: PR URL $PR_URL found but PR number lookup returned empty — giving up on Copilot summon." >&2
+  exit 1
+fi
 
 echo "PR opened: $PR_URL"
 

@@ -194,7 +194,15 @@ summon_copilot() {
     }
   }' -f owner="$owner" -f name="$repo" -F number="$pr_number" --jq .data.repository.pullRequest.id) \
     || return 1
-  [ -n "$pr_node_id" ] || return 1
+  # `gh api ... --jq` prints the literal string "null" (not empty) when
+  # the field is missing — happens if the PR lookup succeeded but
+  # returned no data (e.g. a race where the PR was deleted between
+  # create and lookup). Treat "null" as failure, not as a valid node
+  # ID; passing it to the mutation would error out with a confusing
+  # "ID_INVALID" instead of our clear "could not summon" warning.
+  if [ -z "$pr_node_id" ] || [ "$pr_node_id" = "null" ]; then
+    return 1
+  fi
   gh api graphql -f query='
   mutation($prId: ID!, $botIds: [ID!]!) {
     requestReviews(input: { pullRequestId: $prId, botIds: $botIds, union: true }) {

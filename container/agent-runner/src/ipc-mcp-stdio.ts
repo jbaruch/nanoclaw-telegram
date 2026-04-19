@@ -1202,45 +1202,20 @@ server.tool(
       };
     }
 
-    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const data = {
-      type: 'promote_staging',
-      groupFolder,
-      tileName: args.tileName,
-      skillName: args.skillName || 'all',
-      requestId,
-      timestamp: new Date().toISOString(),
-    };
-
-    writeIpcFile(TASKS_DIR, data);
-
-    // Poll for result (promotion can take a while — tessl publish, git push)
-    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
-    const timeoutMs = 300_000;
-    const pollMs = 1000;
-    const start = Date.now();
-
-    while (Date.now() - start < timeoutMs) {
-      if (fs.existsSync(resultPath)) {
-        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
-        fs.unlinkSync(resultPath);
-        if (result.error) {
-          return {
-            content: [{ type: 'text' as const, text: `Promotion failed: ${result.error}` }],
-            isError: true,
-          };
-        }
-        return {
-          content: [{ type: 'text' as const, text: result.stdout || 'Promotion complete.' }],
-        };
-      }
-      await new Promise(r => setTimeout(r, pollMs));
-    }
-
-    return {
-      content: [{ type: 'text' as const, text: 'Promotion timed out after 5 minutes.' }],
-      isError: true,
-    };
+    // 15 minutes matches the host-side execFile cap in src/ipc.ts. The
+    // previous hand-rolled 5-minute poll would time out and report
+    // failure while the host script was still running (observed on
+    // bulk promotes with 10+ skills hitting the tessl review loop at
+    // ~1 min/skill). Delegate poll plumbing to runHostOperation so
+    // this tool inherits future tweaks to result-file handling etc.
+    return runHostOperation(
+      'promote_staging',
+      {
+        tileName: args.tileName,
+        skillName: args.skillName || 'all',
+      },
+      900_000,
+    );
   },
 );
 
