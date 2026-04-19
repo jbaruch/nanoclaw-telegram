@@ -1285,51 +1285,22 @@ skillName options:
       };
     }
 
-    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const data = {
-      type: 'push_staged_to_branch',
-      groupFolder,
-      tileName: args.tileName,
-      branch: args.branch,
-      commitMessage: args.commitMessage,
-      skillName: args.skillName || 'all',
-      requestId,
-      timestamp: new Date().toISOString(),
-    };
-
-    writeIpcFile(TASKS_DIR, data);
-
-    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
-    const timeoutMs = 300_000;
-    const pollMs = 1000;
-    const start = Date.now();
-
-    while (Date.now() - start < timeoutMs) {
-      if (fs.existsSync(resultPath)) {
-        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
-        fs.unlinkSync(resultPath);
-        if (result.error) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `push_staged_to_branch failed: ${result.error}\n${result.stderr || ''}`,
-              },
-            ],
-            isError: true,
-          };
-        }
-        return {
-          content: [{ type: 'text' as const, text: result.stdout || 'Fixup pushed.' }],
-        };
-      }
-      await new Promise((r) => setTimeout(r, pollMs));
-    }
-
-    return {
-      content: [{ type: 'text' as const, text: 'push_staged_to_branch timed out after 5 minutes.' }],
-      isError: true,
-    };
+    // Reuse runHostOperation for the write-IPC + poll-for-result
+    // plumbing. Keeps timeout/poll cadence/result-file cleanup
+    // consistent across all host-operation MCP tools (sync_tripit,
+    // tessl_update, push_staged_to_branch, etc.), so a future change
+    // to (say) how result files are formatted doesn't require
+    // updating each tool's poll loop.
+    return runHostOperation(
+      'push_staged_to_branch',
+      {
+        tileName: args.tileName,
+        branch: args.branch,
+        commitMessage: args.commitMessage,
+        skillName: args.skillName || 'all',
+      },
+      300_000,
+    );
   },
 );
 

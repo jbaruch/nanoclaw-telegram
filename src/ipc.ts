@@ -92,6 +92,22 @@ const KNOWN_SESSION_NAMES: ReadonlySet<string> = new Set([
 ]);
 const VALID_REQUEST_ID_RE = /^[A-Za-z0-9_-]+$/;
 
+// Host-side allowlist for the five tile-repo names the promote flow is
+// wired against. The MCP tool's zod schema already restricts callers to
+// three of these, but the IPC handler is reachable by any payload
+// dropped into the tasks dir — a compromised container could send
+// `{tileName: "../../etc"}` and escape GROUPS_DIR via `path.join` or
+// point the bash scripts at an attacker-controlled git URL. Keeping
+// the allowlist here (and not trusting the zod schema) defends the
+// security boundary at the actual trust boundary.
+const KNOWN_TILE_NAMES: ReadonlySet<string> = new Set([
+  'nanoclaw-admin',
+  'nanoclaw-core',
+  'nanoclaw-untrusted',
+  'nanoclaw-trusted',
+  'nanoclaw-host',
+]);
+
 /**
  * Compute the host path where an IPC response file should land.
  *
@@ -1427,6 +1443,20 @@ export async function processTaskIpc(
 
         const promoteResultPath = scriptResultPath(sourceGroup, data);
 
+        if (!KNOWN_TILE_NAMES.has(data.tileName)) {
+          logger.warn(
+            { sourceGroup, tileName: data.tileName },
+            'promote_staging rejected: tileName not in allowlist',
+          );
+          fs.writeFileSync(
+            promoteResultPath,
+            JSON.stringify({
+              error: `Invalid tileName "${data.tileName}". Allowed: ${[...KNOWN_TILE_NAMES].join(', ')}.`,
+            }),
+          );
+          break;
+        }
+
         const promoteScript = path.join(
           process.cwd(),
           'scripts',
@@ -1628,6 +1658,20 @@ export async function processTaskIpc(
             pushResultPath,
             JSON.stringify({
               error: 'Only the main group can push to tile branches.',
+            }),
+          );
+          break;
+        }
+
+        if (!KNOWN_TILE_NAMES.has(data.tileName)) {
+          logger.warn(
+            { sourceGroup, tileName: data.tileName },
+            'push_staged_to_branch rejected: tileName not in allowlist',
+          );
+          fs.writeFileSync(
+            pushResultPath,
+            JSON.stringify({
+              error: `Invalid tileName "${data.tileName}". Allowed: ${[...KNOWN_TILE_NAMES].join(', ')}.`,
             }),
           );
           break;
