@@ -341,7 +341,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     // Mirrors the message-payload stripping below. If the
                     // caption is fully internal, send the file with no
                     // caption; the file itself is still useful payload.
-                    const rawCleanCaption = data.caption
+                    const strippedCaption = data.caption
                       ? stripInternalTags(data.caption)
                       : '';
                     // Tag maintenance-session captions so Baruch can
@@ -349,8 +349,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     // Skip the prefix entirely when the caption is
                     // empty — `[M] ` alone on a silent file-send is
                     // noise.
-                    const cleanCaption = rawCleanCaption
-                      ? applyMaintenancePrefix(rawCleanCaption, data.sessionName)
+                    const cleanCaption = strippedCaption
+                      ? applyMaintenancePrefix(
+                          strippedCaption,
+                          data.sessionName,
+                        )
                       : '';
                     await deps.sendFile(
                       data.chatJid,
@@ -392,10 +395,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   }
                 }
               } else if (data.type === 'message' && data.chatJid && data.text) {
-                // Strip <internal> tags — if nothing remains, skip silently
-                const strippedText = data.text
-                  .replace(/<internal>[\s\S]*?<\/internal>/g, '')
-                  .trim();
+                // Strip <internal> tags — if nothing remains, skip silently.
+                // Use the shared `stripInternalTags` helper so this path
+                // can't drift from the send_file caption path above.
+                const strippedText = stripInternalTags(data.text);
                 if (!strippedText) {
                   logger.debug(
                     { sourceGroup },

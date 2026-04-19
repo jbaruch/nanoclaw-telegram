@@ -43,9 +43,10 @@ function writeIpcFile(dir: string, data: object): string {
   //     maintenance-session (scheduled-task) messages so the human
   //     knows which AyeAye persona is talking — e.g. prefixing the
   //     rendered text with `[M]` for maintenance. The `messages/`
-  //     bind mount is SHARED across sessions within a group
-  //     (container-runner.ts:1019), so the payload is the only place
-  //     the session info can survive the IPC hop.
+  //     bind mount is shared across sessions within a group (see the
+  //     mount setup in the orchestrator's container-runner), so the
+  //     payload is the only place the session info can survive the
+  //     IPC hop.
   //
   // Spread order: `sessionName` goes AFTER `...data` so the env-derived
   // value always wins over any caller-provided field. Without this, a
