@@ -828,9 +828,11 @@ describe('register_group success', () => {
 // message content — if someone accidentally drops the `!isMain` guard,
 // we want vitest to fail, not a runtime CVE.
 //
-// We run these with a real filesystem write into `DATA_DIR/ipc/...`
+// We run these with a real filesystem write into `TEST_DATA_DIR/ipc/...`
+// (the mocked DATA_DIR — see `vi.mock('./config.js', ...)` above)
 // because the handler uses `fs.writeFileSync` directly (no mockable
-// seam). `afterEach` cleans up the resulting files.
+// seam). `afterEach` cleans up the resulting files; `afterAll` wipes
+// the whole tempdir as a backstop if a test crashed mid-run.
 
 const UNAUTH_GROUP = 'other-group';
 const unauthInputDir = path.join(

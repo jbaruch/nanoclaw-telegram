@@ -96,16 +96,22 @@ if [ "$MODE" != "--rules-only" ]; then
 
     canonical="${skill_dir#tessl__}"
 
-    # Guard: a staging dir literally named `tessl__` would leave
-    # canonical empty, making later `dst="$TILE_REPO_DIR/skills/"` point
-    # at the skills-root directory — the subsequent `rm -rf $dst` would
-    # wipe every sibling skill on the branch, and the `cp -r "$src/." ..`
-    # would flatten the staged tree directly under skills/. Same
-    # defense applies to any future canonical that picks up a `/`.
-    if [ -z "$canonical" ] || [ "$canonical" != "${canonical#*/}" ]; then
-      echo "ERROR: refusing to operate on empty or path-bearing canonical '$canonical' (from staging dir '$skill_dir')" >&2
-      exit 2
-    fi
+    # Guard: canonical ends up interpolated into `$TILE_REPO_DIR/skills/
+    # $canonical` and fed to `rm -rf` below, so any value that resolves
+    # somewhere other than a sibling skill dir is a footgun:
+    #   - `""`   → `.../skills/` (wipes every skill)
+    #   - `.`    → `.../skills/.` (same)
+    #   - `..`   → `.../skills/..` = `$TILE_REPO_DIR` (wipes the clone)
+    #   - `a/b`  → escapes the skills/ subtree entirely
+    #   - leading `-` → argv confusion with flags
+    # Case-match restricts canonical to `[A-Za-z0-9][A-Za-z0-9_-]*` —
+    # same character set tessl tile/skill names actually use.
+    case "$canonical" in
+      ''|'.'|'..'|*/*|*[!A-Za-z0-9_-]*|[!A-Za-z0-9]*)
+        echo "ERROR: refusing to operate on unsafe canonical '$canonical' (from staging dir '$skill_dir'). Expected [A-Za-z0-9][A-Za-z0-9_-]*." >&2
+        exit 2
+        ;;
+    esac
 
     # See matching comment in promote-to-tile-repo.sh — rc 1 is a policy
     # block, rc ≥ 2 is a read/grep error that must abort the whole push.

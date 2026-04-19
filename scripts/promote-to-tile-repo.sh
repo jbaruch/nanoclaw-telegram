@@ -93,16 +93,19 @@ if [ "$MODE" != "--rules-only" ]; then
 
     canonical="${skill_dir#tessl__}"
 
-    # Guard: empty canonical (staging dir literally named `tessl__`) or
-    # any canonical containing a `/` would make `$TILE_REPO_DIR/skills/
-    # $canonical` point somewhere unexpected — either the skills-root
-    # directory (flat cp clobbers siblings) or an arbitrary subpath.
-    # Refuse. Mirrors the same guard in push-staged-to-branch.sh, where
-    # the downstream `rm -rf` makes this load-bearing for safety.
-    if [ -z "$canonical" ] || [ "$canonical" != "${canonical#*/}" ]; then
-      echo "ERROR: refusing to operate on empty or path-bearing canonical '$canonical' (from staging dir '$skill_dir')" >&2
-      exit 2
-    fi
+    # Guard (mirrors push-staged-to-branch.sh): restrict canonical to
+    # `[A-Za-z0-9][A-Za-z0-9_-]*` — same character set tessl tile/skill
+    # names actually use. Rejects empty (flat cp clobbers siblings),
+    # `.`/`..` (escape out of skills/), `/` (arbitrary subpath), and
+    # leading `-` (argv confusion with flags). The push script's `rm
+    # -rf` makes this load-bearing; the promote script's `cp` has the
+    # same footgun without a delete so we reject up front in both.
+    case "$canonical" in
+      ''|'.'|'..'|*/*|*[!A-Za-z0-9_-]*|[!A-Za-z0-9]*)
+        echo "ERROR: refusing to operate on unsafe canonical '$canonical' (from staging dir '$skill_dir'). Expected [A-Za-z0-9][A-Za-z0-9_-]*." >&2
+        exit 2
+        ;;
+    esac
 
     # Distinguish policy block (rc 1 → BLOCKED, continue) from hard failure
     # (rc ≥ 2 → grep read error, unreadable SKILL.md, etc. → abort). The
