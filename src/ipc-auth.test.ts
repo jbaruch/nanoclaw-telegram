@@ -1,6 +1,14 @@
 import fs from 'fs';
 
-import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  afterAll,
+  vi,
+} from 'vitest';
 
 // Isolate filesystem writes to a per-process tempdir so running this test
 // file doesn't leave artifacts in the developer's real `data/` tree (or
