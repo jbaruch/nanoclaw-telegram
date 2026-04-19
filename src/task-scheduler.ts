@@ -256,8 +256,11 @@ async function runTask(
             // has no prior metadata (task fires before any user
             // message, or chat was manually registered without the
             // normal group-sync write-through). Idempotent: existing
-            // rows keep their name and channel via COALESCE in
-            // storeChatMetadata; `last_message_time` advances to the
+            // rows keep their `name` because we pass `name` as
+            // undefined and `storeChatMetadata` omits `name` from the
+            // UPDATE in that branch (not COALESCE); `channel` and
+            // `is_group` are preserved via COALESCE when we pass
+            // undefined for them. `last_message_time` advances to the
             // outgoing send's timestamp, same as the IPC path would
             // effectively do by chaining a chat-metadata update.
             //
