@@ -378,15 +378,23 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
+                  // Capture whichever send path's message ID applies. Both
+                  // `sendPoolMessage` and `deps.sendMessage` now return the
+                  // Telegram-native message ID (or undefined if the send
+                  // failed or the channel isn't Telegram). Stored on the
+                  // messages row so "which bot send produced Telegram ID X"
+                  // is queryable without log spelunking — previously bot
+                  // rows only carried our synthetic `bot-<ts>-<rand>` id.
+                  let sentMsgId: string | void;
                   if (data.sender && data.chatJid.startsWith('tg:')) {
-                    await sendPoolMessage(
+                    sentMsgId = await sendPoolMessage(
                       data.chatJid,
                       cleanText,
                       data.sender,
                       sourceGroup,
                     );
                   } else {
-                    const sentMsgId = await deps.sendMessage(
+                    sentMsgId = await deps.sendMessage(
                       data.chatJid,
                       cleanText,
                       data.replyToMessageId,
@@ -407,6 +415,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     is_from_me: true,
                     is_bot_message: true,
                     reply_to_message_id: data.replyToMessageId,
+                    telegram_message_id: sentMsgId || undefined,
                   });
                   logger.info(
                     { chatJid: data.chatJid, sourceGroup },

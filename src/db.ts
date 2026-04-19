@@ -32,6 +32,7 @@ function createSchema(database: Database.Database): void {
       timestamp TEXT,
       is_from_me INTEGER,
       is_bot_message INTEGER DEFAULT 0,
+      telegram_message_id TEXT,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
@@ -211,6 +212,22 @@ function createSchema(database: Database.Database): void {
     /* columns already exist */
   }
 
+  // `telegram_message_id` migration (PRAGMA-gated, no silent catch).
+  // For bot-sent messages the `id` column holds our synthetic
+  // `bot-<ts>-<rand>`, so the platform's numeric message ID is nowhere
+  // queryable without this column — the symptom that motivated adding
+  // it: a Telegram message appeared in a group that nobody could
+  // attribute to a specific bot send, because the DB only had the
+  // synthetic IDs. An ALTER-in-try-catch was deliberately avoided
+  // here (the rest of this file does it, pre-existing) so a real
+  // schema-alteration error surfaces instead of being swallowed.
+  const messagesCols = database
+    .prepare('PRAGMA table_info(messages)')
+    .all() as Array<{ name: string }>;
+  if (!messagesCols.some((c) => c.name === 'telegram_message_id')) {
+    database.exec(`ALTER TABLE messages ADD COLUMN telegram_message_id TEXT`);
+  }
+
   // Migrate sessions table to per-session layout (parallel-maintenance).
   // Pre-PR-#55: PK was `(group_folder)` alone — one session per group.
   // Post-PR-#55: PK is `(group_folder, session_name)` so each session
@@ -374,7 +391,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name, telegram_message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -387,6 +404,7 @@ export function storeMessage(msg: NewMessage): void {
     msg.reply_to_message_id ?? null,
     msg.reply_to_message_content ?? null,
     msg.reply_to_sender_name ?? null,
+    msg.telegram_message_id ?? null,
   );
 }
 
@@ -451,6 +469,61 @@ export function getMessageById(
     content: row.content,
     timestamp: row.timestamp,
     is_from_me: row.is_from_me === 1,
+  };
+}
+
+/**
+ * Look up a bot-sent message by the Telegram-native message ID
+ * returned when it was posted. Exists so "what did we post at
+ * Telegram ID X in chat Y" stops being a logs-grep exercise — the
+ * synthetic `bot-<ts>-<rand>` `id` column gives no way to work
+ * back from the Telegram ID otherwise. Narrowly scoped to bot
+ * sends on Telegram (other channels either use the platform ID
+ * as `id` directly or don't populate this column).
+ */
+export function getBotMessageByTelegramId(
+  chatJid: string,
+  telegramMessageId: string,
+): NewMessage | null {
+  const row = db
+    .prepare(
+      `SELECT id, chat_jid, sender, sender_name, content, timestamp,
+              is_from_me, is_bot_message, reply_to_message_id,
+              reply_to_message_content, reply_to_sender_name,
+              telegram_message_id
+         FROM messages
+        WHERE chat_jid = ? AND telegram_message_id = ?`,
+    )
+    .get(chatJid, telegramMessageId) as
+    | {
+        id: string;
+        chat_jid: string;
+        sender: string;
+        sender_name: string;
+        content: string;
+        timestamp: string;
+        is_from_me: number;
+        is_bot_message: number;
+        reply_to_message_id: string | null;
+        reply_to_message_content: string | null;
+        reply_to_sender_name: string | null;
+        telegram_message_id: string | null;
+      }
+    | undefined;
+  if (!row) return null;
+  return {
+    id: row.id,
+    chat_jid: row.chat_jid,
+    sender: row.sender,
+    sender_name: row.sender_name,
+    content: row.content,
+    timestamp: row.timestamp,
+    is_from_me: row.is_from_me === 1,
+    is_bot_message: row.is_bot_message === 1,
+    reply_to_message_id: row.reply_to_message_id ?? undefined,
+    reply_to_message_content: row.reply_to_message_content ?? undefined,
+    reply_to_sender_name: row.reply_to_sender_name ?? undefined,
+    telegram_message_id: row.telegram_message_id ?? undefined,
   };
 }
 

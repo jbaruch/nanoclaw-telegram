@@ -56,6 +56,13 @@ export interface NewMessage {
   reply_to_message_id?: string;
   reply_to_message_content?: string;
   reply_to_sender_name?: string;
+  // Channel-native message ID returned by the platform on send. Only
+  // populated for outbound bot messages on Telegram — the `id` column
+  // for bot sends is our synthetic `bot-<ts>-<rand>` so there's no other
+  // place to pin the Telegram numeric ID. Inbound user messages already
+  // store the platform ID as `id` itself and leave this null. Queryable
+  // for debugging "what did the bot actually post at Telegram ID X?".
+  telegram_message_id?: string;
 }
 
 /**

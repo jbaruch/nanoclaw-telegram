@@ -399,10 +399,10 @@ export async function sendPoolMessage(
   text: string,
   sender: string,
   groupFolder: string,
-): Promise<void> {
+): Promise<string | undefined> {
   if (poolApis.length === 0) {
     // No pool bots — fall back to main bot sendMessage via channel
-    return;
+    return undefined;
   }
 
   const key = `${groupFolder}:${sender}`;
@@ -431,8 +431,14 @@ export async function sendPoolMessage(
   try {
     const numericId = chatId.replace(/^tg:/, '');
     const chunks = splitMessage(text);
+    // Return the LAST chunk's Telegram ID — matches `channel.sendMessage`
+    // above and is the one reply_to threads point at. Callers that want
+    // per-chunk IDs would need to change the signature; no current caller
+    // cares (the stored `messages.db` row represents the full text, so
+    // one ID is enough to trace the send).
+    let lastMsgId: number | undefined;
     for (const chunk of chunks) {
-      await sendTelegramMessage(api, numericId, chunk);
+      lastMsgId = await sendTelegramMessage(api, numericId, chunk);
     }
     logger.info(
       {
@@ -444,8 +450,10 @@ export async function sendPoolMessage(
       },
       'Pool message sent',
     );
+    return lastMsgId?.toString();
   } catch (err) {
     logger.error({ chatId, sender, err }, 'Failed to send pool message');
+    return undefined;
   }
 }
 
