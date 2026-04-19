@@ -198,6 +198,9 @@ const MAINTENANCE_MESSAGE_PREFIX = '[M] ';
  * hop case, agent that hand-typed it, whatever), we don't stack.
  * Exported for the unit test; the production caller is in the same
  * file so the public API is a single entry point.
+ *
+ * @internal — test-only export, should not be part of the public
+ * `.d.ts` surface (we build with `stripInternal: true`).
  */
 export function applyMaintenancePrefix(
   text: string,
