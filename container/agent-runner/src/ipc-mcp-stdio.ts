@@ -1202,45 +1202,97 @@ server.tool(
       };
     }
 
-    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const data = {
-      type: 'promote_staging',
-      groupFolder,
-      tileName: args.tileName,
-      skillName: args.skillName || 'all',
-      requestId,
-      timestamp: new Date().toISOString(),
-    };
+    // 15 minutes matches the host-side execFile cap in src/ipc.ts. The
+    // previous hand-rolled 5-minute poll would time out and report
+    // failure while the host script was still running (observed on
+    // bulk promotes with 10+ skills hitting the tessl review loop at
+    // ~1 min/skill). Delegate poll plumbing to runHostOperation so
+    // this tool inherits future tweaks to result-file handling etc.
+    return runHostOperation(
+      'promote_staging',
+      {
+        tileName: args.tileName,
+        skillName: args.skillName || 'all',
+      },
+      900_000,
+    );
+  },
+);
 
-    writeIpcFile(TASKS_DIR, data);
+server.tool(
+  'push_staged_to_branch',
+  `Push fixups from this group's staging directory to an existing tile-repo PR branch. Use after a promote PR gets review comments: fix the skill back in staging, then call this with the branch name that promote_staging printed ("Branch: promote/...-<tile>"). No new PR is opened — the existing PR auto-updates. Main group only.
 
-    // Poll for result (promotion can take a while — tessl publish, git push)
-    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
-    const timeoutMs = 300_000;
-    const pollMs = 1000;
-    const start = Date.now();
-
-    while (Date.now() - start < timeoutMs) {
-      if (fs.existsSync(resultPath)) {
-        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
-        fs.unlinkSync(resultPath);
-        if (result.error) {
-          return {
-            content: [{ type: 'text' as const, text: `Promotion failed: ${result.error}` }],
-            isError: true,
-          };
-        }
-        return {
-          content: [{ type: 'text' as const, text: result.stdout || 'Promotion complete.' }],
-        };
-      }
-      await new Promise(r => setTimeout(r, pollMs));
+skillName options:
+- omit → push everything currently in staging
+- specific skill (e.g. "tessl__check-unanswered") → push only that skill
+- "--rules-only" → push only rules`,
+  {
+    tileName: z
+      .enum(['nanoclaw-admin', 'nanoclaw-core', 'nanoclaw-untrusted'])
+      .describe('Target tile repo (same one the PR is against)'),
+    branch: z
+      .string()
+      .min(1)
+      .describe(
+        'Existing PR branch, e.g. "promote/20260418T224156Z-nanoclaw-core-a3b2". Parse it from the `Branch: ...` line in promote_staging output.',
+      ),
+    commitMessage: z
+      .string()
+      .min(1)
+      .describe(
+        'Short commit message describing the fixup (e.g. "fix: address Copilot comment on unanswered-precheck.py").',
+      ),
+    skillName: z
+      .string()
+      .optional()
+      .describe(
+        'Specific skill to push. Omit for all staging items. Use "--rules-only" to push only rules.',
+      ),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          { type: 'text' as const, text: 'Only the main group can push to tile branches.' },
+        ],
+        isError: true,
+      };
     }
 
-    return {
-      content: [{ type: 'text' as const, text: 'Promotion timed out after 5 minutes.' }],
-      isError: true,
-    };
+    // Reuse runHostOperation for the write-IPC + poll-for-result
+    // plumbing. Keeps timeout/poll cadence/result-file cleanup
+    // consistent across all host-operation MCP tools (sync_tripit,
+    // tessl_update, push_staged_to_branch, etc.), so a future change
+    // to (say) how result files are formatted doesn't require
+    // updating each tool's poll loop.
+    return runHostOperation(
+      'push_staged_to_branch',
+      {
+        tileName: args.tileName,
+        branch: args.branch,
+        commitMessage: args.commitMessage,
+        skillName: args.skillName || 'all',
+      },
+      300_000,
+    );
+  },
+);
+
+server.tool(
+  'tessl_update',
+  'Run `tessl update` on the host to pull the latest tile versions from the registry. Call this after a promote PR merges (GHA publishes on merge, then the agent triggers this to get the new version). If new tiles land, sessions are cleared automatically so the next message picks them up. A periodic 15-min catch-up runs in the orchestrator as a safety net. Main group only.',
+  {},
+  async () => {
+    if (!isMain) {
+      return {
+        content: [
+          { type: 'text' as const, text: 'Only the main group can trigger tessl_update.' },
+        ],
+        isError: true,
+      };
+    }
+    return runHostOperation('tessl_update');
   },
 );
 
