@@ -6,6 +6,7 @@ import {
   deleteTask,
   getAllChats,
   getAllRegisteredGroups,
+  getBotMessageByTelegramId,
   getLastBotMessageTimestamp,
   getMessagesSince,
   getNewMessages,
@@ -219,6 +220,110 @@ describe('reply context', () => {
     expect(messages).toHaveLength(1);
     expect(messages[0].reply_to_message_id).toBe('99');
     expect(messages[0].reply_to_sender_name).toBe('Dave');
+  });
+});
+
+// --- telegram_message_id persistence ---
+
+describe('telegram_message_id', () => {
+  it('stores and retrieves the telegram_message_id on a bot send', () => {
+    storeChatMetadata('tg:-100123', '2024-01-01T00:00:00.000Z');
+
+    storeMessage({
+      id: 'bot-1776570796407-k6ie5',
+      chat_jid: 'tg:-100123',
+      sender: 'Andy',
+      sender_name: 'Andy',
+      content: 'hello',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: true,
+      is_bot_message: true,
+      telegram_message_id: '4976',
+    });
+
+    const found = getBotMessageByTelegramId('tg:-100123', '4976');
+    expect(found).not.toBeNull();
+    expect(found?.id).toBe('bot-1776570796407-k6ie5');
+    expect(found?.telegram_message_id).toBe('4976');
+    expect(found?.content).toBe('hello');
+    expect(found?.is_bot_message).toBe(true);
+  });
+
+  it('returns null when no bot message has that telegram id', () => {
+    storeChatMetadata('tg:-100123', '2024-01-01T00:00:00.000Z');
+
+    storeMessage({
+      id: 'bot-a',
+      chat_jid: 'tg:-100123',
+      sender: 'Andy',
+      sender_name: 'Andy',
+      content: 'x',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: true,
+      is_bot_message: true,
+      telegram_message_id: '4976',
+    });
+
+    expect(getBotMessageByTelegramId('tg:-100123', '9999')).toBeNull();
+  });
+
+  it('scopes lookup to chat_jid so the same telegram id in a different chat is ignored', () => {
+    // Telegram IDs reset per chat — id 500 in chat A and chat B are different
+    // messages. The getter is (chat_jid, telegram_message_id)-scoped so a
+    // caller asking about chat A doesn't accidentally get chat B's row.
+    storeChatMetadata('tg:-100aaa', '2024-01-01T00:00:00.000Z');
+    storeChatMetadata('tg:-100bbb', '2024-01-01T00:00:00.000Z');
+
+    storeMessage({
+      id: 'bot-a',
+      chat_jid: 'tg:-100aaa',
+      sender: 'Andy',
+      sender_name: 'Andy',
+      content: 'in chat A',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: true,
+      is_bot_message: true,
+      telegram_message_id: '500',
+    });
+    storeMessage({
+      id: 'bot-b',
+      chat_jid: 'tg:-100bbb',
+      sender: 'Andy',
+      sender_name: 'Andy',
+      content: 'in chat B',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: true,
+      is_bot_message: true,
+      telegram_message_id: '500',
+    });
+
+    expect(getBotMessageByTelegramId('tg:-100aaa', '500')?.content).toBe(
+      'in chat A',
+    );
+    expect(getBotMessageByTelegramId('tg:-100bbb', '500')?.content).toBe(
+      'in chat B',
+    );
+  });
+
+  it('leaves telegram_message_id unset when the caller omits it', () => {
+    // Inbound user messages and other-channel sends never populate this
+    // column — and a lookup by the telegram id those messages DO have as
+    // their `id` should NOT resolve through this getter either (the query
+    // checks telegram_message_id, not id).
+    storeChatMetadata('tg:-100123', '2024-01-01T00:00:00.000Z');
+
+    storeMessage({
+      id: '4975', // simulate inbound user message — id IS the telegram id
+      chat_jid: 'tg:-100123',
+      sender: 'user@test',
+      sender_name: 'User',
+      content: 'hi bot',
+      timestamp: '2024-01-01T00:00:01.000Z',
+    });
+
+    // Looking up by the same string returns null because
+    // telegram_message_id column is NULL for this row.
+    expect(getBotMessageByTelegramId('tg:-100123', '4975')).toBeNull();
   });
 });
 

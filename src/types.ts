@@ -56,6 +56,29 @@ export interface NewMessage {
   reply_to_message_id?: string;
   reply_to_message_content?: string;
   reply_to_sender_name?: string;
+  // Channel-native message ID returned by the platform on send. Only
+  // populated for outbound bot messages on Telegram — the `id` column
+  // for bot sends is our synthetic `bot-<ts>-<rand>` so there's no other
+  // place to pin the Telegram numeric ID. Inbound user messages already
+  // store the platform ID as `id` itself and leave this null. Queryable
+  // for debugging "what did the bot actually post at Telegram ID X?".
+  //
+  // Optional + NULL-able: writers may omit (column still defaults to
+  // NULL via `?? null` in storeMessage), and DB getters surface the
+  // persisted NULL as `null` IF their SELECT list includes the
+  // column. The three runtime states:
+  //   - `undefined` — writer didn't provide a value (normalized to
+  //     NULL by storeMessage before persisting), OR reader loaded
+  //     from a query whose explicit SELECT list doesn't include
+  //     this column (e.g. `getNewMessages` / `getMessagesSince` in
+  //     src/db.ts — they project a fixed subset of fields).
+  //   - `null` — column was selected and the row's stored value is
+  //     SQL NULL.
+  //   - `string` — recorded bot-send id.
+  // Call sites: writers with a known id pass a string; writers
+  // without it omit; readers may see undefined / null / string
+  // depending on the SELECT they went through.
+  telegram_message_id?: string | null;
 }
 
 /**

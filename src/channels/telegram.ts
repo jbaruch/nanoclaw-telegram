@@ -450,7 +450,7 @@ export async function sendPoolMessage(
   text: string,
   sender: string,
   groupFolder: string,
-): Promise<void> {
+): Promise<string | undefined> {
   logger.debug(
     {
       chatId,
@@ -463,12 +463,18 @@ export async function sendPoolMessage(
     '[send] sendPoolMessage entered',
   );
   if (poolApis.length === 0) {
-    // No pool bots — fall back to main bot sendMessage via channel
+    // No pool bots configured — return undefined without sending.
+    // Earlier comment claimed "fall back to main bot sendMessage via
+    // channel" but no such fallback is implemented here; callers that
+    // observe undefined must treat it as a hard send failure for the
+    // pool path (the IPC handler in `src/ipc.ts` logs the returned id
+    // and stores it on the bot row, so `undefined` correctly surfaces
+    // as "no Telegram id recorded" rather than a silent drop).
     logger.warn(
       { chatId, sender, groupFolder },
-      '[send] sendPoolMessage called with empty pool — returning (message NOT sent)',
+      '[send] sendPoolMessage called with empty pool — returning undefined (message NOT sent; pool-identity sends require TELEGRAM_BOT_POOL to be configured)',
     );
-    return;
+    return undefined;
   }
 
   const key = `${groupFolder}:${sender}`;
@@ -501,8 +507,14 @@ export async function sendPoolMessage(
       { chatId, sender, poolIndex: idx, chunkCount: chunks.length },
       '[send] sendPoolMessage: sending chunks',
     );
+    // Return the LAST chunk's Telegram ID — matches `channel.sendMessage`
+    // above and is the one reply_to threads point at. Callers that want
+    // per-chunk IDs would need to change the signature; no current caller
+    // cares (the stored `messages.db` row represents the full text, so
+    // one ID is enough to trace the send).
+    let lastMsgId: number | undefined;
     for (let i = 0; i < chunks.length; i++) {
-      await sendTelegramMessage(api, numericId, chunks[i]);
+      lastMsgId = await sendTelegramMessage(api, numericId, chunks[i]);
       logger.debug(
         { chatId, sender, poolIndex: idx, chunkIndex: i },
         '[send] sendPoolMessage: chunk sent',
@@ -518,6 +530,7 @@ export async function sendPoolMessage(
       },
       'Pool message sent',
     );
+    return lastMsgId?.toString();
   } catch (err) {
     // Swallowed — caller won't know. Log at ERROR so at least the
     // operator sees it. The message MAY have reached Telegram before
@@ -534,6 +547,7 @@ export async function sendPoolMessage(
       },
       '[send] Failed to send pool message — caller will still call storeMessage, but the send may have partially landed in Telegram',
     );
+    return undefined;
   }
 }
 
