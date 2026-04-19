@@ -31,18 +31,29 @@ function writeIpcFile(dir: string, data: object): string {
   const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
   const filepath = path.join(dir, filename);
 
-  // Stamp `sessionName` onto every request written to TASKS_DIR so the host
-  // responder routes `_script_result_*` replies back into THIS session's
-  // `input-<session>/` dir (which is what's bind-mounted at
-  // `/workspace/ipc/input/` for this container). Non-TASKS writers
-  // (e.g. MESSAGES_DIR) keep their payload as-is.
+  // Stamp `sessionName` onto EVERY IPC file the container emits (TASKS
+  // and MESSAGES alike). Two consumers need it:
+  //   - TASKS: the host responder routes `_script_result_*` replies
+  //     back into THIS session's `input-<session>/` dir (which is
+  //     what's bind-mounted at `/workspace/ipc/input/` for this
+  //     container). Without the stamp, replies go to the default
+  //     session's dir and this container polls forever.
+  //   - MESSAGES: the host's outbound-message handler uses it to
+  //     distinguish default-session (user-facing) messages from
+  //     maintenance-session (scheduled-task) messages so the human
+  //     knows which AyeAye persona is talking — e.g. prefixing the
+  //     rendered text with `[M]` for maintenance. The `messages/`
+  //     bind mount is shared across sessions within a group (see the
+  //     mount setup in the orchestrator's container-runner), so the
+  //     payload is the only place the session info can survive the
+  //     IPC hop.
   //
   // Spread order: `sessionName` goes AFTER `...data` so the env-derived
   // value always wins over any caller-provided field. Without this, a
   // caller that passes `sessionName` in `data` — even by accident —
-  // could redirect the host's reply to a different session's input dir.
-  const payload =
-    dir === TASKS_DIR ? { ...(data as object), sessionName } : data;
+  // could lie about its session and either hijack another session's
+  // responses or dodge the maintenance-prefix tagging.
+  const payload = { ...(data as object), sessionName };
 
   // Atomic write: temp file then rename
   const tempPath = `${filepath}.tmp`;
@@ -62,8 +73,10 @@ async function runHostOperation(
   timeoutMs = 180_000,
 ): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  // `sessionName` is stamped by `writeIpcFile` when dir === TASKS_DIR,
-  // so we don't need to include it in every caller's payload.
+  // `sessionName` is stamped by `writeIpcFile` on every IPC payload
+  // (both TASKS_DIR and MESSAGES_DIR), so we don't need to include it
+  // in every caller's payload — and shouldn't, since the env-derived
+  // stamp wins over caller-provided values by design.
   writeIpcFile(TASKS_DIR, {
     type,
     groupFolder,
