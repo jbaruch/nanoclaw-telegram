@@ -63,10 +63,16 @@ export interface NewMessage {
   // store the platform ID as `id` itself and leave this null. Queryable
   // for debugging "what did the bot actually post at Telegram ID X?".
   //
-  // `string | null` — matches the persisted shape (SQLite NULL for
-  // inbound / missing sends) and what DB getters surface at runtime.
-  // Using `?: string` alone would force callers to cast every time
-  // they read a row with NULL.
+  // Optional + NULL-able: writers may omit (column still defaults to
+  // NULL via `?? null` in storeMessage), and DB getters surface the
+  // persisted NULL as `null`. The three runtime states:
+  //   - `undefined` — writer didn't provide a value (normalized to
+  //     NULL by storeMessage before persisting).
+  //   - `null` — persisted/loaded as SQL NULL.
+  //   - `string` — recorded bot-send id.
+  // Call sites: writers with a known id pass a string; writers
+  // without it omit (equivalent to undefined); readers see null or
+  // string (never undefined — the DB row always has the column).
   telegram_message_id?: string | null;
 }
 
