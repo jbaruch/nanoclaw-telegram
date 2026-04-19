@@ -234,21 +234,40 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   if (group.requiresTrigger !== false && !group.isMain) {
     const heartbeatId = `heartbeat-${group.folder}`;
     if (!getTaskById(heartbeatId)) {
-      // Pre-check gates the LLM, but it's only enabled for trusted
-      // non-main groups for now because it needs to persist a seen-set
-      // file and untrusted groups mount `/workspace/group` read-only.
-      // Keep the precheck disabled there until the tracked fix (#72)
-      // moves that state to a writable location.
-      const precheckScript = group.containerConfig?.trusted
-        ? 'python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py'
-        : undefined;
+      // Pre-check gates the LLM: `unanswered-precheck.py` runs
+      // check-unanswered, diffs against a per-maintenance-session
+      // seen-set (scheduled tasks always fire in that slot), and
+      // returns `wakeAgent: false` when nothing's new. #72 moved the
+      // seen-set under /home/node/.claude/ so it works across all
+      // trust tiers — the earlier trusted-only gate is gone.
+      //
+      // `timeout -k 1s 24s ... || echo '...'` is a two-layer fail-open:
+      //   - `timeout -k 1s 24s` kills the Python if it hangs. The
+      //     defaults on GNU `timeout` send SIGTERM at the duration
+      //     and SIGKILL ~5s later, so a bare `timeout 25s` could
+      //     run ~30s total and race agent-runner's 30s execFile
+      //     cap — at which point runScript resolves null and our
+      //     `||` never fires. `-k 1s 24s` pins the total to 25s
+      //     wall clock: SIGTERM at 24s, SIGKILL 1s later.
+      //     Guarantees we finish under the 30s cap with margin.
+      //   - `|| echo` catches any non-zero exit (Python crash, bash
+      //     error, timeout above) and emits `wakeAgent: true` with
+      //     an error marker so the agent wakes to investigate
+      //     instead of silently stopping.
+      // Without both layers, a broken or hung precheck would make
+      // agent-runner return null, which the caller treats as "skip
+      // LLM" — silently suppressing every heartbeat tick until
+      // someone notices reactions have stopped. Fail-open errs on
+      // the side of visible wakes over silent skips.
       createTask({
         id: heartbeatId,
         group_folder: group.folder,
         chat_jid: jid,
         prompt:
           'Run the check-unanswered script only: python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/check-unanswered.py — then react and reply to each unanswered message. Do NOT query the database directly. Do NOT check email, calendar, or system health.',
-        script: precheckScript,
+        script:
+          'timeout -k 1s 24s python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py' +
+          ' || echo \'{"wakeAgent":true,"data":{"error":"precheck failed or timed out — check container logs"}}\'',
         schedule_type: 'cron',
         schedule_value: '*/15 * * * *',
         context_mode: 'group',
