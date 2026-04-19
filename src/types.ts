@@ -62,7 +62,12 @@ export interface NewMessage {
   // place to pin the Telegram numeric ID. Inbound user messages already
   // store the platform ID as `id` itself and leave this null. Queryable
   // for debugging "what did the bot actually post at Telegram ID X?".
-  telegram_message_id?: string;
+  //
+  // `string | null` — matches the persisted shape (SQLite NULL for
+  // inbound / missing sends) and what DB getters surface at runtime.
+  // Using `?: string` alone would force callers to cast every time
+  // they read a row with NULL.
+  telegram_message_id?: string | null;
 }
 
 /**

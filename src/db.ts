@@ -37,11 +37,6 @@ function createSchema(database: Database.Database): void {
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
     CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp);
-    -- Diagnostic lookup: "which DB row produced Telegram message X?".
-    -- Keeps getBotMessageByTelegramId O(log n) on large installs
-    -- instead of scanning the whole messages table.
-    CREATE INDEX IF NOT EXISTS idx_messages_chat_telegram_id
-      ON messages(chat_jid, telegram_message_id);
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
@@ -232,6 +227,16 @@ function createSchema(database: Database.Database): void {
   if (!messagesCols.some((c) => c.name === 'telegram_message_id')) {
     database.exec(`ALTER TABLE messages ADD COLUMN telegram_message_id TEXT`);
   }
+
+  // Diagnostic lookup index: "which DB row produced Telegram message X?".
+  // Created AFTER the ALTER above so it works on existing DBs that
+  // didn't have the column yet — creating the index in the main CREATE
+  // TABLE block would throw "no such column: telegram_message_id" on
+  // upgrade and block startup.
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS idx_messages_chat_telegram_id
+       ON messages(chat_jid, telegram_message_id)`,
+  );
 
   // Migrate sessions table to per-session layout (parallel-maintenance).
   // Pre-PR-#55: PK was `(group_folder)` alone — one session per group.
