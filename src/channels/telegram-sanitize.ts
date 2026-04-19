@@ -18,21 +18,33 @@
  *
  * Stray tag tokens (self-closing, mismatched, or tags not in
  * Telegram's allowlist — e.g. `<N>`, `<bar>`, `<analysis>`):
- *   - Always HTML-escaped in the output, whether they sit in plain
- *     prose or inside a Markdown capture. Earlier behavior let them
- *     pass through verbatim in plain prose, but that produced the
- *     same failure mode the inside-capture escaping was designed to
- *     prevent: Telegram's HTML parser rejects any tag not in its
- *     allowlist with a 400 "Unsupported start tag" error, which
- *     dumps the whole message into `sendTelegramMessage`'s plain-
- *     text fallback (see src/channels/telegram.ts) — the fallback
- *     ships the ORIGINAL unsanitized text with no `parse_mode`, so
- *     the user sees raw Markdown markers (`_foo_`, `**bar**`)
- *     instead of rendered italics/bold. Escaping stray tags at the
- *     top level too keeps HTML-send on the happy path; agents that
- *     need literal HTML can use the supported allowlist instead.
- *     See jbaruch/nanoclaw#81 for the production recurrence that
- *     forced this unification.
+ *   - HTML-escaped in the output when they appear in plain prose or
+ *     inside a Markdown capture. ONE important exception: content
+ *     already protected as an allowlisted HTML span in Phase 1a
+ *     (`<code>…</code>`, `<pre>…</pre>`, `<b>…</b>`, and the other
+ *     PROTECTED_SPAN_TAGS entries) is restored verbatim in Phase 3,
+ *     so stray tags INSIDE such a span survive as-is. That's by
+ *     design for the "already-valid HTML passes through" contract —
+ *     e.g. `<code><analysis>x</analysis></code>` keeps the inner
+ *     `<analysis>` visible as literal code. If the content inside a
+ *     protected span contains a tag Telegram rejects, the send will
+ *     fall back to raw text for that message (same failure mode as
+ *     pre-fix top-level strays); authors of `<code>…</code>`-wrapped
+ *     snippets should escape inner angle brackets themselves.
+ *   - Earlier behavior let stray tags in plain prose pass through
+ *     verbatim, which produced the same failure mode the inside-
+ *     capture escaping was designed to prevent: Telegram's HTML
+ *     parser rejects any tag not in its allowlist with a 400
+ *     "Unsupported start tag" error, which dumps the whole message
+ *     into `sendTelegramMessage`'s plain-text fallback (see
+ *     src/channels/telegram.ts) — the fallback ships the ORIGINAL
+ *     unsanitized text with no `parse_mode`, so the user sees raw
+ *     Markdown markers (`_foo_`, `**bar**`) instead of rendered
+ *     italics/bold. Escaping stray tags at the top level keeps
+ *     HTML-send on the happy path; agents that need literal HTML
+ *     should use the supported allowlist intentionally. See
+ *     jbaruch/nanoclaw#81 for the production recurrence that forced
+ *     this unification.
  *
  * Converted patterns (captured text is HTML-escaped before insertion so
  * characters like `&`, `<`, `>`, `"` in content don't produce invalid entities):
