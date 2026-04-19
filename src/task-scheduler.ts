@@ -283,23 +283,44 @@ async function runTask(
               inferredChannel = 'whatsapp';
               inferredIsGroup = true;
             }
-            storeChatMetadata(
-              task.chat_jid,
-              sendTimestamp,
-              undefined,
-              inferredChannel,
-              inferredIsGroup,
-            );
-            storeMessage({
-              id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-              chat_jid: task.chat_jid,
-              sender: ASSISTANT_NAME,
-              sender_name: ASSISTANT_NAME,
-              content: cleanResult,
-              timestamp: sendTimestamp,
-              is_from_me: true,
-              is_bot_message: true,
-            });
+            // Wrap the DB writes so a SQLite error (FK constraint,
+            // disk full, schema mid-migration) never rejects the
+            // `onOutput` promise. The streaming output chain in
+            // `container-runner.ts` awaits this via `.then(...)` with
+            // no `.catch(...)`, so a throw here can wedge the run
+            // from ever resolving and stall the scheduler loop. The
+            // send already succeeded; a missing DB row is recoverable
+            // (at worst we'd get a duplicate in `unanswered` on the
+            // next cycle) — stalling the scheduler is not.
+            try {
+              storeChatMetadata(
+                task.chat_jid,
+                sendTimestamp,
+                undefined,
+                inferredChannel,
+                inferredIsGroup,
+              );
+              storeMessage({
+                id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                chat_jid: task.chat_jid,
+                sender: ASSISTANT_NAME,
+                sender_name: ASSISTANT_NAME,
+                content: cleanResult,
+                timestamp: sendTimestamp,
+                is_from_me: true,
+                is_bot_message: true,
+              });
+            } catch (dbErr) {
+              logger.error(
+                {
+                  taskId: task.id,
+                  chatJid: task.chat_jid,
+                  err: dbErr,
+                  preview: cleanResult.slice(0, 200),
+                },
+                '[task-scheduler] storeChatMetadata/storeMessage failed after send — continuing, send already landed in Telegram',
+              );
+            }
           }
           // Don't close here — agent may still be polling for host script results.
           // Close only on final 'success' status below.
