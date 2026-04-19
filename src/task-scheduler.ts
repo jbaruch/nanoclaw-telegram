@@ -260,8 +260,31 @@ async function runTask(
             // storeChatMetadata; `last_message_time` advances to the
             // outgoing send's timestamp, same as the IPC path would
             // effectively do by chaining a chat-metadata update.
+            //
+            // Pass inferred `channel` + `isGroup` so a NEW chat row
+            // (first-ever metadata write) has the right shape for
+            // `getAvailableGroups()`, which filters on `is_group`.
+            // JID format is `<channel>:<native_id>` by project
+            // convention (e.g. `tg:-100...`, `wa:...@g.us`); negative
+            // native IDs on Telegram indicate groups. For channels we
+            // don't recognise or JIDs that don't match the pattern,
+            // leave the fields undefined so COALESCE preserves
+            // existing values instead of writing NULL over them.
             const sendTimestamp = new Date().toISOString();
-            storeChatMetadata(task.chat_jid, sendTimestamp);
+            const jidMatch = task.chat_jid.match(/^([a-z]+):(.+)$/);
+            const inferredChannel = jidMatch ? jidMatch[1] : undefined;
+            const inferredIsGroup = jidMatch
+              ? jidMatch[1] === 'tg'
+                ? jidMatch[2].startsWith('-')
+                : jidMatch[2].endsWith('@g.us')
+              : undefined;
+            storeChatMetadata(
+              task.chat_jid,
+              sendTimestamp,
+              undefined,
+              inferredChannel,
+              inferredIsGroup,
+            );
             storeMessage({
               id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
               chat_jid: task.chat_jid,

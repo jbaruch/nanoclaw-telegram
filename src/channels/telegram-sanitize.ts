@@ -16,18 +16,23 @@
  *     pre-formatted HTML (e.g. `<code>*literal*</code>`) aren't rewritten.
  *   - http / https / ftp URLs, email addresses.
  *
- * Conditionally-protected regions (rewritten ONLY inside a Markdown
- * capture, passed through unchanged in plain prose):
- *   - Stray tag tokens (self-closing, mismatched, or tags we can't
- *     pair, e.g. `<N>` or `<bar>`). In plain prose they pass through
- *     so the agent can emit literal HTML if it needs to. Inside a
- *     Phase 2 capture (`` `<N>` `` or `**<foo>**`) the token gets
- *     HTML-escaped so the output is `<code>&lt;N&gt;</code>` rather
- *     than `<code><N></code>`. Telegram's HTML parser only accepts a
- *     fixed tag whitelist; leaving the raw `<N>` inside our freshly-
- *     created `<code>`/`<b>`/etc. span causes a 400 rejection and
- *     dumps the whole message into the plain-text fallback in
- *     src/channels/telegram.ts, shipping literal Markdown to the user.
+ * Stray tag tokens (self-closing, mismatched, or tags not in
+ * Telegram's allowlist — e.g. `<N>`, `<bar>`, `<analysis>`):
+ *   - Always HTML-escaped in the output, whether they sit in plain
+ *     prose or inside a Markdown capture. Earlier behavior let them
+ *     pass through verbatim in plain prose, but that produced the
+ *     same failure mode the inside-capture escaping was designed to
+ *     prevent: Telegram's HTML parser rejects any tag not in its
+ *     allowlist with a 400 "Unsupported start tag" error, which
+ *     dumps the whole message into `sendTelegramMessage`'s plain-
+ *     text fallback (see src/channels/telegram.ts) — the fallback
+ *     ships the ORIGINAL unsanitized text with no `parse_mode`, so
+ *     the user sees raw Markdown markers (`_foo_`, `**bar**`)
+ *     instead of rendered italics/bold. Escaping stray tags at the
+ *     top level too keeps HTML-send on the happy path; agents that
+ *     need literal HTML can use the supported allowlist instead.
+ *     See jbaruch/nanoclaw#81 for the production recurrence that
+ *     forced this unification.
  *
  * Converted patterns (captured text is HTML-escaped before insertion so
  * characters like `&`, `<`, `>`, `"` in content don't produce invalid entities):
@@ -50,13 +55,16 @@
 // the inner span untouched.
 //
 // `PH_STRAY_PREFIX` ("protect until Phase 2 decides") is used only for
-// stray tag tokens (Phase 1b) like `<N>` or `<bar>`. Inside a Phase 2
-// capture (`` ` … ` ``, `**…**`, etc.) the stray token must be
-// RESOLVED and HTML-escaped so the captured content ends up like
-// `<code>&lt;N&gt;</code>` — otherwise Telegram sees a bare `<N>`,
-// rejects the message, and the send falls back to raw Markdown.
-// Outside of a capture, stray placeholders are restored in Phase 3
-// just like protect placeholders (pre-existing behavior).
+// stray tag tokens (Phase 1b) like `<N>`, `<bar>`, or `<analysis>`.
+// Inside a Phase 2 capture (`` ` … ` ``, `**…**`, etc.) the stray
+// token is RESOLVED and HTML-escaped via `escapeCaptured`, so the
+// captured content ends up like `<code>&lt;N&gt;</code>`. Outside of
+// a capture, Phase 3 ALSO HTML-escapes the stray token — the earlier
+// behavior (restoring raw) caused `<analysis>` / other
+// non-whitelisted tags to reject Telegram's HTML parse and drop the
+// send into the raw-text fallback. Both code paths now produce
+// escape-safe output for Telegram's HTML allowlist; agents that need
+// literal HTML must use the supported tag set.
 const PH_PREFIX = '\u0000PH';
 const PH_STRAY_PREFIX = '\u0000ST';
 const PH_SUFFIX = '\u0000';
