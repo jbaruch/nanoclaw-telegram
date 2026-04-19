@@ -180,12 +180,37 @@ function saveState(): void {
 const NON_MAIN_HEARTBEAT_PROMPT =
   'MANDATORY FIRST ACTION: Call Skill(skill: "tessl__check-unanswered") BEFORE doing anything else. Follow the skill\'s full two-phase workflow: the deterministic script finds candidate orphans, then LLM reasoning over the conversation-since context decides per candidate whether the bot already addressed it inline (react with 👍) or it genuinely needs a threaded reply. Do NOT skip the reasoning step — blind react+reply duplicates answers whenever the bot answered conversationally without threading. Do NOT query the database directly outside the skill. Do NOT check email, calendar, or system health.';
 
+// Known old canonical strings that orchestrator versions emitted
+// before the current `NON_MAIN_HEARTBEAT_PROMPT`. The startup
+// migration ONLY rewrites rows whose prompt matches one of these —
+// anything else (operator custom text, manual `update_task` via IPC
+// for debugging, etc.) is left alone. A blanket
+// `existing.prompt !== canonical` check would clobber customizations
+// on every restart.
+const LEGACY_NON_MAIN_HEARTBEAT_PROMPTS: ReadonlySet<string> = new Set([
+  // v1: original shipped before the check-unanswered Phase-2 rewrite.
+  'Run the check-unanswered script only: python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/check-unanswered.py — then react and reply to each unanswered message. Do NOT query the database directly. Do NOT check email, calendar, or system health.',
+  // v2: interim — English "Invoke the skill" phrasing, replaced by
+  // the `Call Skill(...)` invocation pattern to match the main-group
+  // heartbeat.
+  'Invoke the `check-unanswered` skill and follow its full workflow. The skill runs the deterministic script to find candidate orphans, then does LLM reasoning over the conversation-since context to decide per candidate whether the bot already addressed it inline (react with 👍) or it genuinely needs a threaded reply. Do NOT skip the reasoning step — blind react+reply duplicates answers whenever the bot answered conversationally without threading. Do NOT query the database directly outside the skill. Do NOT check email, calendar, or system health.',
+]);
+
 /**
  * Ensure a non-main, trigger-required group has the correct heartbeat
  * task in the DB. Creates it if missing; otherwise, if the stored
- * prompt differs from the canonical `NON_MAIN_HEARTBEAT_PROMPT`, syncs
- * just the prompt via `updateTask`. Schedule / status / next_run are
- * preserved — this is a prompt-drift migration, not a reset.
+ * prompt matches a KNOWN LEGACY version (see
+ * `LEGACY_NON_MAIN_HEARTBEAT_PROMPTS`), rewrites just the prompt via
+ * `updateTask`. Custom / unrecognised prompts are left alone — we
+ * don't want to clobber an operator's manual tweak on every restart.
+ *
+ * Scope: only `prompt` is migrated for existing tasks. `schedule`,
+ * `status`, `next_run`, and `script` are preserved as-is. That means
+ * if `containerConfig.trusted` flips AFTER initial creation, the
+ * precheck-script assignment on the heartbeat row stays whatever it
+ * was originally — reconciling it would require a second migration
+ * pathway and has no clear trigger (trust changes rarely happen, and
+ * an operator who flips trust can delete+recreate the heartbeat).
  *
  * Called from two places:
  *   - `registerGroup` (IPC register_group flow, when a group joins or
@@ -224,16 +249,16 @@ function syncNonMainHeartbeat(jid: string, group: RegisteredGroup): void {
       { jid, folder: group.folder },
       'Auto-created heartbeat for trigger-required group',
     );
-  } else if (existingHeartbeat.prompt !== NON_MAIN_HEARTBEAT_PROMPT) {
-    // Prompt drift: a prior orchestrator version wrote a different
-    // string into the DB. Sync to the current canonical prompt so
-    // existing groups pick up workflow changes (e.g. the Phase-2
-    // LLM-reasoning layer in check-unanswered) without requiring a
-    // manual delete+recreate.
+  } else if (
+    existingHeartbeat.prompt !== NON_MAIN_HEARTBEAT_PROMPT &&
+    LEGACY_NON_MAIN_HEARTBEAT_PROMPTS.has(existingHeartbeat.prompt)
+  ) {
+    // Prompt is a known legacy canonical — migrate it. Non-matching
+    // prompts (operator customizations) are deliberately left alone.
     updateTask(heartbeatId, { prompt: NON_MAIN_HEARTBEAT_PROMPT });
     logger.info(
       { jid, folder: group.folder },
-      'Synced non-main heartbeat prompt to current workflow',
+      'Migrated legacy non-main heartbeat prompt to current workflow',
     );
   }
 }
