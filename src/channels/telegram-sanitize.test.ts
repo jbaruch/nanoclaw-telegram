@@ -159,6 +159,63 @@ describe('sanitizeTelegramHtml — HTML entity escaping', () => {
       '<b>Release &lt; v2 &amp; later</b>',
     );
   });
+
+  // --- Regression tests for the "stray tag token inside Markdown capture"
+  // bug. Phase 1b protects `<N>`-shaped tokens as placeholders BEFORE
+  // Phase 2 runs, so a naïve `htmlEscape` on captured Markdown content
+  // only saw the opaque placeholder and restored the raw `<N>` inside
+  // the freshly-created Telegram tag. Telegram's HTML parser only
+  // accepts a fixed whitelist, so it would reject the whole message and
+  // `sendTelegramMessage` would fire its raw-text fallback — shipping
+  // literal Markdown the preprocessor was supposed to convert. Observed
+  // on `2026-04-19` when AyeAye referenced `` `*/skills/<N>` `` and
+  // `` `tessl__<N>` `` in a Russian summary of the promote pipeline.
+  //
+  // Each case below was previously broken (produced `<code><N></code>`,
+  // `<b>**<N>**`-ish, etc.); the fix resolves placeholders before
+  // escaping inside every Phase 2 capture.
+
+  it('inline `<N>` inside backticks is escaped, not passed through as a stray tag', () => {
+    expect(sanitizeTelegramHtml('a `<N>` b')).toBe(
+      'a <code>&lt;N&gt;</code> b',
+    );
+  });
+
+  it('backtick code with multi-char tag-like token inside', () => {
+    expect(sanitizeTelegramHtml('use `foo<bar>baz` as key')).toBe(
+      'use <code>foo&lt;bar&gt;baz</code> as key',
+    );
+  });
+
+  it('path-like backtick content with angle-bracket placeholder', () => {
+    expect(sanitizeTelegramHtml('find `*/skills/<N>` entries')).toBe(
+      'find <code>*/skills/&lt;N&gt;</code> entries',
+    );
+  });
+
+  it('stray tag token inside **bold** is escaped', () => {
+    expect(sanitizeTelegramHtml('**use <N> here**')).toBe(
+      '<b>use &lt;N&gt; here</b>',
+    );
+  });
+
+  it('stray tag token inside *italic* is escaped', () => {
+    expect(sanitizeTelegramHtml('see *the <N> variable* below')).toBe(
+      'see <i>the &lt;N&gt; variable</i> below',
+    );
+  });
+
+  it('stray tag token inside [link text](url) is escaped', () => {
+    expect(
+      sanitizeTelegramHtml('[see <N> docs](https://example.com/n)'),
+    ).toBe('<a href="https://example.com/n">see &lt;N&gt; docs</a>');
+  });
+
+  it('stray tag token inside # heading is escaped', () => {
+    expect(sanitizeTelegramHtml('# About <N> placeholders')).toBe(
+      '<b>About &lt;N&gt; placeholders</b>',
+    );
+  });
 });
 
 // --- Existing HTML element spans: contents must be preserved verbatim ---

@@ -64,6 +64,33 @@ export function sanitizeTelegramHtml(text: string): string {
     return `${PH_PREFIX}${idx}${PH_SUFFIX}`;
   };
 
+  // Regex for the NUL-delimited placeholder tokens we inject during
+  // Phases 0/1a/1b/1c. Reused in `escapeCaptured` below AND in Phase 3.
+  const PH_RE = new RegExp(`${PH_PREFIX}(\\d+)${PH_SUFFIX}`, 'g');
+
+  // Phase 2 conversions (`[…](…)`, `` `…` ``, `**…**`, etc.) capture
+  // content and wrap it in Telegram HTML tags. That captured content may
+  // contain placeholders injected earlier (Phase 1b protected stray tag
+  // tokens like `<N>`). A plain `htmlEscape` on the captured text sees
+  // only the opaque `\u0000PH<idx>\u0000` markers — no `<`, `>`, `&`, or
+  // `"` to escape — so it's a no-op, and Phase 3 restores the raw `<N>`
+  // INSIDE our freshly-created `<code>`/`<b>`/etc. tag. Telegram then
+  // chokes on the unknown `<N>` tag, rejects the whole message with 400,
+  // and `sendTelegramMessage`'s catch fires the plain-text fallback —
+  // which sends the original Markdown literally and is exactly the
+  // "`**foo**` leaked through the preprocessor" symptom.
+  //
+  // Fix: inside Phase 2 captures, resolve the placeholder to its
+  // underlying text BEFORE HTML-escaping, so the stray tag becomes
+  // `&lt;N&gt;` inside the final `<code>…</code>` span. Placeholders
+  // outside any Phase 2 capture (stray tags in plain prose) still
+  // survive through Phase 3 unchanged — that's pre-existing behavior
+  // and out of scope for this fix.
+  const escapeCaptured = (s: string): string =>
+    htmlEscape(
+      s.replace(PH_RE, (_m, idx: string) => placeholders[Number(idx)]),
+    );
+
   let out = text;
 
   // Phase 0: fenced code blocks — stash entire ```…``` regions, rewritten
@@ -97,52 +124,59 @@ export function sanitizeTelegramHtml(text: string): string {
   out = out.replace(/ftp:\/\/[^\s<>")\]]+/g, protect);
   out = out.replace(/[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+/g, protect);
 
-  // Phase 2: Markdown → HTML. Captured groups are HTML-escaped before
-  // being written back so `**a & b**` → `<b>a &amp; b</b>`, not raw `&`.
-  // 2a. Links — url may be a placeholder from Phase 1c.
+  // Phase 2: Markdown → HTML. Captured groups run through `escapeCaptured`
+  // (resolve placeholders, then HTML-escape) so `**a & b**` → `<b>a &amp;
+  // b</b>` and `` `<N>` `` → `<code>&lt;N&gt;</code>` — no raw `&` or
+  // stray tag tokens end up inside our freshly-created Telegram tags.
+  //
+  // 2a. Links — url may be a placeholder from Phase 1c (protected URL),
+  // or a mix of protected URL prefix + stray-tag suffix when the href
+  // contains `<`/`>` that broke Phase 1c's URL regex.
   out = out.replace(
     /\[([^\]]+)\]\(([^)]+)\)/g,
     (_m, txt: string, url: string) =>
-      `<a href="${htmlEscape(url)}">${htmlEscape(txt)}</a>`,
+      `<a href="${escapeCaptured(url)}">${escapeCaptured(txt)}</a>`,
   );
 
   // 2b. Inline code — before bold/italic so backticked content isn't mangled.
   out = out.replace(
     /`([^`\n]+)`/g,
-    (_m, code: string) => `<code>${htmlEscape(code)}</code>`,
+    (_m, code: string) => `<code>${escapeCaptured(code)}</code>`,
   );
 
   // 2c. Bold: **x** or __x__
   out = out.replace(
     /\*\*(.+?)\*\*/g,
-    (_m, t: string) => `<b>${htmlEscape(t)}</b>`,
+    (_m, t: string) => `<b>${escapeCaptured(t)}</b>`,
   );
-  out = out.replace(/__(.+?)__/g, (_m, t: string) => `<b>${htmlEscape(t)}</b>`);
+  out = out.replace(
+    /__(.+?)__/g,
+    (_m, t: string) => `<b>${escapeCaptured(t)}</b>`,
+  );
 
   // 2d. Italic: *x* or _x_ — must look like formatting, not identifier parts.
   out = out.replace(
     /(^|[^\w])\*(\S(?:.*?\S)?)\*(?!\w)/g,
-    (_m, pre: string, t: string) => `${pre}<i>${htmlEscape(t)}</i>`,
+    (_m, pre: string, t: string) => `${pre}<i>${escapeCaptured(t)}</i>`,
   );
   out = out.replace(
     /(^|[^\w])_(\S(?:.*?\S)?)_(?!\w)/g,
-    (_m, pre: string, t: string) => `${pre}<i>${htmlEscape(t)}</i>`,
+    (_m, pre: string, t: string) => `${pre}<i>${escapeCaptured(t)}</i>`,
   );
 
   // 2e. Headings: # to ###### at line start → <b>…</b>
   out = out.replace(
     /^#{1,6}\s+(.+)$/gm,
-    (_m, t: string) => `<b>${htmlEscape(t)}</b>`,
+    (_m, t: string) => `<b>${escapeCaptured(t)}</b>`,
   );
 
   // 2f. Bullets: - item / * item at line start → • item
   out = out.replace(/^[-*]\s+/gm, '\u2022 ');
 
-  // Phase 3: restore placeholders.
-  out = out.replace(
-    new RegExp(`${PH_PREFIX}(\\d+)${PH_SUFFIX}`, 'g'),
-    (_m, idx: string) => placeholders[Number(idx)],
-  );
+  // Phase 3: restore any placeholders that were NOT inside a Phase 2
+  // capture (stray tags in plain prose, full HTML spans from Phase 1a,
+  // fenced blocks from Phase 0, raw URLs/emails from Phase 1c).
+  out = out.replace(PH_RE, (_m, idx: string) => placeholders[Number(idx)]);
 
   return out;
 }
