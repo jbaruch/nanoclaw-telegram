@@ -253,6 +253,26 @@ export function startIpcWatcher(deps: IpcDeps): void {
             .filter((f) => f.endsWith('.json'));
           for (const file of messageFiles) {
             const filePath = path.join(messagesDir, file);
+            // Hoisted so the catch-block at the bottom can log which
+            // message we were processing when things exploded. Without
+            // this, a throw after `data = JSON.parse(...)` but before
+            // the per-type branches would leave the error-log blind to
+            // what content was in flight.
+            let data:
+              | {
+                  type?: string;
+                  chatJid?: string;
+                  text?: string;
+                  sender?: string;
+                  replyToMessageId?: string;
+                  pin?: boolean;
+                  emoji?: string;
+                  messageId?: string;
+                  filePath?: string;
+                  caption?: string;
+                  [key: string]: unknown;
+                }
+              | undefined;
             try {
               const stat = fs.statSync(filePath);
               if (stat.size > 1_048_576) {
@@ -268,7 +288,17 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 );
                 continue;
               }
-              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              if (!data) {
+                // JSON.parse produced null/undefined (e.g. the file
+                // contained literal `null`). Skip to the next file.
+                logger.warn(
+                  { file, sourceGroup },
+                  '[ipc] IPC file parsed to null/undefined — skipping',
+                );
+                fs.unlinkSync(filePath);
+                continue;
+              }
               if (
                 data.type === 'react_to_message' &&
                 data.chatJid &&
@@ -353,7 +383,9 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     const cleanCaption = strippedCaption
                       ? applyMaintenancePrefix(
                           strippedCaption,
-                          data.sessionName,
+                          typeof data.sessionName === 'string'
+                            ? data.sessionName
+                            : undefined,
                         )
                       : '';
                     await deps.sendFile(
@@ -396,14 +428,28 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   }
                 }
               } else if (data.type === 'message' && data.chatJid && data.text) {
-                // Strip <internal> tags — if nothing remains, skip silently.
-                // Use the shared `stripInternalTags` helper so this path
-                // can't drift from the send_file caption path above.
+                logger.debug(
+                  {
+                    sourceGroup,
+                    chatJid: data.chatJid,
+                    rawTextLen: data.text.length,
+                    rawPreview: String(data.text).slice(0, 80),
+                    hasSender: Boolean(data.sender),
+                    senderValue: data.sender,
+                    hasReplyTo: Boolean(data.replyToMessageId),
+                    hasPin: Boolean(data.pin),
+                    ipcFile: file,
+                  },
+                  '[ipc] Received send_message IPC',
+                );
+                // Strip <internal> tags via the shared helper so this
+                // path can't drift from the send_file caption path
+                // above. If nothing remains, skip silently.
                 const strippedText = stripInternalTags(data.text);
                 if (!strippedText) {
                   logger.debug(
                     { sourceGroup },
-                    'IPC message suppressed (all internal)',
+                    '[ipc] send_message suppressed (all internal)',
                   );
                   fs.unlinkSync(filePath);
                   continue;
@@ -416,21 +462,62 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 // the prefix flows through accounting uniformly.
                 const cleanText = applyMaintenancePrefix(
                   strippedText,
-                  data.sessionName,
+                  typeof data.sessionName === 'string'
+                    ? data.sessionName
+                    : undefined,
+                );
+                logger.debug(
+                  {
+                    sourceGroup,
+                    chatJid: data.chatJid,
+                    cleanLen: cleanText.length,
+                    cleanPreview: cleanText.slice(0, 80),
+                  },
+                  '[ipc] send_message after stripInternalTags + maintenance-prefix',
                 );
 
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
-                if (
+                const authOk =
                   isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
-                ) {
-                  if (data.sender && data.chatJid.startsWith('tg:')) {
+                  Boolean(targetGroup && targetGroup.folder === sourceGroup);
+                logger.debug(
+                  {
+                    sourceGroup,
+                    chatJid: data.chatJid,
+                    isMain,
+                    targetGroupFolder: targetGroup?.folder,
+                    authOk,
+                  },
+                  '[ipc] send_message auth check',
+                );
+                if (authOk) {
+                  const usePool = Boolean(
+                    data.sender && data.chatJid.startsWith('tg:'),
+                  );
+                  logger.debug(
+                    {
+                      sourceGroup,
+                      chatJid: data.chatJid,
+                      path: usePool ? 'pool' : 'direct',
+                      sender: data.sender,
+                    },
+                    '[ipc] send_message path decision',
+                  );
+                  if (usePool) {
+                    // `usePool` is only true when `data.sender` is a non-
+                    // empty string — TS just can't re-narrow across the
+                    // intermediate `Boolean(...)` boundary. The `!` is
+                    // safe by the `usePool` definition directly above.
                     await sendPoolMessage(
                       data.chatJid,
                       cleanText,
-                      data.sender,
+                      data.sender!,
                       sourceGroup,
+                    );
+                    logger.debug(
+                      { sourceGroup, chatJid: data.chatJid },
+                      '[ipc] sendPoolMessage returned (void; errors swallowed inside)',
                     );
                   } else {
                     const sentMsgId = await deps.sendMessage(
@@ -438,14 +525,31 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       cleanText,
                       data.replyToMessageId,
                     );
+                    logger.debug(
+                      {
+                        sourceGroup,
+                        chatJid: data.chatJid,
+                        sentMsgId,
+                      },
+                      '[ipc] deps.sendMessage returned',
+                    );
                     // Pin the message if requested
                     if (data.pin && sentMsgId && deps.pinMessage) {
                       await deps.pinMessage(data.chatJid, sentMsgId);
+                      logger.debug(
+                        { sourceGroup, chatJid: data.chatJid, sentMsgId },
+                        '[ipc] pinMessage returned',
+                      );
                     }
                   }
-                  // Store bot response so heartbeat can track answered messages
+                  // Store bot response so heartbeat can track answered messages.
+                  // If we reach here the send path (pool or direct) returned
+                  // without an unhandled throw — so a DB row should ALWAYS
+                  // appear unless the storeMessage call itself throws (see
+                  // outer catch).
+                  const botRowId = `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
                   storeMessage({
-                    id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                    id: botRowId,
                     chat_jid: data.chatJid,
                     sender: data.sender || ASSISTANT_NAME,
                     sender_name: data.sender || ASSISTANT_NAME,
@@ -456,21 +560,47 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     reply_to_message_id: data.replyToMessageId,
                   });
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
-                    'IPC message sent',
+                    {
+                      chatJid: data.chatJid,
+                      sourceGroup,
+                      botRowId,
+                      contentLen: cleanText.length,
+                    },
+                    '[ipc] send_message complete — DB row written',
                   );
                 } else {
                   logger.warn(
-                    { chatJid: data.chatJid, sourceGroup },
-                    'Unauthorized IPC message attempt blocked',
+                    {
+                      chatJid: data.chatJid,
+                      sourceGroup,
+                      targetGroupFolder: targetGroup?.folder,
+                    },
+                    '[ipc] Unauthorized IPC message attempt blocked',
                   );
                 }
               }
               fs.unlinkSync(filePath);
             } catch (err) {
+              // Catches anything thrown above (JSON.parse, auth, send, storeMessage).
+              // If this fires AFTER the send already landed in Telegram, the
+              // user sees a message with no DB row — exactly the ghost-heartbeat
+              // symptom. Log the err, the data type, and a preview so the
+              // operator can correlate with what appeared in the chat.
               logger.error(
-                { file, sourceGroup, err },
-                'Error processing IPC message',
+                {
+                  file,
+                  sourceGroup,
+                  err,
+                  dataType: (data as { type?: string } | undefined)?.type,
+                  dataChatJid: (data as { chatJid?: string } | undefined)
+                    ?.chatJid,
+                  dataTextPreview:
+                    typeof (data as { text?: string } | undefined)?.text ===
+                    'string'
+                      ? (data as { text: string }).text.slice(0, 200)
+                      : undefined,
+                },
+                '[ipc] Error processing IPC message — message may have been sent to the chat before the throw, in which case no DB row will exist',
               );
               const errorDir = path.join(ipcBaseDir, 'errors');
               fs.mkdirSync(errorDir, { recursive: true });
