@@ -96,6 +96,23 @@ if [ "$MODE" != "--rules-only" ]; then
 
     canonical="${skill_dir#tessl__}"
 
+    # Guard: canonical ends up interpolated into `$TILE_REPO_DIR/skills/
+    # $canonical` and fed to `rm -rf` below, so any value that resolves
+    # somewhere other than a sibling skill dir is a footgun:
+    #   - `""`   → `.../skills/` (wipes every skill)
+    #   - `.`    → `.../skills/.` (same)
+    #   - `..`   → `.../skills/..` = `$TILE_REPO_DIR` (wipes the clone)
+    #   - `a/b`  → escapes the skills/ subtree entirely
+    #   - leading `-` → argv confusion with flags
+    # Case-match restricts canonical to `[A-Za-z0-9][A-Za-z0-9_-]*` —
+    # same character set tessl tile/skill names actually use.
+    case "$canonical" in
+      ''|'.'|'..'|*/*|*[!A-Za-z0-9_-]*|[!A-Za-z0-9]*)
+        echo "ERROR: refusing to operate on unsafe canonical '$canonical' (from staging dir '$skill_dir'). Expected [A-Za-z0-9][A-Za-z0-9_-]*." >&2
+        exit 2
+        ;;
+    esac
+
     # See matching comment in promote-to-tile-repo.sh — rc 1 is a policy
     # block, rc ≥ 2 is a read/grep error that must abort the whole push.
     validate_rc=0
@@ -124,7 +141,15 @@ if [ "$MODE" != "--rules-only" ]; then
       done
     fi
 
+    # Wipe the destination before copying so file-level deletions in
+    # staging (author removed a helper script between the initial
+    # promote and this fixup) actually propagate into the branch. The
+    # old mkdir+cp approach only overwrote — `git add -A` would see
+    # no deletion because the file still existed in the clone, leaving
+    # stale artifacts on the PR branch that the fixup flow couldn't
+    # clean up. The canonical-name guard above makes the `rm -rf` safe.
     dst="$TILE_REPO_DIR/skills/$canonical"
+    rm -rf "$dst"
     mkdir -p "$dst"
     cp -r "$src/." "$dst/"
     echo "pushed: $canonical"

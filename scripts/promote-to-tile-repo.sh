@@ -93,6 +93,20 @@ if [ "$MODE" != "--rules-only" ]; then
 
     canonical="${skill_dir#tessl__}"
 
+    # Guard (mirrors push-staged-to-branch.sh): restrict canonical to
+    # `[A-Za-z0-9][A-Za-z0-9_-]*` — same character set tessl tile/skill
+    # names actually use. Rejects empty (flat cp clobbers siblings),
+    # `.`/`..` (escape out of skills/), `/` (arbitrary subpath), and
+    # leading `-` (argv confusion with flags). The push script's `rm
+    # -rf` makes this load-bearing; the promote script's `cp` has the
+    # same footgun without a delete so we reject up front in both.
+    case "$canonical" in
+      ''|'.'|'..'|*/*|*[!A-Za-z0-9_-]*|[!A-Za-z0-9]*)
+        echo "ERROR: refusing to operate on unsafe canonical '$canonical' (from staging dir '$skill_dir'). Expected [A-Za-z0-9][A-Za-z0-9_-]*." >&2
+        exit 2
+        ;;
+    esac
+
     # Distinguish policy block (rc 1 → BLOCKED, continue) from hard failure
     # (rc ≥ 2 → grep read error, unreadable SKILL.md, etc. → abort). The
     # naive `if ! validate_placement ...` pattern collapses both into

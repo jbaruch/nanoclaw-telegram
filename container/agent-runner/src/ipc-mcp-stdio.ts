@@ -1187,11 +1187,24 @@ server.tool(
   },
 );
 
+// Five tile repos the promote flow is wired against. Host-side
+// `KNOWN_TILE_NAMES` in src/ipc.ts enforces this as the real security
+// boundary; keeping the same list as a zod enum here gives callers a
+// clear client-side error (at tool-call time) instead of a generic
+// "host operation failed" after round-tripping to the orchestrator.
+const TILE_NAMES = [
+  'nanoclaw-admin',
+  'nanoclaw-core',
+  'nanoclaw-untrusted',
+  'nanoclaw-trusted',
+  'nanoclaw-host',
+] as const;
+
 server.tool(
   'promote_staging',
-  'Promote staged skills and rules to tessl tiles. Runs the full pipeline: copy from staging, lint, git commit+push, publish to registry, install. Main group only.',
+  'Promote staged skills and rules to a tile repo. Copies staging into a fresh clone, runs a local `tessl skill review --optimize` pass on each promoted skill, pushes a timestamped `promote/<utc>-<tile>-<rand>` branch, opens a PR on the tile repo, and summons Copilot review via GraphQL. Does NOT merge, push to main, or publish to the registry — merge is manual (or via Composio), publish fires in GHA at merge time, and the agent calls `tessl_update` afterwards to pull the new version. Main group only.',
   {
-    tileName: z.string().describe('Target tile: "nanoclaw-admin", "nanoclaw-core", or "nanoclaw-untrusted"'),
+    tileName: z.enum(TILE_NAMES).describe('Target tile repo.'),
     skillName: z.string().optional().describe('Specific skill to promote. Omit for all staging items. Use "--rules-only" to promote only rules.'),
   },
   async (args) => {
@@ -1229,8 +1242,8 @@ skillName options:
 - "--rules-only" → push only rules`,
   {
     tileName: z
-      .enum(['nanoclaw-admin', 'nanoclaw-core', 'nanoclaw-untrusted'])
-      .describe('Target tile repo (same one the PR is against)'),
+      .enum(TILE_NAMES)
+      .describe('Target tile repo (same one the PR is against).'),
     branch: z
       .string()
       .min(1)
