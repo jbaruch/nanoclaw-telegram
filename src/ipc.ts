@@ -75,11 +75,12 @@ let ipcWatcherRunning = false;
  * requesting container mounts at `/workspace/ipc/input/` — otherwise the
  * container polls forever and the IPC call times out.
  *
- * The container-side MCP server stamps `sessionName` onto every TASKS_DIR
- * request (see `container/agent-runner/src/ipc-mcp-stdio.ts`). Older
- * containers that predate that change (or any request where the field is
- * missing) fall back to the default session — matches pre-parallel
- * behavior where only one session existed.
+ * The container-side MCP server stamps `sessionName` onto every IPC
+ * payload (both TASKS and MESSAGES — see
+ * `container/agent-runner/src/ipc-mcp-stdio.ts`). Older containers that
+ * predate that change (or any request where the field is missing) fall
+ * back to the default session — matches pre-parallel behavior where
+ * only one session existed.
  */
 // Session names accepted on IPC requests: ONLY the two the orchestrator
 // ever creates. A broader regex (e.g. `[A-Za-z0-9_-]+`) would let a
@@ -180,6 +181,34 @@ function scriptResultPath(
   // ENOENT at every caller.
   fs.mkdirSync(inputDir, { recursive: true });
   return path.join(inputDir, `_script_result_${requestId}.json`);
+}
+
+// Prefix for outbound text emitted by the maintenance-session AyeAye.
+// Without the prefix, a scheduled-task reply looks identical to a
+// user-facing reply in the chat, which confused Baruch when he
+// responded to `[check-unanswered heartbeat from maintenance]` messages
+// as if they were live conversation. The prefix is applied BOTH to
+// Telegram-bound text AND to the messages.db copy so the full trail
+// shows provenance — heartbeat accounting, future message recap, etc.
+const MAINTENANCE_MESSAGE_PREFIX = '[M] ';
+
+/**
+ * Prepend `[M] ` if the payload came from the maintenance session.
+ * Idempotent — if the text already begins with the prefix (double-
+ * hop case, agent that hand-typed it, whatever), we don't stack.
+ * Exported for the unit test; the production caller is in the same
+ * file so the public API is a single entry point.
+ *
+ * @internal — test-only export, should not be part of the public
+ * `.d.ts` surface (we build with `stripInternal: true`).
+ */
+export function applyMaintenancePrefix(
+  text: string,
+  sessionName: string | undefined,
+): string {
+  if (sessionName !== MAINTENANCE_SESSION_NAME) return text;
+  if (text.startsWith(MAINTENANCE_MESSAGE_PREFIX)) return text;
+  return MAINTENANCE_MESSAGE_PREFIX + text;
 }
 
 export function startIpcWatcher(deps: IpcDeps): void {
@@ -346,8 +375,21 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     // Mirrors the message-payload stripping below. If the
                     // caption is fully internal, send the file with no
                     // caption; the file itself is still useful payload.
-                    const cleanCaption = data.caption
+                    const strippedCaption = data.caption
                       ? stripInternalTags(data.caption)
+                      : '';
+                    // Tag maintenance-session captions so Baruch can
+                    // tell a scheduled-task file-send from a live one.
+                    // Skip the prefix entirely when the caption is
+                    // empty — `[M] ` alone on a silent file-send is
+                    // noise.
+                    const cleanCaption = strippedCaption
+                      ? applyMaintenancePrefix(
+                          strippedCaption,
+                          typeof data.sessionName === 'string'
+                            ? data.sessionName
+                            : undefined,
+                        )
                       : '';
                     await deps.sendFile(
                       data.chatJid,
@@ -403,11 +445,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   },
                   '[ipc] Received send_message IPC',
                 );
-                // Strip <internal> tags — if nothing remains, skip silently
-                const cleanText = data.text
-                  .replace(/<internal>[\s\S]*?<\/internal>/g, '')
-                  .trim();
-                if (!cleanText) {
+                // Strip <internal> tags via the shared helper so this
+                // path can't drift from the send_file caption path
+                // above. If nothing remains, skip silently.
+                const strippedText = stripInternalTags(data.text);
+                if (!strippedText) {
                   logger.debug(
                     { sourceGroup },
                     '[ipc] send_message suppressed (all internal)',
@@ -415,6 +457,18 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   fs.unlinkSync(filePath);
                   continue;
                 }
+                // Tag maintenance-session text so Baruch can tell a
+                // scheduled-task reply from a live conversational one.
+                // Applied AFTER internal-tag stripping (no point
+                // prefixing text we're about to suppress) and BEFORE
+                // both the Telegram send and the messages.db store, so
+                // the prefix flows through accounting uniformly.
+                const cleanText = applyMaintenancePrefix(
+                  strippedText,
+                  typeof data.sessionName === 'string'
+                    ? data.sessionName
+                    : undefined,
+                );
                 logger.debug(
                   {
                     sourceGroup,
@@ -422,7 +476,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     cleanLen: cleanText.length,
                     cleanPreview: cleanText.slice(0, 80),
                   },
-                  '[ipc] send_message after stripInternalTags',
+                  '[ipc] send_message after stripInternalTags + maintenance-prefix',
                 );
 
                 // Authorization: verify this group can send to this chatJid
