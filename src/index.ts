@@ -598,7 +598,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
         if (text) {
           const replyId = pendingReplyTo[chatJid];
-          const sentMsgId = await channel.sendMessage(chatJid, text, replyId);
+          const sendResult = await channel.sendMessage(chatJid, text, replyId);
+          // Normalize `string | void` to `string | undefined`; only
+          // persist a telegram_message_id when we actually got one.
+          const sentMsgId =
+            typeof sendResult === 'string' ? sendResult : undefined;
           // Store bot response in DB so heartbeat can track answered messages.
           // Stamp `telegram_message_id` (last chunk's Telegram ID on multi-
           // chunk sends) so post-hoc "which bot send corresponds to Telegram
@@ -614,7 +618,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             is_from_me: true,
             is_bot_message: true,
             reply_to_message_id: replyId,
-            telegram_message_id: sentMsgId || undefined,
+            telegram_message_id: sentMsgId,
           });
           // Consume after first reply — prevents replying to the wrong message
           // when user sends follow-ups while background agent is working.

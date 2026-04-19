@@ -37,6 +37,11 @@ function createSchema(database: Database.Database): void {
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
     CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp);
+    -- Diagnostic lookup: "which DB row produced Telegram message X?".
+    -- Keeps getBotMessageByTelegramId O(log n) on large installs
+    -- instead of scanning the whole messages table.
+    CREATE INDEX IF NOT EXISTS idx_messages_chat_telegram_id
+      ON messages(chat_jid, telegram_message_id);
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
@@ -512,6 +517,10 @@ export function getBotMessageByTelegramId(
       }
     | undefined;
   if (!row) return null;
+  // Surface NULLs as `null` to match the other message getters
+  // (`getMessagesSince`, `getNewMessages`) — existing tests assert
+  // `.toBeNull()` on those paths. Using `?? undefined` here would
+  // force every caller to handle both shapes.
   return {
     id: row.id,
     chat_jid: row.chat_jid,
@@ -521,11 +530,11 @@ export function getBotMessageByTelegramId(
     timestamp: row.timestamp,
     is_from_me: row.is_from_me === 1,
     is_bot_message: row.is_bot_message === 1,
-    reply_to_message_id: row.reply_to_message_id ?? undefined,
-    reply_to_message_content: row.reply_to_message_content ?? undefined,
-    reply_to_sender_name: row.reply_to_sender_name ?? undefined,
-    telegram_message_id: row.telegram_message_id ?? undefined,
-  };
+    reply_to_message_id: row.reply_to_message_id,
+    reply_to_message_content: row.reply_to_message_content,
+    reply_to_sender_name: row.reply_to_sender_name,
+    telegram_message_id: row.telegram_message_id,
+  } as NewMessage;
 }
 
 export function storeReaction(reaction: {

@@ -513,18 +513,26 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   // failed or the channel isn't Telegram). Stored on the
                   // messages row so "which bot send produced Telegram ID X"
                   // is queryable without log spelunking.
-                  let sentMsgId: string | undefined | void;
+                  // Normalize immediately: both send paths can return
+                  // `string | void | undefined`. Collapsing to the
+                  // `string | undefined` domain up front keeps downstream
+                  // uses (`pinMessage`, `storeMessage`) type-safe without
+                  // truthiness checks that would also drop legitimate
+                  // empty-string / '0' IDs if Telegram ever returns them.
+                  let sentMsgId: string | undefined;
                   if (usePool) {
                     // `usePool` is only true when `data.sender` is a non-
                     // empty string — TS just can't re-narrow across the
                     // intermediate `Boolean(...)` boundary. The `!` is
                     // safe by the `usePool` definition directly above.
-                    sentMsgId = await sendPoolMessage(
+                    const poolResult = await sendPoolMessage(
                       data.chatJid,
                       cleanText,
                       data.sender!,
                       sourceGroup,
                     );
+                    sentMsgId =
+                      typeof poolResult === 'string' ? poolResult : undefined;
                     logger.debug(
                       {
                         sourceGroup,
@@ -534,11 +542,15 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       '[ipc] sendPoolMessage returned',
                     );
                   } else {
-                    sentMsgId = await deps.sendMessage(
+                    const directResult = await deps.sendMessage(
                       data.chatJid,
                       cleanText,
                       data.replyToMessageId,
                     );
+                    sentMsgId =
+                      typeof directResult === 'string'
+                        ? directResult
+                        : undefined;
                     logger.debug(
                       {
                         sourceGroup,
@@ -572,7 +584,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     is_from_me: true,
                     is_bot_message: true,
                     reply_to_message_id: data.replyToMessageId,
-                    telegram_message_id: sentMsgId || undefined,
+                    telegram_message_id: sentMsgId,
                   });
                   logger.info(
                     {
