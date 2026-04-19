@@ -29,9 +29,9 @@ describe('applyMaintenancePrefix', () => {
   it('is idempotent — does not double-prefix already-prefixed text', () => {
     // Defensive: if an upstream bug or a future re-entry ever feeds
     // already-prefixed text back in, we shouldn't end up with `[M] [M]`.
-    expect(
-      applyMaintenancePrefix('[M] hello', MAINTENANCE_SESSION_NAME),
-    ).toBe('[M] hello');
+    expect(applyMaintenancePrefix('[M] hello', MAINTENANCE_SESSION_NAME)).toBe(
+      '[M] hello',
+    );
   });
 
   it('ignores non-maintenance sessionName values regardless of prefix state', () => {
