@@ -241,6 +241,26 @@ describe('sanitizeTelegramHtml — HTML entity escaping', () => {
       '<b>visit https://example.com now</b>',
     );
   });
+
+  // --- Paranoia: if input text ever contains a NUL-delimited
+  // placeholder-shaped sequence that didn't come from `protect` /
+  // `protectStray`, the index could point past the end of the
+  // placeholders array. The bounds-checked `resolveFrom` leaves the
+  // literal text as-is instead of emitting "undefined".
+
+  it('stray-style placeholder sequence in raw input with out-of-range index is left literal', () => {
+    const input = 'normal text \u0000ST42\u0000 more text';
+    // Expect the literal placeholder-shaped bytes to survive — better than
+    // crashing or emitting "undefined". Inside our own processing the
+    // indices come from `strayPlaceholders.length`, so 42 will never
+    // match a real entry.
+    expect(sanitizeTelegramHtml(input)).toBe(input);
+  });
+
+  it('protect-style placeholder sequence in raw input with out-of-range index is left literal', () => {
+    const input = 'some \u0000PH99\u0000 thing';
+    expect(sanitizeTelegramHtml(input)).toBe(input);
+  });
 });
 
 // --- Existing HTML element spans: contents must be preserved verbatim ---
