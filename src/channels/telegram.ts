@@ -5,7 +5,6 @@ import { Api, Bot, InputFile } from 'grammy';
 import OpenAI from 'openai';
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
-import { createDraftStream, DraftStream } from '../draft-stream.js';
 import { getLatestMessage, getMessageById, storeReaction } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
@@ -583,6 +582,79 @@ export class TelegramChannel implements Channel {
         baseFetchConfig: { agent: https.globalAgent, compress: true },
       },
     });
+
+    // Grammy API transformer — catches every outbound call on THIS Bot
+    // instance regardless of which internal code path invoked it. Logs
+    // method + payload preview + a stack trace of the caller. Existing
+    // [send] tracepoints cover every path we currently know about
+    // (sendTelegramMessage wrapper, sendFile, sendPoolMessage), but
+    // issue #81's ghost messages keep showing up with no matching
+    // trace — meaning some path we haven't discovered is invoking
+    // `this.bot.api.*`. A transformer is the ONLY place that sees
+    // every grammy-originated call without relying on callers to
+    // opt-in to logging.
+    //
+    // Enabled only when LOG_LEVEL=debug. The custom logger in
+    // `src/logger.ts` only defines debug/info/warn/error/fatal — unknown
+    // levels fall back to info, so gating on "trace" would attach the
+    // transformer and pay the stack/preview cost while logger.debug
+    // output was suppressed. Keep the gate strictly to the level that
+    // actually prints.
+    const traceGrammy = process.env.LOG_LEVEL === 'debug';
+    // Guard the grammy internal surface. `bot.api.config.use` exists on
+    // real grammy Bot instances, but unit tests mock `this.bot` without
+    // the `api.config` tree, and nothing in grammy's API stability
+    // policy promises this hook. If it's missing, log and continue —
+    // the diagnostic is a nice-to-have; crashing `connect()` because a
+    // future grammy release renamed `config` would be much worse.
+    const grammyConfig = this.bot.api?.config as
+      | { use?: (transformer: Parameters<Api['config']['use']>[0]) => void }
+      | undefined;
+    if (traceGrammy && typeof grammyConfig?.use === 'function') {
+      grammyConfig.use(async (prev, method, payload, signal) => {
+        // Stack trace — Error().stack captures the synchronous call
+        // chain up to this transformer. Slice the top frames so the
+        // grammy internals don't drown out the interesting caller.
+        const stack = new Error().stack?.split('\n').slice(2, 10).join('\n');
+        // Payload preview — trim strings to avoid dumping 4KB of
+        // message text into every log line. Only text / caption / chat
+        // routing fields matter for forensics.
+        const preview: Record<string, unknown> = {};
+        if (payload && typeof payload === 'object') {
+          const p = payload as Record<string, unknown>;
+          if ('chat_id' in p) preview.chat_id = p.chat_id;
+          if ('message_id' in p) preview.message_id = p.message_id;
+          if ('text' in p && typeof p.text === 'string') {
+            preview.textLen = p.text.length;
+            preview.textPreview = p.text.slice(0, 120);
+          }
+          if ('caption' in p && typeof p.caption === 'string') {
+            preview.captionLen = p.caption.length;
+            preview.captionPreview = p.caption.slice(0, 120);
+          }
+          if ('parse_mode' in p) preview.parse_mode = p.parse_mode;
+          // Log only the `message_id` from reply_parameters. The full
+          // object can carry nested `quote` text / entities that would
+          // defeat the "trimmed preview" goal and potentially echo user
+          // content into debug logs.
+          if ('reply_parameters' in p) {
+            const rp = p.reply_parameters as { message_id?: unknown } | null;
+            if (rp && typeof rp === 'object' && 'message_id' in rp) {
+              preview.reply_to_message_id = rp.message_id;
+            }
+          }
+        }
+        logger.debug({ method, preview, stack }, '[grammy-api] outbound call');
+        return prev(method, payload, signal);
+      });
+      logger.info(
+        'Grammy API transformer attached — every bot.api.* call will be traced',
+      );
+    } else if (traceGrammy) {
+      logger.warn(
+        '[grammy-api] LOG_LEVEL=debug set but bot.api.config.use unavailable — transformer skipped (likely mocked Bot in tests, or a grammy API change)',
+      );
+    }
 
     // Command to get chat ID (useful for registration)
     this.bot.command('chatid', (ctx) => {
@@ -1232,31 +1304,6 @@ export class TelegramChannel implements Channel {
       return;
     }
     await this.sendReaction(jid, latest.id, emoji);
-  }
-
-  createDraftStream(jid: string, replyToMessageId?: string): DraftStream {
-    const numericId = jid.replace(/^tg:/, '');
-    return createDraftStream({
-      sendMessage: async (text) => {
-        const opts: Record<string, unknown> = {};
-        if (replyToMessageId) {
-          opts.reply_parameters = {
-            message_id: parseInt(replyToMessageId, 10),
-          };
-        }
-        const msg = await this.bot!.api.sendMessage(numericId, text, opts);
-        return msg.message_id;
-      },
-      editMessage: async (messageId, text) => {
-        await this.bot!.api.editMessageText(numericId, messageId, text);
-      },
-      deleteMessage: async (messageId) => {
-        await this.bot!.api.deleteMessage(numericId, messageId);
-      },
-      throttleMs: 1000,
-      maxLength: 4096,
-      minInitialChars: 30,
-    });
   }
 }
 
