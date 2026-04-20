@@ -74,8 +74,8 @@ Then act per category — decide, don't ask:
 
 ```
 Wiki lint — YYYY-MM-DD
-Fixed: <N> cross-refs added, <M> orphans hub-linked, <K> stale lines superseded
-Report: <N> gaps, <M> contradictions, <K> missing concept pages
+Fixed: <fixed_crossrefs> cross-refs added, <fixed_orphans> orphans hub-linked, <fixed_superseded> stale lines superseded
+Report: <report_gaps> gaps, <report_contradictions> contradictions, <report_missing_concepts> missing concept pages
 [details follow as bullets if any Report-category hits]
 ```
 
