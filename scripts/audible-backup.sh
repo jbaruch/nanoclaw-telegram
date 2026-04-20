@@ -110,11 +110,17 @@ mkdir -p "$DOWNLOAD_DIR" "$BOOKS_DIR" "$ART_DIR"
 DOWNLOADED=0
 FAILED=0
 
-# Feed the ASIN/title pairs from a process substitution so the `while`
-# loop runs in the current shell (not a subshell). Bash's default
-# pipe-to-while forks the loop body into a subshell, which means
-# `DOWNLOADED`/`FAILED` increments disappear before the final summary
-# lines can read them. `done < <(...)` keeps the counters in scope.
+# Materialize the ASIN/title pairs to a temp file BEFORE the loop, so
+# a failure in the Python enumerator can be caught by set -e instead
+# of silently producing an empty TSV (which would make the loop run
+# zero iterations and the summary report "Downloaded: 0 / Failed: 0"
+# as if everything was already up to date). `done < file` also keeps
+# the loop in the current shell so `DOWNLOADED` / `FAILED` counters
+# remain in scope for the final summary — same reason we used process
+# substitution earlier, minus the exit-status blindness.
+ASIN_TSV="$TMPDIR/asin-title.tsv"
+python3 -c "import json; [print(b['asin'], b['title'], sep='\t') for b in json.load(open('$TMPDIR/new-books.json'))]" > "$ASIN_TSV"
+
 while IFS=$'\t' read -r ASIN TITLE; do
   echo ""
   echo "--- Downloading: $TITLE ($ASIN) ---"
@@ -352,7 +358,7 @@ while IFS=$'\t' read -r ASIN TITLE; do
     echo "WARN: tmp_download cleanup partially failed for $ASIN — stragglers may retry next run"
   fi
   rm -f "$REF_TS"
-done < <(python3 -c "import json; [print(b['asin'], b['title'], sep='\t') for b in json.load(open('$TMPDIR/new-books.json'))]")
+done < "$ASIN_TSV"
 
 rmdir "$DOWNLOAD_DIR" 2>/dev/null
 
