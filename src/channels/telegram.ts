@@ -5,7 +5,6 @@ import { Api, Bot, InputFile } from 'grammy';
 import OpenAI from 'openai';
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
-import { createDraftStream, DraftStream } from '../draft-stream.js';
 import { getLatestMessage, getMessageById, storeReaction } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
@@ -1234,30 +1233,6 @@ export class TelegramChannel implements Channel {
     await this.sendReaction(jid, latest.id, emoji);
   }
 
-  createDraftStream(jid: string, replyToMessageId?: string): DraftStream {
-    const numericId = jid.replace(/^tg:/, '');
-    return createDraftStream({
-      sendMessage: async (text) => {
-        const opts: Record<string, unknown> = {};
-        if (replyToMessageId) {
-          opts.reply_parameters = {
-            message_id: parseInt(replyToMessageId, 10),
-          };
-        }
-        const msg = await this.bot!.api.sendMessage(numericId, text, opts);
-        return msg.message_id;
-      },
-      editMessage: async (messageId, text) => {
-        await this.bot!.api.editMessageText(numericId, messageId, text);
-      },
-      deleteMessage: async (messageId) => {
-        await this.bot!.api.deleteMessage(numericId, messageId);
-      },
-      throttleMs: 1000,
-      maxLength: 4096,
-      minInitialChars: 30,
-    });
-  }
 }
 
 registerChannel('telegram', (opts: ChannelOpts) => {
