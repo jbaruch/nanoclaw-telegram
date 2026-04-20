@@ -114,58 +114,153 @@ python3 -c "import json; [print(b['asin'], b['title'], sep='\t') for b in json.l
   echo ""
   echo "--- Downloading: $TITLE ($ASIN) ---"
 
+  # Record the download-start timestamp so we can identify files
+  # produced by THIS audible-cli run regardless of their filename
+  # convention. audible-cli's default output naming has drifted over
+  # releases: some versions prefix with the ASIN, others prefix with
+  # the title, some use the title AND a bitrate suffix
+  # (e.g. `Red_Rising-LC_64_22050_stereo.aax`). A bare `-name "${ASIN}*"`
+  # filter misses the title-prefix variants — this is how the
+  # 2026-04-10 Moriarty/Dave Smith stragglers and the 2026-04-19
+  # Red Rising 471MB straggler ended up stuck in tmp_download/ (the
+  # source files WERE downloaded; the find below just couldn't see
+  # them, so decrypt was skipped and cleanup missed them too).
+  BEFORE_DOWNLOAD=$(date +%s)
+  # Small safety margin against filesystem timestamp resolution and
+  # clock jitter (the mtime can round to the second, and on some FSes
+  # files briefly appear with a timestamp a hair before the issuing
+  # process's recorded start). -1s makes the mtime>this-stamp filter
+  # inclusive of anything that landed in the same second.
+  BEFORE_DOWNLOAD=$((BEFORE_DOWNLOAD - 1))
+
   # Download AAX/AAXC + voucher + cover
   if ! "$AUDIBLE" download --asin "$ASIN" --output-dir "$DOWNLOAD_DIR" --cover --cover-size 500 --chapter 2>&1; then
-    echo "FAILED to download $ASIN"
+    echo "FAILED to download $ASIN (audible-cli exit non-zero)"
     FAILED=$((FAILED + 1))
     continue
   fi
 
-  # Find the downloaded audio file
-  AUDIO_FILE=$(find "$DOWNLOAD_DIR" -name "${ASIN}*" \( -name '*.aax' -o -name '*.aaxc' \) | head -1)
-  VOUCHER_FILE=$(find "$DOWNLOAD_DIR" -name "${ASIN}*.voucher" | head -1)
-  COVER_FILE=$(find "$DOWNLOAD_DIR" -name "${ASIN}*.jpg" -o -name "${ASIN}*.png" | head -1)
+  # Classify the downloaded files by mtime + extension. `find -newermt`
+  # with a Unix-epoch reference beats the ASIN-prefix assumption and
+  # handles both naming conventions. Use @<epoch> form for portability.
+  NEW_FILES=$(find "$DOWNLOAD_DIR" -type f -newermt "@$BEFORE_DOWNLOAD" | sort)
+
+  AUDIO_FILE=""
+  SOURCE_KIND=""   # aax | aaxc | mp3 (unencrypted) | ""
+  VOUCHER_FILE=""
+  COVER_FILE=""
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    case "$f" in
+      *.aaxc) AUDIO_FILE="$f"; SOURCE_KIND="aaxc" ;;
+      *.aax)  AUDIO_FILE="$f"; SOURCE_KIND="aax" ;;
+      # audible-cli can deliver an unencrypted MP3 for some titles
+      # (short-form content, legacy free items). Treat as a distinct
+      # source kind — decrypt doesn't apply; we just copy/rename the
+      # file into BOOKS_DIR as a .mp3. The Dave Smith straggler in
+      # 2026-04-10 hit exactly this path and got stuck because the old
+      # classifier didn't recognise .mp3 at all.
+      *.mp3)
+        # Only use mp3 if nothing else was found — prefer aax/aaxc when
+        # both are present (rare but possible if a mixed payload lands).
+        if [ -z "$AUDIO_FILE" ]; then
+          AUDIO_FILE="$f"; SOURCE_KIND="mp3"
+        fi
+        ;;
+      *.voucher) VOUCHER_FILE="$f" ;;
+      *.jpg|*.png|*.jpeg) COVER_FILE="$f" ;;
+    esac
+  done <<< "$NEW_FILES"
 
   if [ -z "$AUDIO_FILE" ]; then
-    echo "FAILED: no audio file found for $ASIN after download"
+    # Genuinely nothing downloaded — audible-cli exited 0 but produced
+    # no recognizable audio artifact. List what DID land so the
+    # operator can see the real state (empty, or an unexpected
+    # extension we don't classify yet).
+    echo "FAILED: no source audio file from audible-cli for $ASIN"
+    echo "  files touched in this run:"
+    printf '    %s\n' $NEW_FILES
     FAILED=$((FAILED + 1))
     continue
   fi
 
   # Sanitize title for filename
   SAFE_TITLE=$(echo "$TITLE" | sed 's/[^a-zA-Z0-9 ._-]//g' | sed 's/  */ /g' | head -c 200)
-  OUTPUT_M4B="$BOOKS_DIR/$SAFE_TITLE.m4b"
 
-  # Decrypt to M4B
-  echo "Decrypting to M4B..."
-  if [ -n "$VOUCHER_FILE" ]; then
-    # AAXC format — needs voucher
-    "$AUDIBLE" decrypt --input "$AUDIO_FILE" --voucher "$VOUCHER_FILE" --output "$OUTPUT_M4B" 2>&1
-  else
-    # AAX format — uses activation bytes from profile
-    "$AUDIBLE" decrypt --input "$AUDIO_FILE" --output "$OUTPUT_M4B" 2>&1
-  fi
+  case "$SOURCE_KIND" in
+    aaxc)
+      OUTPUT_M4B="$BOOKS_DIR/$SAFE_TITLE.m4b"
+      if [ -z "$VOUCHER_FILE" ]; then
+        echo "FAILED: AAXC source for $ASIN requires a .voucher but none was downloaded"
+        echo "  source file left in tmp_download for retry: $AUDIO_FILE"
+        FAILED=$((FAILED + 1))
+        continue
+      fi
+      echo "Decrypting AAXC (with voucher) to $SAFE_TITLE.m4b ..."
+      if ! "$AUDIBLE" decrypt --input "$AUDIO_FILE" --voucher "$VOUCHER_FILE" --output "$OUTPUT_M4B"; then
+        echo "FAILED: audible decrypt (aaxc) exit non-zero for $ASIN"
+        echo "  source: $AUDIO_FILE (retained in tmp_download for retry)"
+        FAILED=$((FAILED + 1))
+        continue
+      fi
+      ;;
+    aax)
+      OUTPUT_M4B="$BOOKS_DIR/$SAFE_TITLE.m4b"
+      echo "Decrypting AAX (activation bytes) to $SAFE_TITLE.m4b ..."
+      if ! "$AUDIBLE" decrypt --input "$AUDIO_FILE" --output "$OUTPUT_M4B"; then
+        echo "FAILED: audible decrypt (aax) exit non-zero for $ASIN"
+        echo "  source: $AUDIO_FILE (retained in tmp_download for retry)"
+        echo "  hint: verify ~/.audible/config.toml has activation_bytes set for the active profile"
+        FAILED=$((FAILED + 1))
+        continue
+      fi
+      ;;
+    mp3)
+      # Non-encrypted source. Preserve the .mp3 extension so downstream
+      # tagging/players don't assume an MP4 container. OpenAudible's
+      # index doesn't require .m4b uniformly — .mp3 is fine.
+      OUTPUT_M4B="$BOOKS_DIR/$SAFE_TITLE.mp3"
+      echo "Unencrypted MP3 source for $ASIN — copying as-is to $SAFE_TITLE.mp3"
+      if ! cp -- "$AUDIO_FILE" "$OUTPUT_M4B"; then
+        echo "FAILED: cp mp3 for $ASIN (destination $OUTPUT_M4B)"
+        FAILED=$((FAILED + 1))
+        continue
+      fi
+      ;;
+  esac
 
   if [ -f "$OUTPUT_M4B" ]; then
-    echo "OK: $SAFE_TITLE.m4b"
+    echo "OK: $(basename "$OUTPUT_M4B")"
     DOWNLOADED=$((DOWNLOADED + 1))
 
     # Copy cover art
     if [ -n "$COVER_FILE" ] && [ -f "$COVER_FILE" ]; then
-      cp "$COVER_FILE" "$ART_DIR/$SAFE_TITLE.jpg" 2>/dev/null
+      cp "$COVER_FILE" "$ART_DIR/$SAFE_TITLE.jpg"
     fi
 
-    # Archive raw AAX
-    if [ -f "$AUDIO_FILE" ]; then
-      mv "$AUDIO_FILE" "$AAX_DIR/" 2>/dev/null
+    # Archive raw source. AAX goes to the existing archive dir; AAXC
+    # goes there too (so the voucher pairing is co-located if a future
+    # re-decrypt is needed); MP3 sources stay in tmp_download until
+    # cleanup because they're not intermediate — the destination copy
+    # IS the deliverable.
+    if [ "$SOURCE_KIND" != "mp3" ] && [ -f "$AUDIO_FILE" ]; then
+      mkdir -p "$AAX_DIR"
+      mv -- "$AUDIO_FILE" "$AAX_DIR/"
+      # Co-locate the voucher with the AAXC archive copy.
+      if [ "$SOURCE_KIND" = "aaxc" ] && [ -n "$VOUCHER_FILE" ] && [ -f "$VOUCHER_FILE" ]; then
+        mv -- "$VOUCHER_FILE" "$AAX_DIR/"
+      fi
     fi
   else
-    echo "FAILED: decrypt produced no output for $ASIN"
+    echo "FAILED: decrypt/copy produced no output for $ASIN (expected $OUTPUT_M4B)"
     FAILED=$((FAILED + 1))
   fi
 
-  # Clean up download temp files for this book
-  find "$DOWNLOAD_DIR" -name "${ASIN}*" -delete 2>/dev/null
+  # Clean up this book's leftover files in tmp_download by mtime, not
+  # by ASIN prefix. Catches the title-prefix filenames that the old
+  # ASIN-prefix cleanup missed, so stragglers don't accumulate across
+  # weekly runs.
+  find "$DOWNLOAD_DIR" -type f -newermt "@$BEFORE_DOWNLOAD" -delete
 done
 
 rmdir "$DOWNLOAD_DIR" 2>/dev/null
