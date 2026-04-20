@@ -595,14 +595,24 @@ export class TelegramChannel implements Channel {
     // every grammy-originated call without relying on callers to
     // opt-in to logging.
     //
-    // Enabled only when LOG_LEVEL=debug/trace (the stack trace is
-    // noisy). Keep it on until #81 recurs and the smoking gun lands
-    // in the logs; disable via env once the path is identified and
-    // covered by a real tracepoint.
-    const traceGrammy =
-      process.env.LOG_LEVEL === 'debug' || process.env.LOG_LEVEL === 'trace';
-    if (traceGrammy) {
-      this.bot.api.config.use(async (prev, method, payload, signal) => {
+    // Enabled only when LOG_LEVEL=debug. The custom logger in
+    // `src/logger.ts` only defines debug/info/warn/error/fatal — unknown
+    // levels fall back to info, so gating on "trace" would attach the
+    // transformer and pay the stack/preview cost while logger.debug
+    // output was suppressed. Keep the gate strictly to the level that
+    // actually prints.
+    const traceGrammy = process.env.LOG_LEVEL === 'debug';
+    // Guard the grammy internal surface. `bot.api.config.use` exists on
+    // real grammy Bot instances, but unit tests mock `this.bot` without
+    // the `api.config` tree, and nothing in grammy's API stability
+    // policy promises this hook. If it's missing, log and continue —
+    // the diagnostic is a nice-to-have; crashing `connect()` because a
+    // future grammy release renamed `config` would be much worse.
+    const grammyConfig = this.bot.api?.config as
+      | { use?: (transformer: Parameters<Api['config']['use']>[0]) => void }
+      | undefined;
+    if (traceGrammy && typeof grammyConfig?.use === 'function') {
+      grammyConfig.use(async (prev, method, payload, signal) => {
         // Stack trace — Error().stack captures the synchronous call
         // chain up to this transformer. Slice the top frames so the
         // grammy internals don't drown out the interesting caller.
@@ -624,17 +634,26 @@ export class TelegramChannel implements Channel {
             preview.captionPreview = p.caption.slice(0, 120);
           }
           if ('parse_mode' in p) preview.parse_mode = p.parse_mode;
-          if ('reply_parameters' in p)
-            preview.reply_parameters = p.reply_parameters;
+          // Log only the `message_id` from reply_parameters. The full
+          // object can carry nested `quote` text / entities that would
+          // defeat the "trimmed preview" goal and potentially echo user
+          // content into debug logs.
+          if ('reply_parameters' in p) {
+            const rp = p.reply_parameters as { message_id?: unknown } | null;
+            if (rp && typeof rp === 'object' && 'message_id' in rp) {
+              preview.reply_to_message_id = rp.message_id;
+            }
+          }
         }
-        logger.debug(
-          { method, preview, stack },
-          '[grammy-api] outbound call',
-        );
+        logger.debug({ method, preview, stack }, '[grammy-api] outbound call');
         return prev(method, payload, signal);
       });
       logger.info(
         'Grammy API transformer attached — every bot.api.* call will be traced',
+      );
+    } else if (traceGrammy) {
+      logger.warn(
+        '[grammy-api] LOG_LEVEL=debug set but bot.api.config.use unavailable — transformer skipped (likely mocked Bot in tests, or a grammy API change)',
       );
     }
 
