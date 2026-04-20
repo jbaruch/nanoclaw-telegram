@@ -110,7 +110,12 @@ mkdir -p "$DOWNLOAD_DIR" "$BOOKS_DIR" "$ART_DIR"
 DOWNLOADED=0
 FAILED=0
 
-python3 -c "import json; [print(b['asin'], b['title'], sep='\t') for b in json.load(open('$TMPDIR/new-books.json'))]" | while IFS=$'\t' read -r ASIN TITLE; do
+# Feed the ASIN/title pairs from a process substitution so the `while`
+# loop runs in the current shell (not a subshell). Bash's default
+# pipe-to-while forks the loop body into a subshell, which means
+# `DOWNLOADED`/`FAILED` increments disappear before the final summary
+# lines can read them. `done < <(...)` keeps the counters in scope.
+while IFS=$'\t' read -r ASIN TITLE; do
   echo ""
   echo "--- Downloading: $TITLE ($ASIN) ---"
 
@@ -140,10 +145,14 @@ python3 -c "import json; [print(b['asin'], b['title'], sep='\t') for b in json.l
     continue
   fi
 
-  # Classify the downloaded files by mtime + extension. `find -newermt`
-  # with a Unix-epoch reference beats the ASIN-prefix assumption and
-  # handles both naming conventions. Use @<epoch> form for portability.
-  NEW_FILES=$(find "$DOWNLOAD_DIR" -type f -newermt "@$BEFORE_DOWNLOAD" | sort)
+  # Classify the downloaded files by mtime + extension. `find -newer`
+  # against a touched reference file works on every find implementation
+  # we might encounter (GNU, BSD, BusyBox) — `find -newermt "@<epoch>"`
+  # is GNU-only and fails noisily under `set -euo pipefail` on the NAS
+  # if this script ever runs under BusyBox coreutils. Keep portable.
+  REF_TS="$TMPDIR/ref-$BEFORE_DOWNLOAD"
+  touch -d "@$BEFORE_DOWNLOAD" "$REF_TS" 2>/dev/null || touch -t "$(date -r "$BEFORE_DOWNLOAD" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$BEFORE_DOWNLOAD" +%Y%m%d%H%M.%S)" "$REF_TS"
+  NEW_FILES=$(find "$DOWNLOAD_DIR" -type f -newer "$REF_TS" | sort)
 
   AUDIO_FILE=""
   SOURCE_KIND=""   # aax | aaxc | mp3 (unencrypted) | ""
@@ -179,7 +188,14 @@ python3 -c "import json; [print(b['asin'], b['title'], sep='\t') for b in json.l
     # extension we don't classify yet).
     echo "FAILED: no source audio file from audible-cli for $ASIN"
     echo "  files touched in this run:"
-    printf '    %s\n' $NEW_FILES
+    # Iterate line-by-line — don't use `printf '%s\n' $NEW_FILES`
+    # because unquoted expansion word-splits and glob-expands. A
+    # filename containing spaces or a wildcard char would otherwise
+    # be mangled or (worse) match other paths on disk.
+    while IFS= read -r _touched; do
+      [ -z "$_touched" ] && continue
+      printf '    %s\n' "$_touched"
+    done <<< "$NEW_FILES"
     FAILED=$((FAILED + 1))
     continue
   fi
@@ -235,7 +251,7 @@ python3 -c "import json; [print(b['asin'], b['title'], sep='\t') for b in json.l
 
     # Copy cover art
     if [ -n "$COVER_FILE" ] && [ -f "$COVER_FILE" ]; then
-      cp "$COVER_FILE" "$ART_DIR/$SAFE_TITLE.jpg"
+      cp -- "$COVER_FILE" "$ART_DIR/$SAFE_TITLE.jpg"
     fi
 
     # Archive raw source. AAX goes to the existing archive dir; AAXC
@@ -259,9 +275,11 @@ python3 -c "import json; [print(b['asin'], b['title'], sep='\t') for b in json.l
   # Clean up this book's leftover files in tmp_download by mtime, not
   # by ASIN prefix. Catches the title-prefix filenames that the old
   # ASIN-prefix cleanup missed, so stragglers don't accumulate across
-  # weekly runs.
-  find "$DOWNLOAD_DIR" -type f -newermt "@$BEFORE_DOWNLOAD" -delete
-done
+  # weekly runs. Reuse the same reference file from the classifier
+  # (-newer vs -newermt) for portable find behavior.
+  find "$DOWNLOAD_DIR" -type f -newer "$REF_TS" -delete
+  rm -f "$REF_TS"
+done < <(python3 -c "import json; [print(b['asin'], b['title'], sep='\t') for b in json.load(open('$TMPDIR/new-books.json'))]")
 
 rmdir "$DOWNLOAD_DIR" 2>/dev/null
 
