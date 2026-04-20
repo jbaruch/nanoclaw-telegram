@@ -324,14 +324,12 @@ describe('TelegramChannel', () => {
           };
         };
         const OrigBot = origBot.Bot;
-        const stripped: Array<ReturnType<typeof vi.fn>> = [];
         // Wrap Bot so that right after construction we drop api.config.
         origBot.Bot = class extends OrigBot {
           constructor(token: string) {
             super(token);
             // Type assertion: the test mock's api is a concrete object.
             (this.api as { config?: unknown }).config = undefined;
-            stripped.push(vi.fn()); // sentinel for later cleanup
           }
         } as typeof OrigBot;
         try {
