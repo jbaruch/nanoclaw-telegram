@@ -87,6 +87,7 @@ import {
   stopHubitatListener,
 } from './hubitat-listener.js';
 import { startSchedulerLoop } from './task-scheduler.js';
+import { installTelegramOutboundTap } from './telegram-outbound-tap.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -1002,6 +1003,13 @@ function ensureContainerSystemRunning(): void {
 }
 
 async function main(): Promise<void> {
+  // Install the outbound-Telegram HTTP tap FIRST — before any grammy Bot,
+  // credential proxy, or channel loads. The tap wraps `fetch`, `http/https`
+  // `request`, and `child_process.spawn/exec/execFile` to log any outbound
+  // call to `api.telegram.org` regardless of which in-process code path
+  // originates it. Gated on `LOG_LEVEL=debug` (same as #87's transformer);
+  // no overhead at `info` or higher. See `telegram-outbound-tap.ts`.
+  installTelegramOutboundTap();
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
