@@ -64,8 +64,8 @@ Then act per category — decide, don't ask:
 | Category | Action |
 |---|---|
 | Missing cross-references | **Auto-fix.** Add the inbound/outbound link and update the page's `updated:` frontmatter. Safe — purely additive, reversible. |
-| Orphan pages with no inbound links | **Auto-fix.** Add a reference from the nearest category index or hub page. If no natural hub exists, leave a `wiki-lint:` note in the orphan page's frontmatter (`lint_orphan: YYYY-MM-DD`) and list it in the run report. |
-| Stale claims superseded by newer sources | **Auto-fix** when the newer source is already ingested and the supersession is unambiguous (same entity, clearer numbers/dates, newer `created:`). Strike the stale line and add `superseded by [newer-page.md]`. Ambiguous cases — different methodology, partial overlap, conflicting primary sources — fall to **Report**. |
+| Orphan pages with no inbound links | **Auto-fix.** Add a reference from the nearest category index or hub page. If no natural hub exists, set the frontmatter key `lint_orphan: YYYY-MM-DD` on the orphan page and list it in the run report. |
+| Stale claims superseded by newer sources | **Auto-fix** when the newer source is already ingested and the supersession is unambiguous (same entity, clearer numbers/dates, newer `created:`). Strike the stale line and add a Markdown link: `superseded by [Newer Page Title](newer-page.md)`. Ambiguous cases — different methodology, partial overlap, conflicting primary sources — fall to **Report**. |
 | Gaps — topics referenced but never sourced | **Report.** Cannot fix without new source ingestion, which requires human judgment on what to fetch. List the topic and the pages that reference it. |
 | Contradictions between pages | **Report.** Requires human judgment on which claim is correct. Never auto-pick. List the contradicting pages and quote the conflicting lines. |
 | Important concepts mentioned but lacking dedicated pages | **Report.** Creating a concept page is a judgment call about scope and depth — don't synthesize without a source pointer. |
@@ -81,7 +81,7 @@ Report: <N> gaps, <M> contradictions, <K> missing concept pages
 
 If nothing to fix and nothing to report → silence. Do NOT emit "wiki is clean" or any acknowledgment.
 
-**Rationale for acting over asking.** The three auto-fix categories are each reversible via git (the wiki lives under version control) and produce no semantic conflicts: missing cross-refs are discovered links, orphan hub-linking places a page where a reader can find it, and unambiguous supersession strikes an already-superseded fact. The three report-only categories involve choices (which source to trust, how deep a concept page should go, whether to ingest a new source) that belong to Baruch, not to a scheduled job at 4am.
+**Rationale for acting over asking.** The three auto-fix categories are each reversible via git (the wiki lives under version control) and produce no semantic conflicts: missing cross-refs are discovered links, orphan hub-linking places a page where a reader can find it, and unambiguous supersession strikes an already-superseded fact. The three report-only categories involve choices (which source to trust, how deep a concept page should go, whether to ingest a new source) that belong to the wiki owner, not to a scheduled job at 4am.
 
 ## Page format
 
