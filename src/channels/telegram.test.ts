@@ -291,15 +291,13 @@ describe('TelegramChannel', () => {
         await channel.connect();
         expect(currentBot().api.config.use).toHaveBeenCalledTimes(1);
         // First arg is the transformer function — sanity check.
-        expect(
-          typeof currentBot().api.config.use.mock.calls[0][0],
-        ).toBe('function');
+        expect(typeof currentBot().api.config.use.mock.calls[0][0]).toBe(
+          'function',
+        );
         // Info log announces the attachment so operators can see it
         // in docker logs when LOG_LEVEL=debug is set post-restart.
         expect(logger.info).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'Grammy API transformer attached',
-          ),
+          expect.stringContaining('Grammy API transformer attached'),
         );
       } finally {
         if (prev === undefined) delete process.env.LOG_LEVEL;
@@ -335,9 +333,7 @@ describe('TelegramChannel', () => {
         try {
           await channel.connect();
           expect(logger.warn).toHaveBeenCalledWith(
-            expect.stringContaining(
-              'bot.api.config.use unavailable',
-            ),
+            expect.stringContaining('bot.api.config.use unavailable'),
           );
         } finally {
           origBot.Bot = OrigBot;
