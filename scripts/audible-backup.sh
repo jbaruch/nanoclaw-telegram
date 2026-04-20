@@ -158,27 +158,38 @@ while IFS=$'\t' read -r ASIN TITLE; do
   SOURCE_KIND=""   # aax | aaxc | mp3 (unencrypted) | ""
   VOUCHER_FILE=""
   COVER_FILE=""
+  # Classifier uses explicit priority rather than "last write wins."
+  # Priority: aaxc (encrypted w/ voucher) > aax (encrypted w/ activation
+  # bytes) > mp3 (unencrypted). Without this, a mixed payload where
+  # audible-cli drops BOTH .aaxc and .aax for the same title could land
+  # the wrong format depending on sort order / filenames, which in turn
+  # would pick the wrong decrypt path. The priority scale is 3/2/1 so
+  # any "higher" match upgrades SOURCE_KIND, same-level stays on first
+  # match (deterministic via the `sort` above).
+  _prio() { case "$1" in aaxc) echo 3;; aax) echo 2;; mp3) echo 1;; *) echo 0;; esac; }
+  current_prio=0
   while IFS= read -r f; do
     [ -z "$f" ] && continue
     case "$f" in
-      *.aaxc) AUDIO_FILE="$f"; SOURCE_KIND="aaxc" ;;
-      *.aax)  AUDIO_FILE="$f"; SOURCE_KIND="aax" ;;
+      *.aaxc) new_kind="aaxc" ;;
+      *.aax)  new_kind="aax" ;;
       # audible-cli can deliver an unencrypted MP3 for some titles
       # (short-form content, legacy free items). Treat as a distinct
       # source kind — decrypt doesn't apply; we just copy/rename the
       # file into BOOKS_DIR as a .mp3. The Dave Smith straggler in
       # 2026-04-10 hit exactly this path and got stuck because the old
       # classifier didn't recognise .mp3 at all.
-      *.mp3)
-        # Only use mp3 if nothing else was found — prefer aax/aaxc when
-        # both are present (rare but possible if a mixed payload lands).
-        if [ -z "$AUDIO_FILE" ]; then
-          AUDIO_FILE="$f"; SOURCE_KIND="mp3"
-        fi
-        ;;
-      *.voucher) VOUCHER_FILE="$f" ;;
-      *.jpg|*.png|*.jpeg) COVER_FILE="$f" ;;
+      *.mp3)  new_kind="mp3" ;;
+      *.voucher) VOUCHER_FILE="$f"; continue ;;
+      *.jpg|*.jpeg|*.png) COVER_FILE="$f"; continue ;;
+      *) continue ;;
     esac
+    new_prio=$(_prio "$new_kind")
+    if [ "$new_prio" -gt "$current_prio" ]; then
+      AUDIO_FILE="$f"
+      SOURCE_KIND="$new_kind"
+      current_prio="$new_prio"
+    fi
   done <<< "$NEW_FILES"
 
   if [ -z "$AUDIO_FILE" ]; then
@@ -249,9 +260,23 @@ while IFS=$'\t' read -r ASIN TITLE; do
     echo "OK: $(basename "$OUTPUT_M4B")"
     DOWNLOADED=$((DOWNLOADED + 1))
 
-    # Copy cover art
+    # Copy cover art. Preserve the original extension — some titles
+    # ship .png or .jpeg, and renaming to .jpg without re-encoding
+    # leaves consumers that sniff by extension confused (or worse,
+    # players that fail silently on a mismatched container). Extract
+    # the extension from the downloaded filename.
+    #
+    # set -e guard: cover copy failure is non-fatal per-book. Without
+    # the `if ! cp ...` wrapper, a disk-full / permission / path-too-
+    # long error would abort the whole run mid-loop, skipping the
+    # final summary and leaving the book's decrypted m4b in BOOKS_DIR
+    # without its art but with nothing logged. Explicit failure
+    # handling keeps the loop moving.
     if [ -n "$COVER_FILE" ] && [ -f "$COVER_FILE" ]; then
-      cp -- "$COVER_FILE" "$ART_DIR/$SAFE_TITLE.jpg"
+      cover_ext="${COVER_FILE##*.}"
+      if ! cp -- "$COVER_FILE" "$ART_DIR/$SAFE_TITLE.$cover_ext"; then
+        echo "WARN: cover art copy failed for $ASIN — continuing without cover"
+      fi
     fi
 
     # Archive raw source. AAX goes to the existing archive dir; AAXC
@@ -259,12 +284,21 @@ while IFS=$'\t' read -r ASIN TITLE; do
     # re-decrypt is needed); MP3 sources stay in tmp_download until
     # cleanup because they're not intermediate — the destination copy
     # IS the deliverable.
+    #
+    # set -e guard: archive-mv failure is non-fatal per-book (same
+    # rationale as the cover copy above). Log the failure; the raw
+    # source stays in tmp_download and the mtime cleanup at the end
+    # of the loop iteration will pick it up anyway, so we don't leak.
     if [ "$SOURCE_KIND" != "mp3" ] && [ -f "$AUDIO_FILE" ]; then
       mkdir -p "$AAX_DIR"
-      mv -- "$AUDIO_FILE" "$AAX_DIR/"
+      if ! mv -- "$AUDIO_FILE" "$AAX_DIR/"; then
+        echo "WARN: archive mv failed for $AUDIO_FILE — continuing (will be cleaned up by mtime sweep)"
+      fi
       # Co-locate the voucher with the AAXC archive copy.
       if [ "$SOURCE_KIND" = "aaxc" ] && [ -n "$VOUCHER_FILE" ] && [ -f "$VOUCHER_FILE" ]; then
-        mv -- "$VOUCHER_FILE" "$AAX_DIR/"
+        if ! mv -- "$VOUCHER_FILE" "$AAX_DIR/"; then
+          echo "WARN: voucher mv failed for $VOUCHER_FILE — continuing"
+        fi
       fi
     fi
   else
@@ -277,7 +311,18 @@ while IFS=$'\t' read -r ASIN TITLE; do
   # ASIN-prefix cleanup missed, so stragglers don't accumulate across
   # weekly runs. Reuse the same reference file from the classifier
   # (-newer vs -newermt) for portable find behavior.
-  find "$DOWNLOAD_DIR" -type f -newer "$REF_TS" -delete
+  #
+  # set -e guard: a permission issue on one stale file in tmp_download
+  # would otherwise abort the whole run via find's non-zero exit, with
+  # the still-open loop iteration blocking all subsequent books AND
+  # the final summary line. Wrap in `|| true` so cleanup is genuinely
+  # best-effort — a failed delete leaves the straggler for the next
+  # run to try again, which is strictly safer than a hard abort.
+  # Log the failure so systematic issues (tmp_download permissions
+  # flipped, disk full, mtime ref lost) surface for the operator.
+  if ! find "$DOWNLOAD_DIR" -type f -newer "$REF_TS" -delete; then
+    echo "WARN: tmp_download cleanup partially failed for $ASIN — stragglers may retry next run"
+  fi
   rm -f "$REF_TS"
 done < <(python3 -c "import json; [print(b['asin'], b['title'], sep='\t') for b in json.load(open('$TMPDIR/new-books.json'))]")
 
