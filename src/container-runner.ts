@@ -1034,6 +1034,54 @@ export function buildVolumeMounts(
       isMain,
     );
     mounts.push(...validatedMounts);
+
+    // Shadow SECRET_FILES that are reachable through an additionalMount.
+    //
+    // The main-group block above `/dev/null`-mounts each SECRET_FILES
+    // entry at `/workspace/project/<relPath>` — but that shadow only
+    // covers the canonical project mount. An additionalMount can
+    // re-expose the nanoclaw tree at a DIFFERENT container path (e.g.
+    // a group registered with `hostPath: ~/nanoclaw` lands it at
+    // `/workspace/extra/nanoclaw/`), and the `.env` at
+    // `<mount>/.env` has no shadow applied there. A trusted agent
+    // could then read the real token out of the extra mount even
+    // though `/workspace/project/.env` is `/dev/null`.
+    //
+    // For every validated additionalMount whose host path CONTAINS any
+    // SECRET_FILES entry, add a `/dev/null` bind at the corresponding
+    // container path inside the extra mount. `path.relative` returning
+    // a non-empty, non-`..`-prefixed, non-absolute string is the
+    // "inside" predicate — matches what Docker's path resolution does.
+    for (const vm of validatedMounts) {
+      for (const relPath of SECRET_FILES) {
+        // `toHostPath` is for the PATH COMPARISON only (it translates
+        // the orchestrator-local cwd into its host-side equivalent so
+        // `path.relative` compares against the host-side `vm.hostPath`
+        // that Docker will actually bind). The EXISTENCE CHECK
+        // deliberately uses the orchestrator-local path — in DooD mode
+        // the orchestrator can't stat arbitrary host paths (it only
+        // sees what's mounted into its own container), so a stat on
+        // `toHostPath(...)` would wrongly return false and skip the
+        // shadow. See `mount-security.ts` for the same "can't stat
+        // host paths from inside DooD" note.
+        const secretLocalPath = path.join(process.cwd(), relPath);
+        const secretHostPath = toHostPath(secretLocalPath);
+        const relFromMount = path.relative(vm.hostPath, secretHostPath);
+        if (
+          !relFromMount ||
+          relFromMount.startsWith('..') ||
+          path.isAbsolute(relFromMount)
+        ) {
+          continue;
+        }
+        if (!fs.existsSync(secretLocalPath)) continue;
+        mounts.push({
+          hostPath: '/dev/null',
+          containerPath: path.posix.join(vm.containerPath, relFromMount),
+          readonly: true,
+        });
+      }
+    }
   }
 
   return mounts;
