@@ -148,10 +148,23 @@ while IFS=$'\t' read -r ASIN TITLE; do
   # Classify the downloaded files by mtime + extension. `find -newer`
   # against a touched reference file works on every find implementation
   # we might encounter (GNU, BSD, BusyBox) — `find -newermt "@<epoch>"`
-  # is GNU-only and fails noisily under `set -euo pipefail` on the NAS
-  # if this script ever runs under BusyBox coreutils. Keep portable.
+  # is GNU-only. Platform-detect via uname so neither touch nor date
+  # needs a stderr-suppressed fallback (per the no-error-suppression
+  # rule).
   REF_TS="$TMPDIR/ref-$BEFORE_DOWNLOAD"
-  touch -d "@$BEFORE_DOWNLOAD" "$REF_TS" 2>/dev/null || touch -t "$(date -r "$BEFORE_DOWNLOAD" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$BEFORE_DOWNLOAD" +%Y%m%d%H%M.%S)" "$REF_TS"
+  case "$(uname -s)" in
+    Darwin|*BSD)
+      # BSD touch needs `-t YYYYMMDDHHMM.SS`, and BSD `date -r` reads
+      # the epoch from its argument directly.
+      touch -t "$(date -r "$BEFORE_DOWNLOAD" +%Y%m%d%H%M.%S)" "$REF_TS"
+      ;;
+    *)
+      # GNU touch (Linux, Synology NAS default) supports `-d "@epoch"`.
+      # BusyBox will fail here visibly — which is the right behavior,
+      # since the deploy target is GNU coreutils.
+      touch -d "@$BEFORE_DOWNLOAD" "$REF_TS"
+      ;;
+  esac
   NEW_FILES=$(find "$DOWNLOAD_DIR" -type f -newer "$REF_TS" | sort)
 
   AUDIO_FILE=""
