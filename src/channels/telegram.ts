@@ -584,6 +584,60 @@ export class TelegramChannel implements Channel {
       },
     });
 
+    // Grammy API transformer — catches every outbound call on THIS Bot
+    // instance regardless of which internal code path invoked it. Logs
+    // method + payload preview + a stack trace of the caller. Existing
+    // [send] tracepoints cover every path we currently know about
+    // (sendTelegramMessage wrapper, sendFile, sendPoolMessage), but
+    // issue #81's ghost messages keep showing up with no matching
+    // trace — meaning some path we haven't discovered is invoking
+    // `this.bot.api.*`. A transformer is the ONLY place that sees
+    // every grammy-originated call without relying on callers to
+    // opt-in to logging.
+    //
+    // Enabled only when LOG_LEVEL=debug/trace (the stack trace is
+    // noisy). Keep it on until #81 recurs and the smoking gun lands
+    // in the logs; disable via env once the path is identified and
+    // covered by a real tracepoint.
+    const traceGrammy =
+      process.env.LOG_LEVEL === 'debug' || process.env.LOG_LEVEL === 'trace';
+    if (traceGrammy) {
+      this.bot.api.config.use(async (prev, method, payload, signal) => {
+        // Stack trace — Error().stack captures the synchronous call
+        // chain up to this transformer. Slice the top frames so the
+        // grammy internals don't drown out the interesting caller.
+        const stack = new Error().stack?.split('\n').slice(2, 10).join('\n');
+        // Payload preview — trim strings to avoid dumping 4KB of
+        // message text into every log line. Only text / caption / chat
+        // routing fields matter for forensics.
+        const preview: Record<string, unknown> = {};
+        if (payload && typeof payload === 'object') {
+          const p = payload as Record<string, unknown>;
+          if ('chat_id' in p) preview.chat_id = p.chat_id;
+          if ('message_id' in p) preview.message_id = p.message_id;
+          if ('text' in p && typeof p.text === 'string') {
+            preview.textLen = p.text.length;
+            preview.textPreview = p.text.slice(0, 120);
+          }
+          if ('caption' in p && typeof p.caption === 'string') {
+            preview.captionLen = p.caption.length;
+            preview.captionPreview = p.caption.slice(0, 120);
+          }
+          if ('parse_mode' in p) preview.parse_mode = p.parse_mode;
+          if ('reply_parameters' in p)
+            preview.reply_parameters = p.reply_parameters;
+        }
+        logger.debug(
+          { method, preview, stack },
+          '[grammy-api] outbound call',
+        );
+        return prev(method, payload, signal);
+      });
+      logger.info(
+        'Grammy API transformer attached — every bot.api.* call will be traced',
+      );
+    }
+
     // Command to get chat ID (useful for registration)
     this.bot.command('chatid', (ctx) => {
       const chatId = ctx.chat.id;
