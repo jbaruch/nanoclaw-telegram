@@ -157,21 +157,48 @@ while IFS=$'\t' read -r ASIN TITLE; do
   # is GNU-only. Platform-detect via uname so neither touch nor date
   # needs a stderr-suppressed fallback (per the no-error-suppression
   # rule).
+  # Per-book error handling: any failure in touch/date/find must NOT
+  # abort the whole run (set -euo pipefail would otherwise kill the
+  # script mid-batch, losing the summary). On failure, log a clear
+  # per-ASIN message, clean up REF_TS if it was created, bump FAILED,
+  # and continue to the next book.
   REF_TS="$TMPDIR/ref-$BEFORE_DOWNLOAD"
+  rm -f "$REF_TS"
   case "$(uname -s)" in
     Darwin|*BSD)
       # BSD touch needs `-t YYYYMMDDHHMM.SS`, and BSD `date -r` reads
       # the epoch from its argument directly.
-      touch -t "$(date -r "$BEFORE_DOWNLOAD" +%Y%m%d%H%M.%S)" "$REF_TS"
+      if ! REF_TOUCH_TS="$(date -r "$BEFORE_DOWNLOAD" +%Y%m%d%H%M.%S)"; then
+        echo "FAILED to classify downloaded files for $ASIN (could not format reference timestamp)"
+        FAILED=$((FAILED + 1))
+        rm -f "$REF_TS"
+        continue
+      fi
+      if ! touch -t "$REF_TOUCH_TS" "$REF_TS"; then
+        echo "FAILED to classify downloaded files for $ASIN (could not create reference timestamp file)"
+        FAILED=$((FAILED + 1))
+        rm -f "$REF_TS"
+        continue
+      fi
       ;;
     *)
       # GNU touch (Linux, Synology NAS default) supports `-d "@epoch"`.
       # BusyBox will fail here visibly — which is the right behavior,
       # since the deploy target is GNU coreutils.
-      touch -d "@$BEFORE_DOWNLOAD" "$REF_TS"
+      if ! touch -d "@$BEFORE_DOWNLOAD" "$REF_TS"; then
+        echo "FAILED to classify downloaded files for $ASIN (could not create reference timestamp file)"
+        FAILED=$((FAILED + 1))
+        rm -f "$REF_TS"
+        continue
+      fi
       ;;
   esac
-  NEW_FILES=$(find "$DOWNLOAD_DIR" -type f -newer "$REF_TS" | sort)
+  if ! NEW_FILES=$(find "$DOWNLOAD_DIR" -type f -newer "$REF_TS" | sort); then
+    echo "FAILED to classify downloaded files for $ASIN (find/sort error)"
+    FAILED=$((FAILED + 1))
+    rm -f "$REF_TS"
+    continue
+  fi
 
   AUDIO_FILE=""
   SOURCE_KIND=""   # aax | aaxc | mp3 (unencrypted) | ""
