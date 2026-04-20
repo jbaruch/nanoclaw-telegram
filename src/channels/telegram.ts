@@ -1232,7 +1232,6 @@ export class TelegramChannel implements Channel {
     }
     await this.sendReaction(jid, latest.id, emoji);
   }
-
 }
 
 registerChannel('telegram', (opts: ChannelOpts) => {
