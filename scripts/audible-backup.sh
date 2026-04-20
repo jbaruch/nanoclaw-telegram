@@ -165,9 +165,12 @@ while IFS=$'\t' read -r ASIN TITLE; do
   REF_TS="$TMPDIR/ref-$BEFORE_DOWNLOAD"
   rm -f "$REF_TS"
   case "$(uname -s)" in
-    Darwin|*BSD)
+    Darwin|*BSD|DragonFly)
       # BSD touch needs `-t YYYYMMDDHHMM.SS`, and BSD `date -r` reads
-      # the epoch from its argument directly.
+      # the epoch from its argument directly. DragonFlyBSD is listed
+      # explicitly because its `uname -s` reports `DragonFly` (no `BSD`
+      # suffix), which would otherwise fall through to the GNU branch
+      # and fail on `touch -d "@epoch"`.
       if ! REF_TOUCH_TS="$(date -r "$BEFORE_DOWNLOAD" +%Y%m%d%H%M.%S)"; then
         echo "FAILED to classify downloaded files for $ASIN (could not format reference timestamp)"
         FAILED=$((FAILED + 1))
