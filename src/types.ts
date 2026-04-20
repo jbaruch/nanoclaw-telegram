@@ -154,11 +154,6 @@ export interface Channel {
     caption?: string,
     replyToMessageId?: string,
   ): Promise<void>;
-  // Optional: create a draft stream for progressive message display.
-  createDraftStream?(
-    jid: string,
-    replyToMessageId?: string,
-  ): import('./draft-stream.js').DraftStream;
 }
 
 // Callback type that channels use to deliver inbound messages
