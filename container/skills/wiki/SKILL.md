@@ -64,8 +64,8 @@ Then act per category — decide, don't ask:
 | Category | Action |
 |---|---|
 | Missing cross-references | **Auto-fix.** Add the inbound/outbound link and update the page's `updated:` frontmatter. Safe — purely additive, reversible. |
-| Orphan pages with no inbound links | **Auto-fix.** Add a reference from the nearest category index or hub page. If no natural hub exists, set the frontmatter key `lint_orphan: YYYY-MM-DD` on the orphan page and list it in the run report. |
-| Stale claims superseded by newer sources | **Auto-fix** when the newer source is already ingested and the supersession is unambiguous (same entity, clearer numbers/dates, newer `created:`). Strike the stale line and add a Markdown link: `superseded by [Newer Page Title](newer-page.md)`. Ambiguous cases — different methodology, partial overlap, conflicting primary sources — fall to **Report**. |
+| Orphan pages with no inbound links | **Auto-fix.** Add a reference from the nearest category index or hub page and update the page's `updated:` frontmatter. If no natural hub exists, set the frontmatter keys `lint_orphan: YYYY-MM-DD` and `updated:` on the orphan page — these go into the Fixed summary count, not the Report section. |
+| Stale claims superseded by newer sources | **Auto-fix** when the newer source is already ingested and the supersession is unambiguous (same entity, clearer numbers/dates, newer `created:`). Strike the stale line, add a Markdown link: `superseded by [Newer Page Title](newer-page.md)`, and update the page's `updated:` frontmatter. Ambiguous cases — different methodology, partial overlap, conflicting primary sources — fall to **Report**. |
 | Gaps — topics referenced but never sourced | **Report.** Cannot fix without new source ingestion, which requires human judgment on what to fetch. List the topic and the pages that reference it. |
 | Contradictions between pages | **Report.** Requires human judgment on which claim is correct. Never auto-pick. List the contradicting pages and quote the conflicting lines. |
 | Important concepts mentioned but lacking dedicated pages | **Report.** Creating a concept page is a judgment call about scope and depth — don't synthesize without a source pointer. |
@@ -95,6 +95,8 @@ sources: [source1.md, source2.pdf]
 related: [other-page.md, another.md]
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
+# Optional lint-state keys (set by the self-service lint, not by ingest):
+# lint_orphan: YYYY-MM-DD    # set when an orphan page has no natural hub
 ---
 
 Content here. Link to related pages: [Related Topic](related-topic.md)
