@@ -261,7 +261,7 @@ while IFS=$'\t' read -r ASIN TITLE; do
       # index doesn't require .m4b uniformly — .mp3 is fine.
       OUTPUT_M4B="$BOOKS_DIR/$SAFE_TITLE.mp3"
       echo "Unencrypted MP3 source for $ASIN — copying as-is to $SAFE_TITLE.mp3"
-      if ! cp -- "$AUDIO_FILE" "$OUTPUT_M4B"; then
+      if ! cp "$AUDIO_FILE" "$OUTPUT_M4B"; then
         echo "FAILED: cp mp3 for $ASIN (destination $OUTPUT_M4B)"
         FAILED=$((FAILED + 1))
         continue
@@ -287,7 +287,7 @@ while IFS=$'\t' read -r ASIN TITLE; do
     # handling keeps the loop moving.
     if [ -n "$COVER_FILE" ] && [ -f "$COVER_FILE" ]; then
       cover_ext="${COVER_FILE##*.}"
-      if ! cp -- "$COVER_FILE" "$ART_DIR/$SAFE_TITLE.$cover_ext"; then
+      if ! cp "$COVER_FILE" "$ART_DIR/$SAFE_TITLE.$cover_ext"; then
         echo "WARN: cover art copy failed for $ASIN — continuing without cover"
       fi
     fi
@@ -304,19 +304,34 @@ while IFS=$'\t' read -r ASIN TITLE; do
     # of the loop iteration will pick it up anyway, so we don't leak.
     if [ "$SOURCE_KIND" != "mp3" ] && [ -f "$AUDIO_FILE" ]; then
       mkdir -p "$AAX_DIR"
-      if ! mv -- "$AUDIO_FILE" "$AAX_DIR/"; then
-        echo "WARN: archive mv failed for $AUDIO_FILE — continuing (will be cleaned up by mtime sweep)"
+      if ! mv "$AUDIO_FILE" "$AAX_DIR/"; then
+        # Archive is book-keeping: the m4b deliverable is already in
+        # BOOKS_DIR, so the run is fundamentally a success. The AAX/
+        # AAXC source will be swept by the mtime cleanup below — mild
+        # loss for re-decrypt scenarios (only relevant for AAXC, where
+        # the voucher + source would let you redo decryption without
+        # re-downloading). Acceptable edge: archive mv failures are
+        # rare (mkdir AAX_DIR already succeeded; usual cause is a
+        # filesystem permission flip between the two dirs).
+        echo "WARN: archive mv failed for $AUDIO_FILE — source will be swept by cleanup; m4b is already in BOOKS_DIR"
       fi
       # Co-locate the voucher with the AAXC archive copy.
       if [ "$SOURCE_KIND" = "aaxc" ] && [ -n "$VOUCHER_FILE" ] && [ -f "$VOUCHER_FILE" ]; then
-        if ! mv -- "$VOUCHER_FILE" "$AAX_DIR/"; then
+        if ! mv "$VOUCHER_FILE" "$AAX_DIR/"; then
           echo "WARN: voucher mv failed for $VOUCHER_FILE — continuing"
         fi
       fi
     fi
   else
     echo "FAILED: decrypt/copy produced no output for $ASIN (expected $OUTPUT_M4B)"
+    echo "  source retained in tmp_download for inspection: $AUDIO_FILE"
     FAILED=$((FAILED + 1))
+    # Skip the mtime-based cleanup below — the decrypt path claimed
+    # success but produced no m4b, which is a weird state the operator
+    # may want to debug with the source AAX/AAXC still in place.
+    # Audible-cli will re-download next weekly run (OpenAudible's
+    # books.json has no m4b_path for this ASIN → treats it as new).
+    continue
   fi
 
   # Clean up this book's leftover files in tmp_download by mtime, not
