@@ -33,6 +33,8 @@ cd "$PRIVATE_DIR"
 EXCLUDES=(
   # Secrets / private integrations
   --exclude='.env'
+  --exclude='scripts/heartbeat-external.conf'
+  --exclude='scripts/heartbeat-external.state'
   --exclude='scripts/trakt-auth.py'
   --exclude='scripts/audible-backup.sh'
   --exclude='src/hubitat-listener.ts'
