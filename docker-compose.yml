@@ -32,13 +32,12 @@ services:
       - CREDENTIAL_PROXY_HOST=0.0.0.0
       - TZ=America/Chicago
       - NODE_ENV=production
-      # Diagnostic: bumped to debug for issue #81 (ghost heartbeat
-      # messages bypassing DB + sanitizer). Revert to `info` once the
-      # root-cause path is identified and fixed. Logs the full
-      # send-path decision tree in ipc.ts + telegram.ts plus the
-      # `[send] HTML send failed, falling back to plain text` line
-      # that was previously emitted at debug and therefore invisible.
-      - LOG_LEVEL=${LOG_LEVEL:-debug}
+      # Standard log level. For deep Telegram-path diagnostics (per-call
+      # grammy transformer from #87, process-wide HTTP tap from #89, the
+      # `[send]`/`[ipc]` tracing from #82), set LOG_LEVEL=debug in .env
+      # or the environment for the deploy run — the instrumentation is
+      # still in place, just gated off at info.
+      - LOG_LEVEL=${LOG_LEVEL:-info}
     ports:
       # Credential proxy — agent containers reach it via host.docker.internal:3001
       - "3001:3001"
