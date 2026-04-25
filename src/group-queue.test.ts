@@ -730,4 +730,132 @@ describe('GroupQueue', () => {
     resolveProcess!();
     await vi.advanceTimersByTimeAsync(10);
   });
+
+  // --- Container-status derivation (chat_status surface) ---
+
+  it('reports not-spawned for a slot that has never run', () => {
+    expect(queue.getStatus('group-x@g.us', DEFAULT_SESSION_NAME)).toBe(
+      'not-spawned',
+    );
+  });
+
+  it('reports running while a message-processing run is in flight', async () => {
+    let resolveProcessing: () => void;
+    const processMessages = vi.fn(
+      async () =>
+        await new Promise<boolean>((resolve) => {
+          resolveProcessing = () => resolve(true);
+        }),
+    );
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(queue.getStatus('group1@g.us', DEFAULT_SESSION_NAME)).toBe(
+      'running',
+    );
+
+    resolveProcessing!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('reports idle when notifyIdle is called mid-run', async () => {
+    let resolveProcessing: () => void;
+    const processMessages = vi.fn(
+      async (_jid: string) =>
+        await new Promise<boolean>((resolve) => {
+          resolveProcessing = () => resolve(true);
+        }),
+    );
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    queue.notifyIdle('group1@g.us');
+    expect(queue.getStatus('group1@g.us', DEFAULT_SESSION_NAME)).toBe('idle');
+
+    resolveProcessing!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('reports not-spawned after a clean run completes', async () => {
+    const processMessages = vi.fn(async () => true);
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(queue.getStatus('group1@g.us', DEFAULT_SESSION_NAME)).toBe(
+      'not-spawned',
+    );
+  });
+
+  it('reports cooling-down between failed runs (retry backoff window)', async () => {
+    const processMessages = vi.fn(async () => false);
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // First run failed and scheduled a retry; we're now in the backoff
+    // window (retryCount > 0 inside GroupQueue). Don't advance the
+    // timer past the retry threshold or the second run would overlap.
+    expect(queue.getStatus('group1@g.us', DEFAULT_SESSION_NAME)).toBe(
+      'cooling-down',
+    );
+  });
+
+  it('reports cooling-down when caller signals an active circuit breaker', async () => {
+    const processMessages = vi.fn(async () => true);
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Slot ran cleanly so retryCount is 0 and lastExitStatus is 'clean'
+    // — without the breaker flag we'd report 'not-spawned'. The caller
+    // (host's chat_status wiring) passes the per-folder breaker state
+    // in; that signal should win.
+    expect(
+      queue.getStatus('group1@g.us', DEFAULT_SESSION_NAME, true),
+    ).toBe('cooling-down');
+  });
+
+  it('reports crashed after MAX_RETRIES failures exhaust the backoff', async () => {
+    const processMessages = vi.fn(async () => false);
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+
+    // Drive through every retry: 5000, 10000, 20000, 40000, 80000.
+    // After the 5th retry runs and fails, scheduleRetry resets
+    // retryCount to 0 and stops scheduling — the slot is no longer
+    // cooling down; it's crashed (last exit was an error, no recovery
+    // pending). This is the case the issue's incident report describes:
+    // container died, no log, no retry will ever fire on its own.
+    await vi.advanceTimersByTimeAsync(10);
+    for (const delay of [5000, 10000, 20000, 40000, 80000]) {
+      await vi.advanceTimersByTimeAsync(delay + 10);
+    }
+
+    expect(queue.getStatus('group1@g.us', DEFAULT_SESSION_NAME)).toBe(
+      'crashed',
+    );
+  });
+
+  it('reports crashed when a task slot threw and no retry exists', async () => {
+    // Tasks don't reschedule on failure (unlike message runs), so a
+    // single throw should land us straight in 'crashed'. Confirms the
+    // status derivation works for the maintenance slot too.
+    const taskFn = vi.fn(async () => {
+      throw new Error('boom');
+    });
+    queue.enqueueTask(
+      'group1@g.us',
+      'task-1',
+      MAINTENANCE_SESSION_NAME,
+      taskFn,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(queue.getStatus('group1@g.us', MAINTENANCE_SESSION_NAME)).toBe(
+      'crashed',
+    );
+  });
 });

@@ -1446,6 +1446,94 @@ skillName options:
 );
 
 server.tool(
+  'chat_status',
+  'Report host-side state for one or all registered chats: which tile owns each chat (admin/trusted/untrusted), trigger config, container status (running/idle/cooling-down/crashed/not-spawned) per session slot (default + maintenance), and the latest is_from_me=1 message recorded for the chat. Use this to diagnose silent containers — when a chat went quiet you can see whether the container is running, cooling down after an error, or never spawned. Provide chat_id (JID) OR chat_name (display name) to filter to one chat; omit both for all chats. Main group only.',
+  {
+    chat_id: z
+      .string()
+      .optional()
+      .describe(
+        'Specific chat JID, e.g. tg:-1003869886477. Mutually exclusive with chat_name.',
+      ),
+    chat_name: z
+      .string()
+      .optional()
+      .describe(
+        'Chat display name (looked up against the registered groups list). Errors if ambiguous; pass chat_id instead in that case.',
+      ),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'chat_status is admin-tile only.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    return runHostOperation('chat_status', {
+      chat_id: args.chat_id,
+      chat_name: args.chat_name,
+    });
+  },
+);
+
+server.tool(
+  'nuke_chat',
+  "Forcibly nuke another chat's session(s) cross-chat — wipes JSONL transcripts, kills the container, and clears DB session rows. Use when a foreign chat's container is hung, in a corrupted state, or stuck on a poisoned plan and the only way back is a clean restart. Requires chat_id OR chat_name (admin always operates cross-chat — to nuke your own chat use nuke_session). Main group only.",
+  {
+    chat_id: z
+      .string()
+      .optional()
+      .describe('Specific chat JID, e.g. tg:-1003869886477.'),
+    chat_name: z
+      .string()
+      .optional()
+      .describe(
+        'Chat display name. Errors if ambiguous; pass chat_id instead in that case.',
+      ),
+    session: z
+      .enum(['default', 'maintenance', 'all'])
+      .optional()
+      .describe(
+        "Which session slot(s) to wipe. 'default' is the user-facing container, 'maintenance' is the scheduled-task container, 'all' (the default) does both.",
+      ),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'nuke_chat is admin-tile only.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    if (!args.chat_id && !args.chat_name) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'nuke_chat requires chat_id or chat_name — admin always operates cross-chat. Use nuke_session to wipe the current chat.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    return runHostOperation('nuke_chat', {
+      chat_id: args.chat_id,
+      chat_name: args.chat_name,
+      session: args.session,
+    });
+  },
+);
+
+server.tool(
   'tessl_update',
   'Run `tessl update` on the host to pull the latest tile versions from the registry. Call this after a promote PR merges (GHA publishes on merge, then the agent triggers this to get the new version). If new tiles land, sessions are cleared automatically so the next message picks them up. A periodic 15-min catch-up runs in the orchestrator as a safety net. Main group only.',
   {},

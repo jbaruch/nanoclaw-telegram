@@ -1797,6 +1797,18 @@ async function main(): Promise<void> {
 
       logger.info({ groupFolder, session }, 'Session nuked via IPC');
     },
+    getContainerStatus: (chatJid, sessionName) => {
+      // Combine the GroupQueue's per-slot signals (active/idleWaiting/
+      // retryCount/lastExitStatus) with the long-term per-folder
+      // circuit breaker. The breaker lives here, not in GroupQueue,
+      // because it's keyed on group.folder and is set by message-loop
+      // bookkeeping rather than queue lifecycle. Both signals are
+      // cooldown windows from the chat_status caller's perspective.
+      const group = registeredGroups[chatJid];
+      const breakerExpiry = group ? circuitBreakerUntil[group.folder] : 0;
+      const breakerActive = !!breakerExpiry && Date.now() < breakerExpiry;
+      return queue.getStatus(chatJid, sessionName, breakerActive);
+    },
     onTasksChanged: () => {
       const tasks = getAllTasks();
       const taskRows = tasks.map((t) => ({

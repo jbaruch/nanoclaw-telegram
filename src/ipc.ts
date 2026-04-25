@@ -22,10 +22,12 @@ import {
   createTask,
   deleteAllSessions,
   deleteTask,
+  getLastFromMeMessage,
   getTaskById,
   storeMessage,
   updateTask,
 } from './db.js';
+import type { ContainerStatus } from './group-queue.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { stripInternalTags } from './router.js';
@@ -78,6 +80,17 @@ export interface IpcDeps {
     groupFolder: string,
     session: 'default' | 'maintenance' | 'all',
   ) => void;
+  /**
+   * Read the derived container status for a given (jid, sessionName)
+   * slot. Used by `chat_status` to surface running/idle/cooling-down/
+   * crashed/not-spawned without exposing the queue's internal state map.
+   * Implementations must combine the GroupQueue slot state with the
+   * orchestrator-side circuit breaker (per group folder).
+   */
+  getContainerStatus?: (
+    chatJid: string,
+    sessionName: 'default' | 'maintenance',
+  ) => ContainerStatus;
 }
 
 let ipcWatcherRunning = false;
@@ -746,6 +759,10 @@ export async function processTaskIpc(
     command?: string;
     payload?: string | Record<string, unknown>;
     confirm?: boolean;
+    // chat_status / nuke_chat
+    chat_id?: string;
+    chat_name?: string;
+    session?: 'default' | 'maintenance' | 'all';
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -1244,6 +1261,285 @@ export async function processTaskIpc(
         deps.nukeSession(sourceGroup, validSession);
       }
       break;
+
+    case 'chat_status': {
+      // Admin tile only. Returns a structured snapshot per chat: the
+      // host-side state the admin needs to diagnose silent containers
+      // (running / idle / cooling-down / crashed / not-spawned), tile
+      // classification, trigger config, and the latest is_from_me=1
+      // message recorded for the chat.
+      const resultPath = scriptResultPath(sourceGroup, data);
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized chat_status attempt blocked',
+        );
+        fs.writeFileSync(
+          resultPath,
+          JSON.stringify({
+            error: 'chat_status is admin-tile only',
+          }),
+        );
+        break;
+      }
+
+      // Resolve which chats to report on. Three cases:
+      //   - chat_id provided → report only that one (must be registered).
+      //   - chat_name provided → resolve via name match in
+      //     registeredGroups (multiple matches → ambiguous error so the
+      //     caller can pick the right JID rather than us guessing).
+      //   - neither provided → all registered chats.
+      const targets: string[] = [];
+      if (typeof data.chat_id === 'string' && data.chat_id.trim().length > 0) {
+        const trimmed = data.chat_id.trim();
+        if (!registeredGroups[trimmed]) {
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({
+              error: `chat_id ${trimmed} not registered`,
+            }),
+          );
+          break;
+        }
+        targets.push(trimmed);
+      } else if (
+        typeof data.chat_name === 'string' &&
+        data.chat_name.trim().length > 0
+      ) {
+        const wanted = data.chat_name.trim();
+        const matches = Object.entries(registeredGroups).filter(
+          ([, g]) => g.name === wanted,
+        );
+        if (matches.length === 0) {
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({
+              error: `chat_name "${wanted}" did not match any registered chat`,
+            }),
+          );
+          break;
+        }
+        if (matches.length > 1) {
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({
+              error: `chat_name "${wanted}" is ambiguous — matches ${matches.length} chats`,
+              candidates: matches.map(([jid]) => jid),
+            }),
+          );
+          break;
+        }
+        targets.push(matches[0][0]);
+      } else {
+        targets.push(...Object.keys(registeredGroups));
+      }
+
+      const rows = targets.map((jid) => {
+        const group = registeredGroups[jid];
+        const tile: 'admin' | 'trusted' | 'untrusted' = group.isMain
+          ? 'admin'
+          : group.containerConfig?.trusted
+            ? 'trusted'
+            : 'untrusted';
+        // requiresTrigger defaults differ per tile: main groups bypass
+        // the trigger entirely (privileged inbox), while non-main groups
+        // require the trigger unless explicitly opted out. Mirror the
+        // canSenderInteract logic so the reported value matches what
+        // the orchestrator actually enforces.
+        const triggered = group.isMain
+          ? false
+          : group.requiresTrigger !== false;
+        const last = getLastFromMeMessage(jid);
+        return {
+          chat_id: jid,
+          chat_name: group.name,
+          trigger: triggered ? 'triggered' : 'untriggered',
+          tile,
+          last_ayeaye_message: last
+            ? {
+                timestamp: last.timestamp,
+                // Truncate to keep the response small even if the
+                // agent sent a multi-kilobyte reply. 200 chars matches
+                // what fits comfortably in the admin's chat preview.
+                content_snippet:
+                  last.content.length > 200
+                    ? last.content.slice(0, 200) + '…'
+                    : last.content,
+              }
+            : null,
+          containers: deps.getContainerStatus
+            ? {
+                default: deps.getContainerStatus(jid, 'default'),
+                maintenance: deps.getContainerStatus(jid, 'maintenance'),
+              }
+            : { default: 'not-spawned', maintenance: 'not-spawned' },
+        };
+      });
+
+      logger.info(
+        { sourceGroup, count: rows.length },
+        'chat_status served via IPC',
+      );
+      fs.writeFileSync(
+        resultPath,
+        JSON.stringify({ stdout: JSON.stringify({ chats: rows }) }),
+      );
+      break;
+    }
+
+    case 'nuke_chat': {
+      // Admin tile only. Cross-chat nuke — looks up the target by
+      // chat_id or chat_name and forwards to the same wipeSessionJsonl
+      // path the per-chat nuke_session uses. Hard-fails when neither
+      // identifier is provided so admin can never accidentally nuke
+      // its own chat by omission (the nuke_session tool already does
+      // "this chat" — nuke_chat is only useful when targeting another).
+      const resultPath = scriptResultPath(sourceGroup, data);
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized nuke_chat attempt blocked',
+        );
+        fs.writeFileSync(
+          resultPath,
+          JSON.stringify({ error: 'nuke_chat is admin-tile only' }),
+        );
+        break;
+      }
+
+      const hasId =
+        typeof data.chat_id === 'string' && data.chat_id.trim().length > 0;
+      const hasName =
+        typeof data.chat_name === 'string' && data.chat_name.trim().length > 0;
+      if (!hasId && !hasName) {
+        fs.writeFileSync(
+          resultPath,
+          JSON.stringify({
+            error:
+              'nuke_chat requires chat_id or chat_name — admin always operates cross-chat, never on the implicit current chat',
+          }),
+        );
+        break;
+      }
+
+      let targetJid = '';
+      if (hasId) {
+        const trimmed = (data.chat_id as string).trim();
+        if (!registeredGroups[trimmed]) {
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({ error: `chat_id ${trimmed} not registered` }),
+          );
+          break;
+        }
+        targetJid = trimmed;
+      } else {
+        const wanted = (data.chat_name as string).trim();
+        const matches = Object.entries(registeredGroups).filter(
+          ([, g]) => g.name === wanted,
+        );
+        if (matches.length === 0) {
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({
+              error: `chat_name "${wanted}" did not match any registered chat`,
+            }),
+          );
+          break;
+        }
+        if (matches.length > 1) {
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({
+              error: `chat_name "${wanted}" is ambiguous — matches ${matches.length} chats`,
+              candidates: matches.map(([jid]) => jid),
+            }),
+          );
+          break;
+        }
+        targetJid = matches[0][0];
+      }
+
+      const targetGroup = registeredGroups[targetJid];
+      const sessionArg = data.session;
+      const validSession: 'default' | 'maintenance' | 'all' =
+        sessionArg === 'default' ||
+        sessionArg === 'maintenance' ||
+        sessionArg === 'all'
+          ? sessionArg
+          : 'all';
+
+      // Snapshot pre-nuke status to determine which slots actually had
+      // something to kill — the report should call out a noop instead of
+      // pretending we wiped a non-running container. nukeSession is
+      // unconditional (it always wipes JSONL even if the slot is dead),
+      // so we read first, then act.
+      const slotsRequested: Array<'default' | 'maintenance'> =
+        validSession === 'all'
+          ? ['default', 'maintenance']
+          : [validSession];
+      const killedSessions: Array<'default' | 'maintenance'> = [];
+      const getStatus = deps.getContainerStatus;
+      for (const slot of slotsRequested) {
+        const wasActive =
+          getStatus &&
+          (getStatus(targetJid, slot) === 'running' ||
+            getStatus(targetJid, slot) === 'idle');
+        if (wasActive) killedSessions.push(slot);
+      }
+
+      try {
+        deps.nukeSession(targetGroup.folder, validSession);
+        const status =
+          killedSessions.length === 0
+            ? slotsRequested.length === 0
+              ? 'noop'
+              : // No live slots — but JSONL/session rows were still
+                // wiped, which is a meaningful state change. Report
+                // success so the admin knows the wipe ran.
+                'success'
+            : 'success';
+        logger.info(
+          {
+            sourceGroup,
+            targetJid,
+            session: validSession,
+            killedSessions,
+          },
+          'nuke_chat completed via IPC',
+        );
+        fs.writeFileSync(
+          resultPath,
+          JSON.stringify({
+            stdout: JSON.stringify({
+              chat_id: targetJid,
+              chat_name: targetGroup.name,
+              killed_sessions: killedSessions,
+              status,
+            }),
+          }),
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(
+          { sourceGroup, targetJid, err },
+          'nuke_chat failed',
+        );
+        fs.writeFileSync(
+          resultPath,
+          JSON.stringify({
+            stdout: JSON.stringify({
+              chat_id: targetJid,
+              chat_name: targetGroup.name,
+              killed_sessions: [],
+              status: 'error',
+              error: msg,
+            }),
+          }),
+        );
+      }
+      break;
+    }
 
     // --- Named host operations ---
 

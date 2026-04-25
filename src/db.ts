@@ -667,6 +667,27 @@ export function getLastBotMessageTimestamp(
   return row?.ts ?? undefined;
 }
 
+/**
+ * Latest outbound message in a chat (where the host wrote the row with
+ * `is_from_me = 1`, i.e. AyeAye sent it). Returned as `{ timestamp,
+ * content }` or `null` if AyeAye never spoke in this chat. Used by the
+ * `chat_status` IPC handler so the admin tile can answer "when did
+ * AyeAye last respond here, and with what?" for diagnosing silent
+ * containers.
+ */
+export function getLastFromMeMessage(
+  chatJid: string,
+): { timestamp: string; content: string } | null {
+  const row = db
+    .prepare(
+      `SELECT timestamp, content FROM messages
+       WHERE chat_jid = ? AND is_from_me = 1
+       ORDER BY timestamp DESC LIMIT 1`,
+    )
+    .get(chatJid) as { timestamp: string; content: string } | undefined;
+  return row ?? null;
+}
+
 export function createTask(
   task: Omit<ScheduledTask, 'last_run' | 'last_result'>,
 ): void {
