@@ -22,7 +22,7 @@ import {
   createTask,
   deleteAllSessions,
   deleteTask,
-  getLastFromMeMessage,
+  getLastFromMeMessages,
   getTaskById,
   storeMessage,
   updateTask,
@@ -1283,15 +1283,34 @@ export async function processTaskIpc(
         break;
       }
 
-      // Resolve which chats to report on. Three cases:
+      // Resolve which chats to report on. Four cases:
+      //   - both chat_id AND chat_name → reject. Two identifiers that
+      //     might disagree is unsafe targeting; force the caller to
+      //     pick one. Defense in depth — the MCP tool layer also
+      //     blocks this, but a payload arriving directly via the IPC
+      //     dir would otherwise let chat_id silently win.
       //   - chat_id provided → report only that one (must be registered).
       //   - chat_name provided → resolve via name match in
       //     registeredGroups (multiple matches → ambiguous error so the
       //     caller can pick the right JID rather than us guessing).
       //   - neither provided → all registered chats.
+      const hasChatId =
+        typeof data.chat_id === 'string' && data.chat_id.trim().length > 0;
+      const hasChatName =
+        typeof data.chat_name === 'string' && data.chat_name.trim().length > 0;
+      if (hasChatId && hasChatName) {
+        fs.writeFileSync(
+          resultPath,
+          JSON.stringify({
+            error:
+              'chat_status accepts chat_id OR chat_name, not both — they may disagree',
+          }),
+        );
+        break;
+      }
       const targets: string[] = [];
-      if (typeof data.chat_id === 'string' && data.chat_id.trim().length > 0) {
-        const trimmed = data.chat_id.trim();
+      if (hasChatId) {
+        const trimmed = (data.chat_id as string).trim();
         if (!registeredGroups[trimmed]) {
           fs.writeFileSync(
             resultPath,
@@ -1302,11 +1321,8 @@ export async function processTaskIpc(
           break;
         }
         targets.push(trimmed);
-      } else if (
-        typeof data.chat_name === 'string' &&
-        data.chat_name.trim().length > 0
-      ) {
-        const wanted = data.chat_name.trim();
+      } else if (hasChatName) {
+        const wanted = (data.chat_name as string).trim();
         const matches = Object.entries(registeredGroups).filter(
           ([, g]) => g.name === wanted,
         );
@@ -1334,6 +1350,13 @@ export async function processTaskIpc(
         targets.push(...Object.keys(registeredGroups));
       }
 
+      // Batch the "latest is_from_me=1 message per chat" lookup into a
+      // single grouped query (idx_messages_fromme_chat composite
+      // index). Per-target getLastFromMeMessage calls were N
+      // statement compilations + N scan-and-sort passes; this is one
+      // query for any N.
+      const lastMessages = getLastFromMeMessages(targets);
+
       const rows = targets.map((jid) => {
         const group = registeredGroups[jid];
         const tile: 'admin' | 'trusted' | 'untrusted' = group.isMain
@@ -1349,7 +1372,7 @@ export async function processTaskIpc(
         const triggered = group.isMain
           ? false
           : group.requiresTrigger !== false;
-        const last = getLastFromMeMessage(jid);
+        const last = lastMessages.get(jid) ?? null;
         return {
           chat_id: jid,
           chat_name: group.name,
@@ -1421,6 +1444,19 @@ export async function processTaskIpc(
         );
         break;
       }
+      // Two identifiers are an unsafe-targeting smell — if they
+      // disagree, silently picking one is worse than refusing. Reject
+      // here too (the MCP tool layer also blocks the same case).
+      if (hasId && hasName) {
+        fs.writeFileSync(
+          resultPath,
+          JSON.stringify({
+            error:
+              'nuke_chat accepts chat_id OR chat_name, not both — they may disagree',
+          }),
+        );
+        break;
+      }
 
       let targetJid = '';
       if (hasId) {
@@ -1470,10 +1506,11 @@ export async function processTaskIpc(
           : 'all';
 
       // Snapshot pre-nuke status to determine which slots actually had
-      // something to kill — the report should call out a noop instead of
-      // pretending we wiped a non-running container. nukeSession is
-      // unconditional (it always wipes JSONL even if the slot is dead),
-      // so we read first, then act.
+      // a live container to kill. nukeSession ALWAYS wipes JSONL on
+      // disk regardless of whether anything was running; the
+      // user-visible status enum (per the issue spec) reports the
+      // *live-container* outcome so admin can tell whether the call
+      // actually freed any resources.
       const slotsRequested: Array<'default' | 'maintenance'> =
         validSession === 'all'
           ? ['default', 'maintenance']
@@ -1490,21 +1527,24 @@ export async function processTaskIpc(
 
       try {
         deps.nukeSession(targetGroup.folder, validSession);
-        const status =
-          killedSessions.length === 0
-            ? slotsRequested.length === 0
-              ? 'noop'
-              : // No live slots — but JSONL/session rows were still
-                // wiped, which is a meaningful state change. Report
-                // success so the admin knows the wipe ran.
-                'success'
-            : 'success';
+        // Per the issue's status enum: 'success' when at least one
+        // live container was killed; 'noop' when nothing was running
+        // (even though the on-disk wipe still happened — see the
+        // pre-snapshot comment above). 'partial' is reserved for a
+        // future per-slot-failure signal from nukeSession; today
+        // nukeSession is fire-and-forget per slot, so we can't
+        // distinguish partial failure from full success without a
+        // contract change. 'error' is reported only when nukeSession
+        // throws — the catch branch below.
+        const status: 'success' | 'noop' =
+          killedSessions.length > 0 ? 'success' : 'noop';
         logger.info(
           {
             sourceGroup,
             targetJid,
             session: validSession,
             killedSessions,
+            status,
           },
           'nuke_chat completed via IPC',
         );
@@ -1521,20 +1561,22 @@ export async function processTaskIpc(
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        logger.error(
-          { sourceGroup, targetJid, err },
-          'nuke_chat failed',
-        );
+        logger.error({ sourceGroup, targetJid, err }, 'nuke_chat failed');
+        // Top-level `error` field — runHostOperation in the
+        // agent-runner only treats `result.error` as a tool failure
+        // and surfaces `isError: true` to the MCP caller. Burying the
+        // failure inside `stdout` would make the call look like a
+        // success to Claude, which would then move on as if the wipe
+        // ran. Include the structured payload alongside so the admin
+        // can still see what was attempted.
         fs.writeFileSync(
           resultPath,
           JSON.stringify({
-            stdout: JSON.stringify({
-              chat_id: targetJid,
-              chat_name: targetGroup.name,
-              killed_sessions: [],
-              status: 'error',
-              error: msg,
-            }),
+            error: `nuke_chat failed for ${targetJid}: ${msg}`,
+            chat_id: targetJid,
+            chat_name: targetGroup.name,
+            killed_sessions: [],
+            status: 'error',
           }),
         );
       }

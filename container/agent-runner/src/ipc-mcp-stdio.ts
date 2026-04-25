@@ -1474,6 +1474,24 @@ server.tool(
         isError: true,
       };
     }
+    // chat_id and chat_name are mutually exclusive — passing both
+    // means two identifiers that might disagree, and silently
+    // prioritizing one over the other is unsafe targeting. Reject
+    // here so the agent gets a clear schema error rather than a
+    // surprise from the host handler. The host enforces the same
+    // rule as defense in depth (in case a future client bypasses
+    // the MCP layer).
+    if (args.chat_id && args.chat_name) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Provide chat_id OR chat_name, not both.',
+          },
+        ],
+        isError: true,
+      };
+    }
     return runHostOperation('chat_status', {
       chat_id: args.chat_id,
       chat_name: args.chat_name,
@@ -1520,6 +1538,19 @@ server.tool(
           {
             type: 'text' as const,
             text: 'nuke_chat requires chat_id or chat_name — admin always operates cross-chat. Use nuke_session to wipe the current chat.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    // Two identifiers are an unsafe-targeting smell — see the same
+    // rule on chat_status above. Reject before the IPC round-trip.
+    if (args.chat_id && args.chat_name) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Provide chat_id OR chat_name, not both.',
           },
         ],
         isError: true,

@@ -606,6 +606,12 @@ describe('nuke_chat authorization', () => {
 
 describe('nuke_chat resolution', () => {
   it('resolves chat_id and forwards to nukeSession with the right folder', async () => {
+    // Mark default as running so the status enum lands on 'success' —
+    // status='noop' would also be a legitimate outcome (no live slots
+    // to kill), but this test is about chat_id resolution, not the
+    // status enum, so make the precondition explicit.
+    statusOverrides.set('random@g.us::default', 'running');
+
     await processTaskIpc(
       {
         type: 'nuke_chat',
@@ -795,10 +801,13 @@ describe('nuke_chat output', () => {
     expect(payload.status).toBe('success');
   });
 
-  it('reports killed_sessions=[] when no slots were live (still success — JSONL was wiped)', async () => {
-    // All slots are not-spawned (default override). The wipe still
-    // ran, so status stays 'success' rather than degrading to 'noop'
-    // — this distinction matters for the admin's audit trail.
+  it('reports status="noop" when no slots were live', async () => {
+    // All slots are not-spawned (the default override returns
+    // not-spawned). Per the issue's status enum, "noop" is the right
+    // signal — nothing live was killed even though the on-disk wipe
+    // still happened. The previous "always success" behaviour made
+    // every nuke_chat indistinguishable from one that actually freed
+    // a stuck container.
     await processTaskIpc(
       {
         type: 'nuke_chat',
@@ -815,10 +824,10 @@ describe('nuke_chat output', () => {
     };
     const payload = JSON.parse(body.stdout);
     expect(payload.killed_sessions).toEqual([]);
-    expect(payload.status).toBe('success');
+    expect(payload.status).toBe('noop');
   });
 
-  it('returns status="error" when nukeSession throws', async () => {
+  it('reports top-level error field when nukeSession throws', async () => {
     nukeShouldThrow = new Error('disk full');
 
     await processTaskIpc(
@@ -832,12 +841,67 @@ describe('nuke_chat output', () => {
       deps,
     );
 
+    // Top-level `error` matters — runHostOperation in the agent-runner
+    // surfaces `isError: true` only when `result.error` is set. If the
+    // failure were buried inside `result.stdout` (the prior shape),
+    // the MCP caller would get a misleading "successful" response.
     const body = readResult(MAIN_GROUP.folder, 'nuke-err') as {
-      stdout: string;
+      error?: string;
+      chat_id?: string;
+      chat_name?: string;
+      killed_sessions?: string[];
+      status?: string;
     };
-    const payload = JSON.parse(body.stdout);
-    expect(payload.status).toBe('error');
-    expect(payload.error).toBe('disk full');
-    expect(payload.killed_sessions).toEqual([]);
+    expect(body.error).toMatch(/disk full/);
+    expect(body.error).toContain('random@g.us');
+    expect(body.status).toBe('error');
+    expect(body.killed_sessions).toEqual([]);
+    expect(body.chat_id).toBe('random@g.us');
+    expect(body.chat_name).toBe('Random Chat');
+  });
+});
+
+// --- chat_status / nuke_chat XOR enforcement (Copilot review) ---
+
+describe('chat_status / nuke_chat XOR enforcement', () => {
+  it('chat_status rejects when both chat_id and chat_name are provided', async () => {
+    await processTaskIpc(
+      {
+        type: 'chat_status',
+        requestId: 'xor-1',
+        chat_id: 'random@g.us',
+        chat_name: 'Random Chat',
+      },
+      MAIN_GROUP.folder,
+      true,
+      deps,
+    );
+
+    const body = readResult(MAIN_GROUP.folder, 'xor-1') as {
+      error?: string;
+    };
+    // Two identifiers that might disagree is unsafe targeting.
+    // Reject — don't silently pick one and let the call go through.
+    expect(body.error).toMatch(/not both/);
+  });
+
+  it('nuke_chat rejects when both chat_id and chat_name are provided, nukeSession not called', async () => {
+    await processTaskIpc(
+      {
+        type: 'nuke_chat',
+        requestId: 'xor-2',
+        chat_id: 'random@g.us',
+        chat_name: 'Random Chat',
+      },
+      MAIN_GROUP.folder,
+      true,
+      deps,
+    );
+
+    const body = readResult(MAIN_GROUP.folder, 'xor-2') as {
+      error?: string;
+    };
+    expect(body.error).toMatch(/not both/);
+    expect(nukeCalls).toHaveLength(0);
   });
 });
