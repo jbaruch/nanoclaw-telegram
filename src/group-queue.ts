@@ -143,10 +143,7 @@ export class GroupQueue {
   // status queries about a never-run slot must not leave a phantom entry
   // in the map (chat_status iterates over registeredGroups, not the queue
   // map, so creating empties on every poll would just leak memory).
-  private peekGroup(
-    groupJid: string,
-    sessionName: string,
-  ): GroupState | null {
+  private peekGroup(groupJid: string, sessionName: string): GroupState | null {
     return this.groups.get(groupJid)?.get(sessionName) ?? null;
   }
 

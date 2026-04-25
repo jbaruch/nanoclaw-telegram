@@ -218,7 +218,9 @@ describe('chat_status filtering', () => {
       deps,
     );
 
-    const body = readResult(MAIN_GROUP.folder, 'filter-1') as { stdout: string };
+    const body = readResult(MAIN_GROUP.folder, 'filter-1') as {
+      stdout: string;
+    };
     const payload = JSON.parse(body.stdout);
     expect(payload.chats).toHaveLength(1);
     expect(payload.chats[0].chat_id).toBe('trusted@g.us');
@@ -255,7 +257,9 @@ describe('chat_status filtering', () => {
       deps,
     );
 
-    const body = readResult(MAIN_GROUP.folder, 'filter-3') as { stdout: string };
+    const body = readResult(MAIN_GROUP.folder, 'filter-3') as {
+      stdout: string;
+    };
     const payload = JSON.parse(body.stdout);
     expect(payload.chats).toHaveLength(1);
     expect(payload.chats[0].chat_id).toBe('trusted@g.us');
@@ -623,9 +627,7 @@ describe('nuke_chat resolution', () => {
       deps,
     );
 
-    expect(nukeCalls).toEqual([
-      { folder: 'random-group', session: 'all' },
-    ]);
+    expect(nukeCalls).toEqual([{ folder: 'random-group', session: 'all' }]);
 
     const body = readResult(MAIN_GROUP.folder, 'nuke-id') as {
       stdout: string;
@@ -667,9 +669,7 @@ describe('nuke_chat resolution', () => {
       deps,
     );
 
-    expect(nukeCalls).toEqual([
-      { folder: 'random-group', session: 'all' },
-    ]);
+    expect(nukeCalls).toEqual([{ folder: 'random-group', session: 'all' }]);
     const body = readResult(MAIN_GROUP.folder, 'nuke-name') as {
       stdout: string;
     };
@@ -733,9 +733,7 @@ describe('nuke_chat session arg', () => {
       true,
       deps,
     );
-    expect(nukeCalls).toEqual([
-      { folder: 'random-group', session: 'default' },
-    ]);
+    expect(nukeCalls).toEqual([{ folder: 'random-group', session: 'default' }]);
   });
 
   it('passes session=maintenance through to nukeSession', async () => {
@@ -770,9 +768,7 @@ describe('nuke_chat session arg', () => {
       true,
       deps,
     );
-    expect(nukeCalls).toEqual([
-      { folder: 'random-group', session: 'all' },
-    ]);
+    expect(nukeCalls).toEqual([{ folder: 'random-group', session: 'all' }]);
   });
 });
 

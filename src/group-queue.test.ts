@@ -813,9 +813,9 @@ describe('GroupQueue', () => {
     // — without the breaker flag we'd report 'not-spawned'. The caller
     // (host's chat_status wiring) passes the per-folder breaker state
     // in; that signal should win.
-    expect(
-      queue.getStatus('group1@g.us', DEFAULT_SESSION_NAME, true),
-    ).toBe('cooling-down');
+    expect(queue.getStatus('group1@g.us', DEFAULT_SESSION_NAME, true)).toBe(
+      'cooling-down',
+    );
   });
 
   it('reports crashed after MAX_RETRIES failures exhaust the backoff', async () => {

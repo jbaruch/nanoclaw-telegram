@@ -1419,10 +1419,7 @@ export async function processTaskIpc(
       // "this chat" — nuke_chat is only useful when targeting another).
       const resultPath = scriptResultPath(sourceGroup, data);
       if (!isMain) {
-        logger.warn(
-          { sourceGroup },
-          'Unauthorized nuke_chat attempt blocked',
-        );
+        logger.warn({ sourceGroup }, 'Unauthorized nuke_chat attempt blocked');
         fs.writeFileSync(
           resultPath,
           JSON.stringify({ error: 'nuke_chat is admin-tile only' }),
@@ -1512,9 +1509,7 @@ export async function processTaskIpc(
       // *live-container* outcome so admin can tell whether the call
       // actually freed any resources.
       const slotsRequested: Array<'default' | 'maintenance'> =
-        validSession === 'all'
-          ? ['default', 'maintenance']
-          : [validSession];
+        validSession === 'all' ? ['default', 'maintenance'] : [validSession];
       const killedSessions: Array<'default' | 'maintenance'> = [];
       const getStatus = deps.getContainerStatus;
       for (const slot of slotsRequested) {
