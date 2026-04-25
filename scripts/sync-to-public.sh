@@ -398,6 +398,20 @@ PY
 
 echo ""
 
+# --- Normalize formatting -----------------------------------------------------
+# The structural scrubs above (Hubitat removal in steps 3 + 4, etc.) splice out
+# code blocks but leave their surrounding blank lines, producing `\n\n\n` runs
+# that fail public CI's `prettier --check "src/**/*.ts"`. Run prettier --write
+# from private's pinned binary so the synced tree is already formatted; the
+# leak verifier below is regex-based and formatter-agnostic.
+echo "Normalizing formatting..."
+(
+  cd "$PUBLIC_DIR"
+  "$PRIVATE_DIR/node_modules/.bin/prettier" --write 'src/**/*.ts' >/dev/null
+)
+echo "  prettier: formatted src/**/*.ts"
+echo ""
+
 # --- Leak-prevention allowlist check -----------------------------------------
 # Enumerate every IPC handler / MCP tool in the scrubbed public tree and
 # compare against an explicit allowlist. Anything unknown aborts the sync
