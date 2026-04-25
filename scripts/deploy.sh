@@ -68,6 +68,28 @@ fi
 echo "=== NanoClaw Deploy ==="
 echo ""
 
+# 0. Guard against credentials embedded in the git remote URL (#106).
+# Any `https://<user>:<token>@github.com/...` form leaks the token to
+# anyone who runs `git remote -v`, reads `.git/config`, or sees a
+# script's stdout when this script echoes git output. PATs with `repo`
+# scope grant full read/write — leaking one is a high-severity rotate-
+# now incident. Refuse to deploy until the operator switches to SSH or
+# a credential helper. Pattern matches both `https://user:token@host/`
+# and the GitHub-specific `x-access-token:token@host/` shape seen on
+# the NAS in #106.
+echo "0. Checking git remote for embedded credentials..."
+if git remote -v 2>/dev/null | grep -qE 'https?://[^@/[:space:]]+:[^@/[:space:]]+@'; then
+    echo "ERROR: git remote URL embeds credentials." >&2
+    echo "  PATs in remote URLs leak via 'git remote -v', .git/config, and any" >&2
+    echo "  script that echoes git output. Rotate the credential and switch to" >&2
+    echo "  SSH:" >&2
+    echo "    git remote set-url origin git@github.com:<owner>/<repo>.git" >&2
+    echo "  or to a credential helper backed by a secret store. Refusing to" >&2
+    echo "  deploy. See https://github.com/jbaruch/nanoclaw/issues/106" >&2
+    exit 1
+fi
+echo ""
+
 # 1. Pull
 if [[ "$TILES_ONLY" == false ]]; then
     echo "1. Pulling latest code..."
