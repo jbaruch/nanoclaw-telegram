@@ -4,6 +4,9 @@
   "dependencies": {
     "jbaruch/nanoclaw-host": {
       "version": "0.1.15"
+    },
+    "jbaruch/coding-policy": {
+      "version": "0.2.0"
     }
   }
 }
