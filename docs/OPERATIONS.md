@@ -159,13 +159,15 @@ sqlite3 ~/nanoclaw/store/messages.db "UPDATE scheduled_tasks SET prompt='new pro
 | `TELEGRAM_BOT_TOKEN` | @BotFather | Orchestrator (main bot) |
 | `TELEGRAM_BOT_POOL` | @BotFather (6 bots) | Orchestrator (agent swarm) |
 | `OPENAI_API_KEY` | platform.openai.com | Voice transcription (Whisper) |
-| `COMPOSIO_API_KEY` | app.composio.dev | Agent containers (Google Calendar, Gmail) |
-| `GITHUB_TOKEN` | github.com/settings/tokens | Agent containers (git push) |
-| `TRIPIT_ICAL_URL` | TripIt settings | Agent containers (tripit-reclaim sync) |
-| `RECLAIM_API_TOKEN` | reclaim.ai settings | Agent containers (tripit-reclaim sync) |
-| `GOOGLE_CLIENT_ID` | GCP console | Agent containers (Calendar OOO blocks) |
-| `GOOGLE_CLIENT_SECRET` | GCP console | Agent containers (Calendar OOO blocks) |
-| `GOOGLE_REFRESH_TOKEN` | OAuth flow | Agent containers (Calendar OOO blocks) |
+| `COMPOSIO_API_KEY` | app.composio.dev | Agent containers, main/trusted only (Google Calendar, Gmail, Tasks, GitHub via Composio OAuth) |
+| `GITHUB_TOKEN` | github.com/settings/tokens | Host scripts only (git push via IPC) |
+| `TRIPIT_ICAL_URL` | TripIt settings | Host scripts only (tripit-reclaim sync) |
+| `RECLAIM_API_TOKEN` | reclaim.ai settings | Host scripts only (tripit-reclaim sync) |
+| `GOOGLE_CLIENT_ID` | GCP console | Host scripts only (Calendar OOO blocks) |
+| `GOOGLE_CLIENT_SECRET` | GCP console | Host scripts only (Calendar OOO blocks) |
+| `GOOGLE_REFRESH_TOKEN` | OAuth flow | Host scripts only (Calendar OOO blocks) |
+
+Forwarded-into-container credentials live in `src/container-runner.ts` (`CONTAINER_VARS`). Currently the only container-forwarded secret is `COMPOSIO_API_KEY`, and only for main/trusted tiers. Everything else stays host-side and is reached through host scripts invoked via IPC. `docs/SECURITY.md` §4 is the authoritative per-tier view.
 
 ## Agent Container Capabilities
 
