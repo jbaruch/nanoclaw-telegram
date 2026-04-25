@@ -250,7 +250,18 @@ function syncNonMainHeartbeat(jid: string, group: RegisteredGroup): void {
       script: precheckScript,
       schedule_type: 'cron',
       schedule_value: '*/15 * * * *',
-      context_mode: 'group',
+      // Heartbeats read every input from external sources (messages.db,
+      // workspace, skills) on each tick — they have no use for
+      // conversation continuity, and persisting the SDK session chain
+      // bloats the JSONL monotonically. After 6 days of 15-min ticks
+      // the swarm group's maintenance JSONL hit 187 MB and crossed the
+      // AUP-classifier threshold, refusing every subsequent run (#114).
+      // Single contaminated tick (poisoned tool_result, oversized image,
+      // hung tool output) also gets persisted forever and re-read on
+      // every later tick. `'isolated'` makes each tick a fresh session
+      // — manual recovery becomes unnecessary because there's no
+      // accumulated state to wipe.
+      context_mode: 'isolated',
       next_run: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
       status: 'active',
       created_at: new Date().toISOString(),
@@ -789,7 +800,12 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
           'If nothing actionable → produce NO output at all. Silence = success.',
         schedule_type: 'interval',
         schedule_value: '900000', // 15 minutes in ms
-        context_mode: 'group',
+        // See `syncNonMainHeartbeat` above for the full rationale —
+        // heartbeats are stateless by design (every input read from
+        // external sources on each tick), persisting the session chain
+        // is pure liability (#114). Same fix on both heartbeat-create
+        // sites so the orchestrator's two paths can't drift.
+        context_mode: 'isolated',
         next_run: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
         status: 'active',
         created_at: new Date().toISOString(),
