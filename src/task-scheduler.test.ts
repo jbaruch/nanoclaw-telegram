@@ -29,7 +29,9 @@ import {
 } from './db.js';
 import {
   _resetSchedulerLoopForTests,
+  applyComputeNextRunRemediation,
   computeNextRun,
+  computeNextRunDetailed,
   startSchedulerLoop,
 } from './task-scheduler.js';
 import type { ContainerOutput } from './container-runner.js';
@@ -131,6 +133,147 @@ describe('task scheduler', () => {
     };
 
     expect(computeNextRun(task)).toBeNull();
+  });
+
+  it('computeNextRun honors per-task schedule_timezone for cron (#102)', () => {
+    const task = {
+      id: 'cron-utc',
+      group_folder: 'test',
+      chat_jid: 'test@g.us',
+      prompt: 'test',
+      schedule_type: 'cron' as const,
+      schedule_value: '0 12 * * *', // noon
+      schedule_timezone: 'UTC',
+      context_mode: 'isolated' as const,
+      next_run: null,
+      last_run: null,
+      last_result: null,
+      status: 'active' as const,
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    };
+
+    const nextRun = computeNextRun(task);
+    expect(nextRun).not.toBeNull();
+    const next = new Date(nextRun!);
+    expect(next.getUTCHours()).toBe(12);
+    expect(next.getUTCMinutes()).toBe(0);
+  });
+
+  it('computeNextRunDetailed flags clear-bad-timezone when per-task tz is invalid but TIMEZONE works (#102)', () => {
+    createTask({
+      id: 'cron-bad-tz',
+      group_folder: 'test',
+      chat_jid: 'test@g.us',
+      prompt: 'test',
+      schedule_type: 'cron',
+      schedule_value: '0 12 * * *',
+      schedule_timezone: 'Not/A/Real/Zone',
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner',
+    });
+    const task = getTaskById('cron-bad-tz')!;
+
+    const result = computeNextRunDetailed(task);
+
+    // First parse fails on bad tz, retry with TIMEZONE succeeds.
+    expect(result.nextRun).not.toBeNull();
+    expect(result.remediation).toBe('clear-bad-timezone');
+    // Pure: no DB writes from compute itself.
+    expect(getTaskById('cron-bad-tz')?.schedule_timezone).toBe(
+      'Not/A/Real/Zone',
+    );
+  });
+
+  it("applyComputeNextRunRemediation clears bad tz when row hasn't changed (#102)", () => {
+    createTask({
+      id: 'cron-apply-clear',
+      group_folder: 'test',
+      chat_jid: 'test@g.us',
+      prompt: 'test',
+      schedule_type: 'cron',
+      schedule_value: '0 12 * * *',
+      schedule_timezone: 'Not/A/Real/Zone',
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner',
+    });
+
+    applyComputeNextRunRemediation(
+      'cron-apply-clear',
+      'clear-bad-timezone',
+      '0 12 * * *',
+      'Not/A/Real/Zone',
+    );
+
+    expect(getTaskById('cron-apply-clear')?.schedule_timezone).toBeFalsy();
+  });
+
+  it('applyComputeNextRunRemediation skips remediation when row changed since compute (#102)', () => {
+    // Simulate: scheduler observed bad tz, but a concurrent update_task
+    // fixed it before the apply step ran. The fix should NOT be clobbered.
+    createTask({
+      id: 'cron-race',
+      group_folder: 'test',
+      chat_jid: 'test@g.us',
+      prompt: 'test',
+      schedule_type: 'cron',
+      schedule_value: '0 12 * * *',
+      schedule_timezone: 'UTC', // user just fixed it
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner',
+    });
+
+    applyComputeNextRunRemediation(
+      'cron-race',
+      'clear-bad-timezone',
+      '0 12 * * *',
+      'Not/A/Real/Zone', // observed when compute ran (before fix)
+    );
+
+    // User's fix preserved — remediation skipped.
+    expect(getTaskById('cron-race')?.schedule_timezone).toBe('UTC');
+  });
+
+  it('computeNextRunDetailed flags pause-broken-cron when both parses fail (#102)', () => {
+    createTask({
+      id: 'cron-broken',
+      group_folder: 'test',
+      chat_jid: 'test@g.us',
+      prompt: 'test',
+      schedule_type: 'cron',
+      schedule_value: 'not-a-cron-expression',
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner',
+    });
+    const task = getTaskById('cron-broken')!;
+
+    const result = computeNextRunDetailed(task);
+
+    expect(result.nextRun).toBeNull();
+    expect(result.remediation).toBe('pause-broken-cron');
+    // Compute is pure — status NOT flipped here.
+    expect(getTaskById('cron-broken')?.status).toBe('active');
+
+    // Apply step does the actual flip:
+    applyComputeNextRunRemediation(
+      'cron-broken',
+      'pause-broken-cron',
+      'not-a-cron-expression',
+      null,
+    );
+    expect(getTaskById('cron-broken')?.status).toBe('paused');
   });
 
   it('maintenance task with context_mode=group uses stored maintenance sessionId and persists newSessionId', async () => {

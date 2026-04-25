@@ -32,16 +32,77 @@ import { RegisteredGroup, ScheduledTask } from './types.js';
  *
  * Co-authored-by: @community-pr-601
  */
-export function computeNextRun(task: ScheduledTask): string | null {
-  if (task.schedule_type === 'once') return null;
+/**
+ * Result type that lets callers know WHY a recurring task got
+ * `nextRun: null` so they can apply remediation against the FRESH DB
+ * row (avoiding races against concurrent `update_task` IPC).
+ *
+ * The legacy `string | null` shape is preserved by `computeNextRun`
+ * for backwards compat — call `computeNextRunDetailed` to get the
+ * structured result.
+ */
+export type NextRunRemediation =
+  | 'pause-broken-cron' // both per-task tz and TIMEZONE retry failed
+  | 'clear-bad-timezone'; // per-task tz failed, TIMEZONE retry succeeded
+
+export interface NextRunResult {
+  nextRun: string | null;
+  remediation?: NextRunRemediation;
+}
+
+export function computeNextRunDetailed(task: ScheduledTask): NextRunResult {
+  if (task.schedule_type === 'once') return { nextRun: null };
 
   const now = Date.now();
 
   if (task.schedule_type === 'cron') {
-    const interval = CronExpressionParser.parse(task.schedule_value, {
-      tz: TIMEZONE,
-    });
-    return interval.next().toISOString();
+    // Per-task `schedule_timezone` (#102) takes precedence over the
+    // server-wide TIMEZONE config. NULL/undefined falls back to TIMEZONE
+    // — the pre-#102 behavior.
+    //
+    // Pure function (no DB writes): a previous version called
+    // `updateTask` directly here, which raced with concurrent
+    // `update_task` IPC — a user fixing a broken tz could have their
+    // change clobbered by a still-in-flight scheduler tick that read
+    // the old value. Now we just compute and report; the caller is
+    // responsible for pausing or clearing the tz against the FRESH
+    // DB row.
+    try {
+      const interval = CronExpressionParser.parse(task.schedule_value, {
+        tz: task.schedule_timezone || TIMEZONE,
+      });
+      return { nextRun: interval.next().toISOString() };
+    } catch (err) {
+      logger.warn(
+        {
+          taskId: task.id,
+          scheduleValue: task.schedule_value,
+          scheduleTimezone: task.schedule_timezone,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'computeNextRun: cron parse failed — retrying with server TIMEZONE',
+      );
+      try {
+        const interval = CronExpressionParser.parse(task.schedule_value, {
+          tz: TIMEZONE,
+        });
+        return {
+          nextRun: interval.next().toISOString(),
+          remediation: 'clear-bad-timezone',
+        };
+      } catch (retryErr) {
+        logger.error(
+          {
+            taskId: task.id,
+            scheduleValue: task.schedule_value,
+            err:
+              retryErr instanceof Error ? retryErr.message : String(retryErr),
+          },
+          'computeNextRun: cron parse failed even with TIMEZONE fallback',
+        );
+        return { nextRun: null, remediation: 'pause-broken-cron' };
+      }
+    }
   }
 
   if (task.schedule_type === 'interval') {
@@ -52,7 +113,7 @@ export function computeNextRun(task: ScheduledTask): string | null {
         { taskId: task.id, value: task.schedule_value },
         'Invalid interval value',
       );
-      return new Date(now + 60_000).toISOString();
+      return { nextRun: new Date(now + 60_000).toISOString() };
     }
     // Anchor to the scheduled time, not now, to prevent drift.
     // Skip past any missed intervals so we always land in the future.
@@ -60,10 +121,67 @@ export function computeNextRun(task: ScheduledTask): string | null {
     while (next <= now) {
       next += ms;
     }
-    return new Date(next).toISOString();
+    return { nextRun: new Date(next).toISOString() };
   }
 
-  return null;
+  return { nextRun: null };
+}
+
+/**
+ * Backwards-compat shim: `computeNextRun` retains its original
+ * `string | null` shape so existing callers that don't care about
+ * remediation hints continue to work. Internally delegates to
+ * `computeNextRunDetailed` and discards the remediation field —
+ * callers that DO need to act on remediation should call the
+ * detailed variant directly and apply the remediation against the
+ * fresh DB row (re-fetch via `getTaskById`) to avoid clobbering
+ * concurrent IPC updates.
+ */
+export function computeNextRun(task: ScheduledTask): string | null {
+  return computeNextRunDetailed(task).nextRun;
+}
+
+/**
+ * Apply the remediation hint produced by `computeNextRunDetailed`
+ * against the FRESH state of the task (re-fetched from DB). If the
+ * task changed since the compute step (e.g. a concurrent
+ * `update_task` fixed the cron expression or timezone), we skip the
+ * remediation — the caller's fix wins.
+ */
+export function applyComputeNextRunRemediation(
+  taskId: string,
+  remediation: NextRunRemediation,
+  observedScheduleValue: string,
+  observedScheduleTimezone: string | null | undefined,
+): void {
+  const fresh = getTaskById(taskId);
+  if (!fresh) return;
+  // If the user updated the task between compute and now, the values
+  // we'd be remediating against are no longer the source of the
+  // failure. Skip — let the next scheduler tick re-evaluate.
+  if (
+    fresh.schedule_value !== observedScheduleValue ||
+    (fresh.schedule_timezone ?? null) !== (observedScheduleTimezone ?? null)
+  ) {
+    logger.info(
+      { taskId, remediation },
+      'applyComputeNextRunRemediation: task changed since compute — skipping',
+    );
+    return;
+  }
+  if (remediation === 'pause-broken-cron') {
+    updateTask(taskId, { status: 'paused' });
+    logger.warn(
+      { taskId },
+      'Paused task — cron expression unparseable with both per-task tz and server TIMEZONE',
+    );
+  } else if (remediation === 'clear-bad-timezone') {
+    updateTask(taskId, { schedule_timezone: null });
+    logger.warn(
+      { taskId, droppedTimezone: observedScheduleTimezone },
+      'Dropped invalid schedule_timezone — falling back to TIMEZONE going forward',
+    );
+  }
 }
 
 export interface SchedulerDependencies {
@@ -95,7 +213,11 @@ async function runTask(
   try {
     groupDir = resolveGroupFolderPath(task.group_folder);
   } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
+    // resolveGroupFolderPath throws Error on path-validation failure.
+    // Anything else is a bug elsewhere; propagate per
+    // `jbaruch/coding-policy: error-handling`.
+    if (!(err instanceof Error)) throw err;
+    const error = err.message;
     // Stop retry churn for malformed legacy rows.
     updateTask(task.id, { status: 'paused' });
     logger.error(
@@ -377,7 +499,13 @@ async function runTask(
     );
   } catch (err) {
     if (closeTimer) clearTimeout(closeTimer);
-    error = err instanceof Error ? err.message : String(err);
+    // Per `jbaruch/coding-policy: error-handling`: non-Error throws
+    // indicate bugs upstream and should propagate. The scheduler loop
+    // (Step 2 of `loop` below) is the last-resort safety net that
+    // catches them, logs, and keeps ticking — so re-throwing here
+    // doesn't kill the orchestrator.
+    if (!(err instanceof Error)) throw err;
+    error = err.message;
     logger.error({ taskId: task.id, error }, 'Task failed');
   }
 
@@ -392,13 +520,29 @@ async function runTask(
     error,
   });
 
-  const nextRun = computeNextRun(task);
+  // Re-fetch the task to compute next_run against the FRESH schedule
+  // fields. The captured `task` is from before dispatch — between
+  // there and here a user can have called `update_task` to change
+  // `schedule_value`, `schedule_timezone`, or `schedule_type`, and
+  // their fix shouldn't be clobbered by a write-back computed from
+  // the stale capture (the same race `applyComputeNextRunRemediation`
+  // already guards against on the remediation path).
+  const fresh = getTaskById(task.id) ?? task;
+  const computed = computeNextRunDetailed(fresh);
+  if (computed.remediation) {
+    applyComputeNextRunRemediation(
+      fresh.id,
+      computed.remediation,
+      fresh.schedule_value,
+      fresh.schedule_timezone,
+    );
+  }
   const resultSummary = error
     ? `Error: ${error}`
     : result
       ? result.slice(0, 200)
       : 'Completed';
-  updateTaskAfterRun(task.id, nextRun, resultSummary);
+  updateTaskAfterRun(fresh.id, computed.nextRun, resultSummary);
 }
 
 let schedulerRunning = false;
@@ -426,13 +570,30 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         }
 
         // Pre-advance next_run before dispatch to prevent double-fire on crash.
-        const claimedNextRun = computeNextRun(currentTask);
-        if (claimedNextRun !== null) {
-          updateTask(currentTask.id, { next_run: claimedNextRun });
-        } else {
-          // once-task: mark completed before dispatch
+        const computed = computeNextRunDetailed(currentTask);
+        if (computed.remediation) {
+          // Apply remediation against the FRESH DB row — if a user
+          // raced an `update_task` IPC between the read above and
+          // here that fixed the broken cron/tz, the helper detects
+          // the mismatch and skips, letting the user's fix stand.
+          applyComputeNextRunRemediation(
+            currentTask.id,
+            computed.remediation,
+            currentTask.schedule_value,
+            currentTask.schedule_timezone,
+          );
+        }
+        if (computed.nextRun !== null) {
+          updateTask(currentTask.id, { next_run: computed.nextRun });
+        } else if (currentTask.schedule_type === 'once') {
+          // Genuine once-task completion — pre-mark as completed.
           updateTask(currentTask.id, { status: 'completed' });
         }
+        // else: cron/interval with nextRun=null means
+        // `computeNextRunDetailed` returned a `pause-broken-cron`
+        // remediation that the apply step above already handled.
+        // Do NOT flip to completed — that would lose the paused
+        // state set by the remediation. See #102 round-4 review.
 
         deps.queue.enqueueTask(
           currentTask.chat_jid,
@@ -442,7 +603,22 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         );
       }
     } catch (err) {
-      logger.error({ err }, 'Error in scheduler loop');
+      // Terminal safety net for the scheduler loop. Inner code paths
+      // re-throw non-Error per `jbaruch/coding-policy: error-handling`;
+      // this catch is where they finally land. Re-throwing further
+      // here would crash the loop and stop every scheduled task — the
+      // explicit design choice is "log and keep ticking" so a single
+      // bug in one task can't take the orchestrator's whole scheduler
+      // down. Distinguishes Error from non-Error in the log so the
+      // bug source is identifiable downstream.
+      if (err instanceof Error) {
+        logger.error({ err }, 'Scheduler loop caught Error');
+      } else {
+        logger.error(
+          { err: String(err) },
+          'Scheduler loop caught non-Error throw — fix the upstream call site',
+        );
+      }
     }
 
     setTimeout(loop, SCHEDULER_POLL_INTERVAL);

@@ -29,6 +29,7 @@ import {
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { stripInternalTags } from './router.js';
+import { isValidTimezone } from './timezone.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -718,6 +719,16 @@ export async function processTaskIpc(
     prompt?: string;
     schedule_type?: string;
     schedule_value?: string;
+    /**
+     * IANA timezone for cron expressions; #102.
+     *
+     * `null` is also accepted on the update path (where it means
+     * "clear back to TIMEZONE default"). Must be `string | null` — not
+     * just `string` — because IPC payloads arrive as raw JSON and the
+     * caller can legitimately send `null` to unset; TS strict mode
+     * would otherwise reject the `data.timezone === null` check.
+     */
+    timezone?: string | null;
     context_mode?: string;
     script?: string;
     groupFolder?: string;
@@ -786,16 +797,59 @@ export async function processTaskIpc(
 
         const scheduleType = data.schedule_type as 'cron' | 'interval' | 'once';
 
+        // #102: optional IANA timezone parameter. Validated up-front so
+        // a typo fails the schedule call rather than silently falling
+        // back to server-local at fire time.
+        //
+        // Force `null` for non-cron types: the column has no effect on
+        // `interval` (always elapsed-ms) or `once` (instant pinned at
+        // schedule time). Persisting it for those types would be a
+        // footgun if the task were later updated to `cron` without
+        // explicitly passing `timezone` — an old, previously-ignored
+        // value would silently start affecting cron evaluation.
+        let scheduleTimezone: string | null = null;
+        if (
+          data.timezone !== undefined &&
+          data.timezone !== null &&
+          data.timezone !== ''
+        ) {
+          // Order matters here: ignore-because-non-cron BEFORE
+          // validate-IANA. A `once` task that happens to carry a
+          // typo'd timezone field shouldn't fail to schedule — the
+          // field has no effect anyway, just drop it. Validate only
+          // when we'd otherwise persist the value.
+          if (scheduleType !== 'cron') {
+            logger.warn(
+              { timezone: data.timezone, scheduleType },
+              'schedule_task: timezone parameter is only meaningful for cron — ignoring',
+            );
+          } else if (!isValidTimezone(data.timezone)) {
+            logger.warn(
+              { timezone: data.timezone },
+              'Invalid IANA timezone for schedule_task',
+            );
+            break;
+          } else {
+            scheduleTimezone = data.timezone;
+          }
+        }
+
         let nextRun: string | null = null;
         if (scheduleType === 'cron') {
           try {
             const interval = CronExpressionParser.parse(data.schedule_value, {
-              tz: TIMEZONE,
+              tz: scheduleTimezone || TIMEZONE,
             });
             nextRun = interval.next().toISOString();
-          } catch {
+          } catch (err) {
+            // Bind + filter rather than catch-all per
+            // `jbaruch/coding-policy: error-handling`. CronExpressionParser
+            // throws plain Error instances on invalid syntax; anything
+            // non-Error here is a bug somewhere else (e.g. a `throw "str"`
+            // upstream) and should propagate.
+            if (!(err instanceof Error)) throw err;
             logger.warn(
-              { scheduleValue: data.schedule_value },
+              { err: err.message, scheduleValue: data.schedule_value },
               'Invalid cron expression',
             );
             break;
@@ -855,6 +909,7 @@ export async function processTaskIpc(
           script: data.script || null,
           schedule_type: scheduleType,
           schedule_value: data.schedule_value,
+          schedule_timezone: scheduleTimezone,
           context_mode: contextMode,
           next_run: nextRun,
           status: 'active',
@@ -955,8 +1010,73 @@ export async function processTaskIpc(
         if (data.schedule_value !== undefined)
           updates.schedule_value = data.schedule_value;
 
-        // Recompute next_run if schedule changed
-        if (data.schedule_type || data.schedule_value) {
+        // #102: optional timezone update. `null`/empty-string clears
+        // (back to TIMEZONE default); a non-null IANA string overrides.
+        // Only meaningful for cron tasks: if the task IS a cron (or is
+        // being changed to cron in this same update), accept and
+        // persist; otherwise force the value to null so we don't store
+        // a stray timezone that would silently start affecting cron
+        // evaluation if the task were later switched to cron without
+        // explicitly re-passing it.
+        const effectiveScheduleType =
+          updates.schedule_type ?? task.schedule_type;
+
+        // If the schedule_type is being changed AWAY from cron AND the
+        // existing row had a stored schedule_timezone, drop the stored
+        // value too — even if the caller didn't explicitly pass
+        // `timezone`. Otherwise a once/interval task can outlive a
+        // previous cron incarnation with a stray timezone column that
+        // would re-activate if the task were later flipped back to
+        // cron without re-stating tz. (Copilot review round 2.)
+        if (
+          updates.schedule_type !== undefined &&
+          updates.schedule_type !== 'cron' &&
+          task.schedule_timezone &&
+          data.timezone === undefined
+        ) {
+          updates.schedule_timezone = null;
+        }
+
+        if (data.timezone !== undefined) {
+          if (data.timezone === '' || data.timezone === null) {
+            updates.schedule_timezone = null;
+          } else if (effectiveScheduleType !== 'cron') {
+            // Check non-cron BEFORE validating IANA: a typo'd tz on a
+            // once/interval task should drop silently, not abort the
+            // whole update — the field has no effect anyway.
+            logger.warn(
+              {
+                taskId: data.taskId,
+                timezone: data.timezone,
+                effectiveScheduleType,
+              },
+              'update_task: ignoring timezone — effective schedule_type is not cron',
+            );
+            updates.schedule_timezone = null;
+          } else if (!isValidTimezone(data.timezone)) {
+            logger.warn(
+              { taskId: data.taskId, timezone: data.timezone },
+              'Invalid IANA timezone in task update',
+            );
+            break;
+          } else {
+            updates.schedule_timezone = data.timezone;
+          }
+        }
+
+        // Recompute next_run if a recompute-relevant field changed.
+        // Use `!== undefined` (not truthiness) for `schedule_value`
+        // because an empty string IS a valid input on the wire (the
+        // host catches it below as invalid) — truthy-skip would
+        // silently leave next_run stale on a malformed update. For
+        // `timezone`, only count it as a recompute trigger when the
+        // (effective) schedule_type is cron — a timezone-only update
+        // on a once/interval task has no effect on next_run.
+        const triggerRecompute =
+          data.schedule_type !== undefined ||
+          data.schedule_value !== undefined ||
+          (data.timezone !== undefined && effectiveScheduleType === 'cron');
+        if (triggerRecompute) {
           const updatedTask = {
             ...task,
             ...updates,
@@ -965,12 +1085,19 @@ export async function processTaskIpc(
             try {
               const interval = CronExpressionParser.parse(
                 updatedTask.schedule_value,
-                { tz: TIMEZONE },
+                { tz: updatedTask.schedule_timezone || TIMEZONE },
               );
               updates.next_run = interval.next().toISOString();
-            } catch {
+            } catch (err) {
+              // See schedule_task above — same Error-or-rethrow pattern
+              // per `jbaruch/coding-policy: error-handling`.
+              if (!(err instanceof Error)) throw err;
               logger.warn(
-                { taskId: data.taskId, value: updatedTask.schedule_value },
+                {
+                  err: err.message,
+                  taskId: data.taskId,
+                  value: updatedTask.schedule_value,
+                },
                 'Invalid cron in task update',
               );
               break;
@@ -991,6 +1118,20 @@ export async function processTaskIpc(
               );
               break;
             }
+          } else if (updatedTask.schedule_type === 'once') {
+            // #102 follow-up: if a once-task's schedule_value changes
+            // (or the type flips to 'once'), recompute next_run from
+            // the new timestamp. Without this branch the row would
+            // keep its old `next_run` and fire incorrectly.
+            const date = new Date(updatedTask.schedule_value);
+            if (isNaN(date.getTime())) {
+              logger.warn(
+                { taskId: data.taskId, value: updatedTask.schedule_value },
+                'Invalid once timestamp in task update',
+              );
+              break;
+            }
+            updates.next_run = date.toISOString();
           }
         }
 

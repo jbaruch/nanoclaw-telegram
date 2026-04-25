@@ -737,6 +737,256 @@ describe('schedule_task schedule types', () => {
   });
 });
 
+// --- #102: UTC schedule_value + timezone parameter ---
+
+describe('schedule_task with UTC schedule_value (#102)', () => {
+  it('once with Z-suffix is anchored to that exact UTC instant', async () => {
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'utc once',
+        schedule_type: 'once',
+        schedule_value: '2030-01-01T12:00:00Z',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const tasks = getAllTasks();
+    expect(tasks).toHaveLength(1);
+    // next_run is normalized to ISO; equality of the underlying instant
+    // is what matters — not the literal string.
+    expect(new Date(tasks[0].next_run!).toISOString()).toBe(
+      '2030-01-01T12:00:00.000Z',
+    );
+    // schedule_timezone is not used for `once` — left null.
+    expect(tasks[0].schedule_timezone).toBeFalsy();
+  });
+
+  it('local-time once (no suffix) still works for back-compat', async () => {
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'local once',
+        schedule_type: 'once',
+        schedule_value: '2030-01-01T12:00:00',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const tasks = getAllTasks();
+    expect(tasks).toHaveLength(1);
+    // The promised compat behaviour: a no-suffix local string is
+    // interpreted in the host's CURRENT tz at schedule time and pinned
+    // to that absolute UTC instant. The simplest tz-portable assertion:
+    // construct a `Date` from the original local string the same way
+    // the host does, then verify next_run matches that exact instant.
+    // `toLocaleString` with explicit format options would also work but
+    // varies subtly across Node/ICU versions (en-CA punctuation, etc.)
+    // and is overkill for what we're really checking.
+    const expectedInstant = new Date('2030-01-01T12:00:00').toISOString();
+    expect(tasks[0].next_run).toBe(expectedInstant);
+  });
+
+  it('cron with explicit timezone persists schedule_timezone', async () => {
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'utc cron',
+        schedule_type: 'cron',
+        schedule_value: '0 12 * * *',
+        timezone: 'UTC',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const tasks = getAllTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].schedule_timezone).toBe('UTC');
+    expect(tasks[0].next_run).toBeTruthy();
+    // next fire is at 12:00 UTC on some date — minute and hour in UTC
+    // should be 0 and 12.
+    const nextDate = new Date(tasks[0].next_run!);
+    expect(nextDate.getUTCMinutes()).toBe(0);
+    expect(nextDate.getUTCHours()).toBe(12);
+  });
+
+  it('cron with America/Chicago timezone persists schedule_timezone', async () => {
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'chicago cron',
+        schedule_type: 'cron',
+        schedule_value: '0 9 * * *',
+        timezone: 'America/Chicago',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const tasks = getAllTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].schedule_timezone).toBe('America/Chicago');
+  });
+
+  it('cron without timezone leaves schedule_timezone null (server default)', async () => {
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'default tz cron',
+        schedule_type: 'cron',
+        schedule_value: '0 9 * * *',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const tasks = getAllTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].schedule_timezone).toBeFalsy();
+  });
+
+  it('rejects invalid IANA timezone', async () => {
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'bad tz',
+        schedule_type: 'cron',
+        schedule_value: '0 9 * * *',
+        timezone: 'Not/A/Real/Zone',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getAllTasks()).toHaveLength(0);
+  });
+
+  it('schedule_timezone is forced null for once-tasks even if timezone passed', async () => {
+    // A timezone value on a non-cron schedule would persist and silently
+    // start affecting cron evaluation if the task is later updated to
+    // schedule_type: 'cron' without re-passing timezone — Copilot review
+    // flagged this as a footgun. Drop it at schedule time.
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'once with stray tz',
+        schedule_type: 'once',
+        schedule_value: '2030-01-01T12:00:00Z',
+        timezone: 'America/Chicago',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const tasks = getAllTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].schedule_timezone).toBeFalsy();
+  });
+
+  it('schedule_timezone is forced null for interval-tasks even if timezone passed', async () => {
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'interval with stray tz',
+        schedule_type: 'interval',
+        schedule_value: '3600000',
+        timezone: 'Europe/Berlin',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const tasks = getAllTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].schedule_timezone).toBeFalsy();
+  });
+
+  it('update_task recomputes next_run when once-task schedule_value changes', async () => {
+    // Seed a once-task with one timestamp, then update it to a later one
+    // and verify next_run actually moves. Without the once branch in
+    // update_task's recompute, next_run stayed at the original instant
+    // and the task fired at the wrong time.
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        taskId: 'once-update-test',
+        prompt: 'once update',
+        schedule_type: 'once',
+        schedule_value: '2030-01-01T12:00:00Z',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    await processTaskIpc(
+      {
+        type: 'update_task',
+        taskId: 'once-update-test',
+        schedule_value: '2030-06-01T18:30:00Z',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const updated = getTaskById('once-update-test');
+    expect(updated?.next_run).toBe('2030-06-01T18:30:00.000Z');
+  });
+
+  it('update_task rejects invalid once timestamp without breaking existing row', async () => {
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        taskId: 'once-bad-update',
+        prompt: 'once',
+        schedule_type: 'once',
+        schedule_value: '2030-01-01T12:00:00Z',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    await processTaskIpc(
+      {
+        type: 'update_task',
+        taskId: 'once-bad-update',
+        schedule_value: 'not-a-date',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // Original next_run should be intact — invalid update is a no-op.
+    expect(getTaskById('once-bad-update')?.next_run).toBe(
+      '2030-01-01T12:00:00.000Z',
+    );
+  });
+});
+
 // --- context_mode defaulting ---
 
 describe('schedule_task context_mode', () => {

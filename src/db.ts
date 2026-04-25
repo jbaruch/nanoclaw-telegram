@@ -137,6 +137,20 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Add schedule_timezone column for #102 — IANA tz used to evaluate
+  // cron expressions. NULL means "use TIMEZONE config at fire time"
+  // (pre-#102 behavior). Using PRAGMA-check rather than try/catch to
+  // match the no-error-suppression rule already applied to
+  // created_by_role below.
+  const schedTzCols = database
+    .prepare('PRAGMA table_info(scheduled_tasks)')
+    .all() as Array<{ name: string }>;
+  if (!schedTzCols.some((c) => c.name === 'schedule_timezone')) {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN schedule_timezone TEXT`,
+    );
+  }
+
   // Add created_by_role column (scheduled-task provenance). Existing rows
   // backfill to 'owner' — all pre-migration tasks were either
   // host-auto-registered (src/index.ts heartbeat seeders) or created via
@@ -672,8 +686,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at, created_by_role)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, schedule_timezone, context_mode, next_run, status, created_at, created_by_role)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -683,6 +697,7 @@ export function createTask(
     task.script || null,
     task.schedule_type,
     task.schedule_value,
+    task.schedule_timezone || null,
     task.context_mode || 'isolated',
     task.next_run,
     task.status,
@@ -720,6 +735,7 @@ export function updateTask(
       | 'script'
       | 'schedule_type'
       | 'schedule_value'
+      | 'schedule_timezone'
       | 'next_run'
       | 'status'
     >
@@ -743,6 +759,10 @@ export function updateTask(
   if (updates.schedule_value !== undefined) {
     fields.push('schedule_value = ?');
     values.push(updates.schedule_value);
+  }
+  if (updates.schedule_timezone !== undefined) {
+    fields.push('schedule_timezone = ?');
+    values.push(updates.schedule_timezone || null);
   }
   if (updates.next_run !== undefined) {
     fields.push('next_run = ?');
@@ -786,10 +806,25 @@ export function updateTaskAfterRun(
   lastResult: string,
 ): void {
   const now = new Date().toISOString();
+  // Status transitions (in CASE-evaluation order):
+  //   - status = 'paused' → stay 'paused'. A runtime parse failure that
+  //     paused the task via computeNextRun during this very run must
+  //     not be flipped back to 'completed' just because nextRun is null.
+  //     See #102 round-4 review.
+  //   - nextRun IS NULL (and status is anything other than 'paused')
+  //     → 'completed'. Covers the natural once-task end. Note that
+  //     'completed' rows that re-enter this code path would also flip
+  //     here, which is harmless (they were already terminal).
+  //   - otherwise → status unchanged.
   db.prepare(
     `
     UPDATE scheduled_tasks
-    SET next_run = ?, last_run = ?, last_result = ?, status = CASE WHEN ? IS NULL THEN 'completed' ELSE status END
+    SET next_run = ?, last_run = ?, last_result = ?,
+        status = CASE
+          WHEN status = 'paused' THEN 'paused'
+          WHEN ? IS NULL THEN 'completed'
+          ELSE status
+        END
     WHERE id = ?
   `,
   ).run(nextRun, now, lastResult, nextRun, id);

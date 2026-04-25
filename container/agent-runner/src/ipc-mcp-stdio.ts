@@ -221,10 +221,10 @@ MESSAGING BEHAVIOR - The task agent's output is sent to the user or group. It ca
 \u2022 Only send a message when there's something to report (e.g., "notify me if...")
 \u2022 Never send a message (background maintenance tasks)
 
-SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
-\u2022 cron: Standard cron expression (e.g., "*/5 * * * *" for every 5 minutes, "0 9 * * *" for daily at 9am LOCAL time)
+SCHEDULE VALUE FORMAT:
+\u2022 cron: Standard cron expression (e.g., "*/5 * * * *" for every 5 minutes, "0 9 * * *"). By default evaluated in the server's local timezone. Pass an explicit \`timezone\` (IANA name like "UTC" or "America/Chicago") for tz-stable cron schedules \u2014 recommended for anything you want to fire at a specific UTC moment regardless of where the server is.
 \u2022 interval: Milliseconds between runs (e.g., "300000" for 5 minutes, "3600000" for 1 hour)
-\u2022 once: Local time WITHOUT "Z" suffix (e.g., "2026-02-01T15:30:00"). Do NOT use UTC/Z suffix.`,
+\u2022 once: UTC ISO-8601 with "Z" suffix (e.g., "2026-02-01T15:30:00Z") \u2014 RECOMMENDED. The task fires at exactly that UTC moment regardless of server timezone changes. Local strings without a suffix (e.g., "2026-02-01T15:30:00") still work and are pinned to the absolute instant they resolve to in the server's CURRENT tz at SCHEDULE time \u2014 but if you compose them by converting from a UTC anchor in your head, a tz change between when you schedule and when you compose the next one will silently shift those next ones, since you'll be doing the UTC\u2192local math against the wrong tz. UTC strings remove that whole class of bug.`,
   {
     prompt: z
       .string()
@@ -239,7 +239,13 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
     schedule_value: z
       .string()
       .describe(
-        'cron: "*/5 * * * *" | interval: milliseconds like "300000" | once: local timestamp like "2026-02-01T15:30:00" (no Z suffix!)',
+        'cron: "*/5 * * * *" | interval: milliseconds like "300000" | once: UTC ISO-8601 like "2026-02-01T15:30:00Z" (recommended) or local-time without suffix (deprecated)',
+      ),
+    timezone: z
+      .string()
+      .optional()
+      .describe(
+        'IANA timezone for cron expressions (e.g., "UTC", "America/Chicago"). Defaults to server local timezone. Has no effect on interval or once. Recommended: pass "UTC" for cron schedules anchored to absolute time.',
       ),
     context_mode: z
       .enum(['group', 'isolated'])
@@ -265,7 +271,11 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
     if (args.schedule_type === 'cron') {
       try {
         CronExpressionParser.parse(args.schedule_value);
-      } catch {
+      } catch (err) {
+        // CronExpressionParser only throws Error instances on invalid
+        // syntax. Anything non-Error here is an upstream bug; let it
+        // propagate per `jbaruch/coding-policy: error-handling`.
+        if (!(err instanceof Error)) throw err;
         return {
           content: [
             {
@@ -290,27 +300,55 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
         };
       }
     } else if (args.schedule_type === 'once') {
-      if (
-        /[Zz]$/.test(args.schedule_value) ||
-        /[+-]\d{2}:\d{2}$/.test(args.schedule_value)
-      ) {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `Timestamp must be local time without timezone suffix. Got "${args.schedule_value}" — use format like "2026-02-01T15:30:00".`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      // #102: UTC `Z`-suffixed strings are now the RECOMMENDED form
+      // (they're tz-stable across server tz changes). Local-time strings
+      // without a suffix still work — the host pins them to an absolute
+      // UTC instant at SCHEDULE time via `new Date(s).toISOString()`,
+      // and `next_run` is then a fixed instant the scheduler fires on
+      // regardless of any later tz change. The class of bug UTC
+      // strings sidestep is at *compose* time: when an agent
+      // mentally converts a UTC anchor to local against the server's
+      // CURRENT tz to build the string, a tz change between when the
+      // string is composed and when the next one is composed silently
+      // shifts each subsequent task. UTC strings remove that math.
       const date = new Date(args.schedule_value);
       if (isNaN(date.getTime())) {
         return {
           content: [
             {
               type: 'text' as const,
-              text: `Invalid timestamp: "${args.schedule_value}". Use local time format like "2026-02-01T15:30:00".`,
+              text: `Invalid timestamp: "${args.schedule_value}". Recommended format: UTC ISO-8601 like "2026-02-01T15:30:00Z".`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    // #102: validate optional IANA timezone for cron. Only validate
+    // when it'd actually be used (cron) — host already drops it for
+    // non-cron, and rejecting on a non-cron schedule for a typo'd
+    // tz that has no effect would be unhelpful pedantry.
+    // Skip empty-string tz: the host treats it as "no tz provided"
+    // and falls back to TIMEZONE, so failing the call here would be
+    // stricter than the host accepts.
+    if (
+      args.timezone !== undefined &&
+      args.timezone !== '' &&
+      args.schedule_type === 'cron'
+    ) {
+      try {
+        Intl.DateTimeFormat(undefined, { timeZone: args.timezone });
+      } catch (err) {
+        // `Intl.DateTimeFormat` throws RangeError on unknown IANA tz.
+        // Anything non-Error is a host bug; propagate per
+        // `jbaruch/coding-policy: error-handling`.
+        if (!(err instanceof Error)) throw err;
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `Invalid IANA timezone: "${args.timezone}". Use names like "UTC", "America/Chicago", "Europe/Berlin".`,
             },
           ],
           isError: true,
@@ -324,7 +362,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
 
     const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-    const data = {
+    const data: Record<string, unknown> = {
       type: 'schedule_task',
       taskId,
       prompt: args.prompt,
@@ -336,6 +374,13 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
       createdBy: groupFolder,
       timestamp: new Date().toISOString(),
     };
+    // Only forward `timezone` for cron tasks. The host already drops
+    // it for non-cron schedule types, but pruning at the source keeps
+    // the IPC payload semantically clean and avoids the "stray field"
+    // confusion Copilot flagged on review.
+    if (args.timezone !== undefined && args.schedule_type === 'cron') {
+      data.timezone = args.timezone;
+    }
 
     writeIpcFile(TASKS_DIR, data);
 
@@ -506,6 +551,12 @@ server.tool(
       .string()
       .optional()
       .describe('New schedule value (see schedule_task for format)'),
+    timezone: z
+      .string()
+      .optional()
+      .describe(
+        'New IANA timezone for cron (e.g., "UTC", "America/Chicago"). Empty string clears it (back to server default). See #102.',
+      ),
     script: z
       .string()
       .optional()
@@ -514,25 +565,31 @@ server.tool(
       ),
   },
   async (args) => {
-    // Validate schedule_value if provided
-    if (
-      args.schedule_type === 'cron' ||
-      (!args.schedule_type && args.schedule_value)
-    ) {
-      if (args.schedule_value) {
-        try {
-          CronExpressionParser.parse(args.schedule_value);
-        } catch {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Invalid cron: "${args.schedule_value}".`,
-              },
-            ],
-            isError: true,
-          };
-        }
+    // Validate schedule_value when provided, but ONLY against the
+    // explicitly-asserted schedule_type. The previous gate also tried
+    // cron-validating any update with a schedule_value but no type —
+    // which incorrectly rejected valid once-timestamps and interval
+    // millisecond strings during partial updates that left the type
+    // unchanged. The host re-validates against the post-update type
+    // anyway, so the agent-side check should be conservative: only
+    // catch the cases where the caller explicitly said "this is a
+    // cron" or "this is an interval".
+    if (args.schedule_type === 'cron' && args.schedule_value) {
+      try {
+        CronExpressionParser.parse(args.schedule_value);
+      } catch (err) {
+        // See schedule_task above — same Error-or-rethrow pattern per
+        // `jbaruch/coding-policy: error-handling`.
+        if (!(err instanceof Error)) throw err;
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `Invalid cron: "${args.schedule_value}".`,
+            },
+          ],
+          isError: true,
+        };
       }
     }
     if (args.schedule_type === 'interval' && args.schedule_value) {
@@ -543,6 +600,36 @@ server.tool(
             {
               type: 'text' as const,
               text: `Invalid interval: "${args.schedule_value}".`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+    // Validate any non-empty timezone unless the caller is EXPLICITLY
+    // changing schedule_type to once/interval (where tz is documented
+    // to have no effect — the host drops it). This catches the common
+    // case of a partial update that touches an existing cron task's
+    // tz without re-stating schedule_type. Empty string is the
+    // documented "clear back to TIMEZONE default" signal and skips
+    // validation by design.
+    if (
+      args.timezone !== undefined &&
+      args.timezone !== '' &&
+      args.schedule_type !== 'once' &&
+      args.schedule_type !== 'interval'
+    ) {
+      try {
+        Intl.DateTimeFormat(undefined, { timeZone: args.timezone });
+      } catch (err) {
+        // See schedule_task above — same Error-or-rethrow pattern per
+        // `jbaruch/coding-policy: error-handling`.
+        if (!(err instanceof Error)) throw err;
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `Invalid IANA timezone: "${args.timezone}".`,
             },
           ],
           isError: true,
@@ -563,6 +650,7 @@ server.tool(
       data.schedule_type = args.schedule_type;
     if (args.schedule_value !== undefined)
       data.schedule_value = args.schedule_value;
+    if (args.timezone !== undefined) data.timezone = args.timezone;
 
     writeIpcFile(TASKS_DIR, data);
 

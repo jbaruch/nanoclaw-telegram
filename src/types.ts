@@ -106,6 +106,17 @@ export interface ScheduledTask {
   script?: string | null;
   schedule_type: 'cron' | 'interval' | 'once';
   schedule_value: string;
+  /**
+   * IANA timezone for evaluating `cron` expressions (e.g. "UTC",
+   * "America/Chicago"). Null/undefined = use the server's `TIMEZONE`
+   * config at fire time, preserving pre-#102 behavior. Has no effect
+   * on `interval` (always elapsed-ms) or `once` — for `once`, any
+   * offset-suffixed ISO-8601 (`Z`, `+HH:MM`, `-HH:MM`) is treated as
+   * an absolute instant; bare strings without a suffix are
+   * interpreted in server-local time at schedule/update time and
+   * pinned to the resulting UTC moment in `next_run`.
+   */
+  schedule_timezone?: string | null;
   context_mode: 'group' | 'isolated';
   next_run: string | null;
   last_run: string | null;
