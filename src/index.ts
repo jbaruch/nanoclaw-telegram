@@ -50,6 +50,8 @@ import {
   getRouterState,
   initDatabase,
   setRegisteredGroup,
+  updateGroupTrusted,
+  updateGroupTrigger,
   setRouterState,
   setSession,
   storeChatMetadata,
@@ -197,6 +199,13 @@ const LEGACY_NON_MAIN_HEARTBEAT_PROMPTS: ReadonlySet<string> = new Set([
   'Invoke the `check-unanswered` skill and follow its full workflow. The skill runs the deterministic script to find candidate orphans, then does LLM reasoning over the conversation-since context to decide per candidate whether the bot already addressed it inline (react with 👍) or it genuinely needs a threaded reply. Do NOT skip the reasoning step — blind react+reply duplicates answers whenever the bot answered conversationally without threading. Do NOT query the database directly outside the skill. Do NOT check email, calendar, or system health.',
 ]);
 
+// Path to the trusted-only unanswered-precheck script. Referenced by
+// both the heartbeat-create path (`syncNonMainHeartbeat`) and the
+// trust-flip reconciliation path (`setGroupTrusted`); kept as a
+// constant so future edits can't drift between the two sites.
+const UNANSWERED_PRECHECK_SCRIPT =
+  'python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py';
+
 /**
  * Ensure a non-main, trigger-required group has the correct heartbeat
  * task in the DB. Creates it if missing; otherwise, if the stored
@@ -206,12 +215,12 @@ const LEGACY_NON_MAIN_HEARTBEAT_PROMPTS: ReadonlySet<string> = new Set([
  * don't want to clobber an operator's manual tweak on every restart.
  *
  * Scope: only `prompt` is migrated for existing tasks. `schedule`,
- * `status`, `next_run`, and `script` are preserved as-is. That means
- * if `containerConfig.trusted` flips AFTER initial creation, the
- * precheck-script assignment on the heartbeat row stays whatever it
- * was originally — reconciling it would require a second migration
- * pathway and has no clear trigger (trust changes rarely happen, and
- * an operator who flips trust can delete+recreate the heartbeat).
+ * `status`, and `next_run` are preserved as-is. The `script` field is
+ * NOT touched here either — but trust-flip reconciliation for `script`
+ * does happen elsewhere: `setGroupTrusted` (#105) updates the
+ * heartbeat row's script when `containerConfig.trusted` flips, so
+ * `precheckScript` stays in sync with the current trust tier without
+ * requiring a heartbeat delete+recreate.
  *
  * Called from two places:
  *   - `registerGroup` (IPC register_group flow, when a group joins or
@@ -230,7 +239,7 @@ function syncNonMainHeartbeat(jid: string, group: RegisteredGroup): void {
     // Keep the precheck disabled there until the tracked fix (#72)
     // moves that state to a writable location.
     const precheckScript = group.containerConfig?.trusted
-      ? 'python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py'
+      ? UNANSWERED_PRECHECK_SCRIPT
       : undefined;
     createTask({
       id: heartbeatId,
@@ -1210,6 +1219,78 @@ async function main(): Promise<void> {
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
+    setGroupTrusted: (jid, trusted) => {
+      const updated = updateGroupTrusted(jid, trusted);
+      if (!updated) return false;
+      // Mirror DB change into the in-memory registry so subsequent
+      // routing decisions see the new trust flag immediately, before any
+      // restart. Without this, the agent would have to wait for the
+      // orchestrator to reload from DB to see its own update.
+      registeredGroups[jid] = updated;
+
+      // Reconcile the heartbeat task's `script` field if one exists.
+      // The unanswered-precheck only runs for trusted non-main groups
+      // (untrusted mounts /workspace/group read-only and the precheck
+      // needs to persist a seen-set file there — see #72). When trust
+      // flips, the existing heartbeat row's script must follow, or
+      // it'll keep running with the wrong precheck setting until the
+      // operator manually edits the task. If no heartbeat exists
+      // (operator deleted it to disable, or this is the main group)
+      // we leave well alone — registerGroup is the sole path that
+      // creates new heartbeats.
+      if (!updated.isMain) {
+        const heartbeatId = `heartbeat-${updated.folder}`;
+        const heartbeat = getTaskById(heartbeatId);
+        if (heartbeat) {
+          const desiredScript = updated.containerConfig?.trusted
+            ? UNANSWERED_PRECHECK_SCRIPT
+            : null;
+          if ((heartbeat.script ?? null) !== desiredScript) {
+            updateTask(heartbeatId, { script: desiredScript });
+            logger.info(
+              { jid, folder: updated.folder, trusted, desiredScript },
+              'setGroupTrusted: reconciled heartbeat task script for trust change',
+            );
+          }
+        }
+      }
+      return true;
+    },
+    setGroupTrigger: (jid, trigger, requiresTrigger) => {
+      const previous = registeredGroups[jid];
+      const updated = updateGroupTrigger(jid, trigger, requiresTrigger);
+      if (!updated) return false;
+      registeredGroups[jid] = updated;
+
+      // Reconcile heartbeat lifecycle when `requiresTrigger` transitions.
+      // Asymmetric, mirroring `setGroupTrusted`'s pattern for `script`:
+      //   - false→true: CREATE the heartbeat if one doesn't exist
+      //     (operator explicitly opted into trigger-required mode via
+      //     this IPC, which is the same intent registerGroup serves).
+      //   - true→false: leave any existing heartbeat in place and log.
+      //     Auto-deletion would silently destroy operator state — they
+      //     might still want the heartbeat for diagnostic reasons. Same
+      //     conservatism `syncNonMainHeartbeatPrompts` applies at startup.
+      // The "required" predicate matches the rest of the file: undefined
+      // counts as required (legacy default), only explicit `false` opts
+      // out. See line 367 for the same shape in registerGroup.
+      if (!updated.isMain) {
+        const wasRequired = previous?.requiresTrigger !== false;
+        const nowRequired = updated.requiresTrigger !== false;
+        if (!wasRequired && nowRequired) {
+          syncNonMainHeartbeat(jid, updated);
+        } else if (wasRequired && !nowRequired) {
+          const heartbeatId = `heartbeat-${updated.folder}`;
+          if (getTaskById(heartbeatId)) {
+            logger.warn(
+              { jid, folder: updated.folder, heartbeatId },
+              'setGroupTrigger: requiresTrigger flipped to false but heartbeat task still exists — delete manually if no longer needed',
+            );
+          }
+        }
+      }
+      return true;
+    },
     syncGroups: async (force: boolean) => {
       await Promise.all(
         channels

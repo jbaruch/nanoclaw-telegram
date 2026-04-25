@@ -51,6 +51,19 @@ export interface IpcDeps {
   ) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
+  /** Partial update: flip `containerConfig.trusted` only. Returns false if the JID isn't registered. */
+  setGroupTrusted: (jid: string, trusted: boolean) => boolean;
+  /**
+   * Partial update: change the trigger pattern (and optionally
+   * `requiresTrigger`) only. Returns false if (a) the JID isn't
+   * registered, or (b) the trigger fails the non-empty/whitespace
+   * invariant enforced by `updateGroupTrigger`.
+   */
+  setGroupTrigger: (
+    jid: string,
+    trigger: string,
+    requiresTrigger?: boolean,
+  ) => boolean;
   syncGroups: (force: boolean) => Promise<void>;
   getAvailableGroups: () => AvailableGroup[];
   writeGroupsSnapshot: (
@@ -717,6 +730,8 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For set_trusted
+    trusted?: boolean;
     // For host operations / github_backup / promote_staging / sessionize
     requestId?: string;
     message?: string;
@@ -1021,7 +1036,22 @@ export async function processTaskIpc(
         );
         break;
       }
-      if (data.jid && data.name && data.folder && data.trigger) {
+      if (
+        typeof data.jid === 'string' &&
+        typeof data.name === 'string' &&
+        typeof data.folder === 'string' &&
+        typeof data.trigger === 'string' &&
+        data.jid.length > 0 &&
+        data.name.length > 0 &&
+        data.folder.length > 0 &&
+        data.trigger.length > 0
+      ) {
+        // `typeof === 'string'` guards BEFORE calling `.trim()` on
+        // any field. IPC payloads are untrusted JSON: a malformed
+        // request like `{jid: {}}` or `{name: 42}` would otherwise
+        // throw a TypeError and route the task file to ipc/errors,
+        // creating a low-effort log-spam / DoS vector. set_trusted /
+        // set_trigger already follow this pattern; this reuses it.
         if (!isValidGroupFolder(data.folder)) {
           logger.warn(
             { sourceGroup, folder: data.folder },
@@ -1029,17 +1059,43 @@ export async function processTaskIpc(
           );
           break;
         }
+        // Trim string fields so this IPC path can't leave a group
+        // registered under a whitespace-padded key. set_trusted /
+        // set_trigger trim before lookup; an untrimmed register would
+        // otherwise produce a "ghost" registration the partial-update
+        // tools can never match. Same normalization, same site of
+        // truth.
+        const trimmedJid = data.jid.trim();
+        const trimmedName = data.name.trim();
+        const trimmedTrigger = data.trigger.trim();
+        if (
+          trimmedJid.length === 0 ||
+          trimmedName.length === 0 ||
+          trimmedTrigger.length === 0
+        ) {
+          logger.warn(
+            { data },
+            'Invalid register_group request - empty/whitespace fields',
+          );
+          break;
+        }
         // Defense in depth: agent cannot set isMain via IPC.
         // Preserve isMain from the existing registration so IPC config
         // updates (e.g. adding additionalMounts) don't strip the flag.
-        const existingGroup = registeredGroups[data.jid];
-        deps.registerGroup(data.jid, {
-          name: data.name,
+        const existingGroup = registeredGroups[trimmedJid];
+        deps.registerGroup(trimmedJid, {
+          name: trimmedName,
           folder: data.folder,
-          trigger: data.trigger,
+          trigger: trimmedTrigger,
           added_at: new Date().toISOString(),
           containerConfig: data.containerConfig,
-          requiresTrigger: data.requiresTrigger,
+          // Explicitly default to `false` when caller omits — matches
+          // the MCP tool's documented default ("respond to all
+          // messages"). setRegisteredGroup now preserves undefined as
+          // SQL NULL, which is a distinct state from `false`, so we
+          // must not pass undefined here or the new row would behave
+          // differently than callers expect.
+          requiresTrigger: data.requiresTrigger ?? false,
           isMain: existingGroup?.isMain,
         });
         // Refresh snapshot so available_groups.json reflects new trust config immediately
@@ -1054,6 +1110,112 @@ export async function processTaskIpc(
         logger.warn(
           { data },
           'Invalid register_group request - missing required fields',
+        );
+      }
+      break;
+
+    case 'set_trusted':
+      // Partial update: flip container_config.trusted only. Same isMain
+      // gate as register_group — only the main group can change trust
+      // state. See #105.
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized set_trusted attempt blocked',
+        );
+        break;
+      }
+      if (
+        typeof data.jid === 'string' &&
+        data.jid.trim().length > 0 &&
+        typeof data.trusted === 'boolean'
+      ) {
+        // Trim JID for the same reason as set_trigger: avoids a
+        // misleading "group not registered" warning when a caller
+        // passes whitespace-padded JID.
+        const trimmedJid = data.jid.trim();
+        const ok = deps.setGroupTrusted(trimmedJid, data.trusted);
+        if (!ok) {
+          logger.warn(
+            { jid: trimmedJid },
+            'set_trusted: group not registered (use register_group first)',
+          );
+          break;
+        }
+        const availableGroups = deps.getAvailableGroups();
+        deps.writeGroupsSnapshot(
+          sourceGroup,
+          true,
+          availableGroups,
+          new Set(Object.keys(registeredGroups)),
+        );
+        // setGroupTrusted may have reconciled the heartbeat task's
+        // `script` field as a side effect of the trust flip — refresh
+        // the per-group task snapshots so containers see the change
+        // on their next read instead of waiting for the orchestrator
+        // to write a snapshot for some other reason.
+        deps.onTasksChanged();
+      } else {
+        logger.warn(
+          { data },
+          'Invalid set_trusted request - missing/empty jid or invalid trusted',
+        );
+      }
+      break;
+
+    case 'set_trigger':
+      // Partial update: change trigger_pattern and optionally
+      // requires_trigger. Same isMain gate as register_group. See #105.
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized set_trigger attempt blocked',
+        );
+        break;
+      }
+      if (
+        typeof data.jid === 'string' &&
+        data.jid.trim().length > 0 &&
+        typeof data.trigger === 'string' &&
+        data.trigger.trim().length > 0
+      ) {
+        // Reject empty/whitespace triggers + JIDs, then pass the
+        // trimmed values downstream. `getTriggerPattern('')` trims and
+        // falls back to `DEFAULT_TRIGGER`, so an empty trigger would
+        // silently revert the group to the assistant's default trigger
+        // word — not what the caller asked for. Trimming the JID
+        // before lookup avoids a misleading "group not registered"
+        // warning when a caller passes `' tg:-123 '` (whitespace would
+        // never match the registry key).
+        const trimmedJid = data.jid.trim();
+        const trimmedTrigger = data.trigger.trim();
+        const requiresTrigger =
+          typeof data.requiresTrigger === 'boolean'
+            ? data.requiresTrigger
+            : undefined;
+        const ok = deps.setGroupTrigger(
+          trimmedJid,
+          trimmedTrigger,
+          requiresTrigger,
+        );
+        if (!ok) {
+          logger.warn(
+            { jid: trimmedJid },
+            'set_trigger: group not registered (use register_group first)',
+          );
+          break;
+        }
+        const availableGroups = deps.getAvailableGroups();
+        deps.writeGroupsSnapshot(
+          sourceGroup,
+          true,
+          availableGroups,
+          new Set(Object.keys(registeredGroups)),
+        );
+      } else {
+        logger.warn(
+          { data },
+          'Invalid set_trigger request - missing/empty jid or trigger',
         );
       }
       break;

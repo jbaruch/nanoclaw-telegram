@@ -48,6 +48,8 @@ import {
   getRegisteredGroup,
   getTaskById,
   setRegisteredGroup,
+  updateGroupTrusted,
+  updateGroupTrigger,
 } from './db.js';
 import { processTaskIpc, IpcDeps } from './ipc.js';
 import { RegisteredGroup } from './types.js';
@@ -99,6 +101,44 @@ beforeEach(() => {
       groups[jid] = group;
       setRegisteredGroup(jid, group);
       // Mock the fs.mkdirSync that registerGroup does
+    },
+    setGroupTrusted: (jid, trusted) => {
+      const updated = updateGroupTrusted(jid, trusted);
+      if (!updated) return false;
+      groups[jid] = updated;
+      return true;
+    },
+    setGroupTrigger: (jid, trigger, requiresTrigger) => {
+      const previous = groups[jid];
+      const updated = updateGroupTrigger(jid, trigger, requiresTrigger);
+      if (!updated) return false;
+      groups[jid] = updated;
+
+      // Mirror src/index.ts setGroupTrigger heartbeat reconciliation so
+      // these tests exercise the same lifecycle the production deps
+      // closure does. Asymmetric: create on flip-to-required, leave-and-
+      // log on flip-to-not-required (no auto-delete).
+      if (!updated.isMain) {
+        const wasRequired = previous?.requiresTrigger !== false;
+        const nowRequired = updated.requiresTrigger !== false;
+        const heartbeatId = `heartbeat-${updated.folder}`;
+        if (!wasRequired && nowRequired && !getTaskById(heartbeatId)) {
+          createTask({
+            id: heartbeatId,
+            group_folder: updated.folder,
+            chat_jid: jid,
+            prompt: 'mock-heartbeat-prompt',
+            schedule_type: 'cron',
+            schedule_value: '*/15 * * * *',
+            context_mode: 'group',
+            next_run: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+            status: 'active',
+            created_at: new Date().toISOString(),
+            created_by_role: 'owner',
+          });
+        }
+      }
+      return true;
     },
     syncGroups: async () => {},
     getAvailableGroups: () => [],
@@ -815,6 +855,316 @@ describe('register_group success', () => {
     );
 
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
+  });
+});
+
+// --- set_trusted / set_trigger (#105) ---
+
+describe('set_trusted', () => {
+  it('main group can flip trusted on a registered group', async () => {
+    await processTaskIpc(
+      { type: 'set_trusted', jid: 'other@g.us', trusted: true },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const group = getRegisteredGroup('other@g.us');
+    expect(group?.containerConfig?.trusted).toBe(true);
+    // Other fields preserved
+    expect(group?.trigger).toBe('@Andy');
+    expect(group?.folder).toBe('other-group');
+  });
+
+  it('main group can flip trusted back to false', async () => {
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      containerConfig: { trusted: true },
+    });
+    await processTaskIpc(
+      { type: 'set_trusted', jid: 'other@g.us', trusted: false },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getRegisteredGroup('other@g.us')?.containerConfig?.trusted).toBe(
+      false,
+    );
+  });
+
+  it('non-main group cannot flip trusted', async () => {
+    await processTaskIpc(
+      { type: 'set_trusted', jid: 'other@g.us', trusted: true },
+      'other-group',
+      false,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.trusted,
+    ).toBeUndefined();
+  });
+
+  it('set_trusted on unregistered jid is a no-op (no DB row created)', async () => {
+    await processTaskIpc(
+      { type: 'set_trusted', jid: 'never-registered@g.us', trusted: true },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getRegisteredGroup('never-registered@g.us')).toBeUndefined();
+  });
+
+  it('set_trusted preserves additionalMounts and other containerConfig fields', async () => {
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      containerConfig: {
+        trusted: false,
+        additionalMounts: [
+          { hostPath: '/tmp/extra', containerPath: 'extra', readonly: true },
+        ],
+      },
+    });
+    await processTaskIpc(
+      { type: 'set_trusted', jid: 'other@g.us', trusted: true },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const group = getRegisteredGroup('other@g.us');
+    expect(group?.containerConfig?.trusted).toBe(true);
+    expect(group?.containerConfig?.additionalMounts).toEqual([
+      { hostPath: '/tmp/extra', containerPath: 'extra', readonly: true },
+    ]);
+  });
+
+  it('rejects empty/whitespace JID', async () => {
+    await processTaskIpc(
+      { type: 'set_trusted', jid: '  ', trusted: true },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // No row should be modified — OTHER_GROUP has no containerConfig
+    // and an empty-jid call shouldn't have created one.
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.trusted,
+    ).toBeUndefined();
+  });
+
+  it('trims surrounding whitespace from the JID before lookup', async () => {
+    await processTaskIpc(
+      { type: 'set_trusted', jid: '  other@g.us  ', trusted: true },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getRegisteredGroup('other@g.us')?.containerConfig?.trusted).toBe(
+      true,
+    );
+  });
+});
+
+describe('set_trigger', () => {
+  it('main group can change trigger on a registered group', async () => {
+    await processTaskIpc(
+      { type: 'set_trigger', jid: 'other@g.us', trigger: '@NewName' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const group = getRegisteredGroup('other@g.us');
+    expect(group?.trigger).toBe('@NewName');
+    // Other fields preserved
+    expect(group?.folder).toBe('other-group');
+  });
+
+  it('main group can update trigger and requiresTrigger together', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_trigger',
+        jid: 'other@g.us',
+        trigger: '@NewName',
+        requiresTrigger: true,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const group = getRegisteredGroup('other@g.us');
+    expect(group?.trigger).toBe('@NewName');
+    expect(group?.requiresTrigger).toBe(true);
+  });
+
+  it('set_trigger leaves requiresTrigger untouched when omitted', async () => {
+    setRegisteredGroup('other@g.us', { ...OTHER_GROUP, requiresTrigger: true });
+    await processTaskIpc(
+      { type: 'set_trigger', jid: 'other@g.us', trigger: '@Andy2' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const group = getRegisteredGroup('other@g.us');
+    expect(group?.trigger).toBe('@Andy2');
+    expect(group?.requiresTrigger).toBe(true);
+  });
+
+  it('non-main group cannot change trigger', async () => {
+    await processTaskIpc(
+      { type: 'set_trigger', jid: 'other@g.us', trigger: '@Hijack' },
+      'other-group',
+      false,
+      deps,
+    );
+
+    expect(getRegisteredGroup('other@g.us')?.trigger).toBe('@Andy');
+  });
+
+  it('set_trigger rejects empty trigger (would silently revert to default)', async () => {
+    await processTaskIpc(
+      { type: 'set_trigger', jid: 'other@g.us', trigger: '' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // Trigger should remain @Andy from beforeEach setup.
+    expect(getRegisteredGroup('other@g.us')?.trigger).toBe('@Andy');
+  });
+
+  it('set_trigger rejects whitespace-only trigger', async () => {
+    await processTaskIpc(
+      { type: 'set_trigger', jid: 'other@g.us', trigger: '   \t\n  ' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getRegisteredGroup('other@g.us')?.trigger).toBe('@Andy');
+  });
+
+  it('set_trigger trims surrounding whitespace from the stored trigger', async () => {
+    await processTaskIpc(
+      { type: 'set_trigger', jid: 'other@g.us', trigger: '  @Trimmed  ' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getRegisteredGroup('other@g.us')?.trigger).toBe('@Trimmed');
+  });
+
+  it('set_trigger trims surrounding whitespace from the JID before lookup', async () => {
+    // Without trimming, a whitespace-padded JID would never match the
+    // registry key and the caller would see a misleading
+    // "group not registered" warning.
+    await processTaskIpc(
+      { type: 'set_trigger', jid: '  other@g.us  ', trigger: '@PaddedJid' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getRegisteredGroup('other@g.us')?.trigger).toBe('@PaddedJid');
+  });
+
+  it('set_trigger on unregistered jid is a no-op', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_trigger',
+        jid: 'never-registered@g.us',
+        trigger: '@Whatever',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getRegisteredGroup('never-registered@g.us')).toBeUndefined();
+  });
+
+  it('set_trigger flipping requiresTrigger false→true creates the heartbeat task', async () => {
+    // Pre-state: group is in trigger-NOT-required mode and has no
+    // heartbeat task. Production registerGroup only creates heartbeats
+    // for trigger-required groups, so this models a non-main group that
+    // was registered with `requiresTrigger: false`.
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      requiresTrigger: false,
+    });
+    groups['other@g.us'] = { ...OTHER_GROUP, requiresTrigger: false };
+    expect(getTaskById('heartbeat-other-group')).toBeUndefined();
+
+    await processTaskIpc(
+      {
+        type: 'set_trigger',
+        jid: 'other@g.us',
+        trigger: '@Andy',
+        requiresTrigger: true,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // After the flip, the heartbeat exists — runtime scheduling now
+    // matches persisted group mode (the gap Codex flagged).
+    const heartbeat = getTaskById('heartbeat-other-group');
+    expect(heartbeat).toBeDefined();
+    expect(heartbeat?.group_folder).toBe('other-group');
+    expect(heartbeat?.schedule_type).toBe('cron');
+  });
+
+  it('set_trigger flipping requiresTrigger true→false leaves an existing heartbeat in place', async () => {
+    // Pre-state: trigger-required group with an active heartbeat. The
+    // operator is now disabling trigger-required mode. Auto-deleting
+    // the row would destroy operator state silently — match the
+    // syncNonMainHeartbeatPrompts startup convention and leave the row
+    // alone, only logging the drift.
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      requiresTrigger: true,
+    });
+    groups['other@g.us'] = { ...OTHER_GROUP, requiresTrigger: true };
+    createTask({
+      id: 'heartbeat-other-group',
+      group_folder: 'other-group',
+      chat_jid: 'other@g.us',
+      prompt: 'preexisting-heartbeat',
+      schedule_type: 'cron',
+      schedule_value: '*/15 * * * *',
+      context_mode: 'group',
+      next_run: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+      status: 'active',
+      created_at: new Date().toISOString(),
+      created_by_role: 'owner',
+    });
+    expect(getTaskById('heartbeat-other-group')).toBeDefined();
+
+    await processTaskIpc(
+      {
+        type: 'set_trigger',
+        jid: 'other@g.us',
+        trigger: '@Andy',
+        requiresTrigger: false,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // Heartbeat row preserved across the flip.
+    const heartbeat = getTaskById('heartbeat-other-group');
+    expect(heartbeat).toBeDefined();
+    expect(heartbeat?.prompt).toBe('preexisting-heartbeat');
   });
 });
 

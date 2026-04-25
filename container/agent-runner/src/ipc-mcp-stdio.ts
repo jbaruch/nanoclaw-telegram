@@ -585,16 +585,24 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   {
     jid: z
       .string()
+      .trim()
+      .min(1)
       .describe(
-        'The chat JID (e.g., "120363336345536173@g.us", "tg:-1001234567890", "dc:1234567890123456")',
+        'The chat JID (e.g., "120363336345536173@g.us", "tg:-1001234567890", "dc:1234567890123456"). Whitespace-only rejected.',
       ),
-    name: z.string().describe('Display name for the group'),
+    name: z.string().trim().min(1).describe('Display name for the group'),
     folder: z
       .string()
+      .trim()
+      .min(1)
       .describe(
         'Channel-prefixed folder name (e.g., "whatsapp_family-chat", "telegram_dev-team")',
       ),
-    trigger: z.string().describe('Trigger word (e.g., "@Andy")'),
+    trigger: z
+      .string()
+      .trim()
+      .min(1)
+      .describe('Trigger word (e.g., "@Andy"). Whitespace-only rejected.'),
     requiresTrigger: z
       .boolean()
       .optional()
@@ -646,6 +654,138 @@ Use available_groups.json to find the JID for a group. The folder name must be c
         {
           type: 'text' as const,
           text: `Group "${args.name}" registered. It will start receiving messages immediately.`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  'set_trusted',
+  `Flip a registered group's \`trusted\` flag without re-stating its other parameters. Main group only.
+
+Use this when promoting a chat to trusted (read-write filesystem, admin tiles, longer timeout) or demoting it back. Does NOT register a new group — call \`register_group\` first if the JID isn't already registered. The trigger word, folder, and additionalMounts are preserved.`,
+  {
+    jid: z
+      .string()
+      .trim()
+      .min(1)
+      .describe(
+        'The chat JID of an already-registered group (e.g., "tg:-1001234567890"). Whitespace-only rejected.',
+      ),
+    trusted: z
+      .boolean()
+      .describe(
+        'true = trusted container (RW filesystem, admin tiles); false = untrusted container',
+      ),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can change trust state.',
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    const data = {
+      type: 'set_trusted',
+      // `args.jid` is already trimmed by the Zod schema's `.trim()`
+      // transform — pass through verbatim.
+      jid: args.jid,
+      trusted: args.trusted,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          // "requested" rather than "set": the host receives the IPC
+          // file and applies it asynchronously, and may no-op if the
+          // JID isn't registered. We can't confirm the actual write
+          // from this side without a synchronous round-trip.
+          text: `Trust update requested for ${args.jid} → ${args.trusted}. (No-op if the JID isn't registered — call register_group first.)`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  'set_trigger',
+  `Change a registered group's trigger word (and optionally requiresTrigger) without re-stating its other parameters. Main group only.
+
+Use this when renaming the assistant in a chat or switching between always-respond and trigger-only modes. Does NOT register a new group — call \`register_group\` first if the JID isn't already registered.`,
+  {
+    jid: z
+      .string()
+      .trim()
+      .min(1)
+      .describe(
+        'The chat JID of an already-registered group. Whitespace-only rejected.',
+      ),
+    // `.trim()` + `.min(1)` rejects empty/whitespace-only triggers.
+    // Why: `getTriggerPattern('')` trims and falls back to
+    // `DEFAULT_TRIGGER`, so a caller setting a custom trigger to an
+    // empty string would silently get the assistant's default trigger
+    // word back — not what they asked for. Trim also normalizes
+    // surrounding whitespace so `' @Andy '` doesn't store as such.
+    trigger: z
+      .string()
+      .trim()
+      .min(1)
+      .describe(
+        'New non-empty trigger word (e.g., "@Andy"). Replaces the existing trigger. Surrounding whitespace is trimmed.',
+      ),
+    requiresTrigger: z
+      .boolean()
+      .optional()
+      .describe(
+        'Whether messages must start with the trigger word. Omit to leave unchanged.',
+      ),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can change trigger config.',
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    const data: Record<string, unknown> = {
+      type: 'set_trigger',
+      jid: args.jid,
+      trigger: args.trigger,
+      timestamp: new Date().toISOString(),
+    };
+    if (args.requiresTrigger !== undefined) {
+      data.requiresTrigger = args.requiresTrigger;
+    }
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          // "requested" rather than "set": host applies asynchronously and
+          // may no-op if the JID isn't registered.
+          text:
+            args.requiresTrigger === undefined
+              ? `Trigger update requested for ${args.jid} → "${args.trigger}". (No-op if the JID isn't registered — call register_group first.)`
+              : `Trigger update requested for ${args.jid} → "${args.trigger}" (requiresTrigger=${args.requiresTrigger}). (No-op if the JID isn't registered — call register_group first.)`,
         },
       ],
     };

@@ -962,9 +962,102 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.trigger,
     group.added_at,
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
-    group.requiresTrigger === undefined ? 0 : group.requiresTrigger ? 1 : 0,
+    // Map TS `undefined` to SQL NULL (not 0). NULL and 0 are distinct
+    // states elsewhere in the orchestrator: `index.ts` checks
+    // `requiresTrigger === false` to decide whether to skip a group's
+    // heartbeat sync, and a NULL row should NOT match that branch.
+    // Pre-#105, this column wrote 0 for undefined, which silently
+    // collapsed the NULL state on every round-trip — biting the new
+    // partial-update helpers (`updateGroupTrusted`/`updateGroupTrigger`)
+    // because they read existing → reapply. Callers that want explicit
+    // false must pass `false` explicitly; callers passing `undefined`
+    // get NULL preserved.
+    group.requiresTrigger === undefined ? null : group.requiresTrigger ? 1 : 0,
     group.isMain ? 1 : 0,
   );
+}
+
+/**
+ * Partial update: flip `containerConfig.trusted` only.
+ *
+ * Returns the updated RegisteredGroup, or `undefined` if the JID isn't
+ * registered. The caller is responsible for refreshing in-memory state
+ * and snapshots — this function only touches the DB row.
+ *
+ * Implementation note: we round-trip through `getRegisteredGroup` to
+ * preserve every other field (additionalMounts, isMain, etc.) verbatim,
+ * then write back via `setRegisteredGroup`. A targeted SQL UPDATE on the
+ * JSON column would be marginally faster but would force us to either
+ * mutate the JSON string textually (fragile) or duplicate the JSON
+ * encoding logic that already lives in `setRegisteredGroup`.
+ */
+export function updateGroupTrusted(
+  jid: string,
+  trusted: boolean,
+): RegisteredGroup | undefined {
+  const existing = getRegisteredGroup(jid);
+  if (!existing) return undefined;
+  // `getRegisteredGroup` synthesizes its return value with `jid` set as
+  // an extra runtime field for caller convenience, but `RegisteredGroup`
+  // doesn't declare it. Strip via destructure before spreading so the
+  // value we hand back (and the in-memory cache the orchestrator
+  // mirrors into) doesn't carry the DB-only key.
+  const { jid: _existingJid, ...rest } = existing;
+  void _existingJid;
+  const updated: RegisteredGroup = {
+    ...rest,
+    containerConfig: {
+      ...(rest.containerConfig ?? {}),
+      trusted,
+    },
+  };
+  setRegisteredGroup(jid, updated);
+  return updated;
+}
+
+/**
+ * Partial update: change `trigger_pattern` and optionally `requires_trigger`
+ * only. Other fields preserved. Returns updated group or `undefined` if
+ * the JID isn't registered or the trigger fails the non-empty invariant.
+ *
+ * Why reject empty/whitespace triggers: `getTriggerPattern('')` trims
+ * and falls back to `DEFAULT_TRIGGER`, so a caller that thinks they're
+ * setting a custom trigger would silently get the assistant's default
+ * trigger word instead — not what they asked for. Reject at the DB
+ * boundary so any future caller (cron migrations, manual fixups,
+ * alternate MCP tools) can't bypass the IPC-layer check.
+ *
+ * The trigger is also `.trim()`ed before persistence so `' @Andy '`
+ * doesn't end up stored with surrounding whitespace (which would render
+ * that way in `available_groups.json` and elsewhere).
+ */
+export function updateGroupTrigger(
+  jid: string,
+  trigger: string,
+  requiresTrigger?: boolean,
+): RegisteredGroup | undefined {
+  if (typeof trigger !== 'string' || trigger.trim().length === 0) {
+    logger.warn(
+      { jid },
+      'updateGroupTrigger: rejecting empty/whitespace trigger',
+    );
+    return undefined;
+  }
+  const normalizedTrigger = trigger.trim();
+  const existing = getRegisteredGroup(jid);
+  if (!existing) return undefined;
+  // Strip the DB-only `jid` field so it doesn't leak into the returned
+  // RegisteredGroup or into the in-memory cache the orchestrator
+  // mirrors into. Same rationale as updateGroupTrusted above.
+  const { jid: _existingJid, ...rest } = existing;
+  void _existingJid;
+  const updated: RegisteredGroup = {
+    ...rest,
+    trigger: normalizedTrigger,
+    ...(requiresTrigger === undefined ? {} : { requiresTrigger }),
+  };
+  setRegisteredGroup(jid, updated);
+  return updated;
 }
 
 export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
