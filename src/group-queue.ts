@@ -46,7 +46,35 @@ interface GroupState {
   containerName: string | null;
   groupFolder: string | null;
   retryCount: number;
+  // Outcome of the most recent run on this slot. `null` means this slot
+  // has never run (or hasn't run since process start). 'clean' means the
+  // last run completed without throwing (and `processMessagesFn`
+  // returned true for message runs); 'error' means it threw or returned
+  // false. `getStatus()` uses this to distinguish 'crashed' from
+  // 'not-spawned' when the slot is currently idle. Set in the `finally`
+  // blocks of `runForGroup` and `runTask` — anywhere else and it would
+  // race with active runs.
+  lastExitStatus: 'clean' | 'error' | null;
 }
+
+/**
+ * Per-(group, session) container status, derived from internal state.
+ *
+ * - `running` — container is alive and actively processing.
+ * - `idle` — container is alive but waiting on idle-timeout / IPC input.
+ * - `cooling-down` — short-term retry backoff in flight (`retryCount > 0`)
+ *   OR long-term circuit-breaker cooldown active for this group folder.
+ * - `crashed` — last attempted run failed and we're not in either cooldown
+ *   window. Means the next inbound message will retry from scratch.
+ * - `not-spawned` — slot has never run (since process start), or last
+ *   run completed cleanly and nothing is in flight.
+ */
+export type ContainerStatus =
+  | 'running'
+  | 'idle'
+  | 'cooling-down'
+  | 'crashed'
+  | 'not-spawned';
 
 /**
  * GroupQueue tracks in-flight containers per `(groupJid, sessionName)` pair.
@@ -104,10 +132,45 @@ export class GroupQueue {
         containerName: null,
         groupFolder: null,
         retryCount: 0,
+        lastExitStatus: null,
       };
       sessions.set(sessionName, state);
     }
     return state;
+  }
+
+  // Read-only lookup. Unlike getGroup it doesn't lazily create the slot —
+  // status queries about a never-run slot must not leave a phantom entry
+  // in the map (chat_status iterates over registeredGroups, not the queue
+  // map, so creating empties on every poll would just leak memory).
+  private peekGroup(groupJid: string, sessionName: string): GroupState | null {
+    return this.groups.get(groupJid)?.get(sessionName) ?? null;
+  }
+
+  /**
+   * Return the derived status for a (group, session) slot. The
+   * `circuitBreakerActive` flag is passed in by the caller because the
+   * long-term circuit breaker lives on the orchestrator side (per group
+   * folder, not per session) — `index.ts` owns it. Short-term retry
+   * backoff (`retryCount > 0`) is internal and folded in here.
+   *
+   * A slot that has never run returns 'not-spawned'. A slot whose last
+   * run errored AND is not currently in any cooldown window returns
+   * 'crashed' — the next incoming message will retry from scratch.
+   */
+  getStatus(
+    groupJid: string,
+    sessionName: string,
+    circuitBreakerActive = false,
+  ): ContainerStatus {
+    const state = this.peekGroup(groupJid, sessionName);
+    if (!state) return 'not-spawned';
+    if (state.active) {
+      return state.idleWaiting ? 'idle' : 'running';
+    }
+    if (circuitBreakerActive || state.retryCount > 0) return 'cooling-down';
+    if (state.lastExitStatus === 'error') return 'crashed';
+    return 'not-spawned';
   }
 
   setProcessMessagesFn(fn: (groupJid: string) => Promise<boolean>): void {
@@ -343,16 +406,19 @@ export class GroupQueue {
       'Starting container for group',
     );
 
+    let runFailed = false;
     try {
       if (this.processMessagesFn) {
         const success = await this.processMessagesFn(groupJid);
         if (success) {
           state.retryCount = 0;
         } else {
+          runFailed = true;
           this.scheduleRetry(groupJid, state);
         }
       }
     } catch (err) {
+      runFailed = true;
       logger.error({ groupJid, err }, 'Error processing messages for group');
       this.scheduleRetry(groupJid, state);
     } finally {
@@ -360,6 +426,9 @@ export class GroupQueue {
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
+      // Record outcome BEFORE drain so a status query that races a
+      // chained drain run sees the slot's actual exit, not a stale null.
+      state.lastExitStatus = runFailed ? 'error' : 'clean';
       this.activeCount--;
       this.drainGroup(groupJid, DEFAULT_SESSION_NAME);
     }
@@ -387,9 +456,11 @@ export class GroupQueue {
       'Running queued task',
     );
 
+    let runFailed = false;
     try {
       await task.fn();
     } catch (err) {
+      runFailed = true;
       logger.error(
         { groupJid, sessionName, taskId: task.id, err },
         'Error running task',
@@ -401,6 +472,7 @@ export class GroupQueue {
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
+      state.lastExitStatus = runFailed ? 'error' : 'clean';
       this.activeCount--;
       this.drainGroup(groupJid, sessionName);
     }

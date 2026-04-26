@@ -37,6 +37,14 @@ function createSchema(database: Database.Database): void {
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
     CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp);
+    -- Composite index for chat_status latest-is_from_me-1 lookup
+    -- (see getLastFromMeMessages). Without it, the predicate
+    -- chat_jid = ? AND is_from_me = 1 falls back to a full scan +
+    -- sort by timestamp on every chat in the snapshot, scaling
+    -- poorly with message history. Trailing timestamp column lets
+    -- SQLite satisfy ORDER BY directly from the index.
+    CREATE INDEX IF NOT EXISTS idx_messages_fromme_chat
+      ON messages(chat_jid, is_from_me, timestamp);
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
@@ -679,6 +687,71 @@ export function getLastBotMessageTimestamp(
     )
     .get(chatJid, `${botPrefix}:%`) as { ts: string | null } | undefined;
   return row?.ts ?? undefined;
+}
+
+/**
+ * Latest outbound message in a chat (where the host wrote the row with
+ * `is_from_me = 1`, i.e. AyeAye sent it). Returned as `{ timestamp,
+ * content }` or `null` if AyeAye never spoke in this chat. Used by the
+ * `chat_status` IPC handler so the admin tile can answer "when did
+ * AyeAye last respond here, and with what?" for diagnosing silent
+ * containers. Single-chat convenience wrapper around the batch helper.
+ */
+export function getLastFromMeMessage(
+  chatJid: string,
+): { timestamp: string; content: string } | null {
+  return getLastFromMeMessages([chatJid]).get(chatJid) ?? null;
+}
+
+/**
+ * Batch variant. Resolves "latest is_from_me=1 message per chat" for
+ * many JIDs in one SQL round-trip. Backs the all-chats path of the
+ * `chat_status` IPC handler — calling the single-chat helper N times
+ * was N statement compilations and N scan+sorts; this issues a single
+ * grouped query against the `idx_messages_fromme_chat` composite index
+ * (created in createSchema). Chats that AyeAye has never spoken in are
+ * absent from the returned map, matching the single-chat helper's
+ * `null` return.
+ */
+export function getLastFromMeMessages(
+  chatJids: readonly string[],
+): Map<string, { timestamp: string; content: string }> {
+  const out = new Map<string, { timestamp: string; content: string }>();
+  if (chatJids.length === 0) return out;
+  const placeholders = chatJids.map(() => '?').join(',');
+  // GROUP BY + MAX(timestamp) gives "latest per chat" without a
+  // correlated subquery. Pull the matching content via a self-join so
+  // the row's `content` corresponds to the same row whose `timestamp`
+  // is the MAX — without the join we'd get arbitrary content from any
+  // is_from_me=1 row in the chat. Composite index makes both halves
+  // (the GROUP BY scan and the join lookup) fast.
+  const sql = `
+    SELECT m.chat_jid, m.timestamp, m.content
+    FROM messages m
+    JOIN (
+      SELECT chat_jid, MAX(timestamp) AS max_ts
+      FROM messages
+      WHERE is_from_me = 1 AND chat_jid IN (${placeholders})
+      GROUP BY chat_jid
+    ) latest
+      ON m.chat_jid = latest.chat_jid
+     AND m.timestamp = latest.max_ts
+     AND m.is_from_me = 1
+  `;
+  const rows = db.prepare(sql).all(...chatJids) as Array<{
+    chat_jid: string;
+    timestamp: string;
+    content: string;
+  }>;
+  for (const row of rows) {
+    // Multiple is_from_me=1 messages with the same MAX timestamp would
+    // produce duplicate rows; the Map dedupes by keeping the last
+    // assignment. This is rare enough (millisecond-precision
+    // timestamps) that picking arbitrarily is fine — the docstring
+    // promises "latest", not a deterministic tiebreak.
+    out.set(row.chat_jid, { timestamp: row.timestamp, content: row.content });
+  }
+  return out;
 }
 
 export function createTask(
