@@ -92,7 +92,15 @@ function ts(): string {
 // every log line, multiplying syscall cost.
 let sinkPath: string | null = null;
 let writesSinceSizeCheck = 0;
+let consecutiveWriteFailures = 0;
 const SIZE_CHECK_EVERY = 256;
+// After this many CONSECUTIVE write failures, mark the sink permanently
+// disabled. Without a cap, a persistent EACCES (locked-down filesystem,
+// chmod removed) would make every log line do init+append+retry — a
+// hot loop that adds two failed syscalls per emitted log line. Three
+// failures is enough to ride through a transient wipe (the test
+// fixture pattern) without thrashing on a permanent break.
+const MAX_CONSECUTIVE_WRITE_FAILURES = 3;
 
 function initSink(): string | null {
   if (sinkPath !== null) return sinkPath || null;
@@ -115,29 +123,42 @@ function writeToSink(line: string): void {
   if (!p) return;
   try {
     fs.appendFileSync(p, line);
+    // Successful write — reset the failure counter so a future
+    // transient blip starts the backoff fresh, not at the previous
+    // run's terminal value.
+    consecutiveWriteFailures = 0;
     writesSinceSizeCheck++;
     if (writesSinceSizeCheck >= SIZE_CHECK_EVERY) {
       writesSinceSizeCheck = 0;
       const stat = fs.statSync(p);
       if (stat.size > ORCHESTRATOR_LOG_MAX_BYTES) {
-        // Single-step rotation — rename current to `.1`, drop any
-        // older `.1`. We don't keep N rotations because the
-        // orchestrator log is high-volume and `scripts/logrotate.sh`
-        // already handles richer rotation when invoked externally.
-        // The internal rotation here is a safety net so a
-        // logrotate-less deployment can't fill disk.
+        // Single-step rotation — rename current to `.1` after first
+        // unlinking any prior `.1`. Two-step instead of relying on
+        // rename-overwrites because `fs.renameSync` does NOT overwrite
+        // an existing destination on Windows (NTFS rejects the rename;
+        // only POSIX has the overwrite semantics). The unlink-first
+        // path works on every platform we deploy to. We don't keep N
+        // rotations because the orchestrator log is high-volume and
+        // `scripts/logrotate.sh` already handles richer rotation when
+        // invoked externally — the internal rotation here is a safety
+        // net so a logrotate-less deployment can't fill disk.
         const rotated = `${p}.1`;
         try {
           if (fs.existsSync(rotated)) fs.unlinkSync(rotated);
         } catch {
-          // Old rotation locked / vanished — proceed with rename;
-          // the rename will overwrite if the destination still exists.
+          // Old rotation locked / vanished. If unlink failed and the
+          // file still exists, the renameSync below will throw on
+          // Windows and silently overwrite on POSIX — either way the
+          // catch on rename keeps us going.
         }
         try {
           fs.renameSync(p, rotated);
         } catch {
-          // Rename failed (e.g. cross-filesystem on some setups) —
-          // leave the file alone and try again next size check.
+          // Rename failed (cross-filesystem, dest still present on
+          // Windows, EACCES). Leave the file alone and try again
+          // next size check — the active log keeps growing past the
+          // cap until rotation succeeds, but that's preferable to
+          // crashing the logger.
         }
       }
     }
@@ -148,21 +169,28 @@ function writeToSink(line: string): void {
     // The directory was probably deleted out from under us (operator
     // cleanup, log-rotation tooling, test wipe between runs). Reset
     // the cached sinkPath, re-init to recreate the dir, and retry the
-    // write ONCE so the current line still lands on disk. Without
-    // the retry, a single transient ENOENT would lose the line that
-    // tripped it (and the recovery would only kick in for the NEXT
-    // write).
+    // write ONCE so the current line still lands on disk. After
+    // MAX_CONSECUTIVE_WRITE_FAILURES failures in a row, mark the sink
+    // permanently disabled — a persistent EACCES would otherwise turn
+    // every subsequent log line into a guaranteed-failed init+append
+    // pair, doubling syscall cost for no benefit.
+    consecutiveWriteFailures++;
+    if (consecutiveWriteFailures >= MAX_CONSECUTIVE_WRITE_FAILURES) {
+      sinkPath = ''; // permanent disable
+      return;
+    }
     sinkPath = null;
     const retryPath = initSink();
     if (!retryPath) return;
     try {
       fs.appendFileSync(retryPath, line);
+      consecutiveWriteFailures = 0;
     } catch {
-      // Second failure — give up on this line. Reset again so the
-      // next call re-tries init from scratch (the failing disk may
-      // be transient). Dropping a single line is better than
-      // crashing the orchestrator.
-      sinkPath = null;
+      // Second failure on this call. Don't reset to null again — the
+      // next writeToSink call's initSink() will run with sinkPath
+      // still pointing at the resurrected path, hit appendFileSync,
+      // hit the same error, increment the counter, and either retry
+      // once more or trip the permanent-disable threshold above.
     }
   }
 }

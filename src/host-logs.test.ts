@@ -126,6 +126,25 @@ describe('ensureHostLogDirs', () => {
     expect(() => ensureHostLogDirs()).not.toThrow();
     expect(fs.readFileSync(sentinel, 'utf-8')).toBe('still here');
   });
+
+  it('returns true on success', () => {
+    expect(ensureHostLogDirs()).toBe(true);
+  });
+
+  it('returns false when mkdirSync fails — never throws', () => {
+    // Simulate a hostile filesystem (read-only mount, EACCES, etc.).
+    // The orchestrator startup code path needs ensureHostLogDirs to
+    // be best-effort: a failing dir-create must not crash spawn,
+    // because aborting container creation on a logging-side failure
+    // would mean no agent runs at all rather than just no host-logs
+    // visibility — a strict downgrade of behaviour.
+    const spy = vi.spyOn(fs, 'mkdirSync').mockImplementation(() => {
+      throw new Error('EROFS');
+    });
+    expect(() => ensureHostLogDirs()).not.toThrow();
+    expect(ensureHostLogDirs()).toBe(false);
+    spy.mockRestore();
+  });
 });
 
 // --- Retention pruning ---
@@ -148,8 +167,7 @@ describe('pruneOldContainerLogs', () => {
     // Make `oldFile` older than the retention window. `+1000` extra
     // ms is paranoia against subsecond clock drift between the
     // `now` we pass in and the file's mtimeMs comparison.
-    const oldMtime =
-      (now.getTime() - CONTAINER_LOG_RETENTION_MS - 1000) / 1000;
+    const oldMtime = (now.getTime() - CONTAINER_LOG_RETENTION_MS - 1000) / 1000;
     fs.utimesSync(oldFile, oldMtime, oldMtime);
 
     const deleted = pruneOldContainerLogs(now);

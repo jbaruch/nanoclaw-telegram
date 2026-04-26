@@ -365,12 +365,25 @@ export function buildVolumeMounts(
     // orchestrator's own diagnostics) and must not leak to untrusted
     // or trusted-non-main tiles. Read-only by construction so admin
     // can observe but not mutate the host's view of itself.
-    ensureHostLogDirs();
-    mounts.push({
-      hostPath: toHostPath(hostLogsDir()),
-      containerPath: '/workspace/host-logs',
-      readonly: true,
-    });
+    //
+    // ensureHostLogDirs() is best-effort and returns false on
+    // permission / disk errors. Skip the mount if the directory
+    // tree didn't materialize — better to lose host-logs visibility
+    // than to abort the container spawn entirely. The agent will
+    // see no /workspace/host-logs and fall back to chat_status for
+    // diagnosis (live data, no historical files).
+    if (ensureHostLogDirs()) {
+      mounts.push({
+        hostPath: toHostPath(hostLogsDir()),
+        containerPath: '/workspace/host-logs',
+        readonly: true,
+      });
+    } else {
+      logger.warn(
+        { group: group.name },
+        'host-logs dir bootstrap failed — admin tile will spawn without /workspace/host-logs',
+      );
+    }
     // Shadow ALL files containing secrets so agents can't read bot tokens.
     // Without this, subagents curl the Telegram API directly, bypassing MCP.
     // mount --bind inside the container doesn't work (needs CAP_SYS_ADMIN),
@@ -1372,6 +1385,13 @@ export async function runContainerAgent(
   // aligned (a single `data` event can split a line, or contain many),
   // so we buffer until we see `\n` and emit `[OUT] ` / `[ERR] ` per
   // complete line. Trailing partial line is flushed on container exit.
+  //
+  // The buffer is bounded: a misbehaving container that emits megabytes
+  // without a newline (e.g. binary garbage, a long single-line log
+  // dump) would otherwise grow the orchestrator's heap unboundedly.
+  // Cap at 64 KB per stream — well above typical line lengths but
+  // small enough that even pathological output flushes quickly.
+  const LINE_BUFFER_MAX = 64 * 1024;
   const makeLinePrefixer = (prefix: string) => {
     let buffer = '';
     const writeLines = (chunk: string) => {
@@ -1382,6 +1402,14 @@ export async function runContainerAgent(
         const line = buffer.slice(0, nl);
         buffer = buffer.slice(nl + 1);
         streamLog.write(`${prefix} ${stripAnsi(line)}\n`);
+      }
+      // Cap the buffer: if no newline appeared and the buffer crossed
+      // the limit, flush the entire current buffer as a synthetic
+      // line. Tagged with `[…cap…]` so a reader knows the line was
+      // not delimited by a real newline (might cut mid-token).
+      if (buffer.length > LINE_BUFFER_MAX) {
+        streamLog.write(`${prefix} […cap…] ${stripAnsi(buffer)}\n`);
+        buffer = '';
       }
     };
     const flush = () => {

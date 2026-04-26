@@ -66,12 +66,36 @@ export const ORCHESTRATOR_LOG_MAX_BYTES = 10 * 1024 * 1024;
  * Best-effort directory bootstrap. Called from the orchestrator at
  * startup AND lazily by the logger (logger may run before the
  * orchestrator's startup hook on some import-order paths). Failure is
- * non-fatal — callers fall back to stdout-only logging.
+ * non-fatal — callers fall back to stdout-only logging or skip the
+ * host-logs mount entirely.
+ *
+ * Returns `true` if all three directories exist after the call,
+ * `false` if any mkdirSync failed (EACCES, EROFS, ENOSPC, etc.).
+ * Each call is idempotent; failures don't half-complete state.
  */
-export function ensureHostLogDirs(): void {
-  fs.mkdirSync(hostLogsDir(), { recursive: true });
-  fs.mkdirSync(hostLogsContainersDir(), { recursive: true });
-  fs.mkdirSync(hostLogsStateDir(), { recursive: true });
+export function ensureHostLogDirs(): boolean {
+  // Wrap each mkdirSync individually so a failure on the second or
+  // third doesn't unwind progress on the first (mkdir is idempotent
+  // anyway, but we should still keep the partial-success state if it
+  // helps later callers — e.g. the logger sink only needs the root
+  // dir, not containers/ or state/).
+  let ok = true;
+  try {
+    fs.mkdirSync(hostLogsDir(), { recursive: true });
+  } catch {
+    ok = false;
+  }
+  try {
+    fs.mkdirSync(hostLogsContainersDir(), { recursive: true });
+  } catch {
+    ok = false;
+  }
+  try {
+    fs.mkdirSync(hostLogsStateDir(), { recursive: true });
+  } catch {
+    ok = false;
+  }
+  return ok;
 }
 
 /**

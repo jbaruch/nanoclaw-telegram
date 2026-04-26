@@ -56,9 +56,8 @@ const ORIGINAL_LOG_LEVEL = process.env.LOG_LEVEL;
 process.env.LOG_LEVEL = 'info';
 vi.resetModules();
 const { logger } = await import('./logger.js');
-const { hostLogsOrchestratorFile, ORCHESTRATOR_LOG_MAX_BYTES } = await import(
-  './host-logs.js'
-);
+const { hostLogsOrchestratorFile, ORCHESTRATOR_LOG_MAX_BYTES } =
+  await import('./host-logs.js');
 
 afterAll(() => {
   if (ORIGINAL_LOG_LEVEL === undefined) {
@@ -145,11 +144,9 @@ describe('logger file sink', () => {
     // swallow the error — propagating it would turn every log call
     // into a crash hazard during disk-full / permission scenarios.
     const err = new Error('EACCES');
-    const spy = vi
-      .spyOn(fs, 'appendFileSync')
-      .mockImplementation(() => {
-        throw err;
-      });
+    const spy = vi.spyOn(fs, 'appendFileSync').mockImplementation(() => {
+      throw err;
+    });
     expect(() => logger.info('still ok')).not.toThrow();
     spy.mockRestore();
   });
@@ -181,5 +178,39 @@ describe('logger file sink', () => {
     expect(fs.existsSync(rotated)).toBe(true);
     const activeSize = fs.statSync(hostLogsOrchestratorFile()).size;
     expect(activeSize).toBeLessThan(ORCHESTRATOR_LOG_MAX_BYTES);
+  });
+
+  // NOTE: this test must run LAST in the file because it deliberately
+  // trips the sink's permanent-disable state, which sticks across
+  // tests in the same vitest worker (logger module is loaded once via
+  // dynamic import at the top of the file). Tests after this one
+  // would see the sink disabled and fail to write at all.
+  it('stops retrying after consecutive write failures (no hot-loop)', () => {
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    // Make every appendFileSync fail. The sink should retry a few
+    // times then permanently disable itself — without the cap, every
+    // subsequent log line would still go through init + append +
+    // retry, doubling syscall cost forever under persistent EACCES.
+    let appendCalls = 0;
+    const spy = vi.spyOn(fs, 'appendFileSync').mockImplementation(() => {
+      appendCalls++;
+      throw new Error('EACCES');
+    });
+
+    // Hammer the logger past the threshold (3 consecutive failures).
+    for (let i = 0; i < 20; i++) {
+      logger.info(`line ${i}`);
+    }
+    const callsAfterCap = appendCalls;
+
+    // After the cap is hit, subsequent log calls must skip
+    // appendFileSync entirely (the sink path is permanently
+    // disabled). If the count keeps climbing past the cap, the
+    // hot-loop concern Copilot raised is real.
+    for (let i = 0; i < 20; i++) {
+      logger.info(`more ${i}`);
+    }
+    expect(appendCalls).toBe(callsAfterCap);
+    spy.mockRestore();
   });
 });

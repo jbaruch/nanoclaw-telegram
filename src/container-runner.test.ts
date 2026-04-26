@@ -336,9 +336,7 @@ describe('host-logs mount admin-only gating', () => {
     // The readonlyMountArgs mock formats as `host:container:ro`; the
     // mount appears as a single `-v ...host-logs:/workspace/host-logs:ro`
     // entry in the spawned arg list.
-    expect(
-      args.some((a) => a.includes(':/workspace/host-logs:ro')),
-    ).toBe(true);
+    expect(args.some((a) => a.includes(':/workspace/host-logs:ro'))).toBe(true);
   });
 
   it('trusted non-main group does NOT get the host-logs mount', async () => {
@@ -360,24 +358,16 @@ describe('host-logs mount admin-only gating', () => {
     // container. If this assertion ever fires, every trusted tile
     // would gain visibility into every other group's stdout/stderr —
     // exactly the leak the admin-only gate is designed to prevent.
-    expect(
-      args.some((a) => a.includes('/workspace/host-logs')),
-    ).toBe(false);
+    expect(args.some((a) => a.includes('/workspace/host-logs'))).toBe(false);
   });
 
   it('untrusted group does NOT get the host-logs mount', async () => {
-    const promise = runContainerAgent(
-      testGroup,
-      testInput,
-      () => {},
-    );
+    const promise = runContainerAgent(testGroup, testInput, () => {});
     fakeProc.emit('close', 0);
     await vi.advanceTimersByTimeAsync(10);
     await promise;
 
     const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
-    expect(
-      args.some((a) => a.includes('/workspace/host-logs')),
-    ).toBe(false);
+    expect(args.some((a) => a.includes('/workspace/host-logs'))).toBe(false);
   });
 });
