@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.53] - 2026-04-26
+
+- Poison defense: `TaskOutput(block!=false)` is denied at the PreToolUse hook to stop the SDK from leaking raw sub-agent JSONL on timeout (#116). MCP tool results are scrubbed of Cf-class invisible-Unicode characters and capped at `TOOL_RESULT_MAX_BYTES` bytes (default 64 KiB) before reaching the model (#117).
+
 ## [1.2.36] - 2026-03-26
 
 - [BREAKING] Replaced pino logger with built-in logger. WhatsApp users must re-merge the WhatsApp fork to pick up the Baileys logger compatibility fix: `git fetch whatsapp main && git merge whatsapp/main`. If the `whatsapp` remote is not configured: `git remote add whatsapp https://github.com/qwibitai/nanoclaw-whatsapp.git`.
