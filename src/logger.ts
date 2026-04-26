@@ -1,3 +1,12 @@
+import fs from 'fs';
+
+import {
+  hostLogsDir,
+  hostLogsOrchestratorFile,
+  ORCHESTRATOR_LOG_MAX_BYTES,
+  stripAnsi,
+} from './host-logs.js';
+
 const LEVELS = { debug: 20, info: 30, warn: 40, error: 50, fatal: 60 } as const;
 type Level = keyof typeof LEVELS;
 
@@ -76,6 +85,88 @@ function ts(): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
 }
 
+// File sink state. The sink is `null` until the first write succeeds in
+// initSink(); becomes `''` after a permanent failure so we don't keep
+// retrying. Number of writes since the last size check is sampled
+// every CHECK_EVERY writes — checking every write would `statSync` on
+// every log line, multiplying syscall cost.
+let sinkPath: string | null = null;
+let writesSinceSizeCheck = 0;
+const SIZE_CHECK_EVERY = 256;
+
+function initSink(): string | null {
+  if (sinkPath !== null) return sinkPath || null;
+  try {
+    fs.mkdirSync(hostLogsDir(), { recursive: true });
+    sinkPath = hostLogsOrchestratorFile();
+    return sinkPath;
+  } catch {
+    // Permanent failure — disable the sink so subsequent calls don't
+    // retry the failing path on every log line. The empty-string
+    // sentinel is distinct from `null` (the "not yet initialized"
+    // state) so the ternary above can short-circuit correctly.
+    sinkPath = '';
+    return null;
+  }
+}
+
+function writeToSink(line: string): void {
+  const p = initSink();
+  if (!p) return;
+  try {
+    fs.appendFileSync(p, line);
+    writesSinceSizeCheck++;
+    if (writesSinceSizeCheck >= SIZE_CHECK_EVERY) {
+      writesSinceSizeCheck = 0;
+      const stat = fs.statSync(p);
+      if (stat.size > ORCHESTRATOR_LOG_MAX_BYTES) {
+        // Single-step rotation — rename current to `.1`, drop any
+        // older `.1`. We don't keep N rotations because the
+        // orchestrator log is high-volume and `scripts/logrotate.sh`
+        // already handles richer rotation when invoked externally.
+        // The internal rotation here is a safety net so a
+        // logrotate-less deployment can't fill disk.
+        const rotated = `${p}.1`;
+        try {
+          if (fs.existsSync(rotated)) fs.unlinkSync(rotated);
+        } catch {
+          // Old rotation locked / vanished — proceed with rename;
+          // the rename will overwrite if the destination still exists.
+        }
+        try {
+          fs.renameSync(p, rotated);
+        } catch {
+          // Rename failed (e.g. cross-filesystem on some setups) —
+          // leave the file alone and try again next size check.
+        }
+      }
+    }
+  } catch {
+    // Sink write must NEVER throw — logger errors propagating into
+    // the call stack would make every emitter log-call pathway leaky.
+    //
+    // The directory was probably deleted out from under us (operator
+    // cleanup, log-rotation tooling, test wipe between runs). Reset
+    // the cached sinkPath, re-init to recreate the dir, and retry the
+    // write ONCE so the current line still lands on disk. Without
+    // the retry, a single transient ENOENT would lose the line that
+    // tripped it (and the recovery would only kick in for the NEXT
+    // write).
+    sinkPath = null;
+    const retryPath = initSink();
+    if (!retryPath) return;
+    try {
+      fs.appendFileSync(retryPath, line);
+    } catch {
+      // Second failure — give up on this line. Reset again so the
+      // next call re-tries init from scratch (the failing disk may
+      // be transient). Dropping a single line is better than
+      // crashing the orchestrator.
+      sinkPath = null;
+    }
+  }
+}
+
 function log(
   level: Level,
   dataOrMsg: Record<string, unknown> | string,
@@ -93,7 +184,12 @@ function log(
     typeof dataOrMsg === 'string'
       ? `[${ts()}] ${tag} (${process.pid}): ${MSG_COLOR}${dataOrMsg}${RESET}\n`
       : `[${ts()}] ${tag} (${process.pid}): ${MSG_COLOR}${msg}${RESET}${formatData(dataOrMsg)}\n`;
-  stream.write(redactBotTokens(line));
+  const redacted = redactBotTokens(line);
+  stream.write(redacted);
+  // The file sink gets the same content but ANSI-stripped — color codes
+  // render as garbled `\x1b[...m` literals in tools that don't
+  // interpret them (cat, most editors, the admin tile's file reads).
+  writeToSink(stripAnsi(redacted));
 }
 
 export const logger = {

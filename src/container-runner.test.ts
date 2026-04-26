@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 
@@ -293,5 +294,90 @@ describe('selectTiles', () => {
   it('admin tile is NEVER in trusted or untrusted selections', () => {
     expect(selectTiles(false, true)).not.toContain('nanoclaw-admin');
     expect(selectTiles(false, false)).not.toContain('nanoclaw-admin');
+  });
+});
+
+// --- host-logs mount admin-only gating (#103 item 3) ---
+//
+// The mount is the security boundary for host-side observability:
+// orchestrator log + per-container streaming logs are inherently
+// cross-chat (every group's output) and must NEVER reach a non-admin
+// tile. These tests assert the mount appears in the spawn args when
+// the group is admin (`isMain: true`) AND is absent for trusted /
+// untrusted groups, by inspecting the args passed to the mocked
+// spawn.
+
+describe('host-logs mount admin-only gating', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('admin (isMain=true) gets the host-logs mount', async () => {
+    const adminGroup: RegisteredGroup = {
+      ...testGroup,
+      isMain: true,
+    };
+    const promise = runContainerAgent(
+      adminGroup,
+      { ...testInput, isMain: true },
+      () => {},
+    );
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    // The readonlyMountArgs mock formats as `host:container:ro`; the
+    // mount appears as a single `-v ...host-logs:/workspace/host-logs:ro`
+    // entry in the spawned arg list.
+    expect(
+      args.some((a) => a.includes(':/workspace/host-logs:ro')),
+    ).toBe(true);
+  });
+
+  it('trusted non-main group does NOT get the host-logs mount', async () => {
+    const trustedGroup: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: { trusted: true },
+    };
+    const promise = runContainerAgent(
+      trustedGroup,
+      { ...testInput, isMain: false, isTrusted: true },
+      () => {},
+    );
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    // Cross-chat host artifacts must not reach a trusted-but-not-main
+    // container. If this assertion ever fires, every trusted tile
+    // would gain visibility into every other group's stdout/stderr —
+    // exactly the leak the admin-only gate is designed to prevent.
+    expect(
+      args.some((a) => a.includes('/workspace/host-logs')),
+    ).toBe(false);
+  });
+
+  it('untrusted group does NOT get the host-logs mount', async () => {
+    const promise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+    );
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(
+      args.some((a) => a.includes('/workspace/host-logs')),
+    ).toBe(false);
   });
 });
