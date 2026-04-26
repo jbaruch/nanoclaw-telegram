@@ -23,6 +23,12 @@ import {
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
+import {
+  containerLogPath,
+  ensureHostLogDirs,
+  hostLogsDir,
+  stripAnsi,
+} from './host-logs.js';
 import { logger } from './logger.js';
 import {
   CONTAINER_HOST_GATEWAY,
@@ -353,6 +359,31 @@ export function buildVolumeMounts(
       containerPath: '/workspace/project',
       readonly: true,
     });
+    // Host log artifacts: orchestrator log + per-container streaming
+    // logs + state snapshot. Admin-tile only — these files are
+    // inherently cross-chat (every group's container output, the
+    // orchestrator's own diagnostics) and must not leak to untrusted
+    // or trusted-non-main tiles. Read-only by construction so admin
+    // can observe but not mutate the host's view of itself.
+    //
+    // ensureHostLogDirs() is best-effort and returns false on
+    // permission / disk errors. Skip the mount if the directory
+    // tree didn't materialize — better to lose host-logs visibility
+    // than to abort the container spawn entirely. The agent will
+    // see no /workspace/host-logs and fall back to chat_status for
+    // diagnosis (live data, no historical files).
+    if (ensureHostLogDirs()) {
+      mounts.push({
+        hostPath: toHostPath(hostLogsDir()),
+        containerPath: '/workspace/host-logs',
+        readonly: true,
+      });
+    } else {
+      logger.warn(
+        { group: group.name },
+        'host-logs dir bootstrap failed — admin tile will spawn without /workspace/host-logs',
+      );
+    }
     // Shadow ALL files containing secrets so agents can't read bot tokens.
     // Without this, subagents curl the Telegram API directly, bypassing MCP.
     // mount --bind inside the container doesn't work (needs CAP_SYS_ADMIN),
@@ -1292,6 +1323,105 @@ export async function runContainerAgent(
   const logsDir = path.join(groupDir, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
+  // Per-spawn streaming log under host-logs/. Distinct from the
+  // post-exit summary written at `logsDir` below — the streaming file
+  // captures output line-by-line as the container produces it, so the
+  // admin tile can read what a stuck container is actually doing
+  // without waiting for it to exit. Failure to open the stream is
+  // non-fatal: the container still runs, we just lose the host-logs
+  // copy for this spawn (the in-memory buffers + post-exit summary
+  // remain unaffected).
+  const spawnStartedAt = new Date();
+  // `input.sessionName` is optional on the type but is always set by
+  // every caller that actually invokes runContainerAgent (default or
+  // maintenance). Fall back to the canonical default to keep the file
+  // path deterministic if a future caller forgets to stamp the field.
+  const streamSessionName = input.sessionName || DEFAULT_SESSION_NAME;
+  const streamLogPath = containerLogPath(
+    group.folder,
+    streamSessionName,
+    spawnStartedAt,
+  );
+  let streamLog: fs.WriteStream | null = null;
+  try {
+    fs.mkdirSync(path.dirname(streamLogPath), { recursive: true });
+    streamLog = fs.createWriteStream(streamLogPath, { flags: 'a' });
+    // Attach an error listener BEFORE the first write. Stream errors
+    // emit async (e.g. ENOENT if the parent dir is wiped between
+    // mkdir and create, EBADF if the fd is reaped) — without a
+    // listener, Node's default handler is "throw uncaught exception"
+    // which would crash the orchestrator on a logging path. This must
+    // never happen: lose the streamed log, keep serving the user.
+    streamLog.on('error', (err) => {
+      logger.warn(
+        { err, group: group.name, streamLogPath },
+        'host-logs stream errored mid-spawn; dropping per-spawn stream',
+      );
+      // Null the local ref so subsequent writes from the data
+      // listeners no-op rather than try to push into a broken stream.
+      streamLog = null;
+    });
+    streamLog.write(
+      [
+        `=== Container Stream Log ===`,
+        `Group: ${group.name}`,
+        `Folder: ${group.folder}`,
+        `Session: ${streamSessionName}`,
+        `Container: ${containerName}`,
+        `Start: ${spawnStartedAt.toISOString()}`,
+        `=== STDOUT/STDERR (line-prefixed) ===`,
+        ``,
+      ].join('\n'),
+    );
+  } catch (err) {
+    logger.warn(
+      { err, group: group.name, streamLogPath },
+      'host-logs stream open failed; container will run without per-spawn stream',
+    );
+    streamLog = null;
+  }
+
+  // Buffered line writer per stream. Container output isn't line-
+  // aligned (a single `data` event can split a line, or contain many),
+  // so we buffer until we see `\n` and emit `[OUT] ` / `[ERR] ` per
+  // complete line. Trailing partial line is flushed on container exit.
+  //
+  // The buffer is bounded: a misbehaving container that emits megabytes
+  // without a newline (e.g. binary garbage, a long single-line log
+  // dump) would otherwise grow the orchestrator's heap unboundedly.
+  // Cap at 64 KB per stream — well above typical line lengths but
+  // small enough that even pathological output flushes quickly.
+  const LINE_BUFFER_MAX = 64 * 1024;
+  const makeLinePrefixer = (prefix: string) => {
+    let buffer = '';
+    const writeLines = (chunk: string) => {
+      if (!streamLog) return;
+      buffer += chunk;
+      let nl: number;
+      while ((nl = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        streamLog.write(`${prefix} ${stripAnsi(line)}\n`);
+      }
+      // Cap the buffer: if no newline appeared and the buffer crossed
+      // the limit, flush the entire current buffer as a synthetic
+      // line. Tagged with `[…cap…]` so a reader knows the line was
+      // not delimited by a real newline (might cut mid-token).
+      if (buffer.length > LINE_BUFFER_MAX) {
+        streamLog.write(`${prefix} […cap…] ${stripAnsi(buffer)}\n`);
+        buffer = '';
+      }
+    };
+    const flush = () => {
+      if (!streamLog || buffer.length === 0) return;
+      streamLog.write(`${prefix} ${stripAnsi(buffer)}\n`);
+      buffer = '';
+    };
+    return { writeLines, flush };
+  };
+  const stdoutPrefixer = makeLinePrefixer('[OUT]');
+  const stderrPrefixer = makeLinePrefixer('[ERR]');
+
   return new Promise((resolve) => {
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -1314,6 +1444,10 @@ export async function runContainerAgent(
 
     container.stdout.on('data', (data) => {
       const chunk = data.toString();
+
+      // Streaming host-logs copy. Best-effort — write errors don't
+      // affect the buffer accumulation or marker parsing below.
+      stdoutPrefixer.writeLines(chunk);
 
       // Always accumulate for logging
       if (!stdoutTruncated) {
@@ -1366,6 +1500,7 @@ export async function runContainerAgent(
 
     container.stderr.on('data', (data) => {
       const chunk = data.toString();
+      stderrPrefixer.writeLines(chunk);
       const lines = chunk.trim().split('\n');
       for (const line of lines) {
         if (line) logger.debug({ container: group.folder }, line);
@@ -1427,6 +1562,22 @@ export async function runContainerAgent(
     container.on('close', (code) => {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
+
+      // Flush any partial trailing line and close the streaming log.
+      // Failure to close cleanly is non-fatal — Node will GC the fd
+      // eventually; the streamed bytes already on disk are intact.
+      stdoutPrefixer.flush();
+      stderrPrefixer.flush();
+      if (streamLog) {
+        try {
+          streamLog.write(
+            `\n=== Container Exited ===\nCode: ${code}\nDuration: ${duration}ms\nEnd: ${new Date().toISOString()}\n`,
+          );
+          streamLog.end();
+        } catch {
+          // Stream already errored / closed — nothing useful to do.
+        }
+      }
 
       if (timedOut) {
         const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1635,6 +1786,25 @@ export async function runContainerAgent(
         { group: group.name, containerName, error: err },
         'Container spawn error',
       );
+      // Spawn-error path: the close handler may not fire on some
+      // failure modes (e.g. spawn ENOENT — the binary doesn't exist),
+      // so flush + close the streaming log here too. Without this the
+      // file descriptor leaks until process GC and the file is left
+      // open with no exit footer, which makes the on-disk record
+      // ambiguous (was the container still running, or did it die
+      // before producing any output?).
+      stdoutPrefixer.flush();
+      stderrPrefixer.flush();
+      if (streamLog) {
+        try {
+          streamLog.write(
+            `\n=== Container Spawn Failed ===\nError: ${err.message}\nEnd: ${new Date().toISOString()}\n`,
+          );
+          streamLog.end();
+        } catch {
+          // Stream already errored / closed — nothing to recover.
+        }
+      }
       resolve({
         status: 'error',
         result: null,
