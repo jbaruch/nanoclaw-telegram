@@ -34,6 +34,12 @@ import { DATA_DIR } from './config.js';
  * time — vi.mock factories run async, so the mock can land AFTER an
  * indirect import has already evaluated the const, leaving the test
  * with a path under the real (unmocked) DATA_DIR.
+ *
+ * The static `import { DATA_DIR } from './config.js'` here creates a
+ * potential cycle (config → env → logger → host-logs → config); the
+ * cycle is broken at env.ts which lazy-loads logger via require() so
+ * env never completes via the import-of-logger path during the cycle.
+ * See env.ts for the why.
  */
 export function hostLogsDir(): string {
   return path.join(DATA_DIR, 'host-logs');
