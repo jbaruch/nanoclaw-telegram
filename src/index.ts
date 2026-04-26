@@ -1312,8 +1312,7 @@ async function runAgent(
       //    a session pointer is broken — the SDK uses it whenever
       //    transcript load fails for ANY reason, and the previous
       //    regex missed it entirely. Per #144 bug 2.
-      const isStaleSession =
-        !!sessionId && isStaleSessionError(output.error);
+      const isStaleSession = !!sessionId && isStaleSessionError(output.error);
 
       if (isStaleSession) {
         logger.warn(

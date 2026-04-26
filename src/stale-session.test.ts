@@ -39,9 +39,9 @@ describe('isStaleSessionError', () => {
   });
 
   it('matches "session ... not found" / "session not found" wording', () => {
-    expect(
-      isStaleSessionError('SDKError: session 090b2cf8 not found'),
-    ).toBe(true);
+    expect(isStaleSessionError('SDKError: session 090b2cf8 not found')).toBe(
+      true,
+    );
     expect(isStaleSessionError('session not found')).toBe(true);
   });
 
