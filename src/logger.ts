@@ -109,74 +109,57 @@ function initSink(): string | null {
     sinkPath = hostLogsOrchestratorFile();
     return sinkPath;
   } catch {
-    // Permanent failure — disable the sink so subsequent calls don't
-    // retry the failing path on every log line. The empty-string
-    // sentinel is distinct from `null` (the "not yet initialized"
-    // state) so the ternary above can short-circuit correctly.
-    sinkPath = '';
+    // Transient mkdir failures shouldn't permanently disable the sink:
+    // a startup race where DATA_DIR is mounted late, a brief
+    // permission denial, or a parent directory that exists but isn't
+    // writable yet would otherwise leave the orchestrator with no
+    // file logging for its entire lifetime. Return null so the caller
+    // skips THIS write, but leave sinkPath as null so the NEXT
+    // writeToSink call retries the mkdir. The consecutive-failure
+    // counter in writeToSink still trips the permanent-disable path
+    // after several retries fail, so a truly unwritable filesystem
+    // doesn't loop forever.
     return null;
   }
 }
 
 function writeToSink(line: string): void {
   const p = initSink();
-  if (!p) return;
-  try {
-    fs.appendFileSync(p, line);
-    // Successful write — reset the failure counter so a future
-    // transient blip starts the backoff fresh, not at the previous
-    // run's terminal value.
-    consecutiveWriteFailures = 0;
-    writesSinceSizeCheck++;
-    if (writesSinceSizeCheck >= SIZE_CHECK_EVERY) {
-      writesSinceSizeCheck = 0;
-      const stat = fs.statSync(p);
-      if (stat.size > ORCHESTRATOR_LOG_MAX_BYTES) {
-        // Single-step rotation — rename current to `.1` after first
-        // unlinking any prior `.1`. Two-step instead of relying on
-        // rename-overwrites because `fs.renameSync` does NOT overwrite
-        // an existing destination on Windows (NTFS rejects the rename;
-        // only POSIX has the overwrite semantics). The unlink-first
-        // path works on every platform we deploy to. We don't keep N
-        // rotations because the orchestrator log is high-volume and
-        // `scripts/logrotate.sh` already handles richer rotation when
-        // invoked externally — the internal rotation here is a safety
-        // net so a logrotate-less deployment can't fill disk.
-        const rotated = `${p}.1`;
-        try {
-          if (fs.existsSync(rotated)) fs.unlinkSync(rotated);
-        } catch {
-          // Old rotation locked / vanished. If unlink failed and the
-          // file still exists, the renameSync below will throw on
-          // Windows and silently overwrite on POSIX — either way the
-          // catch on rename keeps us going.
-        }
-        try {
-          fs.renameSync(p, rotated);
-        } catch {
-          // Rename failed (cross-filesystem, dest still present on
-          // Windows, EACCES). Leave the file alone and try again
-          // next size check — the active log keeps growing past the
-          // cap until rotation succeeds, but that's preferable to
-          // crashing the logger.
-        }
-      }
-    }
-  } catch {
-    // Sink write must NEVER throw — logger errors propagating into
-    // the call stack would make every emitter log-call pathway leaky.
-    //
-    // The directory was probably deleted out from under us (operator
-    // cleanup, log-rotation tooling, test wipe between runs). Reset
-    // the cached sinkPath, re-init to recreate the dir, and retry the
-    // write ONCE so the current line still lands on disk. After
-    // MAX_CONSECUTIVE_WRITE_FAILURES failures in a row, mark the sink
-    // permanently disabled — a persistent EACCES would otherwise turn
-    // every subsequent log line into a guaranteed-failed init+append
-    // pair, doubling syscall cost for no benefit.
+  if (!p) {
+    // Init returned null (transient mkdir failure or permanent-disable
+    // sentinel). Bump the failure counter — without this, repeated
+    // mkdir failures wouldn't ever trip the permanent-disable
+    // threshold, making the retry loop into a hot path.
     consecutiveWriteFailures++;
     if (consecutiveWriteFailures >= MAX_CONSECUTIVE_WRITE_FAILURES) {
       sinkPath = ''; // permanent disable
+    }
+    return;
+  }
+  // Append in its own try/catch so a successful write isn't conflated
+  // with a downstream rotation error. Without this split, an
+  // appendFileSync that succeeds followed by a statSync that throws
+  // (file got truncated by external tooling between append and stat,
+  // brief filesystem hiccup) would be counted as a write failure and
+  // reset sinkPath even though the line landed on disk.
+  let appendOk = false;
+  try {
+    fs.appendFileSync(p, line);
+    appendOk = true;
+    consecutiveWriteFailures = 0;
+  } catch {
+    // Sink write must NEVER throw. The directory was probably
+    // deleted out from under us (operator cleanup, log-rotation
+    // tooling, test wipe between runs). Reset cached sinkPath,
+    // re-init to recreate the dir, and retry the write ONCE so the
+    // current line still lands on disk. After
+    // MAX_CONSECUTIVE_WRITE_FAILURES failures in a row, mark the
+    // sink permanently disabled — a persistent EACCES would
+    // otherwise turn every subsequent log line into a
+    // guaranteed-failed init+append pair.
+    consecutiveWriteFailures++;
+    if (consecutiveWriteFailures >= MAX_CONSECUTIVE_WRITE_FAILURES) {
+      sinkPath = '';
       return;
     }
     sinkPath = null;
@@ -184,14 +167,54 @@ function writeToSink(line: string): void {
     if (!retryPath) return;
     try {
       fs.appendFileSync(retryPath, line);
+      appendOk = true;
       consecutiveWriteFailures = 0;
     } catch {
-      // Second failure on this call. Don't reset to null again — the
-      // next writeToSink call's initSink() will run with sinkPath
-      // still pointing at the resurrected path, hit appendFileSync,
-      // hit the same error, increment the counter, and either retry
-      // once more or trip the permanent-disable threshold above.
+      // Second failure on this call. Leave sinkPath as the
+      // resurrected path so the next writeToSink retries init from
+      // scratch, hitting the threshold check above on persistent
+      // failure.
     }
+  }
+  if (!appendOk) return;
+
+  // Periodic size check + rotation. Failures in this branch DO NOT
+  // count against the write-failure budget — the line already landed
+  // on disk; we just couldn't roll over. Worst case the log grows
+  // past the cap until the next size check fires, which is benign.
+  writesSinceSizeCheck++;
+  if (writesSinceSizeCheck < SIZE_CHECK_EVERY) return;
+  writesSinceSizeCheck = 0;
+  try {
+    const stat = fs.statSync(p);
+    if (stat.size <= ORCHESTRATOR_LOG_MAX_BYTES) return;
+    // Two-step rotation: unlink any prior `.1`, then rename. Both
+    // halves wrapped in their own try/catch because `fs.renameSync`
+    // does NOT overwrite an existing destination on Windows (NTFS
+    // rejects the rename; only POSIX has overwrite semantics). The
+    // unlink-first path works on every platform we deploy to. We
+    // don't keep N rotations because the orchestrator log is
+    // high-volume and `scripts/logrotate.sh` already handles richer
+    // rotation when invoked externally — this internal rotation is
+    // a safety net so a logrotate-less deployment can't fill disk.
+    const rotated = `${p}.1`;
+    try {
+      if (fs.existsSync(rotated)) fs.unlinkSync(rotated);
+    } catch {
+      // Old rotation locked / vanished. The renameSync below will
+      // either succeed (POSIX overwrite) or fail (Windows / locked
+      // file) — either way the outer catch handles it.
+    }
+    try {
+      fs.renameSync(p, rotated);
+    } catch {
+      // Rename failed (cross-filesystem, dest still present on
+      // Windows, EACCES). Leave the active file alone; try again
+      // next size check.
+    }
+  } catch {
+    // statSync threw. Skip this rotation cycle silently — the
+    // append already succeeded, and we'll re-check next interval.
   }
 }
 

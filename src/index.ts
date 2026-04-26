@@ -79,6 +79,7 @@ import {
   loadSenderAllowlist,
   shouldDropMessage,
 } from './sender-allowlist.js';
+import { pruneOldContainerLogs } from './host-logs.js';
 import { startSessionCleanup } from './session-cleanup.js';
 import {
   extractSessionCommand,
@@ -1834,6 +1835,45 @@ async function main(): Promise<void> {
   startSessionCleanup();
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
+
+  // Per-container streaming logs grow with every spawn. Without
+  // pruning, `data/host-logs/containers/<group>/<session>/*.log`
+  // would accumulate indefinitely — a chatty trusted group spawning
+  // many times a day fills the disk over a few months. Run prune at
+  // startup AND once a day thereafter; both are safe and cheap.
+  // Retention window is owned by host-logs.ts (currently 7 days).
+  void (async () => {
+    try {
+      const deleted = pruneOldContainerLogs();
+      if (deleted > 0) {
+        logger.info(
+          { deleted },
+          'host-logs prune at startup removed expired per-spawn logs',
+        );
+      }
+    } catch (err) {
+      logger.warn({ err }, 'host-logs prune at startup failed');
+    }
+  })();
+  // 24h interval, unref'd so the timer doesn't keep the orchestrator
+  // alive past graceful shutdown. setInterval is fine even though the
+  // logical schedule is "once per day" — the orchestrator process
+  // typically lives for weeks, and crash recovery brings the timer
+  // back on next start.
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+  setInterval(() => {
+    try {
+      const deleted = pruneOldContainerLogs();
+      if (deleted > 0) {
+        logger.info(
+          { deleted },
+          'host-logs daily prune removed expired per-spawn logs',
+        );
+      }
+    } catch (err) {
+      logger.warn({ err }, 'host-logs daily prune failed');
+    }
+  }, ONE_DAY_MS).unref();
 
   // Write available_groups.json for all main/trusted groups on startup.
   // Otherwise the snapshot only updates when a container spawns, which can

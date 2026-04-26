@@ -5,7 +5,7 @@ import { DATA_DIR } from './config.js';
 
 /**
  * Host log artifacts the admin tile reads via `/workspace/host-logs/`
- * (mounted read-only from this directory). Three sub-trees:
+ * (mounted read-only from this directory). Two sub-trees:
  *
  *   - `orchestrator.log`     — the orchestrator's own log lines, written
  *                              by `logger.ts` in addition to stdout/stderr.
@@ -15,12 +15,15 @@ import { DATA_DIR } from './config.js';
  *                              stdout/stderr, opened at spawn and closed
  *                              on exit. Distinct from the existing
  *                              post-exit summary at `groups/<folder>/logs/`.
- *   - `state/snapshot.json`  — periodic snapshot of orchestrator state
- *                              (registered groups + per-slot container
- *                              status + circuit-breaker timing).
- *                              Survives orchestrator crashes so admin can
- *                              still diagnose when chat_status (live) is
- *                              unreachable.
+ *
+ * (A `state/snapshot.json` writer was contemplated for the issue's
+ * "host-side state" deliverable but the existing `chat_status` MCP
+ * tool already exposes the same data on demand. Adding a periodic
+ * file writer would duplicate that data; the only marginal value is
+ * reachability when the orchestrator is unresponsive, and the
+ * recovery path for that scenario is `/scripts/deploy.sh` rather
+ * than reading a snapshot file. Folded into the issue's followup if
+ * the orchestrator-down case becomes load-bearing in practice.)
  *
  * Only the admin tile gets this directory mounted in. Untrusted / trusted /
  * core / host tiles must NOT receive it — these files are inherently
@@ -52,9 +55,6 @@ export function hostLogsStateDir(): string {
 }
 export function hostLogsOrchestratorFile(): string {
   return path.join(hostLogsDir(), 'orchestrator.log');
-}
-export function hostLogsSnapshotFile(): string {
-  return path.join(hostLogsStateDir(), 'snapshot.json');
 }
 
 // Retention for per-container streaming logs. Long enough to cover a
@@ -107,8 +107,16 @@ export function ensureHostLogDirs(): boolean {
 /**
  * Where the streaming log file for a single container spawn should live.
  * Caller passes the spawn timestamp explicitly so the filename is
- * deterministic from the call site (the post-exit summary writer can
- * cross-reference the same timestamp).
+ * tied to the spawn moment (millisecond precision), keeping per-spawn
+ * files distinct under a high-spawn-rate operator workload.
+ *
+ * Note: this filename is currently NOT cross-referenced by the existing
+ * post-exit summary writer at `groups/<folder>/logs/`. The summary uses
+ * its own exit-time `new Date().toISOString()` and the two paths live
+ * in different trees serving different audiences (host operator vs.
+ * admin tile). If a future change wants symmetry, both writers should
+ * accept the spawn timestamp from the caller and stamp the same
+ * filename.
  */
 export function containerLogPath(
   groupFolder: string,

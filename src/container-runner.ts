@@ -1786,6 +1786,25 @@ export async function runContainerAgent(
         { group: group.name, containerName, error: err },
         'Container spawn error',
       );
+      // Spawn-error path: the close handler may not fire on some
+      // failure modes (e.g. spawn ENOENT — the binary doesn't exist),
+      // so flush + close the streaming log here too. Without this the
+      // file descriptor leaks until process GC and the file is left
+      // open with no exit footer, which makes the on-disk record
+      // ambiguous (was the container still running, or did it die
+      // before producing any output?).
+      stdoutPrefixer.flush();
+      stderrPrefixer.flush();
+      if (streamLog) {
+        try {
+          streamLog.write(
+            `\n=== Container Spawn Failed ===\nError: ${err.message}\nEnd: ${new Date().toISOString()}\n`,
+          );
+          streamLog.end();
+        } catch {
+          // Stream already errored / closed — nothing to recover.
+        }
+      }
       resolve({
         status: 'error',
         result: null,
