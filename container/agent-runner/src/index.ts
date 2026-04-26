@@ -20,8 +20,15 @@ import { execFile } from 'child_process';
 import {
   query,
   HookCallback,
+  PostToolUseHookInput,
   PreCompactHookInput,
+  PreToolUseHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
+import {
+  DEFAULT_TOOL_RESULT_MAX_BYTES,
+  sanitizeToolResponse,
+  shouldDenyTaskOutputBlock,
+} from './poison-defense.js';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -262,6 +269,83 @@ function createPreCompactHook(assistantName?: string): HookCallback {
     }
 
     return {};
+  };
+}
+
+/**
+ * #116 — Deny `TaskOutput` calls that would block on a sub-agent.
+ * The SDK's `TaskOutput(block=true)` returns a raw chunk of the
+ * sub-agent JSONL on timeout, leaking any high-entropy / invisible-
+ * Unicode payload the sub-agent received from a noisy upstream
+ * straight into this session's context. The deny path forces the main
+ * session onto either non-blocking polling or the file-result pattern.
+ */
+function createTaskOutputBlockGateHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const pre = input as PreToolUseHookInput;
+    if (pre.tool_name !== 'TaskOutput') {
+      return {};
+    }
+    const decision = shouldDenyTaskOutputBlock(pre.tool_input);
+    if (!decision.deny) {
+      return {};
+    }
+    log(`PreToolUse: denied TaskOutput(block!=false) — ${decision.reason}`);
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: 'deny' as const,
+        permissionDecisionReason: decision.reason,
+      },
+    };
+  };
+}
+
+/**
+ * #117 — Sanitize MCP tool results before they reach the model. Strips
+ * Cf-class invisible-Unicode characters and caps each text block at
+ * `TOOL_RESULT_MAX_BYTES` (default 64 KiB).
+ *
+ * Scope: MCP tools only. The SDK's `updatedMCPToolOutput` field is the
+ * only documented mutation surface for tool results post-fact, and it
+ * is MCP-tool-scoped. Built-in tools (WebFetch, Bash) keep their raw
+ * output — accepted gap; the triggering incident was Composio (MCP).
+ */
+function createMcpToolResultSanitizerHook(): HookCallback {
+  const byteCap = (() => {
+    const raw = process.env.TOOL_RESULT_MAX_BYTES;
+    if (!raw) return DEFAULT_TOOL_RESULT_MAX_BYTES;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      log(
+        `Invalid TOOL_RESULT_MAX_BYTES=${raw}; falling back to ${DEFAULT_TOOL_RESULT_MAX_BYTES}`,
+      );
+      return DEFAULT_TOOL_RESULT_MAX_BYTES;
+    }
+    return parsed;
+  })();
+
+  return async (input, _toolUseId, _context) => {
+    const post = input as PostToolUseHookInput;
+    // Matcher already filters to mcp__*, but double-check defensively
+    // — a misconfigured matcher would otherwise let `updatedMCPToolOutput`
+    // silently no-op on non-MCP tools.
+    if (!post.tool_name?.startsWith('mcp__')) {
+      return {};
+    }
+    const { sanitized, stats } = sanitizeToolResponse(post.tool_response, byteCap);
+    if (stats.strippedBytes === 0 && stats.truncatedBytes === 0) {
+      return {};
+    }
+    log(
+      `tool_result_sanitizer tool=${post.tool_name} stripped_bytes=${stats.strippedBytes} truncated_bytes=${stats.truncatedBytes}`,
+    );
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PostToolUse' as const,
+        updatedMCPToolOutput: sanitized,
+      },
+    };
   };
 }
 
@@ -738,6 +822,24 @@ async function runQuery(
         PreCompact: [
           { hooks: [createPreCompactHook(containerInput.assistantName)] },
         ],
+        // #116 — gate TaskOutput before it can leak the sub-agent
+        // transcript. Matcher must be `TaskOutput` (not `mcp__*`) —
+        // it's an SDK built-in, not an MCP tool.
+        PreToolUse: [
+          {
+            matcher: 'TaskOutput',
+            hooks: [createTaskOutputBlockGateHook()],
+          },
+        ],
+        // #117 — strip invisible-Unicode + cap byte size on every MCP
+        // tool result. Matcher restricts to MCP because that's the
+        // only tool family `updatedMCPToolOutput` can mutate.
+        PostToolUse: [
+          {
+            matcher: 'mcp__.*',
+            hooks: [createMcpToolResultSanitizerHook()],
+          },
+        ],
       },
     },
   })) {
@@ -1014,6 +1116,17 @@ async function main(): Promise<void> {
           settingSources: ['project', 'user'] as const,
           hooks: {
             PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
+            // Mirror the main query()'s poison-defense hooks so the two
+            // configurations don't drift if `allowedTools` is ever broadened
+            // on this branch. Today the slash-command path has no tools, so
+            // these are inert — but defining them here keeps the contract
+            // single-sourced.
+            PreToolUse: [
+              { matcher: 'TaskOutput', hooks: [createTaskOutputBlockGateHook()] },
+            ],
+            PostToolUse: [
+              { matcher: 'mcp__.*', hooks: [createMcpToolResultSanitizerHook()] },
+            ],
           },
         },
       })) {
