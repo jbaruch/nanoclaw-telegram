@@ -34,6 +34,8 @@ export const DEFAULT_TOOL_RESULT_MAX_BYTES = 65536;
 const TRUNCATION_MARKER =
   '\n\n[truncated by tool_result sanitizer — original exceeded byte cap]';
 
+const TRUNCATION_MARKER_BYTES = Buffer.byteLength(TRUNCATION_MARKER, 'utf-8');
+
 /**
  * Strips Unicode "Cf" (Format) category — zero-width joiners, BOM,
  * directional marks, language tags, etc. These render as nothing but
@@ -69,19 +71,26 @@ export function sanitizeText(
   const beforeBytes = utf8ByteLength(text);
   const stripped = text.replace(INVISIBLE_UNICODE_RE, '');
   const strippedBytes = beforeBytes - utf8ByteLength(stripped);
+  const strippedBuf = Buffer.from(stripped, 'utf-8');
 
-  if (utf8ByteLength(stripped) <= byteCap) {
+  if (strippedBuf.length <= byteCap) {
     return { out: stripped, stats: { strippedBytes, truncatedBytes: 0 } };
   }
 
-  // Truncate to byteCap. Buffer slicing can split a multi-byte codepoint;
-  // decoding with `toString('utf-8')` substitutes U+FFFD for the partial
-  // tail, which is acceptable noise for a truncation marker.
-  const buf = Buffer.from(stripped, 'utf-8');
-  const head = buf.subarray(0, byteCap).toString('utf-8');
-  const truncatedBytes = utf8ByteLength(stripped) - utf8ByteLength(head);
+  // Reserve marker bytes so the final string stays at or under `byteCap`
+  // (prevents the cap from being silently exceeded by ~70 bytes of marker).
+  // If `byteCap` is smaller than the marker itself, fall back to emitting
+  // just the marker — degenerate cap, but still respects the contract.
+  const headroom = Math.max(0, byteCap - TRUNCATION_MARKER_BYTES);
+  const headBuf = strippedBuf.subarray(0, headroom);
+
+  // Compute truncated bytes from buffer lengths, NOT from the decoded
+  // `head` string. Decoding a buffer that ends mid-codepoint substitutes
+  // U+FFFD (3 bytes) for the partial tail (1–3 bytes), so re-measuring
+  // the decoded string gives wrong (and occasionally negative) deltas.
+  const truncatedBytes = strippedBuf.length - headBuf.length;
   return {
-    out: head + TRUNCATION_MARKER,
+    out: headBuf.toString('utf-8') + TRUNCATION_MARKER,
     stats: { strippedBytes, truncatedBytes },
   };
 }

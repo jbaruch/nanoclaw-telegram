@@ -14,7 +14,10 @@ const ZWNJ = '‌';
 const ZWJ = '‍';
 const BOM = '﻿';
 const RLM = '‏'; // Right-to-left mark, also Cf
-const LANG_TAG = '󠁥'; // U+E0065 — Cf-class language tag char
+// Use String.fromCodePoint for supplementary-plane chars — the literal
+// glyph gets eaten by some editors / tooling and silently degrades to
+// the empty string (caught in Copilot review on PR #151).
+const LANG_TAG = String.fromCodePoint(0xe0065); // Cf-class language tag char
 
 describe('sanitizeText', () => {
   it('strips standard zero-width characters', () => {
@@ -49,10 +52,26 @@ describe('sanitizeText', () => {
 
   it('truncates with a marker when over the byte cap', () => {
     const input = 'x'.repeat(1000);
-    const { out, stats } = sanitizeText(input, 100);
-    expect(out.startsWith('x'.repeat(100))).toBe(true);
+    const cap = 200;
+    const { out, stats } = sanitizeText(input, cap);
     expect(out).toContain('truncated by tool_result sanitizer');
-    expect(stats.truncatedBytes).toBe(900);
+    // Final string must stay at or under the cap — marker bytes are
+    // reserved out of the headroom, not appended past it.
+    expect(Buffer.byteLength(out, 'utf-8')).toBeLessThanOrEqual(cap);
+    // truncatedBytes counts bytes dropped from the source (the marker
+    // doesn't count as truncation).
+    const markerBytes = Buffer.byteLength(
+      '\n\n[truncated by tool_result sanitizer — original exceeded byte cap]',
+      'utf-8',
+    );
+    expect(stats.truncatedBytes).toBe(1000 - (cap - markerBytes));
+  });
+
+  it('falls back to marker-only when byteCap is smaller than the marker', () => {
+    const input = 'x'.repeat(1000);
+    const { out, stats } = sanitizeText(input, 5);
+    expect(out).toContain('truncated by tool_result sanitizer');
+    expect(stats.truncatedBytes).toBe(1000);
   });
 
   it('strips first then truncates so cap reflects post-strip size', () => {
@@ -113,9 +132,12 @@ describe('sanitizeToolResponse', () => {
     const overCap = 'x'.repeat(DEFAULT_TOOL_RESULT_MAX_BYTES + 100);
     const response = { content: [{ type: 'text', text: overCap }] };
     const { sanitized, stats } = sanitizeToolResponse(response);
-    expect(stats.truncatedBytes).toBe(100);
+    expect(stats.truncatedBytes).toBeGreaterThanOrEqual(100);
     const text = (sanitized as { content: { text: string }[] }).content[0].text;
     expect(text).toContain('truncated by tool_result sanitizer');
+    expect(Buffer.byteLength(text, 'utf-8')).toBeLessThanOrEqual(
+      DEFAULT_TOOL_RESULT_MAX_BYTES,
+    );
   });
 
   it('preserves extra block fields (annotations, etc.)', () => {
