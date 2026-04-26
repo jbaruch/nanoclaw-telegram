@@ -449,7 +449,6 @@ async function runQuery(
   mcpServerPath: string,
   containerInput: ContainerInput,
   sdkEnv: Record<string, string | undefined>,
-  resumeAt?: string,
 ): Promise<{
   newSessionId?: string;
   lastAssistantUuid?: string;
@@ -662,8 +661,20 @@ async function runQuery(
     options: {
       cwd: '/workspace/group',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
+      // `resume: sessionId` continues the existing session at its
+      // natural cursor (the JSONL tail). We deliberately do NOT pass
+      // `resumeSessionAt: <lastAssistantUuid>` here — the Anthropic
+      // Agent SDK treats that argument as fork-at-turn semantics, not
+      // continue. Combining `resume` + `resumeSessionAt` for the same
+      // session produces a `result.subtype = 'error_during_execution'`
+      // on the very next query and wedges every subsequent IPC in the
+      // container's lifetime (no `system/init`, no `assistant`, just
+      // a single error result whose `lastAssistantUuid` is `none`,
+      // which prevents any further progress). See #148 for the full
+      // repro and root-cause analysis. The previous defensive recovery
+      // (drop-resumeAt-on-error) only papered over the symptom; the
+      // fix is to never set up the poison in the first place.
       resume: sessionId,
-      resumeSessionAt: resumeAt,
       systemPrompt: systemPromptAppend
         ? {
             type: 'preset' as const,
@@ -780,8 +791,28 @@ async function runQuery(
       resultCount++;
       const textResult =
         'result' in message ? (message as { result?: string }).result : null;
-      const subtype = message.subtype;
-      const isError = subtype !== 'success';
+      // SDK result messages have a required `subtype` per the SDK
+      // types, but other call sites in this file treat it as optional
+      // and a missing/undefined value here would silently classify as
+      // an error and emit `"undefined: undefined"` to the orchestrator
+      // (per #149 review). Default to `'unknown'` so the diagnostic
+      // string stays readable, and prefer the SDK's explicit
+      // `is_error` flag when available — relying on the `subtype !==
+      // 'success'` heuristic was the indirect path.
+      const errMsg = message as {
+        subtype?: string;
+        errors?: string[];
+        terminal_reason?: string;
+        permission_denials?: unknown[];
+        is_error?: boolean;
+        stop_reason?: string | null;
+        num_turns?: number;
+        total_cost_usd?: number;
+      };
+      const subtype = errMsg.subtype || 'unknown';
+      const isError =
+        errMsg.is_error === true ||
+        (subtype !== 'success' && subtype !== 'unknown');
       if (isError) {
         // SDKResultError carries the actual diagnostic context that the
         // generic 'error_during_execution' subtype name buries. Pull every
@@ -789,16 +820,6 @@ async function runQuery(
         // failure mode tripped (prompt_too_long, model_error, blocking_limit,
         // rapid_refill_breaker, etc.). Without this, every failure looks
         // identical from outside.
-        const errMsg = message as {
-          subtype: string;
-          errors?: string[];
-          terminal_reason?: string;
-          permission_denials?: unknown[];
-          is_error?: boolean;
-          stop_reason?: string | null;
-          num_turns?: number;
-          total_cost_usd?: number;
-        };
         log(
           `Result #${resultCount}: subtype=${subtype} ERROR ` +
             `terminal_reason=${errMsg.terminal_reason || 'none'} ` +
@@ -808,10 +829,22 @@ async function runQuery(
             `num_turns=${errMsg.num_turns ?? 'n/a'} ` +
             `cost=$${errMsg.total_cost_usd ?? 'n/a'}`,
         );
-        const summary =
+        // Pick the most-informative source for the human-readable
+        // summary, falling through to `textResult` (the SDK sometimes
+        // puts the only readable error there) before settling for the
+        // bare subtype. Cap to 500 chars and collapse newlines so a
+        // verbose error string can't blow up the IPC marker JSON we
+        // write to stdout — that JSON gets parsed by the orchestrator
+        // and excessively large strings have caused buffer issues
+        // before.
+        const rawSummary =
           errMsg.terminal_reason ||
           (errMsg.errors && errMsg.errors[0]) ||
+          textResult ||
           subtype;
+        const summary = String(rawSummary)
+          .replace(/\s+/g, ' ')
+          .slice(0, 500);
         writeOutput({
           status: 'error',
           result: null,
@@ -1099,13 +1132,17 @@ async function main(): Promise<void> {
     prompt = `<untrusted-input source="${containerInput.groupFolder}">\n${prompt}\n</untrusted-input>`;
   }
 
-  // Query loop: run query → wait for IPC message → run new query → repeat
-  let resumeAt: string | undefined;
+  // Query loop: run query → wait for IPC message → run new query → repeat.
+  //
+  // No `resumeAt` plumbing — see the comment on `resume:` inside
+  // `runQuery` for why passing `resumeSessionAt` poisons the session.
+  // The natural-cursor `resume: sessionId` is sufficient for both the
+  // first query and every follow-up; the SDK appends to the JSONL tail.
   let consecutiveErrors = 0;
   try {
     while (true) {
       log(
-        `Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`,
+        `Starting query (session: ${sessionId || 'new'})...`,
       );
 
       let queryResult;
@@ -1116,15 +1153,13 @@ async function main(): Promise<void> {
           mcpServerPath,
           containerInput,
           sdkEnv,
-          resumeAt,
         );
       } catch (resumeErr) {
         const msg = resumeErr instanceof Error ? resumeErr.message : String(resumeErr);
         if (sessionId && /session|conversation not found|resume/i.test(msg)) {
           log(`Session resume failed (${msg}), retrying with fresh session`);
           sessionId = undefined;
-          resumeAt = undefined;
-          queryResult = await runQuery(prompt, undefined, mcpServerPath, containerInput, sdkEnv, undefined);
+          queryResult = await runQuery(prompt, undefined, mcpServerPath, containerInput, sdkEnv);
         } else {
           throw resumeErr;
         }
@@ -1132,26 +1167,21 @@ async function main(): Promise<void> {
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
-      if (queryResult.lastAssistantUuid) {
-        resumeAt = queryResult.lastAssistantUuid;
-      }
 
-      // Recover from SDK error_during_execution / error_max_turns / etc.
-      // The error result means the SDK aborted mid-turn. lastAssistantUuid
-      // was NOT updated (no assistant message arrived), so resumeAt still
-      // points at the assistant turn whose follow-up failed. Resuming at
-      // the same UUID typically reproduces the same failure — we have to
-      // drop it. After two consecutive errors, drop the whole session and
-      // start fresh on the next IPC message; the conversation's lost but
-      // the container stops burning tokens on a poisoned chain.
+      // Recover from SDK result-message errors (`error_during_execution`,
+      // `error_max_turns`, etc.) that aren't thrown exceptions. The
+      // `resumeSessionAt` poison that USED to fire here is gone (#148),
+      // so consecutive errors now indicate a genuine SDK / model issue,
+      // not a self-inflicted resume mismatch. After two in a row, drop
+      // the sessionId so the next IPC message starts a fresh
+      // conversation — the previous conversation's lost but the
+      // container stops burning tokens on a chain that won't recover.
       if (queryResult.errorResult) {
         consecutiveErrors++;
         log(
-          `Error result detected (consecutive=${consecutiveErrors}). ` +
-            `Dropping resumeAt=${resumeAt || 'none'}` +
-            (consecutiveErrors >= 2 ? ` and sessionId=${sessionId || 'none'}` : ''),
+          `Error result detected (consecutive=${consecutiveErrors}).` +
+            (consecutiveErrors >= 2 ? ` Dropping sessionId=${sessionId || 'none'}` : ''),
         );
-        resumeAt = undefined;
         if (consecutiveErrors >= 2) {
           sessionId = undefined;
         }

@@ -133,6 +133,54 @@ const CIRCUIT_BREAKER_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
 const consecutiveFailures: Record<string, number> = {};
 const circuitBreakerUntil: Record<string, number> = {};
 
+// Per-folder timestamp of the most recent `nukeSession` call. Used to
+// gate the post-spawn `setSession` writes against a race where a nuke
+// fires while a container is still being awaited: the dying container
+// emits a final SDK result containing the same `newSessionId` it was
+// processing, and the completion handler would otherwise resurrect
+// that row in the DB right after nuke deleted it. Resurrected row
+// points at the JSONL file that nuke just wiped — every subsequent
+// spawn reads the resurrected sessionId, the SDK can't load the
+// transcript, and the chat wedges permanently. See #144 bug 1.
+//
+// Compare against the spawn's start timestamp captured BEFORE
+// `runContainerAgent` is invoked: if `nukeTimestamps[folder] >=
+// spawnStart`, the nuke landed after the spawn began (or
+// concurrently), so any session-id write coming back from this
+// container is stale and must be dropped.
+const nukeTimestamps: Record<string, number> = {};
+
+/**
+ * Predicate: should the orchestrator clear the stored sessionId after
+ * the agent-runner reported `output.error` and we have an active
+ * `sessionId`?
+ *
+ * Trues on either of:
+ * 1. Error strings the SDK / agent-runner produces when the JSONL
+ *    transcript is missing or unloadable: `no conversation found`,
+ *    `ENOENT.../<uuid>.jsonl`, `session ... not found`. These are
+ *    the historical signals — kept verbatim to preserve the
+ *    pre-existing recovery for crash-mid-write / disk-full cases.
+ * 2. The token `error_during_execution` anywhere in the message —
+ *    this is the SDK's result-message subtype that the agent-runner
+ *    formats as `error_during_execution: <summary>` per #149's
+ *    error-result recovery path. The previous regex missed this
+ *    entirely, which is why #144's nuke-resurrected sessionId
+ *    wedged chats: every spawn reproduced the same SDK error and
+ *    nothing ever cleared the bad row from the DB.
+ *
+ * Exported for the unit test in `src/index.stale-session.test.ts`.
+ *
+ * @internal — call sites in this module are the only production
+ *   consumers; the export is solely for test isolation.
+ */
+const STALE_SESSION_RE =
+  /no conversation found|ENOENT.*\.jsonl|session.*not found|error_during_execution/i;
+export function isStaleSessionError(errorMsg: string | undefined): boolean {
+  if (!errorMsg) return false;
+  return STALE_SESSION_RE.test(errorMsg);
+}
+
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
   const agentTs = getRouterState('last_agent_timestamp');
@@ -1130,6 +1178,20 @@ async function runAgent(
   // User-facing path always uses the `default` slot's session chain.
   const sessionId = sessions[group.folder]?.[DEFAULT_SESSION_NAME];
 
+  // Capture the spawn-start wall clock BEFORE any container work
+  // begins. The two `setSession` writes below (the streaming
+  // wrappedOnOutput and the post-completion handler) compare this
+  // against `nukeTimestamps[group.folder]` to detect a nuke that
+  // landed mid-spawn — the dying container's last SDK result still
+  // carries the now-defunct `newSessionId`, and writing it back to
+  // the DB would resurrect a row whose JSONL was just wiped. See
+  // #144 bug 1 for the failure mode (every subsequent spawn reads
+  // the resurrected row, fails to load the missing transcript, and
+  // wedges the chat permanently).
+  const spawnStart = Date.now();
+  const wasNukedDuringSpawn = (): boolean =>
+    (nukeTimestamps[group.folder] ?? 0) >= spawnStart;
+
   // Update tasks snapshot for container to read (filtered by group)
   const isTrusted = !!group.containerConfig?.trusted;
   const tasks = getAllTasks();
@@ -1163,9 +1225,21 @@ async function runAgent(
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
-          if (!sessions[group.folder]) sessions[group.folder] = {};
-          sessions[group.folder][DEFAULT_SESSION_NAME] = output.newSessionId;
-          setSession(group.folder, DEFAULT_SESSION_NAME, output.newSessionId);
+          if (wasNukedDuringSpawn()) {
+            logger.warn(
+              {
+                group: group.name,
+                staleSessionId: output.newSessionId,
+                nukeAt: nukeTimestamps[group.folder],
+                spawnStart,
+              },
+              'Dropping streaming setSession write — nuke fired during spawn (#144)',
+            );
+          } else {
+            if (!sessions[group.folder]) sessions[group.folder] = {};
+            sessions[group.folder][DEFAULT_SESSION_NAME] = output.newSessionId;
+            setSession(group.folder, DEFAULT_SESSION_NAME, output.newSessionId);
+          }
         }
         await onOutput(output);
       }
@@ -1200,22 +1274,46 @@ async function runAgent(
     );
 
     if (output.newSessionId) {
-      if (!sessions[group.folder]) sessions[group.folder] = {};
-      sessions[group.folder][DEFAULT_SESSION_NAME] = output.newSessionId;
-      setSession(group.folder, DEFAULT_SESSION_NAME, output.newSessionId);
+      if (wasNukedDuringSpawn()) {
+        logger.warn(
+          {
+            group: group.name,
+            staleSessionId: output.newSessionId,
+            nukeAt: nukeTimestamps[group.folder],
+            spawnStart,
+          },
+          'Dropping post-completion setSession write — nuke fired during spawn (#144)',
+        );
+      } else {
+        if (!sessions[group.folder]) sessions[group.folder] = {};
+        sessions[group.folder][DEFAULT_SESSION_NAME] = output.newSessionId;
+        setSession(group.folder, DEFAULT_SESSION_NAME, output.newSessionId);
+      }
     }
 
     if (output.status === 'error') {
-      // Detect stale/corrupt session — clear it so the next retry starts fresh.
-      // The session .jsonl can go missing after a crash mid-write, manual
-      // deletion, or disk-full. The existing backoff in group-queue.ts
-      // handles the retry; we just need to remove the broken session ID.
+      // Detect stale/corrupt session — clear it so the next retry
+      // starts fresh. The session .jsonl can go missing after a crash
+      // mid-write, manual deletion, disk-full, or — most critically
+      // for this codebase — after the #144 race wrote a stale
+      // sessionId back to the DB pointing at a JSONL that nuke had
+      // already wiped. The existing backoff in group-queue.ts handles
+      // the retry; we just need to remove the broken session ID.
+      //
+      // The regex covers the SDK's two reporting shapes:
+      // 1. Thrown / re-formatted into the error string by the SDK or
+      //    the agent-runner (e.g. "no conversation found", "ENOENT
+      //    /workspace/.claude/projects/.../<uuid>.jsonl", "session
+      //    not found").
+      // 2. SDK result-message error subtypes that the agent-runner
+      //    formats as `<subtype>: <summary>` per #149's recovery path
+      //    (e.g. "error_during_execution: ..."). The
+      //    `error_during_execution` token is the dominant signal that
+      //    a session pointer is broken — the SDK uses it whenever
+      //    transcript load fails for ANY reason, and the previous
+      //    regex missed it entirely. Per #144 bug 2.
       const isStaleSession =
-        sessionId &&
-        output.error &&
-        /no conversation found|ENOENT.*\.jsonl|session.*not found/i.test(
-          output.error,
-        );
+        !!sessionId && isStaleSessionError(output.error);
 
       if (isStaleSession) {
         logger.warn(
@@ -1721,6 +1819,15 @@ async function main(): Promise<void> {
       groupFolder: string,
       session: 'default' | 'maintenance' | 'all',
     ) => {
+      // Stamp the nuke's wall-clock timestamp BEFORE doing any of the
+      // wipe work — the in-flight spawn handler (runAgent) compares
+      // this against its own pre-spawn timestamp to decide whether
+      // the SDK result it just got is from a session that's since
+      // been nuked. The Date.now() resolution + the
+      // setSession-before-nuke sequence is robust against the race
+      // observed in #144 bug 1 (concurrent setSession resurrected
+      // a row that the same call had just deleted).
+      nukeTimestamps[groupFolder] = Date.now();
       // Granular nuke: `session` narrows which slot(s) to kill.
       //   'all'         → kill default + maintenance (pre-parallel default)
       //   'default'     → kill only user-facing container
