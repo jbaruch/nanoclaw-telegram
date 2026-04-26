@@ -454,9 +454,11 @@ async function runQuery(
   newSessionId?: string;
   lastAssistantUuid?: string;
   closedDuringQuery: boolean;
+  errorResult: boolean;
 }> {
   const stream = new MessageStream();
   stream.push(prompt);
+  let sawErrorResult = false;
 
   // Poll IPC for follow-up messages and _close sentinel during the query
   let ipcPolling = true;
@@ -778,14 +780,55 @@ async function runQuery(
       resultCount++;
       const textResult =
         'result' in message ? (message as { result?: string }).result : null;
-      log(
-        `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
-      );
-      writeOutput({
-        status: 'success',
-        result: textResult || null,
-        newSessionId,
-      });
+      const subtype = message.subtype;
+      const isError = subtype !== 'success';
+      if (isError) {
+        // SDKResultError carries the actual diagnostic context that the
+        // generic 'error_during_execution' subtype name buries. Pull every
+        // field the SDK exposes so the orchestrator log can pin down WHICH
+        // failure mode tripped (prompt_too_long, model_error, blocking_limit,
+        // rapid_refill_breaker, etc.). Without this, every failure looks
+        // identical from outside.
+        const errMsg = message as {
+          subtype: string;
+          errors?: string[];
+          terminal_reason?: string;
+          permission_denials?: unknown[];
+          is_error?: boolean;
+          stop_reason?: string | null;
+          num_turns?: number;
+          total_cost_usd?: number;
+        };
+        log(
+          `Result #${resultCount}: subtype=${subtype} ERROR ` +
+            `terminal_reason=${errMsg.terminal_reason || 'none'} ` +
+            `errors=${JSON.stringify(errMsg.errors || [])} ` +
+            `stop_reason=${errMsg.stop_reason || 'none'} ` +
+            `permission_denials=${(errMsg.permission_denials || []).length} ` +
+            `num_turns=${errMsg.num_turns ?? 'n/a'} ` +
+            `cost=$${errMsg.total_cost_usd ?? 'n/a'}`,
+        );
+        const summary =
+          errMsg.terminal_reason ||
+          (errMsg.errors && errMsg.errors[0]) ||
+          subtype;
+        writeOutput({
+          status: 'error',
+          result: null,
+          newSessionId,
+          error: `${subtype}: ${summary}`,
+        });
+        sawErrorResult = true;
+      } else {
+        log(
+          `Result #${resultCount}: subtype=${subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
+        );
+        writeOutput({
+          status: 'success',
+          result: textResult || null,
+          newSessionId,
+        });
+      }
       // Break out of the for-await loop after receiving the result.
       // Without this, the iterator hangs waiting for more SDK messages
       // that will never come, and follow-up IPC messages are lost.
@@ -799,7 +842,7 @@ async function runQuery(
   log(
     `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`,
   );
-  return { newSessionId, lastAssistantUuid, closedDuringQuery };
+  return { newSessionId, lastAssistantUuid, closedDuringQuery, errorResult: sawErrorResult };
 }
 
 interface ScriptResult {
@@ -1058,6 +1101,7 @@ async function main(): Promise<void> {
 
   // Query loop: run query → wait for IPC message → run new query → repeat
   let resumeAt: string | undefined;
+  let consecutiveErrors = 0;
   try {
     while (true) {
       log(
@@ -1090,6 +1134,29 @@ async function main(): Promise<void> {
       }
       if (queryResult.lastAssistantUuid) {
         resumeAt = queryResult.lastAssistantUuid;
+      }
+
+      // Recover from SDK error_during_execution / error_max_turns / etc.
+      // The error result means the SDK aborted mid-turn. lastAssistantUuid
+      // was NOT updated (no assistant message arrived), so resumeAt still
+      // points at the assistant turn whose follow-up failed. Resuming at
+      // the same UUID typically reproduces the same failure — we have to
+      // drop it. After two consecutive errors, drop the whole session and
+      // start fresh on the next IPC message; the conversation's lost but
+      // the container stops burning tokens on a poisoned chain.
+      if (queryResult.errorResult) {
+        consecutiveErrors++;
+        log(
+          `Error result detected (consecutive=${consecutiveErrors}). ` +
+            `Dropping resumeAt=${resumeAt || 'none'}` +
+            (consecutiveErrors >= 2 ? ` and sessionId=${sessionId || 'none'}` : ''),
+        );
+        resumeAt = undefined;
+        if (consecutiveErrors >= 2) {
+          sessionId = undefined;
+        }
+      } else {
+        consecutiveErrors = 0;
       }
 
       // If _close was consumed during the query, exit immediately.
