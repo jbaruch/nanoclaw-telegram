@@ -38,12 +38,13 @@ function makeGroup(folderName: string, claudeMdContent?: string): string {
 }
 
 describe('buildPlan', () => {
-  it('classifies a known-vanilla file as deletable', () => {
-    // Pick a vanilla hash and reverse-find a content string that
-    // matches it: not feasible. Instead, write any content and
-    // assert that NON-matching content goes into the customized
-    // bucket (since real vanilla hashes were sampled from the NAS
-    // production data, not test data).
+  it('classifies a non-vanilla file as customized (warn-and-leave)', () => {
+    // Real vanilla hashes were sampled from the NAS production data,
+    // not test data, so we can't easily round-trip a "vanilla" fixture
+    // here — that case is covered by the synthetic-hash test below.
+    // This case asserts the dispatch in the OTHER direction: any
+    // unrecognized content lands in `customizedToWarn`, never
+    // `vanillaToDelete`.
     makeGroup('telegram_test', 'arbitrary non-vanilla content\n');
     const plan = buildPlan(path.join(tmpRoot, 'groups'));
     expect(plan.vanillaToDelete).toEqual([]);
@@ -75,18 +76,32 @@ describe('buildPlan', () => {
     ]);
   });
 
-  it('skips main/ and global/ folders entirely', () => {
+  it('skips CLAUDE.md handling for main/ and global/ (git-managed templates)', () => {
     makeGroup('main', 'main admin template\n');
     makeGroup('global', 'global template\n');
     makeGroup('telegram_real', 'whatever\n');
     const plan = buildPlan(path.join(tmpRoot, 'groups'));
-    // The only group walked is telegram_real
+    // CLAUDE.md decisions are only made for per-group copies — main and
+    // global are kept in sync by `git pull`, the migration must not
+    // touch their CLAUDE.md regardless of hash.
     expect(plan.customizedToWarn).toHaveLength(1);
     expect(plan.customizedToWarn[0].path).toContain('telegram_real');
-    expect(plan.memoryMdToCreate).toHaveLength(1);
-    // No memory or delete actions for main/global
+    expect(plan.vanillaToDelete).toEqual([]);
+  });
+
+  it('places MEMORY.md in main/ (so its @import resolves) but not in global/', () => {
+    makeGroup('main', 'main admin template\n');
+    makeGroup('global', 'global template\n');
+    makeGroup('telegram_real', 'whatever\n');
+    const plan = buildPlan(path.join(tmpRoot, 'groups'));
+    expect(plan.memoryMdToCreate.sort()).toEqual(
+      [
+        path.join(tmpRoot, 'groups', 'main', 'MEMORY.md'),
+        path.join(tmpRoot, 'groups', 'telegram_real', 'MEMORY.md'),
+      ].sort(),
+    );
     expect(
-      plan.memoryMdToCreate.some((p) => p.includes('/main/') || p.includes('/global/')),
+      plan.memoryMdToCreate.some((p) => p.includes('/global/')),
     ).toBe(false);
   });
 

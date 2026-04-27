@@ -29,6 +29,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 
 // SHA-256 of every per-group `CLAUDE.md` shape sampled on the NAS that
 // is bytewise-identical to a historical template (i.e. no operator or
@@ -44,10 +45,16 @@ export const KNOWN_VANILLA_TEMPLATE_HASHES = new Set<string>([
   'a9652e52b5861358b5831362bb3f6a0251dc8b60a574a36bffcd2e2806c1781f',
 ]);
 
-// Group folders that the migration must NOT touch — they hold source
-// templates (not per-group copies) and are managed by `git pull` /
-// `deploy.sh`.
-const SKIP_FOLDERS = new Set<string>(['main', 'global']);
+// Group folders whose CLAUDE.md is git-managed (a source template,
+// not a per-group copy) — `git pull` / `deploy.sh` keeps these in
+// sync, so the migration must not delete them. MEMORY.md placement,
+// on the other hand, applies to every group folder including main:
+// main's thin CLAUDE.md @-imports `/workspace/group/MEMORY.md` and
+// will fail to resolve without a placeholder.
+const SKIP_CLAUDE_MD_FOLDERS = new Set<string>(['main', 'global']);
+// `global/` holds the templates themselves, not a real group, so
+// it never gets a MEMORY.md.
+const SKIP_MEMORY_MD_FOLDERS = new Set<string>(['global']);
 
 export interface Plan {
   vanillaToDelete: string[];
@@ -80,33 +87,40 @@ export function buildPlan(groupsDir: string): Plan {
 
   for (const entry of fs.readdirSync(groupsDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
-    if (SKIP_FOLDERS.has(entry.name)) continue;
 
     const groupDir = path.join(groupsDir, entry.name);
     const claudeMdPath = path.join(groupDir, 'CLAUDE.md');
     const memoryMdPath = path.join(groupDir, 'MEMORY.md');
 
-    if (fs.existsSync(claudeMdPath)) {
-      const sha = sha256(claudeMdPath);
-      if (KNOWN_VANILLA_TEMPLATE_HASHES.has(sha)) {
-        plan.vanillaToDelete.push(claudeMdPath);
+    // CLAUDE.md handling — only for per-group copies, not git-managed templates.
+    if (!SKIP_CLAUDE_MD_FOLDERS.has(entry.name)) {
+      if (fs.existsSync(claudeMdPath)) {
+        const sha = sha256(claudeMdPath);
+        if (KNOWN_VANILLA_TEMPLATE_HASHES.has(sha)) {
+          plan.vanillaToDelete.push(claudeMdPath);
+        } else {
+          const content = fs.readFileSync(claudeMdPath, 'utf-8');
+          plan.customizedToWarn.push({
+            path: claudeMdPath,
+            bytes: Buffer.byteLength(content, 'utf-8'),
+            sha,
+            firstLine: content.split('\n')[0]?.trim() ?? '',
+          });
+        }
       } else {
-        const content = fs.readFileSync(claudeMdPath, 'utf-8');
-        plan.customizedToWarn.push({
-          path: claudeMdPath,
-          bytes: Buffer.byteLength(content, 'utf-8'),
-          sha,
-          firstLine: content.split('\n')[0]?.trim() ?? '',
-        });
+        plan.alreadyMissingClaudeMd.push(claudeMdPath);
       }
-    } else {
-      plan.alreadyMissingClaudeMd.push(claudeMdPath);
     }
 
-    if (fs.existsSync(memoryMdPath)) {
-      plan.alreadyHaveMemoryMd.push(memoryMdPath);
-    } else {
-      plan.memoryMdToCreate.push(memoryMdPath);
+    // MEMORY.md placement — every real group, including main. Skipping
+    // main here would leave main's CLAUDE.md with an unresolvable
+    // `@/workspace/group/MEMORY.md` import on the first spawn.
+    if (!SKIP_MEMORY_MD_FOLDERS.has(entry.name)) {
+      if (fs.existsSync(memoryMdPath)) {
+        plan.alreadyHaveMemoryMd.push(memoryMdPath);
+      } else {
+        plan.memoryMdToCreate.push(memoryMdPath);
+      }
     }
   }
 
@@ -192,6 +206,13 @@ function main(): void {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Compare via pathToFileURL — `process.argv[1]` is often a relative
+// path (e.g. `tsx scripts/migrate-thin-claude-md.ts` from the project
+// root passes `scripts/...` here), and the previous
+// `file://${process.argv[1]}` comparison silently fails to match in
+// that case, leaving `main()` unrun and the script a quiet no-op.
+const isMainModule =
+  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+if (isMainModule) {
   main();
 }

@@ -29,6 +29,7 @@ import {
   sanitizeToolResponse,
   shouldDenyTaskOutputBlock,
 } from './poison-defense.js';
+import { buildSubagentRuleFilePaths } from './subagent-prompt.js';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -691,18 +692,17 @@ async function runQuery(
     'Report results via mcp__nanoclaw__send_message.',
   ];
 
-  // Load rules + behavior chain. Group CLAUDE.md is now a thin pointer
-  // (post-#153), so loading it would only inject @import lines as raw
-  // text. Load the targets it points at directly: SOUL, FORMATTING,
-  // per-group MEMORY, the tessl rules. Subagents don't inherit
-  // settingSources from the parent — they only get what's in their
-  // prompt + skills array, hence the explicit list.
-  const ruleFiles = [
+  // Build the rule/behavior chain. Group CLAUDE.md is now a thin
+  // pointer (post-#153), so loading it would only inject @import lines
+  // as raw text — this loader doesn't resolve @imports. The helper
+  // enumerates the imported targets directly and adds main-only files
+  // (project-root RULES.md + ADMIN.md) when the container is main.
+  // See `subagent-prompt.ts` for unit tests covering the branching.
+  const ruleFiles = buildSubagentRuleFilePaths({
+    isMain: !!containerInput.isMain,
     soulMdPath,
     formattingMdPath,
-    '/workspace/group/MEMORY.md',
-    '/workspace/group/.tessl/RULES.md',
-  ];
+  });
   for (const rulePath of ruleFiles) {
     if (fs.existsSync(rulePath)) {
       const content = fs.readFileSync(rulePath, 'utf-8').trim();
