@@ -704,11 +704,7 @@ describe('buildVolumeMounts — trusted group CLAUDE.md mount', () => {
     const originalCwd = process.cwd();
     process.chdir(PROJECT_DIR);
     try {
-      const mounts = buildVolumeMounts(
-        makeTrustedGroup(),
-        false,
-        'chatT@g.us',
-      );
+      const mounts = buildVolumeMounts(makeTrustedGroup(), false, 'chatT@g.us');
       const claudeMdMount = mounts.find(
         (m) => m.containerPath === '/workspace/group/CLAUDE.md',
       );
@@ -729,11 +725,7 @@ describe('buildVolumeMounts — trusted group CLAUDE.md mount', () => {
     const originalCwd = process.cwd();
     process.chdir(PROJECT_DIR);
     try {
-      const mounts = buildVolumeMounts(
-        makeTrustedGroup(),
-        false,
-        'chatT@g.us',
-      );
+      const mounts = buildVolumeMounts(makeTrustedGroup(), false, 'chatT@g.us');
       const groupFolderMount = mounts.find(
         (m) => m.containerPath === '/workspace/group',
       );
@@ -748,11 +740,7 @@ describe('buildVolumeMounts — trusted group CLAUDE.md mount', () => {
     const originalCwd = process.cwd();
     process.chdir(PROJECT_DIR);
     try {
-      const mounts = buildVolumeMounts(
-        makeTrustedGroup(),
-        false,
-        'chatT@g.us',
-      );
+      const mounts = buildVolumeMounts(makeTrustedGroup(), false, 'chatT@g.us');
       const folderIdx = mounts.findIndex(
         (m) => m.containerPath === '/workspace/group',
       );
