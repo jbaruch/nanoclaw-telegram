@@ -23,6 +23,7 @@ import {
   PostToolUseHookInput,
   PreCompactHookInput,
   PreToolUseHookInput,
+  SessionStartHookInput,
   StopHookInput,
   UserPromptSubmitHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
@@ -50,6 +51,7 @@ import {
   decideReplyThreading,
   extractLatestInboundId,
 } from './reply-threading.js';
+import { composeAutoContext } from './session-start-context.js';
 import { buildSubagentRuleFilePaths } from './subagent-prompt.js';
 import { fileURLToPath } from 'url';
 
@@ -366,6 +368,60 @@ function createMcpToolResultSanitizerHook(): HookCallback {
       hookSpecificOutput: {
         hookEventName: 'PostToolUse' as const,
         updatedMCPToolOutput: sanitized,
+      },
+    };
+  };
+}
+
+/**
+ * #141 — session-start-auto-context. Inject MEMORY.md, RUNBOOK.md,
+ * and the most-recent daily log into the session at startup so the
+ * agent doesn't need to invoke the `tessl__trusted-memory` skill on
+ * its own. Skill-based reads are advisory; under load the model
+ * skips them. The hook makes the read deterministic.
+ *
+ * Skips when:
+ *  - The session source is not `startup` — `resume` and `clear`
+ *    sessions already have context, and `compact` sessions are
+ *    handled by `PreCompact`.
+ *  - The container has no named user-facing assistant (subagents,
+ *    maintenance probes).
+ *
+ * Composition + truncation logic lives in `session-start-context.ts`
+ * (SDK-free, vitest-covered).
+ */
+function createSessionStartAutoContextHook(
+  containerInput: ContainerInput,
+): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const start = input as SessionStartHookInput;
+    if (start.source !== 'startup') {
+      return {};
+    }
+    if (!containerInput.assistantName || containerInput.assistantName.length === 0) {
+      log('SessionStart: auto-context skipped (no assistantName)');
+      return {};
+    }
+    // Memory file path mirrors the orchestrator's mount layout. The
+    // dash-prefixed dir name encodes the original `/workspace/group`
+    // path the way Claude Code projects the dir under `~/.claude`.
+    const memoryFile = '/home/node/.claude/projects/-workspace-group/memory/MEMORY.md';
+    const runbookFile = '/workspace/group/RUNBOOK.md';
+    const dailyLogDir = '/workspace/group/daily';
+    const result = composeAutoContext({ memoryFile, runbookFile, dailyLogDir });
+    if (result.composed.length === 0) {
+      log('SessionStart: auto-context found no source files');
+      return {};
+    }
+    const foundLabels = result.sections
+      .filter((s) => s.found)
+      .map((s) => s.label)
+      .join(',');
+    log(`SessionStart: auto-context injected sections=${foundLabels}`);
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'SessionStart' as const,
+        additionalContext: result.composed,
       },
     };
   };
@@ -1316,6 +1372,12 @@ async function runQuery(
       hooks: {
         PreCompact: [
           { hooks: [createPreCompactHook(containerInput.assistantName)] },
+        ],
+        // #141 — auto-inject MEMORY.md / RUNBOOK.md / latest daily log
+        // before the first turn fires. Source filter (`startup` only)
+        // and assistantName gate live inside the callback.
+        SessionStart: [
+          { hooks: [createSessionStartAutoContextHook(containerInput)] },
         ],
         // #136 — react-first guarantees the user gets an acknowledgement
         // emoji before any LLM tokens are spent. The gate inside
