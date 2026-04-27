@@ -3,22 +3,22 @@
   "mode": "managed",
   "dependencies": {
     "jbaruch/nanoclaw-core": {
-      "version": "0.1.60"
+      "version": "0.1.87"
     },
     "jbaruch/nanoclaw-admin": {
-      "version": "0.1.101"
+      "version": "0.1.230"
     },
     "jbaruch/nanoclaw-untrusted": {
-      "version": "0.1.15"
+      "version": "0.1.26"
     },
     "jbaruch/nanoclaw-trusted": {
-      "version": "0.1.30"
+      "version": "0.1.50"
     },
     "jbaruch/reclaim-tripit-sync": {
       "version": "0.1.2"
     },
     "jbaruch/nanoclaw-host": {
-      "version": "0.1.2"
+      "version": "0.1.24"
     }
   }
 }
