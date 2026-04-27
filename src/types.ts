@@ -124,6 +124,20 @@ export interface ScheduledTask {
   status: 'active' | 'paused' | 'completed';
   created_at: string;
   created_by_role: CreatedByRole;
+  /**
+   * Continuation marker for self-resuming cycles (#93/#130). NULL/undefined
+   * for ordinary one-shot scheduled tasks. When set by the resumable-cycle
+   * helper skill (in the `nanoclaw-admin` tile), the task-scheduler
+   * surfaces the value to the spawned container as
+   * `NANOCLAW_CONTINUATION=1` plus
+   * `NANOCLAW_CONTINUATION_CYCLE_ID=<value>`. The calling skill (nightly /
+   * weekly / morning-brief) checks the env var alongside a prompt-prefix
+   * marker; both must agree to take the lock-skip continuation branch,
+   * otherwise the run is treated as a fresh user invocation. A scheduler
+   * that sets the env but mangles the prompt (or vice versa) therefore
+   * fails closed instead of silently bypassing the two-phase lock.
+   */
+  continuation_cycle_id?: string | null;
 }
 
 export interface TaskRunLog {

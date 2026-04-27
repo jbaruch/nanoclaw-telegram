@@ -331,6 +331,21 @@ export interface ContainerInput {
    * `src/task-scheduler.ts` is the sole writer of `'maintenance'`.
    */
   sessionName?: string;
+  /**
+   * Continuation marker for self-resuming cycles (#93/#130). Set only on
+   * scheduled-task spawns whose `scheduled_tasks.continuation_cycle_id`
+   * column is non-NULL. When present the spawned container gets:
+   *   - `NANOCLAW_CONTINUATION=1`
+   *   - `NANOCLAW_CONTINUATION_CYCLE_ID=<value>`
+   *
+   * Absence (undefined / empty) means "fresh invocation" — neither env var
+   * is set, and that absence is itself the signal the calling skill
+   * (resumable-cycle / nightly-housekeeping / etc.) cross-checks against
+   * its prompt-prefix marker. Mismatch fails closed to fresh invocation;
+   * a scheduler that sets the env but mangles the prompt (or vice versa)
+   * therefore never silently bypasses the two-phase lock acquisition.
+   */
+  continuationCycleId?: string;
 }
 
 export interface ContainerOutput {
@@ -1324,6 +1339,7 @@ function buildContainerArgs(
   isMain: boolean,
   replyToMessageId?: string,
   chatJid?: string,
+  continuationCycleId?: string,
 ): BuildContainerArgsResult {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -1412,6 +1428,18 @@ function buildContainerArgs(
   // Pass reply-to message ID so the first IPC send_message appears as a Telegram reply
   if (replyToMessageId) {
     args.push('-e', `NANOCLAW_REPLY_TO_MESSAGE_ID=${replyToMessageId}`);
+  }
+
+  // Continuation marker for self-resuming cycles (#93/#130). Both env
+  // vars are emitted together when the scheduled-task row carried a
+  // non-NULL `continuation_cycle_id`; neither is emitted on a fresh
+  // invocation. The calling skill checks both signals (env vars + the
+  // prompt prefix it parses out of the task prompt) and fails closed to
+  // "fresh invocation" if they disagree, so the env presence is
+  // load-bearing — never paper over a missing value with a default.
+  if (continuationCycleId) {
+    args.push('-e', 'NANOCLAW_CONTINUATION=1');
+    args.push('-e', `NANOCLAW_CONTINUATION_CYCLE_ID=${continuationCycleId}`);
   }
 
   // Route API traffic through the credential proxy (containers never see real secrets)
@@ -1514,6 +1542,7 @@ export async function runContainerAgent(
       input.isMain,
       input.replyToMessageId,
       input.chatJid,
+      input.continuationCycleId,
     );
 
   logger.debug(
