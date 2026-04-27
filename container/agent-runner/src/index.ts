@@ -32,6 +32,7 @@ import {
   shouldDenyTaskOutputBlock,
 } from './poison-defense.js';
 import { evaluateBashCommand } from './bash-safety-net.js';
+import { detectComposioFidelity } from './composio-fidelity.js';
 import { detectLazyVerification } from './lazy-verification.js';
 import {
   applyReplyThreadingDecision,
@@ -494,6 +495,79 @@ function createLazyVerificationDetectorHook(): HookCallback {
     return {
       decision: 'block' as const,
       reason: decision.reinjection,
+      systemMessage: decision.reinjection,
+    };
+  };
+}
+
+/**
+ * Path the fidelity audit log is appended to. Mounted via the
+ * `host-logs` bind from the orchestrator (alongside the existing
+ * agent-runner stderr destination). On a misconfigured container
+ * where the dir doesn't exist, the hook silently best-efforts the
+ * write — fabrication detection still fires; observability degrades.
+ */
+const FIDELITY_AUDIT_LOG = '/workspace/host-logs/fidelity-alerts.log';
+
+/**
+ * #140 — composio-fidelity. Background sub-agents that wrap Composio
+ * tool calls sometimes return synthetic data with fabricated IDs
+ * (sequential `email_01..email_18`, `pr1_notif`, `promo_001`) when
+ * the upstream API hiccups. Pure text rules can't catch it — the
+ * model has finished generating by the time the data lands.
+ *
+ * The hook fires on PostToolUse, scans the result text for known
+ * fabrication signatures, appends a structured audit entry to
+ * `/workspace/host-logs/fidelity-alerts.log`, and injects a
+ * systemMessage flagging the result as untrusted so the agent
+ * re-runs or treats it skeptically. We do NOT silently rewrite the
+ * tool result — that would mask the failure mode from the agent and
+ * downstream observability.
+ */
+function createComposioFidelityHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const post = input as PostToolUseHookInput;
+    // Limit to MCP tools — Composio is the documented driver of the
+    // bug. Built-in tools (Bash, Read, etc.) generate their own kinds
+    // of output that would false-positive on the regexes (sequential
+    // file numbering in `ls`, etc.).
+    if (!post.tool_name?.startsWith('mcp__')) {
+      return {};
+    }
+    const decision = detectComposioFidelity(post.tool_response);
+    if (!decision.fabricated) {
+      return {};
+    }
+    const auditEntry =
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        tool: post.tool_name,
+        toolUseId: post.tool_use_id,
+        sessionId: post.session_id,
+        findings: decision.findings,
+      }) + '\n';
+    try {
+      fs.mkdirSync(path.dirname(FIDELITY_AUDIT_LOG), { recursive: true });
+      fs.appendFileSync(FIDELITY_AUDIT_LOG, auditEntry);
+    } catch (err) {
+      // Narrow to filesystem error class — the audit-log mount may be
+      // missing on a misconfigured container or hit ENOSPC under load.
+      // Both should degrade observability without breaking the
+      // fidelity check itself. Other error types (TypeError on a
+      // malformed `auditEntry`, etc.) propagate so they aren't
+      // silently absorbed.
+      const errno = err as NodeJS.ErrnoException;
+      if (typeof errno.code !== 'string') {
+        throw err;
+      }
+      log(
+        `composio-fidelity: failed to append to audit log (${errno.code}): ${errno.message}`,
+      );
+    }
+    log(
+      `PostToolUse: composio-fidelity flagged ${post.tool_name} — rules=${decision.findings.map((f) => f.rule).join(',')}`,
+    );
+    return {
       systemMessage: decision.reinjection,
     };
   };
@@ -1040,10 +1114,17 @@ async function runQuery(
         // #117 — strip invisible-Unicode + cap byte size on every MCP
         // tool result. Matcher restricts to MCP because that's the
         // only tool family `updatedMCPToolOutput` can mutate.
+        // #140 — flag fabricated-ID signatures (sequential email_01..,
+        // pr1_notif, promo_001) in MCP tool returns. Both run on the
+        // same matcher; SDK invokes them in registration order so the
+        // sanitizer normalises bytes first, then fidelity inspects.
         PostToolUse: [
           {
             matcher: 'mcp__.*',
-            hooks: [createMcpToolResultSanitizerHook()],
+            hooks: [
+              createMcpToolResultSanitizerHook(),
+              createComposioFidelityHook(),
+            ],
           },
         ],
       },
@@ -1332,7 +1413,13 @@ async function main(): Promise<void> {
               { matcher: 'Bash', hooks: [createBashSafetyNetHook()] },
             ],
             PostToolUse: [
-              { matcher: 'mcp__.*', hooks: [createMcpToolResultSanitizerHook()] },
+              {
+                matcher: 'mcp__.*',
+                hooks: [
+                  createMcpToolResultSanitizerHook(),
+                  createComposioFidelityHook(),
+                ],
+              },
             ],
           },
         },
