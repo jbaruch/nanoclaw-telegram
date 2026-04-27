@@ -96,9 +96,16 @@ export function sanitizeText(
 }
 
 /**
- * Walks an MCP tool response of the standard
- * `{ content: [{ type: 'text', text: string }, ...] }` shape and
- * sanitizes each `text` field in place.
+ * Walks an MCP tool response and sanitizes each `text` field in place.
+ *
+ * Accepts both shapes the MCP wire format produces:
+ *   - wrapped:  `{ content: [{ type: 'text', text }, ...] }`
+ *   - bare:     `[{ type: 'text', text }, ...]`
+ *
+ * The bare-array shape was originally missed (the walker only checked
+ * `response.content`), which let invisible-Unicode and oversized
+ * payloads slip past the sanitizer entirely on tools that emit the
+ * unwrapped variant. See #165.
  *
  * Non-text blocks (image, resource, etc.) and unrecognized shapes pass
  * through untouched — sanitizing image bytes would break legitimate
@@ -114,7 +121,11 @@ export function sanitizeToolResponse(
     return { sanitized: response, stats };
   }
 
-  const content = (response as { content?: unknown }).content;
+  const isBareArray = Array.isArray(response);
+  const content = isBareArray
+    ? (response as unknown[])
+    : (response as { content?: unknown }).content;
+
   if (!Array.isArray(content)) {
     return { sanitized: response, stats };
   }
@@ -138,7 +149,9 @@ export function sanitizeToolResponse(
   });
 
   return {
-    sanitized: { ...(response as object), content: newContent },
+    sanitized: isBareArray
+      ? newContent
+      : { ...(response as object), content: newContent },
     stats,
   };
 }

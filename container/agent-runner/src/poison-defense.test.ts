@@ -9,11 +9,11 @@ import {
 
 // Invisible-Unicode characters in the Cf class. These render as zero
 // width but tokenize, so they're the standard padding/smuggling vector.
-const ZWSP = '​';
-const ZWNJ = '‌';
-const ZWJ = '‍';
-const BOM = '﻿';
-const RLM = '‏'; // Right-to-left mark, also Cf
+const ZWSP = '\u200B';
+const ZWNJ = '\u200C';
+const ZWJ = '\u200D';
+const BOM = '\uFEFF';
+const RLM = '\u200F'; // Right-to-left mark, also Cf
 // Use String.fromCodePoint for supplementary-plane chars — the literal
 // glyph gets eaten by some editors / tooling and silently degrades to
 // the empty string (caught in Copilot review on PR #151).
@@ -148,6 +148,41 @@ describe('sanitizeToolResponse', () => {
     expect((sanitized as { content: { annotations: string[] }[] }).content[0].annotations).toEqual(
       ['note'],
     );
+  });
+
+  it('walks bare-array responses and sanitizes each text block', () => {
+    const response = [
+      { type: 'text', text: `bare${ZWSP}array` },
+      { type: 'text', text: `block${BOM}two` },
+    ];
+    const { sanitized, stats } = sanitizeToolResponse(response, 1024);
+    expect(sanitized).toEqual([
+      { type: 'text', text: 'barearray' },
+      { type: 'text', text: 'blocktwo' },
+    ]);
+    expect(stats.strippedBytes).toBeGreaterThan(0);
+  });
+
+  it('truncates oversized text inside a bare-array response', () => {
+    const overCap = 'x'.repeat(DEFAULT_TOOL_RESULT_MAX_BYTES + 100);
+    const response = [{ type: 'text', text: overCap }];
+    const { sanitized, stats } = sanitizeToolResponse(response);
+    expect(stats.truncatedBytes).toBeGreaterThanOrEqual(100);
+    const text = (sanitized as { text: string }[])[0].text;
+    expect(text).toContain('truncated by tool_result sanitizer');
+    expect(Buffer.byteLength(text, 'utf-8')).toBeLessThanOrEqual(
+      DEFAULT_TOOL_RESULT_MAX_BYTES,
+    );
+  });
+
+  it('passes through bare arrays of non-text blocks untouched', () => {
+    const imageBlock = {
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: 'AAAA' },
+    };
+    const { sanitized, stats } = sanitizeToolResponse([imageBlock], 1024);
+    expect((sanitized as unknown[])[0]).toBe(imageBlock);
+    expect(stats.strippedBytes).toBe(0);
   });
 });
 
