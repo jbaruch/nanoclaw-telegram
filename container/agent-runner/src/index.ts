@@ -41,6 +41,10 @@ import {
   extractHygieneSignatures,
 } from './path-hygiene-cadence.js';
 import {
+  ReactToMessageIpcPayload,
+  runReactFirstHook,
+} from './react-first.js';
+import {
   applyReplyThreadingDecision,
   createReplyThreadingState,
   decideReplyThreading,
@@ -364,6 +368,85 @@ function createMcpToolResultSanitizerHook(): HookCallback {
         updatedMCPToolOutput: sanitized,
       },
     };
+  };
+}
+
+/**
+ * IPC outbox the MCP `send_message` / `react_to_message` tools write
+ * into. The host watches this dir and dispatches to the channel.
+ *
+ * Mirrored verbatim from `ipc-mcp-stdio.ts`. Kept un-shared because the
+ * MCP module is a separate stdio process that runs independently of the
+ * agent-runner; touching its constants from here would couple two
+ * processes that today exchange data only through filesystem paths.
+ */
+const IPC_MESSAGES_DIR = '/workspace/ipc/messages';
+
+/**
+ * Real fs-backed IPC writer used by `createReactFirstHook`. Same
+ * shape the MCP `react_to_message` tool emits — see
+ * `ipc-mcp-stdio.ts:writeIpcFile` — so the host's outbound
+ * dispatcher consumes it transparently. Atomic via tempfile + rename.
+ */
+function writeReactToMessageIpc(payload: ReactToMessageIpcPayload): void {
+  fs.mkdirSync(IPC_MESSAGES_DIR, { recursive: true });
+  const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+  const filepath = path.join(IPC_MESSAGES_DIR, filename);
+  const tempPath = `${filepath}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(payload, null, 2));
+  fs.renameSync(tempPath, filepath);
+}
+
+/**
+ * #136 — react-first. Synthesise a `react_to_message` IPC call before
+ * the model spends any tokens on the inbound. The agent's behaviour
+ * rule is "react with an emoji to acknowledge — silence means
+ * success"; without an enforced reaction, a healthy run that just
+ * forgot to react reads to the user as "container down".
+ *
+ * Hook execution lives in `react-first.ts` (`runReactFirstHook`) so
+ * the unit tests can exercise the full path — gate, payload shaping,
+ * graceful IPC-failure handling — without spinning up the SDK or
+ * touching the filesystem. This wrapper just plumbs container input
+ * + the real fs-backed writer into the pure executor.
+ */
+function createReactFirstHook(containerInput: ContainerInput): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const submit = input as UserPromptSubmitHookInput;
+    const result = runReactFirstHook(
+      {
+        isScheduledTask: containerInput.isScheduledTask === true,
+        isSubagent: typeof submit.agent_id === 'string' && submit.agent_id.length > 0,
+        prompt: typeof submit.prompt === 'string' ? submit.prompt : '',
+        assistantName: containerInput.assistantName,
+        chatJid: containerInput.chatJid,
+        groupFolder: containerInput.groupFolder,
+        // Match the falsy-empty-string fallback used elsewhere
+        // (`NANOCLAW_SESSION_NAME: containerInput.sessionName || 'default'`)
+        // so an accidentally-empty `sessionName` doesn't get stamped
+        // onto the IPC payload.
+        sessionName: containerInput.sessionName || 'default',
+      },
+      writeReactToMessageIpc,
+    );
+    switch (result.kind) {
+      case 'skipped':
+        log(`UserPromptSubmit: react-first skipped (${result.skipReason})`);
+        break;
+      case 'emitted':
+        log(`UserPromptSubmit: react-first emitted ${result.emoji}`);
+        break;
+      case 'ipc-failed':
+        // Don't block the prompt on an IPC-write failure — a missing
+        // acknowledgement is bad, but a dropped prompt is worse.
+        // `runReactFirstHook` already narrowed to expected
+        // NodeJS.ErrnoException codes (other errors propagated).
+        log(
+          `UserPromptSubmit: react-first IPC write failed (${result.code}): ${result.message}`,
+        );
+        break;
+    }
+    return {};
   };
 }
 
@@ -1234,10 +1317,15 @@ async function runQuery(
         PreCompact: [
           { hooks: [createPreCompactHook(containerInput.assistantName)] },
         ],
+        // #136 — react-first guarantees the user gets an acknowledgement
+        // emoji before any LLM tokens are spent. The gate inside
+        // `react-first.ts` handles sub-agent / scheduled-task / no-name
+        // containers; this entry just wires the callback in.
         // #137 — seed reply-threading state with the latest inbound id
         // on every new submitted prompt. Pairs with the PreToolUse
         // entry below.
         UserPromptSubmit: [
+          { hooks: [createReactFirstHook(containerInput)] },
           {
             hooks: [createReplyThreadingPromptHook(replyThreadingState)],
           },
