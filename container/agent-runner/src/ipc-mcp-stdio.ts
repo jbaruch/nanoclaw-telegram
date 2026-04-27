@@ -698,7 +698,6 @@ Use available_groups.json to find the JID for a group. The folder name must be c
         'Whether messages must start with the trigger word. Default: false (respond to all messages). Set to true for busy groups with many participants where you only want the agent to respond when explicitly mentioned.',
       ),
     trusted: z.boolean().optional().describe('Whether the group gets a trusted container (read-write filesystem, admin tiles, longer timeout). Default: false. Set true for personal/friends groups.'),
-    enableHeartbeat: z.boolean().optional().describe('Opt this non-main group into the 15-min unanswered-message heartbeat. Default: false. Pre-#158 this was implicit on requiresTrigger; now explicit.'),
     additionalMounts: z.array(z.object({
       hostPath: z.string().describe('Path on the host (supports "~" expansion; does not need to be absolute).'),
       containerPath: z.string().optional().describe('Optional mount name inside /workspace/extra/. When omitted, the host derives it from basename(hostPath).'),
@@ -718,10 +717,9 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       };
     }
 
-    const containerConfig = (args.trusted !== undefined || args.enableHeartbeat !== undefined || args.additionalMounts)
+    const containerConfig = (args.trusted !== undefined || args.additionalMounts)
       ? {
           ...(args.trusted !== undefined ? { trusted: args.trusted } : {}),
-          ...(args.enableHeartbeat !== undefined ? { enableHeartbeat: args.enableHeartbeat } : {}),
           ...(args.additionalMounts ? { additionalMounts: args.additionalMounts } : {}),
         }
       : undefined;

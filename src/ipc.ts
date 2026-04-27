@@ -24,6 +24,7 @@ import {
   deleteTask,
   getLastFromMeMessages,
   getTaskById,
+  getTasksForGroup,
   storeMessage,
   updateTask,
 } from './db.js';
@@ -1365,6 +1366,32 @@ export async function processTaskIpc(
         );
         break;
       }
+      // Cascade-delete scheduled_tasks tied to the unregistered folder
+      // BEFORE we drop the registration. Without this, the scheduler
+      // keeps firing the auto-created heartbeat (and any other tasks
+      // bound to this folder) every cycle, logging "Group not found
+      // for task" on each tick — exactly the noisy-orphan behaviour
+      // Copilot flagged on PR #198. We do this before unregisterGroup
+      // so a crash between the two leaves the registration alive (DB
+      // delete is the authoritative atomic step); the inverse ordering
+      // would orphan the registration with its tasks already gone,
+      // which is the more confusing recovery path.
+      const orphanTasks = getTasksForGroup(target.folder);
+      for (const task of orphanTasks) {
+        deleteTask(task.id);
+      }
+      if (orphanTasks.length > 0) {
+        logger.info(
+          {
+            jid: trimmedJid,
+            folder: target.folder,
+            taskIds: orphanTasks.map((t) => t.id),
+          },
+          'unregister_group: cascade-deleted scheduled tasks for unregistered folder',
+        );
+        deps.onTasksChanged();
+      }
+
       const removed = deps.unregisterGroup(trimmedJid);
       if (!removed) {
         // In-memory said yes but DB said no — possible if a parallel

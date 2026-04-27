@@ -1218,6 +1218,71 @@ describe('unregister_group success', () => {
     // Sibling registrations untouched.
     expect(getRegisteredGroup('other@g.us')).toBeDefined();
   });
+
+  it('cascade-deletes scheduled tasks tied to the unregistered folder', async () => {
+    // Pre-state: a heartbeat-style scheduled task and an unrelated
+    // one-off task exist for the group folder. Unregister must clear
+    // BOTH so the scheduler doesn't keep firing them every cycle and
+    // logging "Group not found for task" noise. A sibling group's
+    // task is a control: it must survive untouched.
+    createTask({
+      id: 'heartbeat-other-group',
+      group_folder: 'other-group',
+      chat_jid: 'other@g.us',
+      prompt: 'mock-heartbeat-prompt',
+      schedule_type: 'cron',
+      schedule_value: '*/15 * * * *',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+      status: 'active',
+      created_at: new Date().toISOString(),
+      created_by_role: 'owner',
+    });
+    createTask({
+      id: 'oneoff-other-group',
+      group_folder: 'other-group',
+      chat_jid: 'other@g.us',
+      prompt: 'do the thing',
+      schedule_type: 'once',
+      schedule_value: '2026-12-01T00:00:00.000Z',
+      context_mode: 'group',
+      next_run: '2026-12-01T00:00:00.000Z',
+      status: 'active',
+      created_at: new Date().toISOString(),
+      created_by_role: 'main_agent',
+    });
+    createTask({
+      id: 'sibling-third-group',
+      group_folder: 'third-group',
+      chat_jid: 'third@g.us',
+      prompt: 'unrelated',
+      schedule_type: 'once',
+      schedule_value: '2026-12-01T00:00:00.000Z',
+      context_mode: 'group',
+      next_run: '2026-12-01T00:00:00.000Z',
+      status: 'active',
+      created_at: new Date().toISOString(),
+      created_by_role: 'main_agent',
+    });
+    expect(getTaskById('heartbeat-other-group')).toBeDefined();
+    expect(getTaskById('oneoff-other-group')).toBeDefined();
+    expect(getTaskById('sibling-third-group')).toBeDefined();
+
+    await processTaskIpc(
+      { type: 'unregister_group', jid: 'other@g.us' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // Tasks for the unregistered folder are gone…
+    expect(getTaskById('heartbeat-other-group')).toBeUndefined();
+    expect(getTaskById('oneoff-other-group')).toBeUndefined();
+    // …sibling group's task survives.
+    expect(getTaskById('sibling-third-group')).toBeDefined();
+    // Registration itself was removed too.
+    expect(getRegisteredGroup('other@g.us')).toBeUndefined();
+  });
 });
 
 // --- set_trusted / set_trigger (#105) ---
