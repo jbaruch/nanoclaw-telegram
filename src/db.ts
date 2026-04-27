@@ -1053,20 +1053,40 @@ export function getAllSessions(): Record<string, Record<string, string>> {
 // Defensive parser shared by getRegisteredGroup and getAllRegisteredGroups.
 // A single malformed row (partial write, manual edit, schema-migration glitch)
 // must not crash startup — getAllRegisteredGroups runs at orchestrator boot.
+//
+// Catches SyntaxError specifically (JSON.parse's only throw); other errors
+// propagate. Validates the parsed value is a non-null object — JSON.parse
+// can legally return primitives, null, or arrays from `"null"`, `"true"`,
+// `"[]"`, etc., none of which are valid ContainerConfig shapes.
+//
+// Logs jid + a bounded snippet of the raw payload (not the full string):
+// container_config rows can in principle hold absolute host paths under
+// additionalMounts, and an operator only needs enough context to grep
+// the DB row by jid for a full inspection.
 function parseContainerConfig(
   raw: string | null,
   jid: string,
 ): ContainerConfig | undefined {
   if (!raw) return undefined;
+  let parsed: unknown;
   try {
-    return JSON.parse(raw) as ContainerConfig;
+    parsed = JSON.parse(raw);
   } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     logger.warn(
-      { err, jid, raw },
+      { err, jid, snippet: raw.slice(0, 80), len: raw.length },
       'registered_groups: invalid container_config JSON, treating as undefined',
     );
     return undefined;
   }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    logger.warn(
+      { jid, snippet: raw.slice(0, 80), len: raw.length },
+      'registered_groups: container_config is not a JSON object, treating as undefined',
+    );
+    return undefined;
+  }
+  return parsed as ContainerConfig;
 }
 
 export function getRegisteredGroup(

@@ -807,4 +807,22 @@ describe('registered group malformed container_config', () => {
     expect(group?.containerConfig).toBeUndefined();
     expect(group?.name).toBe('Broken Group');
   });
+
+  it('treats valid-but-non-object JSON (null, primitives, arrays) as undefined', () => {
+    const cases = ['null', 'true', '42', '"oops"', '[]'];
+    for (let i = 0; i < cases.length; i++) {
+      const jid = `non-object-${i}@g.us`;
+      _writeRawRegisteredGroup({
+        jid,
+        name: `Group ${i}`,
+        folder: `whatsapp_non_object_${i}`,
+        trigger: '@Andy',
+        added_at: '2024-01-01T00:00:00.000Z',
+        container_config: cases[i],
+      });
+      const group = getRegisteredGroup(jid);
+      expect(group).toBeDefined();
+      expect(group?.containerConfig).toBeUndefined();
+    }
+  });
 });
