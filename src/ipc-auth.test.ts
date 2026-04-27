@@ -44,6 +44,7 @@ import path from 'path';
 import {
   _initTestDatabase,
   createTask,
+  deleteRegisteredGroup,
   getAllTasks,
   getRegisteredGroup,
   getTaskById,
@@ -101,6 +102,13 @@ beforeEach(() => {
       groups[jid] = group;
       setRegisteredGroup(jid, group);
       // Mock the fs.mkdirSync that registerGroup does
+    },
+    unregisterGroup: (jid) => {
+      // Mirror src/index.ts unregisterGroup: in-memory + DB delete in
+      // one call. Returns the DB delete's truthy-changes result so
+      // tests can distinguish "actually removed" from "no row matched".
+      delete groups[jid];
+      return deleteRegisteredGroup(jid);
     },
     setGroupTrusted: (jid, trusted) => {
       const updated = updateGroupTrusted(jid, trusted);
@@ -1105,6 +1113,110 @@ describe('register_group success', () => {
     );
 
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
+  });
+});
+
+// --- unregister_group (#159) ---
+
+describe('unregister_group authorization', () => {
+  it('non-main group is rejected', async () => {
+    await processTaskIpc(
+      { type: 'unregister_group', jid: 'other@g.us' },
+      'other-group',
+      false,
+      deps,
+    );
+
+    // Group still registered — unauthorized call rejected before any
+    // mutation.
+    expect(getRegisteredGroup('other@g.us')).toBeDefined();
+    expect(groups['other@g.us']).toBeDefined();
+  });
+});
+
+describe('unregister_group success', () => {
+  it('main group can unregister a non-main group from both stores', async () => {
+    expect(getRegisteredGroup('other@g.us')).toBeDefined();
+
+    await processTaskIpc(
+      { type: 'unregister_group', jid: 'other@g.us' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // DB row gone
+    expect(getRegisteredGroup('other@g.us')).toBeUndefined();
+    // In-memory mirror gone — subsequent routing decisions stop
+    // treating the JID as registered before any restart.
+    expect(groups['other@g.us']).toBeUndefined();
+  });
+
+  it('trims whitespace-padded jid before lookup', async () => {
+    expect(getRegisteredGroup('other@g.us')).toBeDefined();
+
+    await processTaskIpc(
+      { type: 'unregister_group', jid: '  other@g.us  ' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getRegisteredGroup('other@g.us')).toBeUndefined();
+  });
+
+  it('refuses to unregister a main group', async () => {
+    setRegisteredGroup('main@g.us', {
+      name: 'Main',
+      folder: 'main',
+      trigger: '@Andy',
+      added_at: '2026-01-01',
+      isMain: true,
+    });
+    groups['main@g.us'] = {
+      name: 'Main',
+      folder: 'main',
+      trigger: '@Andy',
+      added_at: '2026-01-01',
+      isMain: true,
+    };
+
+    await processTaskIpc(
+      { type: 'unregister_group', jid: 'main@g.us' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // Main row preserved — losing it mid-runtime would leave the
+    // orchestrator without any path to recreate it via IPC.
+    expect(getRegisteredGroup('main@g.us')).toBeDefined();
+    expect(groups['main@g.us']).toBeDefined();
+  });
+
+  it('rejects request with missing jid', async () => {
+    await processTaskIpc(
+      { type: 'unregister_group' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // No mutation — sentinel group still registered.
+    expect(getRegisteredGroup('other@g.us')).toBeDefined();
+  });
+
+  it('is a no-op for an unregistered jid (idempotent)', async () => {
+    await processTaskIpc(
+      { type: 'unregister_group', jid: 'never-registered@g.us' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getRegisteredGroup('never-registered@g.us')).toBeUndefined();
+    // Sibling registrations untouched.
+    expect(getRegisteredGroup('other@g.us')).toBeDefined();
   });
 });
 

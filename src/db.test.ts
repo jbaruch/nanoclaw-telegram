@@ -4,6 +4,7 @@ import {
   _initTestDatabase,
   _writeRawRegisteredGroup,
   createTask,
+  deleteRegisteredGroup,
   deleteTask,
   getAllChats,
   getAllRegisteredGroups,
@@ -812,6 +813,61 @@ describe('registered group isMain', () => {
     const group = groups['group@g.us'];
     expect(group).toBeDefined();
     expect(group.isMain).toBeUndefined();
+  });
+});
+
+// --- deleteRegisteredGroup (#159) ---
+
+describe('deleteRegisteredGroup', () => {
+  it('removes a registered row and returns true', () => {
+    setRegisteredGroup('purge@g.us', {
+      name: 'Purge Me',
+      folder: 'purge-group',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+    });
+    expect(getRegisteredGroup('purge@g.us')).toBeDefined();
+
+    const removed = deleteRegisteredGroup('purge@g.us');
+
+    expect(removed).toBe(true);
+    expect(getRegisteredGroup('purge@g.us')).toBeUndefined();
+  });
+
+  it('is idempotent — repeat calls report false after first delete', () => {
+    setRegisteredGroup('once@g.us', {
+      name: 'Once',
+      folder: 'once-group',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    expect(deleteRegisteredGroup('once@g.us')).toBe(true);
+    expect(deleteRegisteredGroup('once@g.us')).toBe(false);
+  });
+
+  it('returns false for a JID that was never registered', () => {
+    expect(deleteRegisteredGroup('never-here@g.us')).toBe(false);
+  });
+
+  it('does not affect sibling registrations', () => {
+    setRegisteredGroup('keeper@g.us', {
+      name: 'Keeper',
+      folder: 'keeper-group',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+    });
+    setRegisteredGroup('goer@g.us', {
+      name: 'Goer',
+      folder: 'goer-group',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    deleteRegisteredGroup('goer@g.us');
+
+    expect(getRegisteredGroup('goer@g.us')).toBeUndefined();
+    expect(getRegisteredGroup('keeper@g.us')).toBeDefined();
   });
 });
 

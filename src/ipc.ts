@@ -54,6 +54,20 @@ export interface IpcDeps {
   ) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
+  /**
+   * Inverse of `registerGroup` (#159). Removes the in-memory entry and
+   * the DB row in one call. Returns false if the JID was not registered
+   * — caller can use that to log a no-op or to surface "nothing to do"
+   * to the requester. The caller is responsible for refreshing the
+   * `available_groups.json` snapshot afterward (mirrors the
+   * registerGroup contract).
+   *
+   * Out of scope: deleting the on-disk `groups/<folder>/` directory.
+   * Operators delete that manually; auto-deletion would silently destroy
+   * agent-curated state (CLAUDE.md, MEMORY.md, scheduled-task workspace)
+   * on every churn of the registration.
+   */
+  unregisterGroup: (jid: string) => boolean;
   /** Partial update: flip `containerConfig.trusted` only. Returns false if the JID isn't registered. */
   setGroupTrusted: (jid: string, trusted: boolean) => boolean;
   /**
@@ -1305,6 +1319,80 @@ export async function processTaskIpc(
         );
       }
       break;
+
+    case 'unregister_group': {
+      // Inverse of register_group (#159). Same isMain gate — only the
+      // main group can change the registry. The dormant-row problem
+      // (#159 motivation) is exactly what happens when there is no
+      // structured remove path: rows linger forever, the spawner
+      // ignores them because the JSON snapshot doesn't list them, and
+      // operators can't fix it from inside chat containers because
+      // `/workspace/store/messages.db` is mounted read-only there.
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized unregister_group attempt blocked',
+        );
+        break;
+      }
+      if (typeof data.jid !== 'string' || data.jid.trim().length === 0) {
+        logger.warn(
+          { data },
+          'Invalid unregister_group request - missing/empty jid',
+        );
+        break;
+      }
+      const trimmedJid = data.jid.trim();
+      const target = registeredGroups[trimmedJid];
+      if (!target) {
+        logger.warn(
+          { jid: trimmedJid },
+          'unregister_group: group not registered (no-op)',
+        );
+        break;
+      }
+      // Refuse to unregister a main group via IPC. Losing the main
+      // registration mid-runtime would leave the orchestrator without
+      // any path that can re-create it (the same isMain gate above
+      // would reject the corresponding register_group call). The
+      // operator can flip `is_main` directly in the DB if they really
+      // mean to, which is a deliberate destructive action rather than
+      // a one-line MCP call.
+      if (target.isMain) {
+        logger.warn(
+          { jid: trimmedJid, folder: target.folder },
+          'unregister_group: refusing to unregister main group',
+        );
+        break;
+      }
+      const removed = deps.unregisterGroup(trimmedJid);
+      if (!removed) {
+        // In-memory said yes but DB said no — possible if a parallel
+        // path raced us. Log and fall through to snapshot refresh
+        // anyway: the snapshot is derived state and a refresh is
+        // always safe.
+        logger.warn(
+          { jid: trimmedJid, folder: target.folder },
+          'unregister_group: in-memory entry present but DB delete reported no rows',
+        );
+      } else {
+        logger.info(
+          { jid: trimmedJid, folder: target.folder },
+          'Group unregistered',
+        );
+      }
+      // Refresh snapshot so available_groups.json no longer flags the
+      // removed JID as registered. Same site-of-truth pattern as
+      // register_group / set_trusted / set_trigger above.
+      const availableGroups = deps.getAvailableGroups();
+      deps.writeGroupsSnapshot(
+        sourceGroup,
+        true,
+        availableGroups,
+        new Set(Object.keys(registeredGroups)),
+      );
+      break;
+    }
 
     case 'set_trusted':
       // Partial update: flip container_config.trusted only. Same isMain

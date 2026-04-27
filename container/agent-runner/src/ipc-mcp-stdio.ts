@@ -698,6 +698,7 @@ Use available_groups.json to find the JID for a group. The folder name must be c
         'Whether messages must start with the trigger word. Default: false (respond to all messages). Set to true for busy groups with many participants where you only want the agent to respond when explicitly mentioned.',
       ),
     trusted: z.boolean().optional().describe('Whether the group gets a trusted container (read-write filesystem, admin tiles, longer timeout). Default: false. Set true for personal/friends groups.'),
+    enableHeartbeat: z.boolean().optional().describe('Opt this non-main group into the 15-min unanswered-message heartbeat. Default: false. Pre-#158 this was implicit on requiresTrigger; now explicit.'),
     additionalMounts: z.array(z.object({
       hostPath: z.string().describe('Path on the host (supports "~" expansion; does not need to be absolute).'),
       containerPath: z.string().optional().describe('Optional mount name inside /workspace/extra/. When omitted, the host derives it from basename(hostPath).'),
@@ -717,9 +718,10 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       };
     }
 
-    const containerConfig = (args.trusted !== undefined || args.additionalMounts)
+    const containerConfig = (args.trusted !== undefined || args.enableHeartbeat !== undefined || args.additionalMounts)
       ? {
           ...(args.trusted !== undefined ? { trusted: args.trusted } : {}),
+          ...(args.enableHeartbeat !== undefined ? { enableHeartbeat: args.enableHeartbeat } : {}),
           ...(args.additionalMounts ? { additionalMounts: args.additionalMounts } : {}),
         }
       : undefined;
@@ -742,6 +744,54 @@ Use available_groups.json to find the JID for a group. The folder name must be c
         {
           type: 'text' as const,
           text: `Group "${args.name}" registered. It will start receiving messages immediately.`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  'unregister_group',
+  `Remove a chat/group from the registry so the agent stops responding there. Main group only.
+
+Inverse of \`register_group\` (#159). Removes both the SQLite \`registered_groups\` row AND the JID's authoritative entry in \`available_groups.json\` in one call. The on-disk \`groups/<folder>/\` directory (CLAUDE.md, MEMORY.md, scheduled-task workspace) is left intact — operators delete that manually if/when they want a clean slate.
+
+Refuses to unregister the main group itself (losing the main registration mid-runtime would leave the orchestrator without an IPC path to recreate it). No-op when the JID isn't registered.`,
+  {
+    jid: z
+      .string()
+      .trim()
+      .min(1)
+      .describe(
+        'The chat JID of the registered group to remove (e.g., "tg:1698969", "120363336345536173@g.us"). Whitespace-only rejected.',
+      ),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can unregister groups.',
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    const data = {
+      type: 'unregister_group',
+      jid: args.jid,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Unregister requested for ${args.jid}. (No-op if the JID wasn't registered. The on-disk groups/<folder>/ directory is preserved — delete manually if no longer needed.)`,
         },
       ],
     };

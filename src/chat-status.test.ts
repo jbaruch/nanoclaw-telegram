@@ -138,6 +138,7 @@ beforeEach(() => {
     sendMessage: async () => {},
     registeredGroups: () => groups,
     registerGroup: () => {},
+    unregisterGroup: () => false,
     setGroupTrusted: () => true,
     setGroupTrigger: () => true,
     syncGroups: async () => {},
