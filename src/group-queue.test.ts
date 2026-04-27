@@ -69,9 +69,9 @@ describe('GroupQueue', () => {
 
   it('spawns a container per distinct group with no global cap', async () => {
     // Burst N > old-cap (5) inbound messages across distinct groups; all
-    // must spawn immediately. The historical MAX_CONCURRENT_CONTAINERS
-    // gate would have queued the overflow — its removal is what this
-    // test guards against accidentally reintroducing.
+    // must spawn immediately. The historical global concurrency cap
+    // would have queued the overflow — its removal is what this test
+    // guards against accidentally reintroducing.
     let activeCount = 0;
     let maxActive = 0;
     const completionCallbacks: Array<() => void> = [];
