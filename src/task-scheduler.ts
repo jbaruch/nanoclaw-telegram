@@ -279,10 +279,22 @@ export interface SchedulerDependencies {
    * `nukeSession` and the time-based `cleanup-sessions.sh` script cannot
    * find it to wipe later. Without this hook, every run leaves an orphan
    * JSONL under `data/sessions/<group>/maintenance/.claude/projects/<slug>/`.
-   * The scheduler invokes this on each terminal sessionId observed
-   * during the run, immediately after `logTaskRun` lands. Implemented by
-   * the orchestrator via `wipeSessionJsonl` (delete-while-open is safe
-   * on POSIX, so we don't need to wait for container teardown).
+   *
+   * Invocation contract: the scheduler de-duplicates every `newSessionId`
+   * the SDK reports during the run (streaming events plus the terminal
+   * `runContainerAgent` return value, since either may carry the id, and
+   * the SDK can re-issue the id mid-run) and calls this helper once per
+   * unique id from a `finally` block that runs after the post-run DB
+   * bookkeeping (`logTaskRun`, `updateTaskAfterRun`). The `finally`
+   * placement guarantees the wipe still fires when those DB writes throw
+   * — otherwise a transient SQLite error would leave the just-created
+   * JSONL orphan-on-disk, defeating #193.
+   *
+   * Implemented by the orchestrator via `wipeSessionJsonl` (delete-
+   * while-open is safe on POSIX, so we don't have to wait for container
+   * teardown). The implementation is defensive — ENOENT and other
+   * expected fs errors are swallowed internally and reflected in the
+   * returned count.
    *
    * Scope note: only the `<sessionId>.jsonl` file is unlinked. The
    * sibling per-session tool-results directory at
@@ -608,58 +620,56 @@ async function runTask(
 
   const durationMs = Date.now() - startTime;
 
-  logTaskRun({
-    task_id: task.id,
-    run_at: new Date().toISOString(),
-    duration_ms: durationMs,
-    status: error ? 'error' : 'success',
-    result,
-    error,
-  });
+  // Post-run bookkeeping is wrapped in try/finally so the disk-hygiene
+  // wipe still runs if any DB write throws (transient SQLite, disk
+  // full, schema mid-migration). Without the finally a thrown
+  // logTaskRun / updateTaskAfterRun would leave the just-created
+  // JSONL orphan-on-disk forever — exactly what #193 is preventing.
+  try {
+    logTaskRun({
+      task_id: task.id,
+      run_at: new Date().toISOString(),
+      duration_ms: durationMs,
+      status: error ? 'error' : 'success',
+      result,
+      error,
+    });
 
-  // Re-fetch the task to compute next_run against the FRESH schedule
-  // fields. The captured `task` is from before dispatch — between
-  // there and here a user can have called `update_task` to change
-  // `schedule_value`, `schedule_timezone`, or `schedule_type`, and
-  // their fix shouldn't be clobbered by a write-back computed from
-  // the stale capture (the same race `applyComputeNextRunRemediation`
-  // already guards against on the remediation path).
-  const fresh = getTaskById(task.id) ?? task;
-  const computed = computeNextRunDetailed(fresh);
-  if (computed.remediation) {
-    applyComputeNextRunRemediation(
-      fresh.id,
-      computed.remediation,
-      fresh.schedule_value,
-      fresh.schedule_timezone,
-    );
-  }
-  const resultSummary = error
-    ? `Error: ${error}`
-    : result
-      ? result.slice(0, 200)
-      : 'Completed';
-  updateTaskAfterRun(fresh.id, computed.nextRun, resultSummary);
-
-  // #193: wipe the JSONL transcripts created by this run. The sessionId
-  // is never persisted (no resume, no DB row), so without an explicit
-  // wipe here the file accumulates forever under the maintenance slot.
-  // Errors are logged-and-swallowed: a wipe failure must not mask the
-  // task's reported result. Multiple ids are possible if the SDK
-  // re-issued newSessionId mid-run; we wipe all of them.
-  for (const sid of observedSessionIds) {
-    try {
-      deps.wipeSessionJsonl(task.group_folder, MAINTENANCE_SESSION_NAME, sid);
-    } catch (wipeErr) {
-      logger.warn(
-        {
-          taskId: task.id,
-          groupFolder: task.group_folder,
-          sessionId: sid,
-          err: wipeErr instanceof Error ? wipeErr.message : String(wipeErr),
-        },
-        'Failed to wipe scheduled-task JSONL transcript — orphan may accumulate',
+    // Re-fetch the task to compute next_run against the FRESH schedule
+    // fields. The captured `task` is from before dispatch — between
+    // there and here a user can have called `update_task` to change
+    // `schedule_value`, `schedule_timezone`, or `schedule_type`, and
+    // their fix shouldn't be clobbered by a write-back computed from
+    // the stale capture (the same race `applyComputeNextRunRemediation`
+    // already guards against on the remediation path).
+    const fresh = getTaskById(task.id) ?? task;
+    const computed = computeNextRunDetailed(fresh);
+    if (computed.remediation) {
+      applyComputeNextRunRemediation(
+        fresh.id,
+        computed.remediation,
+        fresh.schedule_value,
+        fresh.schedule_timezone,
       );
+    }
+    const resultSummary = error
+      ? `Error: ${error}`
+      : result
+        ? result.slice(0, 200)
+        : 'Completed';
+    updateTaskAfterRun(fresh.id, computed.nextRun, resultSummary);
+  } finally {
+    // #193: wipe the JSONL transcripts created by this run. The
+    // sessionId is never persisted (no resume, no DB row), so without
+    // this wipe the file accumulates forever under the maintenance
+    // slot. Multiple ids are possible if the SDK re-issued
+    // newSessionId mid-run — wipe all of them. No try/catch wrapper:
+    // `wipeSessionJsonl` already swallows ENOENT and other expected
+    // fs errors internally; anything that escapes is a programming
+    // bug per `jbaruch/coding-policy: error-handling`, and propagation
+    // is caught by the scheduler loop's terminal safety net.
+    for (const sid of observedSessionIds) {
+      deps.wipeSessionJsonl(task.group_folder, MAINTENANCE_SESSION_NAME, sid);
     }
   }
 }
