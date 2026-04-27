@@ -1059,10 +1059,10 @@ export function getAllSessions(): Record<string, Record<string, string>> {
 // can legally return primitives, null, or arrays from `"null"`, `"true"`,
 // `"[]"`, etc., none of which are valid ContainerConfig shapes.
 //
-// Logs jid + a bounded snippet of the raw payload (not the full string):
-// container_config rows can in principle hold absolute host paths under
-// additionalMounts, and an operator only needs enough context to grep
-// the DB row by jid for a full inspection.
+// Logs jid + payload length only — never the payload content. The raw
+// container_config string is treated as opaque/possibly-sensitive per
+// no-secrets and error-handling rules. Operators inspect the actual row
+// via the DB by jid, not via logs.
 function parseContainerConfig(
   raw: string | null,
   jid: string,
@@ -1074,14 +1074,18 @@ function parseContainerConfig(
   } catch (err) {
     if (!(err instanceof SyntaxError)) throw err;
     logger.warn(
-      { err, jid, snippet: raw.slice(0, 80), len: raw.length },
+      { errName: err.name, jid, len: raw.length },
       'registered_groups: invalid container_config JSON, treating as undefined',
     );
     return undefined;
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     logger.warn(
-      { jid, snippet: raw.slice(0, 80), len: raw.length },
+      {
+        jid,
+        len: raw.length,
+        parsedType: parsed === null ? 'null' : typeof parsed,
+      },
       'registered_groups: container_config is not a JSON object, treating as undefined',
     );
     return undefined;
