@@ -7,6 +7,7 @@ For detailed release notes, see the [full changelog on the documentation site](h
 ## [Unreleased]
 
 - Hooks epic — `bash-safety-net` PreToolUse hook denies known-destructive Bash commands deterministically (#143). Catalogue covers `rm -rf` on root / mount-root paths (combined and split flags, end-of-options marker, trailing-slash and dot-segment variants), force-push to `main`/`master` (`--force` flag and `+refspec` syntax), `mkfs.*`, raw-disk `dd`, raw block-device redirects, `chmod -R 777`, `chown -R` on mount roots, and the canonical fork bomb. Anchored to command-start positions so prose mentions of the same tokens (e.g. `echo mkfs.ext4 docs.md`) are not flagged.
+- Hooks epic — `reply-threading-enforcement` PreToolUse hook denies a standalone `mcp__nanoclaw__send_message` (no `reply_to`) when the latest user inbound is unanswered (#137). Carve-outs: `pin: true` (status updates), `sender` set (multi-bot persona), maintenance / scheduled-task session, and any `reply_to` (which marks the inbound addressed and unlocks subsequent standalones in the same turn). Single-turn enforcement only — cross-turn de-dup needs a `messages.db` query and is queued as a follow-up.
 
 ## [1.2.54] - 2026-04-26
 

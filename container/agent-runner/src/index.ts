@@ -23,6 +23,7 @@ import {
   PostToolUseHookInput,
   PreCompactHookInput,
   PreToolUseHookInput,
+  UserPromptSubmitHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import {
   DEFAULT_TOOL_RESULT_MAX_BYTES,
@@ -30,6 +31,12 @@ import {
   shouldDenyTaskOutputBlock,
 } from './poison-defense.js';
 import { evaluateBashCommand } from './bash-safety-net.js';
+import {
+  applyReplyThreadingDecision,
+  createReplyThreadingState,
+  decideReplyThreading,
+  extractLatestInboundId,
+} from './reply-threading.js';
 import { buildSubagentRuleFilePaths } from './subagent-prompt.js';
 import { fileURLToPath } from 'url';
 
@@ -382,6 +389,72 @@ function createBashSafetyNetHook(): HookCallback {
   };
 }
 
+/**
+ * #137 — reply-threading-enforcement. Mid-turn `send_message` calls
+ * that omit `reply_to` land at the bottom of an active chat instead
+ * of as a quoted reply. In multi-user threads this looks like AyeAye
+ * answering a different question or talking to itself.
+ *
+ * The pair of hooks below shares an in-process state object scoped to
+ * one `runQuery()` call (one user-facing turn / chained MessageStream
+ * sequence). UserPromptSubmit re-seeds the inner flags on every new
+ * inbound, so the single state is safe across the chained turns the
+ * MessageStream may carry within a single `runQuery()`.
+ *  - `createReplyThreadingPromptHook(state)` runs on UserPromptSubmit
+ *    and seeds `state.latestInboundId` from the prompt's last
+ *    `<message id="...">` tag.
+ *  - `createReplyThreadingPreToolHook(state, isMaintenanceSession)`
+ *    runs on PreToolUse(send_message) and denies a standalone call
+ *    while the latest inbound is unanswered.
+ *
+ * Single-turn enforcement only — cross-turn de-dup (the
+ * "bot-already-spoke-since" multi-user carve-out) needs a SQL query
+ * against the mounted `messages.db` and is intentionally deferred to
+ * a follow-up. The single-turn check catches the recurring "standalone
+ * mid-turn" bug class on its own.
+ */
+function createReplyThreadingPromptHook(
+  state: ReturnType<typeof createReplyThreadingState>,
+): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const submit = input as UserPromptSubmitHookInput;
+    const inboundId = extractLatestInboundId(submit.prompt);
+    state.latestInboundId = inboundId;
+    state.repliedToInbound = false;
+    if (inboundId) {
+      log(`UserPromptSubmit: reply-threading seeded latestInboundId=${inboundId}`);
+    }
+    return {};
+  };
+}
+
+function createReplyThreadingPreToolHook(
+  state: ReturnType<typeof createReplyThreadingState>,
+  isMaintenanceSession: boolean,
+): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const pre = input as PreToolUseHookInput;
+    const decision = decideReplyThreading({
+      toolName: pre.tool_name,
+      toolInput: pre.tool_input,
+      isMaintenanceSession,
+      state,
+    });
+    applyReplyThreadingDecision(state, decision);
+    if (decision.kind !== 'deny') {
+      return {};
+    }
+    log(`PreToolUse: reply-threading denied send_message — ${decision.reason}`);
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: 'deny' as const,
+        permissionDecisionReason: decision.reason,
+      },
+    };
+  };
+}
+
 function sanitizeFilename(summary: string): string {
   return summary
     .toLowerCase()
@@ -575,6 +648,22 @@ async function runQuery(
   const stream = new MessageStream();
   stream.push(prompt);
   let sawErrorResult = false;
+
+  // #137 — single-turn reply-threading state shared by the
+  // UserPromptSubmit hook (which seeds the latest inbound id) and the
+  // PreToolUse hook (which gates standalone send_message calls).
+  // Lifetime: one runQuery() call. The UserPromptSubmit hook resets
+  // the inner `repliedToInbound` flag on every new inbound, so the
+  // state is safe to re-use across the chained turns a single
+  // MessageStream may carry.
+  const replyThreadingState = createReplyThreadingState();
+  // Seed from the initial prompt up-front so the very first
+  // send_message of the turn is gated even before UserPromptSubmit
+  // fires (the SDK fires the prompt-submit hook AFTER the prompt is
+  // accepted, but a model can in principle emit a tool call before
+  // that — the seed makes the gate strict from t=0).
+  replyThreadingState.latestInboundId = extractLatestInboundId(prompt);
+  const isMaintenanceSession = containerInput.sessionName === 'maintenance';
 
   // Poll IPC for follow-up messages and _close sentinel during the query
   let ipcPolling = true;
@@ -862,12 +951,23 @@ async function runQuery(
         PreCompact: [
           { hooks: [createPreCompactHook(containerInput.assistantName)] },
         ],
+        // #137 — seed reply-threading state with the latest inbound id
+        // on every new submitted prompt. Pairs with the PreToolUse
+        // entry below.
+        UserPromptSubmit: [
+          {
+            hooks: [createReplyThreadingPromptHook(replyThreadingState)],
+          },
+        ],
         // #116 — gate TaskOutput before it can leak the sub-agent
         // transcript. Matcher must be `TaskOutput` (not `mcp__*`) —
         // it's an SDK built-in, not an MCP tool.
         // #143 — bash-safety-net denies known-destructive Bash
         // commands. Separate matcher entry because the SDK runs
         // matchers independently per tool name.
+        // #137 — deny standalone send_message while the latest inbound
+        // is unanswered. Matcher restricts to send_message so unrelated
+        // MCP traffic isn't paid for on every call.
         PreToolUse: [
           {
             matcher: 'TaskOutput',
@@ -876,6 +976,15 @@ async function runQuery(
           {
             matcher: 'Bash',
             hooks: [createBashSafetyNetHook()],
+          },
+          {
+            matcher: 'mcp__nanoclaw__send_message',
+            hooks: [
+              createReplyThreadingPreToolHook(
+                replyThreadingState,
+                isMaintenanceSession,
+              ),
+            ],
           },
         ],
         // #117 — strip invisible-Unicode + cap byte size on every MCP
