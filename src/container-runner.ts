@@ -143,29 +143,34 @@ export function buildSecretEnvFile(
     fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
     0o600,
   );
-  // Write inside a nested try so a write failure (disk full, EIO,
-  // EDQUOT) doesn't leave the file behind — the outer caller never
-  // gets a cleanup callback if we throw, so we MUST unlink here
-  // before rethrowing. Without this, a partial-secret tempfile
-  // would persist on disk until the next reboot's tmpdir clear.
+  // success flag drives finally-block cleanup without a catch-all:
+  // exceptions from writeFileSync/closeSync propagate naturally, and
+  // finally unlinks the on-disk tempfile if the write didn't fully
+  // succeed. Without this, a write failure (disk full, EIO, EDQUOT)
+  // would leak a partial-secret tempfile because the outer caller
+  // never sees a cleanup callback from a throwing buildSecretEnvFile.
+  let writeSucceeded = false;
   try {
-    try {
-      fs.writeFileSync(fd, lines.join('\n') + '\n');
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch (err) {
-    try {
-      fs.unlinkSync(tmpPath);
-    } catch (unlinkErr) {
-      if ((unlinkErr as NodeJS.ErrnoException).code !== 'ENOENT') {
-        logger.warn(
-          { err: unlinkErr, tmpPath },
-          'Failed to clean up secret env-file after write error',
-        );
+    fs.writeFileSync(fd, lines.join('\n') + '\n');
+    writeSucceeded = true;
+  } finally {
+    fs.closeSync(fd);
+    if (!writeSucceeded) {
+      // unlink failures other than ENOENT are logged but don't mask
+      // the original error — the outer try is propagating the real
+      // cause via finally semantics.
+      try {
+        fs.unlinkSync(tmpPath);
+      } catch (unlinkErr) {
+        const code = (unlinkErr as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT') {
+          logger.warn(
+            { err: unlinkErr, tmpPath },
+            'Failed to clean up secret env-file after write error',
+          );
+        }
       }
     }
-    throw err;
   }
 
   let cleaned = false;
