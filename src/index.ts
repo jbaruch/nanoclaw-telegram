@@ -835,7 +835,12 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   // that would have surprise-created a heartbeat the moment somebody
   // flipped that flag. Heartbeat is now an explicit, visible config
   // choice rather than a side-effect of trigger configuration.
-  if (group.containerConfig?.enableHeartbeat && !group.isMain) {
+  //
+  // Strict `=== true` because containerConfig parses from unvalidated
+  // JSON via parseContainerConfig — a non-boolean truthy value (e.g. the
+  // string "true" from a hand-edited row) would otherwise create a
+  // surprise heartbeat. Documented as boolean-only, enforced here.
+  if (group.containerConfig?.enableHeartbeat === true && !group.isMain) {
     syncNonMainHeartbeat(jid, group);
   }
 

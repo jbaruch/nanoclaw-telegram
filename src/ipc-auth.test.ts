@@ -100,13 +100,14 @@ beforeEach(() => {
     registerGroup: (jid, group) => {
       groups[jid] = group;
       setRegisteredGroup(jid, group);
-      // Mock the fs.mkdirSync that registerGroup does
 
       // Mirror src/index.ts registerGroup heartbeat creation: only fires
       // when `containerConfig.enableHeartbeat` is explicitly opted in
       // (#158 — auto-create on `requiresTrigger` was removed because no
-      // group ever had that flag set).
-      if (group.containerConfig?.enableHeartbeat && !group.isMain) {
+      // group ever had that flag set). Strict `=== true` and
+      // `context_mode: 'isolated'` to match production exactly so a
+      // regression on either dimension trips these tests.
+      if (group.containerConfig?.enableHeartbeat === true && !group.isMain) {
         const heartbeatId = `heartbeat-${group.folder}`;
         if (!getTaskById(heartbeatId)) {
           createTask({
@@ -116,7 +117,7 @@ beforeEach(() => {
             prompt: 'mock-heartbeat-prompt',
             schedule_type: 'cron',
             schedule_value: '*/15 * * * *',
-            context_mode: 'group',
+            context_mode: 'isolated',
             next_run: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
             status: 'active',
             created_at: new Date().toISOString(),
@@ -1108,11 +1109,14 @@ describe('register_group success', () => {
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
   });
 
-  it('register_group does NOT auto-create a heartbeat for a non-main group without enableHeartbeat (#158)', async () => {
-    // Pre-#158, registering any non-main group with `requiresTrigger`
-    // unset (default true) would surprise-create a heartbeat. With the
-    // auto-rule removed, heartbeat creation requires
-    // `containerConfig.enableHeartbeat` to be set explicitly.
+  it('register_group does NOT auto-create a heartbeat for a non-main group with requiresTrigger=true (#158)', async () => {
+    // Pre-#158, the `requiresTrigger !== false` branch in registerGroup
+    // would surprise-create a heartbeat for any non-main group whose
+    // trigger flag was on. The IPC handler defaults `requiresTrigger`
+    // to false when omitted (which would skip the old branch anyway),
+    // so we explicitly set `requiresTrigger: true` here to exercise the
+    // exact pre-#158 condition. With the auto-rule removed, heartbeat
+    // creation now requires `containerConfig.enableHeartbeat === true`.
     await processTaskIpc(
       {
         type: 'register_group',
@@ -1120,6 +1124,7 @@ describe('register_group success', () => {
         name: 'Silent',
         folder: 'silent-group',
         trigger: '@Andy',
+        requiresTrigger: true,
       },
       'whatsapp_main',
       true,
@@ -1127,6 +1132,7 @@ describe('register_group success', () => {
     );
 
     expect(getRegisteredGroup('silent@g.us')).toBeDefined();
+    expect(getRegisteredGroup('silent@g.us')?.requiresTrigger).toBe(true);
     expect(getTaskById('heartbeat-silent-group')).toBeUndefined();
   });
 
