@@ -667,6 +667,60 @@ describe('task CRUD', () => {
     deleteTask('task-3');
     expect(getTaskById('task-3')).toBeUndefined();
   });
+
+  // --- continuation_cycle_id (#93/#130) ---
+  //
+  // The column is opt-in: ordinary tasks omit it (DB stores NULL) and
+  // the helper skill that drives self-resuming cycles supplies the slot
+  // key (UTC date / ISO week per the proposal). The task-scheduler
+  // reads the value verbatim and threads it through ContainerInput so
+  // the spawned container gets the matching env vars; persistence
+  // round-tripping is therefore the part the DB layer must guarantee.
+  it('persists continuation_cycle_id when supplied', () => {
+    createTask({
+      id: 'task-cont-1',
+      group_folder: 'main',
+      chat_jid: 'group@g.us',
+      prompt: 'continue nightly chain',
+      schedule_type: 'once',
+      schedule_value: '2026-04-21T00:00:30.000Z',
+      context_mode: 'isolated',
+      next_run: '2026-04-21T00:00:30.000Z',
+      status: 'active',
+      created_at: '2026-04-21T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+      continuation_cycle_id: '2026-04-21',
+    });
+
+    const task = getTaskById('task-cont-1');
+    expect(task).toBeDefined();
+    expect(task!.continuation_cycle_id).toBe('2026-04-21');
+  });
+
+  it('stores continuation_cycle_id as NULL when omitted (ordinary task)', () => {
+    createTask({
+      id: 'task-cont-2',
+      group_folder: 'main',
+      chat_jid: 'group@g.us',
+      prompt: 'fresh task',
+      schedule_type: 'once',
+      schedule_value: '2026-04-21T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2026-04-21T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    const task = getTaskById('task-cont-2');
+    expect(task).toBeDefined();
+    // DB column is TEXT NULL; better-sqlite3 surfaces SQL NULL as
+    // JS `null`, NOT `undefined`. The calling code uses
+    // `task.continuation_cycle_id ?? undefined` to normalise back to
+    // the optional-string ContainerInput field, so any non-null result
+    // here would silently emit continuation env vars on a fresh task.
+    expect(task!.continuation_cycle_id).toBeNull();
+  });
 });
 
 // --- LIMIT behavior ---

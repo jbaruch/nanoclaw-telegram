@@ -409,6 +409,16 @@ async function runTask(
         // it runs concurrently with user-facing work. Sole writer of this
         // value — inbound paths route to `'default'` instead.
         sessionName: MAINTENANCE_SESSION_NAME,
+        // Continuation marker for self-resuming cycles (#93/#130). NULL on
+        // ordinary tasks; set only when the resumable-cycle helper skill
+        // scheduled this row as the next link of a chain. Container-runner
+        // emits NANOCLAW_CONTINUATION=1 + NANOCLAW_CONTINUATION_CYCLE_ID
+        // env vars iff this is non-empty. `?? undefined` normalises the DB
+        // SELECT result (NULL for ordinary rows) into the optional
+        // ContainerInput field shape — never pass `null` here, since
+        // `if (continuationCycleId)` in buildContainerArgs would treat the
+        // string `"null"` as truthy if a stringification slipped in.
+        continuationCycleId: task.continuation_cycle_id ?? undefined,
       },
       (proc, containerName) =>
         deps.onProcess(

@@ -361,6 +361,142 @@ describe('task scheduler', () => {
     expect(getSession('main', 'default')).toBeUndefined();
   });
 
+  // --- continuation_cycle_id flow-through (#93/#130) ---
+  //
+  // The scheduler is the bridge between the DB row and the spawned
+  // container: when a task row's continuation_cycle_id column is
+  // non-NULL, the value must reach the ContainerInput so
+  // container-runner can emit the matching env vars. Round-tripping
+  // through the scheduler is the load-bearing wiring step — without
+  // it, a chained continuation row created by the resumable-cycle
+  // helper skill would still spawn a container indistinguishable from
+  // a fresh user invocation.
+
+  it('passes continuation_cycle_id from task row through to ContainerInput', async () => {
+    const MAIN_GROUP = {
+      name: 'Main',
+      folder: 'main',
+      trigger: 'always',
+      added_at: '2026-04-21T00:00:00.000Z',
+      isMain: true,
+    };
+
+    createTask({
+      id: 'continuation-task',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt:
+        '[CONTINUATION 2026-04-21 #1] Continue tessl__nightly-housekeeping ...',
+      schedule_type: 'once',
+      schedule_value: '2026-04-21T00:00:30.000Z',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-04-21T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+      continuation_cycle_id: '2026-04-21',
+    });
+
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result: 'ok',
+        } as ContainerOutput);
+        return { status: 'success', result: 'ok' };
+      },
+    );
+
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': MAIN_GROUP }),
+      getSessions: () => ({}),
+      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(mockRunContainerAgent).toHaveBeenCalled();
+    const containerInput = mockRunContainerAgent.mock.calls[0][1];
+    expect(containerInput.continuationCycleId).toBe('2026-04-21');
+  });
+
+  it('omits continuationCycleId on ordinary tasks (no continuation env vars)', async () => {
+    const MAIN_GROUP = {
+      name: 'Main',
+      folder: 'main',
+      trigger: 'always',
+      added_at: '2026-04-21T00:00:00.000Z',
+      isMain: true,
+    };
+
+    createTask({
+      id: 'plain-task',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'plain scheduled task',
+      schedule_type: 'once',
+      schedule_value: '2026-04-21T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-04-21T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+      // continuation_cycle_id intentionally omitted — DB stores NULL.
+    });
+
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result: 'ok',
+        } as ContainerOutput);
+        return { status: 'success', result: 'ok' };
+      },
+    );
+
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': MAIN_GROUP }),
+      getSessions: () => ({}),
+      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    const containerInput = mockRunContainerAgent.mock.calls[0][1];
+    // Must be undefined (not null) — the ContainerInput field is
+    // typed as optional string and the container-runner uses a
+    // truthiness check that treats `null` the same, but downstream
+    // consumers (logging, future code) would observe the wrong
+    // shape if the scheduler forwarded SQL NULL verbatim.
+    expect(containerInput.continuationCycleId).toBeUndefined();
+  });
+
   it('maintenance task with context_mode=isolated does NOT persist newSessionId', async () => {
     const MAIN_GROUP = {
       name: 'Main',

@@ -67,7 +67,16 @@ function createSchema(database: Database.Database): void {
       --   'untrusted_agent' — untrusted group's agent (NOT trusted, wrap applies)
       -- Without this, an untrusted agent could self-schedule a prompt that
       -- later fires unwrapped and bypasses the trust boundary.
-      created_by_role TEXT NOT NULL DEFAULT 'owner'
+      created_by_role TEXT NOT NULL DEFAULT 'owner',
+      -- Continuation marker for self-resuming cycles (#93/#130). NULL for
+      -- ordinary one-shot scheduled tasks. When set by the resumable-cycle
+      -- helper skill, the task-scheduler plumbs the value into the spawned
+      -- container as NANOCLAW_CONTINUATION=1 +
+      -- NANOCLAW_CONTINUATION_CYCLE_ID=<value>. Absence of the env vars is
+      -- itself the "fresh invocation" signal the calling skill checks for;
+      -- mismatch between the prompt prefix and these env vars fails closed
+      -- to fresh, never silently takes the lock-skip branch.
+      continuation_cycle_id TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
     CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
@@ -174,6 +183,22 @@ function createSchema(database: Database.Database): void {
   if (!scheduledCols.some((c) => c.name === 'created_by_role')) {
     database.exec(
       `ALTER TABLE scheduled_tasks ADD COLUMN created_by_role TEXT NOT NULL DEFAULT 'owner'`,
+    );
+  }
+
+  // Add continuation_cycle_id column for #93/#130 — self-resuming cycles.
+  // NULL for ordinary tasks; set when the resumable-cycle helper skill
+  // schedules the next link of a chain. The task-scheduler reads this
+  // value at fire time and plumbs it onto the spawned container as
+  // NANOCLAW_CONTINUATION=1 + NANOCLAW_CONTINUATION_CYCLE_ID=<value>.
+  // PRAGMA-gated rather than try/catch per the no-error-suppression
+  // rule (see schedule_timezone migration above).
+  const continuationCols = database
+    .prepare('PRAGMA table_info(scheduled_tasks)')
+    .all() as Array<{ name: string }>;
+  if (!continuationCols.some((c) => c.name === 'continuation_cycle_id')) {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN continuation_cycle_id TEXT`,
     );
   }
 
@@ -793,8 +818,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, schedule_timezone, context_mode, next_run, status, created_at, created_by_role)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, schedule_timezone, context_mode, next_run, status, created_at, created_by_role, continuation_cycle_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -810,6 +835,7 @@ export function createTask(
     task.status,
     task.created_at,
     task.created_by_role,
+    task.continuation_cycle_id || null,
   );
 }
 
