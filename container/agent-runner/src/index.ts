@@ -36,6 +36,11 @@ import { detectComposioFidelity } from './composio-fidelity.js';
 import { detectLazyVerification } from './lazy-verification.js';
 import { rewriteMarkdownToHtml } from './markdown-to-html.js';
 import {
+  DEFAULT_HYGIENE_WINDOW_MS,
+  decideHygieneCadence,
+  extractHygieneSignatures,
+} from './path-hygiene-cadence.js';
+import {
   applyReplyThreadingDecision,
   createReplyThreadingState,
   decideReplyThreading,
@@ -620,6 +625,119 @@ function createComposioFidelityHook(): HookCallback {
   };
 }
 
+/**
+ * #139 — path-hygiene-cadence. Heartbeat scans surface persistent
+ * path-hygiene issues every tick. Without throttling the same
+ * complaint reaches Baruch every ~30 min, which got memory'd as
+ * "don't re-report same issue within ~4h"; the memory is advisory
+ * and the model under load ignores it.
+ *
+ * The hook uses an in-process `Map<signature, lastReportedAtMs>`
+ * scoped to a runQuery() lifetime, seeded at construction time from
+ * the per-group daily logs (`/workspace/group/daily/<YYYY-MM-DD>.md`
+ * for today and yesterday — covers the 4h window across midnight).
+ * On every PreToolUse(send_message) we extract signatures, compare
+ * against the map, and either deny (some signature seen <4h ago) or
+ * pass and record the new reporting time.
+ *
+ * Carve-outs (mirroring #137):
+ *  - `pin: true` bypasses (the user explicitly requested an update).
+ *  - `reply_to` to a recent user message bypasses (responding to an
+ *    explicit ask about hygiene).
+ */
+const HYGIENE_DAILY_LOG_DIR = '/workspace/group/daily';
+
+function loadHygieneSignaturesFromDailyLogs(nowMs: number): Map<string, number> {
+  const out = new Map<string, number>();
+  if (!fs.existsSync(HYGIENE_DAILY_LOG_DIR)) {
+    return out;
+  }
+  // Load today + yesterday — together they always cover the full 4h
+  // window even when "now" sits just past midnight.
+  const today = new Date(nowMs);
+  const yesterday = new Date(nowMs - 24 * 60 * 60 * 1000);
+  const filenames = [today, yesterday].map((d) => {
+    const yyyy = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    return path.join(HYGIENE_DAILY_LOG_DIR, `${yyyy}-${mm}-${dd}.md`);
+  });
+  for (const file of filenames) {
+    if (!fs.existsSync(file)) continue;
+    let body: string;
+    let mtimeMs: number;
+    try {
+      body = fs.readFileSync(file, 'utf-8');
+      mtimeMs = fs.statSync(file).mtimeMs;
+    } catch (err) {
+      const errno = err as NodeJS.ErrnoException;
+      if (typeof errno.code === 'string') {
+        log(
+          `path-hygiene: failed to read/stat ${file} (${errno.code}): ${errno.message}`,
+        );
+        continue;
+      }
+      throw err;
+    }
+    for (const sig of extractHygieneSignatures(body)) {
+      const prior = out.get(sig.signature);
+      if (prior === undefined || prior < mtimeMs) {
+        out.set(sig.signature, mtimeMs);
+      }
+    }
+  }
+  return out;
+}
+
+function createPathHygieneCadenceHook(): HookCallback {
+  // State is constructed once per runQuery. Seeded from on-disk daily
+  // logs so cross-container cadence works across container restarts —
+  // the in-process Map then keeps the bookkeeping cheap for repeated
+  // hits within the same turn.
+  const seenAt = loadHygieneSignaturesFromDailyLogs(Date.now());
+  return async (input, _toolUseId, _context) => {
+    const pre = input as PreToolUseHookInput;
+    if (pre.tool_name !== 'mcp__nanoclaw__send_message') {
+      return {};
+    }
+    const args = (pre.tool_input as Record<string, unknown>) ?? {};
+    if (args.pin === true) {
+      return {};
+    }
+    if (typeof args.reply_to === 'string' && args.reply_to.length > 0) {
+      // Responding to an explicit ask — let it through even on a
+      // freshly reported signature.
+      return {};
+    }
+    const text = typeof args.text === 'string' ? args.text : '';
+    const nowMs = Date.now();
+    const decision = decideHygieneCadence({
+      text,
+      lookupLastReportedAtMs: (sig) => seenAt.get(sig),
+      nowMs,
+      windowMs: DEFAULT_HYGIENE_WINDOW_MS,
+    });
+    if (decision.kind === 'deny') {
+      log(
+        `PreToolUse: path-hygiene-cadence denied — ${decision.suppressed.map((s) => s.signature).join(',')}`,
+      );
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse' as const,
+          permissionDecision: 'deny' as const,
+          permissionDecisionReason: decision.reason,
+        },
+      };
+    }
+    // Pass: record each fresh signature so subsequent calls in the
+    // same turn / container lifetime see it as "just reported".
+    for (const sig of extractHygieneSignatures(text)) {
+      seenAt.set(sig.signature, nowMs);
+    }
+    return {};
+  };
+}
+
 function sanitizeFilename(summary: string): string {
   return summary
     .toLowerCase()
@@ -1143,6 +1261,9 @@ async function runQuery(
         // #137 — deny standalone send_message while the latest inbound
         // is unanswered. Matcher restricts to send_message so unrelated
         // MCP traffic isn't paid for on every call.
+        // #139 — suppress duplicate path-hygiene reports within 4h.
+        // State is per-runQuery + seeded from the daily-log mtime so
+        // cadence persists across container restarts.
         PreToolUse: [
           {
             matcher: 'TaskOutput',
@@ -1164,6 +1285,10 @@ async function runQuery(
                 isMaintenanceSession,
               ),
             ],
+          },
+          {
+            matcher: 'mcp__nanoclaw__send_message',
+            hooks: [createPathHygieneCadenceHook()],
           },
         ],
         // #117 — strip invisible-Unicode + cap byte size on every MCP
