@@ -81,13 +81,52 @@ const PH_PREFIX = '\u0000PH';
 const PH_STRAY_PREFIX = '\u0000ST';
 const PH_SUFFIX = '\u0000';
 
-/** Escape `&`, `<`, `>`, `"` so captured text is safe inside HTML content / attributes. */
-function htmlEscape(s: string): string {
+/**
+ * Escape only the characters Telegram's HTML parser actually decodes in
+ * CONTENT regions (text between tags): `&`, `<`, `>`. Used for visible
+ * text — link labels, code, bold, italic, heading bodies.
+ *
+ * Telegram does NOT decode `&apos;` or `&quot;` in content — both
+ * render as the literal entity string. So `htmlEscape` would have
+ * produced `say &quot;hi&quot;` and the user would see `say
+ * &quot;hi&quot;` instead of `say "hi"`. Closes #160's content path.
+ */
+function htmlEscapeContent(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
+ * Escape for HTML ATTRIBUTE values (currently just `<a href="…">`).
+ * Adds `"` → `&quot;` on top of `htmlEscapeContent`. Telegram correctly
+ * decodes `&quot;` in attribute values, so this stays.
+ */
+function htmlEscapeAttr(s: string): string {
+  return htmlEscapeContent(s).replace(/"/g, '&quot;');
+}
+
+/**
+ * Decode entity references that the agent sometimes emits inline
+ * (`&apos;`, `&quot;`, numeric `&#39;`, `&#34;`) back to raw chars
+ * BEFORE the sanitizer runs. Without this, `Baruch&apos;s Office`
+ * passes through unchanged in plain prose (no Markdown captures to
+ * trigger htmlEscape) and Telegram renders the literal entity string
+ * — see #160 for the production sighting.
+ *
+ * Deliberately narrow: only the four entities Telegram doesn't decode
+ * in content. `&amp;`, `&lt;`, `&gt;` stay encoded — Telegram decodes
+ * those itself, and decoding them here would let an agent that wrote
+ * `&lt;script&gt;` smuggle real `<` and `>` characters into the
+ * sanitizer (which would then NOT re-escape them, since Phase 1b
+ * looks for tag-shaped tokens like `<foo>` — a bare `<` inside text
+ * survives). Ordering: this runs BEFORE Phase 0 so the decoded
+ * content reaches the rest of the pipeline as raw chars.
+ */
+function decodeAgentEntities(s: string): string {
   return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/&apos;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&#34;/g, '"');
 }
 
 /**
@@ -108,6 +147,13 @@ const PROTECTED_SPAN_TAGS = [
 
 export function sanitizeTelegramHtml(text: string): string {
   if (!text) return text;
+
+  // Decode agent-emitted `&apos;` / `&quot;` (and numeric forms) BEFORE
+  // any other phase runs. See `decodeAgentEntities` docstring for why
+  // this only covers the four entities Telegram doesn't decode itself
+  // — touching `&lt;`/`&gt;`/`&amp;` here would smuggle real angle
+  // brackets past the stray-tag protector.
+  text = decodeAgentEntities(text);
 
   const placeholders: string[] = [];
   const strayPlaceholders: string[] = [];
@@ -164,8 +210,15 @@ export function sanitizeTelegramHtml(text: string): string {
       return n >= 0 && n < arr.length ? arr[n] : match;
     };
 
-  const escapeCaptured = (s: string): string =>
-    htmlEscape(s.replace(PH_STRAY_RE, resolveFrom(strayPlaceholders)));
+  // Two captured-text escapers: `escapeCapturedContent` for visible
+  // text (link labels, code, bold, italic, heading bodies) — does NOT
+  // emit `&quot;`. `escapeCapturedAttr` for `<a href="…">` URL values
+  // — does emit `&quot;` because attributes need it and Telegram
+  // decodes it correctly there.
+  const escapeCapturedContent = (s: string): string =>
+    htmlEscapeContent(s.replace(PH_STRAY_RE, resolveFrom(strayPlaceholders)));
+  const escapeCapturedAttr = (s: string): string =>
+    htmlEscapeAttr(s.replace(PH_STRAY_RE, resolveFrom(strayPlaceholders)));
 
   let out = text;
 
@@ -174,11 +227,11 @@ export function sanitizeTelegramHtml(text: string): string {
   // or `_` or `<` aren't mangled downstream.
   out = out.replace(
     /```(?:[\w-]+)?\r?\n([\s\S]*?)\r?\n```/g,
-    (_m, code: string) => protect(`<pre>${htmlEscape(code)}</pre>`),
+    (_m, code: string) => protect(`<pre>${htmlEscapeContent(code)}</pre>`),
   );
   // Single-line / unterminated fenced blocks (defensive — less common).
   out = out.replace(/```([\s\S]*?)```/g, (_m, code: string) =>
-    protect(`<pre>${htmlEscape(code)}</pre>`),
+    protect(`<pre>${htmlEscapeContent(code)}</pre>`),
   );
 
   // Phase 1a: protect full HTML element spans (tag + contents + closing tag)
@@ -217,39 +270,39 @@ export function sanitizeTelegramHtml(text: string): string {
   out = out.replace(
     /\[([^\]]+)\]\(([^)]+)\)/g,
     (_m, txt: string, url: string) =>
-      `<a href="${escapeCaptured(url)}">${escapeCaptured(txt)}</a>`,
+      `<a href="${escapeCapturedAttr(url)}">${escapeCapturedContent(txt)}</a>`,
   );
 
   // 2b. Inline code — before bold/italic so backticked content isn't mangled.
   out = out.replace(
     /`([^`\n]+)`/g,
-    (_m, code: string) => `<code>${escapeCaptured(code)}</code>`,
+    (_m, code: string) => `<code>${escapeCapturedContent(code)}</code>`,
   );
 
   // 2c. Bold: **x** or __x__
   out = out.replace(
     /\*\*(.+?)\*\*/g,
-    (_m, t: string) => `<b>${escapeCaptured(t)}</b>`,
+    (_m, t: string) => `<b>${escapeCapturedContent(t)}</b>`,
   );
   out = out.replace(
     /__(.+?)__/g,
-    (_m, t: string) => `<b>${escapeCaptured(t)}</b>`,
+    (_m, t: string) => `<b>${escapeCapturedContent(t)}</b>`,
   );
 
   // 2d. Italic: *x* or _x_ — must look like formatting, not identifier parts.
   out = out.replace(
     /(^|[^\w])\*(\S(?:.*?\S)?)\*(?!\w)/g,
-    (_m, pre: string, t: string) => `${pre}<i>${escapeCaptured(t)}</i>`,
+    (_m, pre: string, t: string) => `${pre}<i>${escapeCapturedContent(t)}</i>`,
   );
   out = out.replace(
     /(^|[^\w])_(\S(?:.*?\S)?)_(?!\w)/g,
-    (_m, pre: string, t: string) => `${pre}<i>${escapeCaptured(t)}</i>`,
+    (_m, pre: string, t: string) => `${pre}<i>${escapeCapturedContent(t)}</i>`,
   );
 
   // 2e. Headings: # to ###### at line start → <b>…</b>
   out = out.replace(
     /^#{1,6}\s+(.+)$/gm,
-    (_m, t: string) => `<b>${escapeCaptured(t)}</b>`,
+    (_m, t: string) => `<b>${escapeCapturedContent(t)}</b>`,
   );
 
   // 2f. Bullets: - item / * item at line start → • item
@@ -284,7 +337,7 @@ export function sanitizeTelegramHtml(text: string): string {
   out = out.replace(PH_STRAY_RE, (_m, idx: string): string => {
     const n = Number(idx);
     return n >= 0 && n < strayPlaceholders.length
-      ? htmlEscape(strayPlaceholders[n])
+      ? htmlEscapeContent(strayPlaceholders[n])
       : _m;
   });
 

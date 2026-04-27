@@ -332,9 +332,12 @@ describe('sanitizeTelegramHtml — fenced code blocks', () => {
   });
 
   it('fenced block with language hint is preserved', () => {
+    // `"` stays raw — Telegram doesn't decode `&quot;` in <pre> content,
+    // so emitting it would render the literal entity. `<` and `&` still
+    // need the standard escapes Telegram supports. See issue #160.
     const input = '```python\nif x < 5:\n    print("a & b")\n```';
     expect(sanitizeTelegramHtml(input)).toBe(
-      '<pre>if x &lt; 5:\n    print(&quot;a &amp; b&quot;)</pre>',
+      '<pre>if x &lt; 5:\n    print("a &amp; b")</pre>',
     );
   });
 
@@ -354,5 +357,85 @@ describe('sanitizeTelegramHtml — fenced code blocks', () => {
 describe('sanitizeTelegramHtml — contract with parseTextStyles', () => {
   it('lone *foo* is italic (would be wrong if parseTextStyles emitted *bold*)', () => {
     expect(sanitizeTelegramHtml('say *foo* now')).toBe('say <i>foo</i> now');
+  });
+});
+
+// --- Issue #160: Telegram doesn't decode `&apos;` or `&quot;` in content ---
+
+describe('sanitizeTelegramHtml — agent-emitted entities (issue #160)', () => {
+  it('decodes &apos; from plain prose into a raw apostrophe', () => {
+    // Production sighting: agent wrote "Baruch&apos;s Office" and
+    // Telegram rendered the literal entity. Sanitizer must turn it
+    // into a raw apostrophe so the user sees "Baruch's Office".
+    expect(sanitizeTelegramHtml('Baruch&apos;s Office')).toBe(
+      "Baruch's Office",
+    );
+  });
+
+  it('decodes &quot; from plain prose into a raw quote', () => {
+    expect(sanitizeTelegramHtml('they said &quot;hi&quot;')).toBe(
+      'they said "hi"',
+    );
+  });
+
+  it('decodes numeric &#39; and &#34; forms', () => {
+    expect(sanitizeTelegramHtml('Baruch&#39;s &#34;office&#34;')).toBe(
+      'Baruch\'s "office"',
+    );
+  });
+
+  it('decodes agent entities INSIDE a Markdown bold capture', () => {
+    // The decode runs before Phase 2 captures, so a `**Baruch&apos;s**`
+    // input becomes `**Baruch's**` first, then the bold conversion
+    // produces a clean `<b>Baruch's</b>` instead of `<b>Baruch&amp;apos;s</b>`.
+    expect(sanitizeTelegramHtml('**Baruch&apos;s rules**')).toBe(
+      "<b>Baruch's rules</b>",
+    );
+  });
+
+  it('does NOT decode &amp; (Telegram decodes it itself)', () => {
+    // Decoding `&amp;` here would leak a raw `&` into prose, which
+    // Telegram then mis-parses if it appears next to other entity-like
+    // sequences. Safer to leave the three Telegram-supported entities
+    // alone end-to-end.
+    expect(sanitizeTelegramHtml('a &amp; b')).toBe('a &amp; b');
+  });
+
+  it('does NOT decode &lt; / &gt; (would smuggle real angle brackets)', () => {
+    // Decoding `&lt;` to `<` here would let the agent inject what
+    // looks like a stray tag past Phase 1b's stray-tag protector.
+    // The three Telegram-decoded entities stay encoded throughout.
+    expect(sanitizeTelegramHtml('a &lt;tag&gt; b')).toBe('a &lt;tag&gt; b');
+  });
+});
+
+// --- Issue #160: " in content stays raw, but stays escaped in href attributes ---
+
+describe('sanitizeTelegramHtml — quote handling in content vs attributes', () => {
+  it('leaves " raw in <code> content (Telegram does NOT decode &quot; in content)', () => {
+    expect(sanitizeTelegramHtml('`say "hi"`')).toBe('<code>say "hi"</code>');
+  });
+
+  it('leaves " raw in <b> content', () => {
+    expect(sanitizeTelegramHtml('**say "hi"**')).toBe('<b>say "hi"</b>');
+  });
+
+  it('leaves " raw in <i> content', () => {
+    expect(sanitizeTelegramHtml('*say "hi"*')).toBe('<i>say "hi"</i>');
+  });
+
+  it('still escapes " to &quot; inside href attribute values', () => {
+    // Telegram decodes `&quot;` correctly in attribute values, and
+    // raw `"` inside `href="…"` would close the attribute prematurely.
+    // So content gets raw quotes, attributes get escaped quotes.
+    expect(sanitizeTelegramHtml('[link](https://example.com/?q="x")')).toBe(
+      '<a href="https://example.com/?q=&quot;x&quot;">link</a>',
+    );
+  });
+
+  it('leaves " raw in heading content', () => {
+    expect(sanitizeTelegramHtml('# This is "important"')).toBe(
+      '<b>This is "important"</b>',
+    );
   });
 });
