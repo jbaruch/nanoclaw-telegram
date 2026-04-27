@@ -1282,6 +1282,14 @@ describe('unregister_group success', () => {
     // BOTH so the scheduler doesn't keep firing them every cycle and
     // logging "Group not found for task" noise. A sibling group's
     // task is a control: it must survive untouched.
+    //
+    // Fixed timestamps per testing-standards (`Provide fixed test
+    // data; never have the test generate its own inputs randomly`) —
+    // runtime-derived clock values would make the row contents
+    // non-deterministic across runs.
+    const FIXED_CREATED_AT = '2026-01-01T00:00:00.000Z';
+    const FIXED_NEXT_RUN_15MIN = '2026-01-01T00:15:00.000Z';
+    const FIXED_NEXT_RUN_ONCE = '2026-12-01T00:00:00.000Z';
     createTask({
       id: 'heartbeat-other-group',
       group_folder: 'other-group',
@@ -1290,9 +1298,9 @@ describe('unregister_group success', () => {
       schedule_type: 'cron',
       schedule_value: '*/15 * * * *',
       context_mode: 'isolated',
-      next_run: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+      next_run: FIXED_NEXT_RUN_15MIN,
       status: 'active',
-      created_at: new Date().toISOString(),
+      created_at: FIXED_CREATED_AT,
       created_by_role: 'owner',
     });
     createTask({
@@ -1301,11 +1309,11 @@ describe('unregister_group success', () => {
       chat_jid: 'other@g.us',
       prompt: 'do the thing',
       schedule_type: 'once',
-      schedule_value: '2026-12-01T00:00:00.000Z',
+      schedule_value: FIXED_NEXT_RUN_ONCE,
       context_mode: 'group',
-      next_run: '2026-12-01T00:00:00.000Z',
+      next_run: FIXED_NEXT_RUN_ONCE,
       status: 'active',
-      created_at: new Date().toISOString(),
+      created_at: FIXED_CREATED_AT,
       created_by_role: 'main_agent',
     });
     createTask({
@@ -1314,11 +1322,11 @@ describe('unregister_group success', () => {
       chat_jid: 'third@g.us',
       prompt: 'unrelated',
       schedule_type: 'once',
-      schedule_value: '2026-12-01T00:00:00.000Z',
+      schedule_value: FIXED_NEXT_RUN_ONCE,
       context_mode: 'group',
-      next_run: '2026-12-01T00:00:00.000Z',
+      next_run: FIXED_NEXT_RUN_ONCE,
       status: 'active',
-      created_at: new Date().toISOString(),
+      created_at: FIXED_CREATED_AT,
       created_by_role: 'main_agent',
     });
     expect(getTaskById('heartbeat-other-group')).toBeDefined();

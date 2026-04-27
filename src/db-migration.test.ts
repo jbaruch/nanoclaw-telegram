@@ -321,7 +321,10 @@ describe('database migrations', () => {
 
       _closeDatabase();
     } finally {
+      // Restore CWD before removing tempDir — see the matching block
+      // above. testing-standards `Clean up after yourself` rule.
       process.chdir(repoRoot);
+      fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
 
@@ -367,7 +370,10 @@ describe('database migrations', () => {
 
       void getRegisteredGroup; // silence unused-import lint
     } finally {
+      // Restore CWD before removing tempDir — see the matching block
+      // above. testing-standards `Clean up after yourself` rule.
       process.chdir(repoRoot);
+      fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
 });
