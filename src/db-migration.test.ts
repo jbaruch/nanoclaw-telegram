@@ -253,4 +253,127 @@ describe('database migrations', () => {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it('drops the dormant tg:1698969 / telegram_main row on initDatabase (#159)', async () => {
+    const repoRoot = process.cwd();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-db-test-'));
+
+    try {
+      process.chdir(tempDir);
+      fs.mkdirSync(path.join(tempDir, 'store'), { recursive: true });
+
+      const dbPath = path.join(tempDir, 'store', 'messages.db');
+      const legacyDb = new Database(dbPath);
+      // Reproduce the dormant pair: real swarm row + dormant
+      // telegram_main row keyed by tg:1698969. Spawner reads
+      // available_groups.json (built from chats × registered_groups)
+      // so the dormant row is invisible at runtime, and there was no
+      // inverse of register_group until #159 to clean it up.
+      legacyDb.exec(`
+        CREATE TABLE registered_groups (
+          jid TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          folder TEXT NOT NULL UNIQUE,
+          trigger_pattern TEXT NOT NULL,
+          added_at TEXT NOT NULL,
+          container_config TEXT,
+          requires_trigger INTEGER DEFAULT 1,
+          is_main INTEGER DEFAULT 0
+        );
+      `);
+      legacyDb
+        .prepare(
+          `INSERT INTO registered_groups (jid, name, folder, trigger_pattern, added_at, is_main) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'tg:1698969',
+          'Telegram Main (dormant)',
+          'telegram_main',
+          '@Andy',
+          '2024-01-01T00:00:00.000Z',
+          1,
+        );
+      legacyDb
+        .prepare(
+          `INSERT INTO registered_groups (jid, name, folder, trigger_pattern, added_at, is_main) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'tg:-1009999999',
+          'Telegram Swarm (active)',
+          'telegram_swarm',
+          '@Andy',
+          '2024-02-01T00:00:00.000Z',
+          1,
+        );
+      legacyDb.close();
+
+      vi.resetModules();
+      const { initDatabase, getRegisteredGroup, _closeDatabase } =
+        await import('./db.js');
+
+      initDatabase();
+
+      // Dormant row removed.
+      expect(getRegisteredGroup('tg:1698969')).toBeUndefined();
+      // Active swarm row preserved — cleanup is anchored by jid AND
+      // folder AND is_main, not a wildcard delete.
+      expect(getRegisteredGroup('tg:-1009999999')).toBeDefined();
+
+      _closeDatabase();
+    } finally {
+      // Restore CWD before removing tempDir — see the matching block
+      // above. testing-standards `Clean up after yourself` rule.
+      process.chdir(repoRoot);
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('cleanup is idempotent — second initDatabase pass is a no-op (#159)', async () => {
+    // Once the dormant row is gone, replaying initDatabase must not
+    // throw or mutate any other row.
+    const repoRoot = process.cwd();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-db-test-'));
+
+    try {
+      process.chdir(tempDir);
+      fs.mkdirSync(path.join(tempDir, 'store'), { recursive: true });
+
+      vi.resetModules();
+      const {
+        initDatabase,
+        setRegisteredGroup,
+        getRegisteredGroup,
+        _closeDatabase,
+      } = await import('./db.js');
+
+      initDatabase();
+      setRegisteredGroup('benign@g.us', {
+        name: 'Benign',
+        folder: 'benign-group',
+        trigger: '@Andy',
+        added_at: '2024-01-01T00:00:00.000Z',
+      });
+      _closeDatabase();
+
+      // Second boot — same DB, no dormant row to remove.
+      vi.resetModules();
+      const {
+        initDatabase: initAgain,
+        getRegisteredGroup: getAgain,
+        _closeDatabase: closeAgain,
+      } = await import('./db.js');
+      initAgain();
+
+      expect(getAgain('benign@g.us')).toBeDefined();
+      expect(getAgain('tg:1698969')).toBeUndefined();
+      closeAgain();
+
+      void getRegisteredGroup; // silence unused-import lint
+    } finally {
+      // Restore CWD before removing tempDir — see the matching block
+      // above. testing-standards `Clean up after yourself` rule.
+      process.chdir(repoRoot);
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });

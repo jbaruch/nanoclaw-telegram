@@ -44,6 +44,7 @@ import path from 'path';
 import {
   _initTestDatabase,
   createTask,
+  deleteRegisteredGroup,
   getAllTasks,
   getRegisteredGroup,
   getTaskById,
@@ -125,6 +126,13 @@ beforeEach(() => {
           });
         }
       }
+    },
+    unregisterGroup: (jid) => {
+      // Mirror src/index.ts unregisterGroup: in-memory + DB delete in
+      // one call. Returns the DB delete's truthy-changes result so
+      // tests can distinguish "actually removed" from "no row matched".
+      delete groups[jid];
+      return deleteRegisteredGroup(jid);
     },
     setGroupTrusted: (jid, trusted) => {
       const updated = updateGroupTrusted(jid, trusted);
@@ -1162,6 +1170,183 @@ describe('register_group success', () => {
     expect(heartbeat?.group_folder).toBe('beating-group');
     expect(heartbeat?.schedule_type).toBe('cron');
     expect(heartbeat?.schedule_value).toBe('*/15 * * * *');
+  });
+});
+
+// --- unregister_group (#159) ---
+
+describe('unregister_group authorization', () => {
+  it('non-main group is rejected', async () => {
+    await processTaskIpc(
+      { type: 'unregister_group', jid: 'other@g.us' },
+      'other-group',
+      false,
+      deps,
+    );
+
+    // Group still registered — unauthorized call rejected before any
+    // mutation.
+    expect(getRegisteredGroup('other@g.us')).toBeDefined();
+    expect(groups['other@g.us']).toBeDefined();
+  });
+});
+
+describe('unregister_group success', () => {
+  it('main group can unregister a non-main group from both stores', async () => {
+    expect(getRegisteredGroup('other@g.us')).toBeDefined();
+
+    await processTaskIpc(
+      { type: 'unregister_group', jid: 'other@g.us' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // DB row gone
+    expect(getRegisteredGroup('other@g.us')).toBeUndefined();
+    // In-memory mirror gone — subsequent routing decisions stop
+    // treating the JID as registered before any restart.
+    expect(groups['other@g.us']).toBeUndefined();
+  });
+
+  it('trims whitespace-padded jid before lookup', async () => {
+    expect(getRegisteredGroup('other@g.us')).toBeDefined();
+
+    await processTaskIpc(
+      { type: 'unregister_group', jid: '  other@g.us  ' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getRegisteredGroup('other@g.us')).toBeUndefined();
+  });
+
+  it('refuses to unregister a main group', async () => {
+    setRegisteredGroup('main@g.us', {
+      name: 'Main',
+      folder: 'main',
+      trigger: '@Andy',
+      added_at: '2026-01-01',
+      isMain: true,
+    });
+    groups['main@g.us'] = {
+      name: 'Main',
+      folder: 'main',
+      trigger: '@Andy',
+      added_at: '2026-01-01',
+      isMain: true,
+    };
+
+    await processTaskIpc(
+      { type: 'unregister_group', jid: 'main@g.us' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // Main row preserved — losing it mid-runtime would leave the
+    // orchestrator without any path to recreate it via IPC.
+    expect(getRegisteredGroup('main@g.us')).toBeDefined();
+    expect(groups['main@g.us']).toBeDefined();
+  });
+
+  it('rejects request with missing jid', async () => {
+    await processTaskIpc(
+      { type: 'unregister_group' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // No mutation — sentinel group still registered.
+    expect(getRegisteredGroup('other@g.us')).toBeDefined();
+  });
+
+  it('is a no-op for an unregistered jid (idempotent)', async () => {
+    await processTaskIpc(
+      { type: 'unregister_group', jid: 'never-registered@g.us' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getRegisteredGroup('never-registered@g.us')).toBeUndefined();
+    // Sibling registrations untouched.
+    expect(getRegisteredGroup('other@g.us')).toBeDefined();
+  });
+
+  it('cascade-deletes scheduled tasks tied to the unregistered folder', async () => {
+    // Pre-state: a heartbeat-style scheduled task and an unrelated
+    // one-off task exist for the group folder. Unregister must clear
+    // BOTH so the scheduler doesn't keep firing them every cycle and
+    // logging "Group not found for task" noise. A sibling group's
+    // task is a control: it must survive untouched.
+    //
+    // Fixed timestamps per testing-standards (`Provide fixed test
+    // data; never have the test generate its own inputs randomly`) —
+    // runtime-derived clock values would make the row contents
+    // non-deterministic across runs.
+    const FIXED_CREATED_AT = '2026-01-01T00:00:00.000Z';
+    const FIXED_NEXT_RUN_15MIN = '2026-01-01T00:15:00.000Z';
+    const FIXED_NEXT_RUN_ONCE = '2026-12-01T00:00:00.000Z';
+    createTask({
+      id: 'heartbeat-other-group',
+      group_folder: 'other-group',
+      chat_jid: 'other@g.us',
+      prompt: 'mock-heartbeat-prompt',
+      schedule_type: 'cron',
+      schedule_value: '*/15 * * * *',
+      context_mode: 'isolated',
+      next_run: FIXED_NEXT_RUN_15MIN,
+      status: 'active',
+      created_at: FIXED_CREATED_AT,
+      created_by_role: 'owner',
+    });
+    createTask({
+      id: 'oneoff-other-group',
+      group_folder: 'other-group',
+      chat_jid: 'other@g.us',
+      prompt: 'do the thing',
+      schedule_type: 'once',
+      schedule_value: FIXED_NEXT_RUN_ONCE,
+      context_mode: 'group',
+      next_run: FIXED_NEXT_RUN_ONCE,
+      status: 'active',
+      created_at: FIXED_CREATED_AT,
+      created_by_role: 'main_agent',
+    });
+    createTask({
+      id: 'sibling-third-group',
+      group_folder: 'third-group',
+      chat_jid: 'third@g.us',
+      prompt: 'unrelated',
+      schedule_type: 'once',
+      schedule_value: FIXED_NEXT_RUN_ONCE,
+      context_mode: 'group',
+      next_run: FIXED_NEXT_RUN_ONCE,
+      status: 'active',
+      created_at: FIXED_CREATED_AT,
+      created_by_role: 'main_agent',
+    });
+    expect(getTaskById('heartbeat-other-group')).toBeDefined();
+    expect(getTaskById('oneoff-other-group')).toBeDefined();
+    expect(getTaskById('sibling-third-group')).toBeDefined();
+
+    await processTaskIpc(
+      { type: 'unregister_group', jid: 'other@g.us' },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // Tasks for the unregistered folder are gone…
+    expect(getTaskById('heartbeat-other-group')).toBeUndefined();
+    expect(getTaskById('oneoff-other-group')).toBeUndefined();
+    // …sibling group's task survives.
+    expect(getTaskById('sibling-third-group')).toBeDefined();
+    // Registration itself was removed too.
+    expect(getRegisteredGroup('other@g.us')).toBeUndefined();
   });
 });
 

@@ -751,6 +751,54 @@ Use available_groups.json to find the JID for a group. The folder name must be c
 );
 
 server.tool(
+  'unregister_group',
+  `Remove a chat/group from the registry so the agent stops responding there. Main group only.
+
+Inverse of \`register_group\` (#159). Removes both the SQLite \`registered_groups\` row AND the JID's authoritative entry in \`available_groups.json\` in one call. The on-disk \`groups/<folder>/\` directory (CLAUDE.md, MEMORY.md, scheduled-task workspace) is left intact — operators delete that manually if/when they want a clean slate.
+
+Refuses to unregister the main group itself (losing the main registration mid-runtime would leave the orchestrator without an IPC path to recreate it). No-op when the JID isn't registered.`,
+  {
+    jid: z
+      .string()
+      .trim()
+      .min(1)
+      .describe(
+        'The chat JID of the registered group to remove (e.g., "tg:1698969", "120363336345536173@g.us"). Whitespace-only rejected.',
+      ),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can unregister groups.',
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    const data = {
+      type: 'unregister_group',
+      jid: args.jid,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Unregister requested for ${args.jid}. (No-op if the JID wasn't registered. The on-disk groups/<folder>/ directory is preserved — delete manually if no longer needed.)`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
   'set_trusted',
   `Flip a registered group's \`trusted\` flag without re-stating its other parameters. Main group only.
 

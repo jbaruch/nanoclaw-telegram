@@ -321,6 +321,22 @@ function createSchema(database: Database.Database): void {
       `);
     })();
   }
+
+  // One-shot cleanup (#159): drop the dormant `tg:1698969` /
+  // `telegram_main` row. Predates `telegram_swarm` and never appeared in
+  // any container's `available_groups.json` — the spawner ignores it
+  // because the JSON is authoritative — but it lingered in
+  // `registered_groups` because there was no inverse of `register_group`
+  // until this issue. Anchored by `(jid, folder, is_main)` so it cannot
+  // ever match a current operator-managed row.
+  database
+    .prepare(
+      `DELETE FROM registered_groups
+         WHERE jid = 'tg:1698969'
+           AND folder = 'telegram_main'
+           AND is_main = 1`,
+    )
+    .run();
 }
 
 export function initDatabase(): void {
@@ -1360,6 +1376,28 @@ export function updateGroupTrigger(
   };
   setRegisteredGroup(jid, updated);
   return updated;
+}
+
+/**
+ * Remove a registered_groups row by JID. Returns true if a row was
+ * actually deleted, false if no row matched. Idempotent — repeat calls
+ * after deletion are a no-op and report `false`.
+ *
+ * Caller is responsible for refreshing in-memory state and snapshots —
+ * this function only touches the DB row, mirroring the
+ * `setRegisteredGroup` / `updateGroupTrusted` contract.
+ *
+ * Out of scope: the on-disk `groups/<folder>/` directory. Group state
+ * (CLAUDE.md, MEMORY.md, scheduled-task workspace) survives unregister
+ * — operators delete those manually if/when they want a clean slate.
+ * Forces a deliberate destructive action instead of silently nuking
+ * agent-curated state when the registration churns.
+ */
+export function deleteRegisteredGroup(jid: string): boolean {
+  const result = db
+    .prepare('DELETE FROM registered_groups WHERE jid = ?')
+    .run(jid);
+  return result.changes > 0;
 }
 
 export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {

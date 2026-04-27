@@ -38,6 +38,7 @@ import {
   getAllRegisteredGroups,
   getAllSessions,
   deleteAllSessions,
+  deleteRegisteredGroup,
   deleteSession,
   deleteSessionName,
   getAllTasks,
@@ -379,6 +380,35 @@ function syncNonMainHeartbeatPrompts(): void {
     const heartbeatId = `heartbeat-${group.folder}`;
     if (!getTaskById(heartbeatId)) continue; // don't recreate deleted heartbeats
     syncNonMainHeartbeat(jid, group);
+  }
+}
+
+/**
+ * Drift detector (#159): log every `registered_groups` row whose JID has
+ * no matching `chats` row. The spawner reads `available_groups.json`
+ * (which is rebuilt from `getAllChats()`) so a row missing from `chats`
+ * is silently ignored at runtime — exactly the dormant-row failure mode
+ * #159's one-shot cleanup addressed for `tg:1698969` / `telegram_main`.
+ *
+ * Read-only by design: future operator-introduced drift gets surfaced
+ * for review (operator can resolve it via `unregister_group`) instead
+ * of being auto-deleted at startup. Auto-delete would make recovery
+ * from a transient `chats` outage (e.g. a partial DB restore that
+ * truncated `chats` but kept `registered_groups`) catastrophic — every
+ * registered group would vanish on the next restart.
+ */
+function logRegisteredGroupOrphans(): void {
+  const knownJids = new Set(getAllChats().map((c) => c.jid));
+  const orphans: Array<{ jid: string; folder: string }> = [];
+  for (const [jid, group] of Object.entries(registeredGroups)) {
+    if (knownJids.has(jid)) continue;
+    orphans.push({ jid, folder: group.folder });
+  }
+  if (orphans.length > 0) {
+    logger.warn(
+      { orphans },
+      'registered_groups rows have no matching chats row — invisible to the spawner. Run unregister_group to clean up if intended.',
+    );
   }
 }
 
@@ -1709,6 +1739,10 @@ async function main(): Promise<void> {
   // post-deploy heartbeat use the current canonical prompt.
   syncNonMainHeartbeatPrompts();
 
+  // Surface registered-but-invisible-to-spawner rows (#159) at startup
+  // so we notice future drift instead of growing dormant rows silently.
+  logRegisteredGroupOrphans();
+
   // Start subsystems (independently of connection handler).
   // Scheduled tasks run through the shared queue under the parallel
   // `maintenance` slot, but they do NOT resume or persist an SDK session
@@ -1767,6 +1801,16 @@ async function main(): Promise<void> {
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
+    unregisterGroup: (jid) => {
+      // Mirror DB delete into the in-memory registry so subsequent
+      // routing decisions stop seeing the JID as registered before any
+      // restart. Same site-of-truth pattern as setGroupTrusted /
+      // setGroupTrigger above. Returns the DB delete's truthy-changes
+      // result so the IPC handler can distinguish "actually removed"
+      // from "wasn't there to begin with" — see #159.
+      delete registeredGroups[jid];
+      return deleteRegisteredGroup(jid);
+    },
     setGroupTrusted: (jid, trusted) => {
       const updated = updateGroupTrusted(jid, trusted);
       if (!updated) return false;
