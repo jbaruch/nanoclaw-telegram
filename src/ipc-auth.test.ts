@@ -101,31 +101,17 @@ beforeEach(() => {
       groups[jid] = group;
       setRegisteredGroup(jid, group);
       // Mock the fs.mkdirSync that registerGroup does
-    },
-    setGroupTrusted: (jid, trusted) => {
-      const updated = updateGroupTrusted(jid, trusted);
-      if (!updated) return false;
-      groups[jid] = updated;
-      return true;
-    },
-    setGroupTrigger: (jid, trigger, requiresTrigger) => {
-      const previous = groups[jid];
-      const updated = updateGroupTrigger(jid, trigger, requiresTrigger);
-      if (!updated) return false;
-      groups[jid] = updated;
 
-      // Mirror src/index.ts setGroupTrigger heartbeat reconciliation so
-      // these tests exercise the same lifecycle the production deps
-      // closure does. Asymmetric: create on flip-to-required, leave-and-
-      // log on flip-to-not-required (no auto-delete).
-      if (!updated.isMain) {
-        const wasRequired = previous?.requiresTrigger !== false;
-        const nowRequired = updated.requiresTrigger !== false;
-        const heartbeatId = `heartbeat-${updated.folder}`;
-        if (!wasRequired && nowRequired && !getTaskById(heartbeatId)) {
+      // Mirror src/index.ts registerGroup heartbeat creation: only fires
+      // when `containerConfig.enableHeartbeat` is explicitly opted in
+      // (#158 — auto-create on `requiresTrigger` was removed because no
+      // group ever had that flag set).
+      if (group.containerConfig?.enableHeartbeat && !group.isMain) {
+        const heartbeatId = `heartbeat-${group.folder}`;
+        if (!getTaskById(heartbeatId)) {
           createTask({
             id: heartbeatId,
-            group_folder: updated.folder,
+            group_folder: group.folder,
             chat_jid: jid,
             prompt: 'mock-heartbeat-prompt',
             schedule_type: 'cron',
@@ -138,6 +124,21 @@ beforeEach(() => {
           });
         }
       }
+    },
+    setGroupTrusted: (jid, trusted) => {
+      const updated = updateGroupTrusted(jid, trusted);
+      if (!updated) return false;
+      groups[jid] = updated;
+      return true;
+    },
+    setGroupTrigger: (jid, trigger, requiresTrigger) => {
+      const updated = updateGroupTrigger(jid, trigger, requiresTrigger);
+      if (!updated) return false;
+      groups[jid] = updated;
+      // Pre-#158, this mock also mirrored a heartbeat-on-flip side
+      // effect. Production no longer touches heartbeats from
+      // setGroupTrigger — trigger config and heartbeat opt-in are
+      // orthogonal — so the mock omits it too.
       return true;
     },
     syncGroups: async () => {},
@@ -1106,6 +1107,56 @@ describe('register_group success', () => {
 
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
   });
+
+  it('register_group does NOT auto-create a heartbeat for a non-main group without enableHeartbeat (#158)', async () => {
+    // Pre-#158, registering any non-main group with `requiresTrigger`
+    // unset (default true) would surprise-create a heartbeat. With the
+    // auto-rule removed, heartbeat creation requires
+    // `containerConfig.enableHeartbeat` to be set explicitly.
+    await processTaskIpc(
+      {
+        type: 'register_group',
+        jid: 'silent@g.us',
+        name: 'Silent',
+        folder: 'silent-group',
+        trigger: '@Andy',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getRegisteredGroup('silent@g.us')).toBeDefined();
+    expect(getTaskById('heartbeat-silent-group')).toBeUndefined();
+  });
+
+  it('register_group with enableHeartbeat creates the non-main heartbeat (#158)', async () => {
+    // Explicit opt-in is the only path that creates a non-main
+    // heartbeat after #158. Verify the row appears with a 15-minute
+    // cron schedule.
+    await processTaskIpc(
+      {
+        type: 'register_group',
+        jid: 'beating@g.us',
+        name: 'Beating',
+        folder: 'beating-group',
+        trigger: '@Andy',
+        containerConfig: { enableHeartbeat: true },
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getRegisteredGroup('beating@g.us')?.containerConfig).toEqual({
+      enableHeartbeat: true,
+    });
+    const heartbeat = getTaskById('heartbeat-beating-group');
+    expect(heartbeat).toBeDefined();
+    expect(heartbeat?.group_folder).toBe('beating-group');
+    expect(heartbeat?.schedule_type).toBe('cron');
+    expect(heartbeat?.schedule_value).toBe('*/15 * * * *');
+  });
 });
 
 // --- set_trusted / set_trigger (#105) ---
@@ -1341,11 +1392,11 @@ describe('set_trigger', () => {
     expect(getRegisteredGroup('never-registered@g.us')).toBeUndefined();
   });
 
-  it('set_trigger flipping requiresTrigger false→true creates the heartbeat task', async () => {
-    // Pre-state: group is in trigger-NOT-required mode and has no
-    // heartbeat task. Production registerGroup only creates heartbeats
-    // for trigger-required groups, so this models a non-main group that
-    // was registered with `requiresTrigger: false`.
+  it('set_trigger flipping requiresTrigger false→true does NOT create a heartbeat task', async () => {
+    // Heartbeat lifecycle is orthogonal to trigger config (#158) — the
+    // only path that creates a non-main heartbeat is registerGroup with
+    // `containerConfig.enableHeartbeat`. Flipping the trigger flag must
+    // not have a side effect on scheduled tasks.
     setRegisteredGroup('other@g.us', {
       ...OTHER_GROUP,
       requiresTrigger: false,
@@ -1365,20 +1416,16 @@ describe('set_trigger', () => {
       deps,
     );
 
-    // After the flip, the heartbeat exists — runtime scheduling now
-    // matches persisted group mode (the gap Codex flagged).
-    const heartbeat = getTaskById('heartbeat-other-group');
-    expect(heartbeat).toBeDefined();
-    expect(heartbeat?.group_folder).toBe('other-group');
-    expect(heartbeat?.schedule_type).toBe('cron');
+    expect(getTaskById('heartbeat-other-group')).toBeUndefined();
   });
 
   it('set_trigger flipping requiresTrigger true→false leaves an existing heartbeat in place', async () => {
-    // Pre-state: trigger-required group with an active heartbeat. The
-    // operator is now disabling trigger-required mode. Auto-deleting
-    // the row would destroy operator state silently — match the
-    // syncNonMainHeartbeatPrompts startup convention and leave the row
-    // alone, only logging the drift.
+    // Pre-state: non-main group with an existing heartbeat row (e.g.
+    // from a pre-#158 auto-create or an explicit opt-in). The operator
+    // is now disabling trigger-required mode. The flip must not
+    // delete the row — heartbeat lifecycle is no longer coupled to
+    // trigger config (#158), and silently destroying operator state
+    // would surprise anyone relying on the row for diagnostics.
     setRegisteredGroup('other@g.us', {
       ...OTHER_GROUP,
       requiresTrigger: true,

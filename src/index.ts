@@ -257,12 +257,18 @@ const UNANSWERED_PRECHECK_SCRIPT =
   'python3 /home/node/.claude/skills/tessl__check-unanswered/scripts/unanswered-precheck.py';
 
 /**
- * Ensure a non-main, trigger-required group has the correct heartbeat
- * task in the DB. Creates it if missing; otherwise, if the stored
- * prompt matches a KNOWN LEGACY version (see
+ * Ensure a non-main group with explicit heartbeat opt-in has the correct
+ * heartbeat task in the DB. Creates it if missing; otherwise, if the
+ * stored prompt matches a KNOWN LEGACY version (see
  * `LEGACY_NON_MAIN_HEARTBEAT_PROMPTS`), rewrites just the prompt via
  * `updateTask`. Custom / unrecognised prompts are left alone — we
  * don't want to clobber an operator's manual tweak on every restart.
+ *
+ * Opt-in is `containerConfig.enableHeartbeat === true`. Pre-#158 this
+ * fired automatically for every `requiresTrigger !== false` non-main
+ * group, but no group has actually had `requires_trigger=1` in the DB,
+ * so the auto-rule was dead code that would surprise-create a heartbeat
+ * the moment somebody flipped the flag. Heartbeats are now explicit.
  *
  * Scope: only `prompt` is migrated for existing tasks. `schedule`,
  * `status`, and `next_run` are preserved as-is. The `script` field is
@@ -274,10 +280,11 @@ const UNANSWERED_PRECHECK_SCRIPT =
  *
  * Called from two places:
  *   - `registerGroup` (IPC register_group flow, when a group joins or
- *     re-registers).
- *   - `syncNonMainHeartbeatPrompts` at startup (iterates already-
- *     registered groups loaded from the DB, since startup doesn't
- *     re-call `registerGroup` for them).
+ *     re-registers — only if `enableHeartbeat` is set).
+ *   - `syncNonMainHeartbeatPrompts` at startup (migrates the prompt of
+ *     any non-main group that already has a heartbeat row, regardless
+ *     of the current opt-in flag — preserves existing rows that
+ *     pre-date #158).
  */
 function syncNonMainHeartbeat(jid: string, group: RegisteredGroup): void {
   const heartbeatId = `heartbeat-${group.folder}`;
@@ -318,7 +325,7 @@ function syncNonMainHeartbeat(jid: string, group: RegisteredGroup): void {
     });
     logger.info(
       { jid, folder: group.folder },
-      'Auto-created heartbeat for trigger-required group',
+      'Auto-created heartbeat for opted-in group',
     );
   } else if (
     existingHeartbeat.prompt !== NON_MAIN_HEARTBEAT_PROMPT &&
@@ -335,13 +342,21 @@ function syncNonMainHeartbeat(jid: string, group: RegisteredGroup): void {
 }
 
 /**
- * Startup migration: iterate every non-main, trigger-required group
- * already in the DB and migrate its heartbeat prompt IF one exists.
- * Does NOT create missing heartbeats — that's intentional. An operator
- * who manually deleted a heartbeat task (to disable automatic checks
- * for a group) would be thwarted every orchestrator restart if startup
- * recreated it. Creation stays bound to the register-group IPC flow,
- * which only fires when a group explicitly joins/re-registers.
+ * Startup migration: iterate every non-main group already in the DB
+ * and migrate its heartbeat prompt IF one exists. Does NOT create
+ * missing heartbeats — that's intentional. An operator who manually
+ * deleted a heartbeat task (to disable automatic checks for a group)
+ * would be thwarted every orchestrator restart if startup recreated
+ * it. Creation stays bound to the register-group IPC flow with an
+ * explicit `enableHeartbeat` opt-in (#158).
+ *
+ * Filter is just `!group.isMain` — the main group's heartbeat is
+ * created and managed separately. Pre-#158 this also gated on
+ * `requiresTrigger !== false`, but since the `requires_trigger` flag
+ * never actually flipped on for any registered group, that check was
+ * dead. Dropping it makes the migration purely "any existing non-main
+ * heartbeat row gets its prompt updated", which is what callers
+ * actually need: backward-compat for rows created by the old auto-rule.
  *
  * Handles the case where orchestrator code upgraded but the group
  * hasn't re-registered via IPC — without this, `syncNonMainHeartbeat`'s
@@ -349,7 +364,7 @@ function syncNonMainHeartbeat(jid: string, group: RegisteredGroup): void {
  * after initial setup.
  */
 function syncNonMainHeartbeatPrompts(): void {
-  // Delegate to `syncNonMainHeartbeat` for each eligible group that
+  // Delegate to `syncNonMainHeartbeat` for each non-main group that
   // already has a heartbeat task — DRY with the register-group code
   // path so a future edit to the migration logic can't silently
   // diverge. The existing-heartbeat guard ABOVE `syncNonMainHeartbeat`
@@ -357,7 +372,7 @@ function syncNonMainHeartbeatPrompts(): void {
   // startup: if an operator deleted the row to disable automatic
   // checks for a group, this startup pass respects that and skips.
   for (const [jid, group] of Object.entries(registeredGroups)) {
-    if (group.requiresTrigger === false || group.isMain) continue;
+    if (group.isMain) continue;
     const heartbeatId = `heartbeat-${group.folder}`;
     if (!getTaskById(heartbeatId)) continue; // don't recreate deleted heartbeats
     syncNonMainHeartbeat(jid, group);
@@ -813,10 +828,14 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     }
   }
 
-  // Auto-create a lightweight heartbeat for trigger-required groups.
-  // These groups have their own container and can only send to their own chat,
-  // preventing cross-group message routing bugs from the main heartbeat.
-  if (group.requiresTrigger !== false && !group.isMain) {
+  // Heartbeat for non-main groups is opt-in via
+  // `containerConfig.enableHeartbeat`. Pre-#158 this auto-fired for every
+  // `requiresTrigger !== false` non-main group, but no group has ever
+  // had `requires_trigger=1` in the DB — the rule was dormant dead code
+  // that would have surprise-created a heartbeat the moment somebody
+  // flipped that flag. Heartbeat is now an explicit, visible config
+  // choice rather than a side-effect of trigger configuration.
+  if (group.containerConfig?.enableHeartbeat && !group.isMain) {
     syncNonMainHeartbeat(jid, group);
   }
 
@@ -1763,38 +1782,14 @@ async function main(): Promise<void> {
       return true;
     },
     setGroupTrigger: (jid, trigger, requiresTrigger) => {
-      const previous = registeredGroups[jid];
       const updated = updateGroupTrigger(jid, trigger, requiresTrigger);
       if (!updated) return false;
       registeredGroups[jid] = updated;
-
-      // Reconcile heartbeat lifecycle when `requiresTrigger` transitions.
-      // Asymmetric, mirroring `setGroupTrusted`'s pattern for `script`:
-      //   - false→true: CREATE the heartbeat if one doesn't exist
-      //     (operator explicitly opted into trigger-required mode via
-      //     this IPC, which is the same intent registerGroup serves).
-      //   - true→false: leave any existing heartbeat in place and log.
-      //     Auto-deletion would silently destroy operator state — they
-      //     might still want the heartbeat for diagnostic reasons. Same
-      //     conservatism `syncNonMainHeartbeatPrompts` applies at startup.
-      // The "required" predicate matches the rest of the file: undefined
-      // counts as required (legacy default), only explicit `false` opts
-      // out. See line 367 for the same shape in registerGroup.
-      if (!updated.isMain) {
-        const wasRequired = previous?.requiresTrigger !== false;
-        const nowRequired = updated.requiresTrigger !== false;
-        if (!wasRequired && nowRequired) {
-          syncNonMainHeartbeat(jid, updated);
-        } else if (wasRequired && !nowRequired) {
-          const heartbeatId = `heartbeat-${updated.folder}`;
-          if (getTaskById(heartbeatId)) {
-            logger.warn(
-              { jid, folder: updated.folder, heartbeatId },
-              'setGroupTrigger: requiresTrigger flipped to false but heartbeat task still exists — delete manually if no longer needed',
-            );
-          }
-        }
-      }
+      // Heartbeat lifecycle is intentionally NOT touched here. Pre-#158
+      // a flip to `requiresTrigger=true` would auto-create a heartbeat
+      // and the inverse flip would log a warning. With heartbeat opt-in
+      // via `containerConfig.enableHeartbeat`, trigger config and
+      // heartbeat are orthogonal — operators change each independently.
       return true;
     },
     syncGroups: async (force: boolean) => {
