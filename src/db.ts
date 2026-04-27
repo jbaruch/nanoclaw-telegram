@@ -894,6 +894,36 @@ export function deleteTask(id: string): void {
   db.prepare('DELETE FROM scheduled_tasks WHERE id = ?').run(id);
 }
 
+/**
+ * Delete completed once-tasks whose last_run is older than maxAgeMs.
+ * Recurring tasks never reach status='completed' (computeNextRun only
+ * returns null for once-tasks), so the schedule_type='once' clause is
+ * defensive. Returns the number of rows removed.
+ */
+export function pruneCompletedTasks(maxAgeMs: number): number {
+  const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+  const rows = db
+    .prepare(
+      `SELECT id FROM scheduled_tasks
+       WHERE status = 'completed'
+         AND schedule_type = 'once'
+         AND last_run IS NOT NULL
+         AND last_run < ?`,
+    )
+    .all(cutoff) as { id: string }[];
+  if (rows.length === 0) return 0;
+  const deleteLogs = db.prepare('DELETE FROM task_run_logs WHERE task_id = ?');
+  const deleteRow = db.prepare('DELETE FROM scheduled_tasks WHERE id = ?');
+  const tx = db.transaction((ids: string[]) => {
+    for (const id of ids) {
+      deleteLogs.run(id);
+      deleteRow.run(id);
+    }
+  });
+  tx(rows.map((r) => r.id));
+  return rows.length;
+}
+
 export function getDueTasks(): ScheduledTask[] {
   const now = new Date().toISOString();
   return db

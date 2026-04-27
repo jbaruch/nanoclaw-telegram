@@ -24,10 +24,13 @@ import {
   getLastBotMessageTimestamp,
   getSession,
   getTaskById,
+  pruneCompletedTasks,
   setSession,
   storeChatMetadata,
+  updateTaskAfterRun,
 } from './db.js';
 import {
+  COMPLETED_TASK_TTL_MS,
   _resetSchedulerLoopForTests,
   applyComputeNextRunRemediation,
   computeNextRun,
@@ -832,5 +835,75 @@ describe('task scheduler', () => {
     const offset =
       (new Date(nextRun!).getTime() - new Date(scheduledTime).getTime()) % ms;
     expect(offset).toBe(0);
+  });
+
+  it('pruneCompletedTasks removes once-tasks whose last_run is older than TTL', () => {
+    const t0 = new Date('2026-04-01T00:00:00.000Z').getTime();
+    vi.setSystemTime(t0);
+    createTask({
+      id: 'old-completed',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'old',
+      schedule_type: 'once',
+      schedule_value: new Date(t0).toISOString(),
+      context_mode: 'isolated',
+      next_run: new Date(t0).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    // Mimic scheduler's terminal write-back: nextRun=null marks it completed
+    // and stamps last_run with the current (mocked) time.
+    updateTaskAfterRun('old-completed', null, 'ok');
+
+    // Fast-forward past the TTL boundary; prune should now match.
+    vi.setSystemTime(t0 + COMPLETED_TASK_TTL_MS + 60_000);
+
+    const removed = pruneCompletedTasks(COMPLETED_TASK_TTL_MS);
+    expect(removed).toBe(1);
+    expect(getTaskById('old-completed')).toBeUndefined();
+  });
+
+  it('pruneCompletedTasks preserves once-tasks completed within the TTL window', () => {
+    createTask({
+      id: 'recent-completed',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'recent',
+      schedule_type: 'once',
+      schedule_value: '2026-01-01T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: '2026-01-01T00:00:00.000Z',
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    updateTaskAfterRun('recent-completed', null, 'ok');
+
+    const removed = pruneCompletedTasks(COMPLETED_TASK_TTL_MS);
+    expect(removed).toBe(0);
+    expect(getTaskById('recent-completed')).toBeDefined();
+  });
+
+  it('pruneCompletedTasks never touches active tasks regardless of age', () => {
+    const old = new Date(Date.now() - COMPLETED_TASK_TTL_MS * 10).toISOString();
+    createTask({
+      id: 'stale-active',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'still active',
+      schedule_type: 'interval',
+      schedule_value: '60000',
+      context_mode: 'isolated',
+      next_run: old,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    const removed = pruneCompletedTasks(COMPLETED_TASK_TTL_MS);
+    expect(removed).toBe(0);
+    expect(getTaskById('stale-active')).toBeDefined();
   });
 });
