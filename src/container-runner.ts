@@ -1352,10 +1352,12 @@ function buildContainerArgs(
     }
   }
   const secretEnvFile = buildSecretEnvFile(secretEnv);
-  // Insert env-file BEFORE other -e flags so docker's left-to-right
-  // override semantics let a later `-e` override (we don't currently
-  // do that for secrets, but the ordering keeps the door open without
-  // surprising future code).
+  // Position of `--env-file` in argv is irrelevant for override
+  // semantics — docker resolves `-e` over `--env-file` regardless of
+  // order. We append here for readability of the assembled command;
+  // a future caller adding a non-secret `-e` after this point won't
+  // accidentally override a secret because the names don't overlap
+  // (SECRET_CONTAINER_VARS membership is the partition rule).
   if (secretEnvFile) args.push(...secretEnvFile.args);
 
   // Select which model + effort the agent-runner's SDK query() uses.
