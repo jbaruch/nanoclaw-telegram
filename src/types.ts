@@ -31,6 +31,14 @@ export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
   trusted?: boolean; // Trusted groups get limited credentials (e.g. voice transcription)
+  /**
+   * Opt this non-main group into the 15-min unanswered-message heartbeat.
+   * Default: undefined / false — no heartbeat. The main group always gets
+   * a heartbeat regardless of this flag (handled separately in
+   * `registerGroup`). Made explicit by #158 to kill the historical
+   * "trigger-required → auto-heartbeat" coupling.
+   */
+  enableHeartbeat?: boolean;
 }
 
 export interface RegisteredGroup {
