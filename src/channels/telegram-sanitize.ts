@@ -113,13 +113,19 @@ function htmlEscapeAttr(s: string): string {
  * — see #160 for the production sighting.
  *
  * Deliberately narrow: only the four entities Telegram doesn't decode
- * in content. `&amp;`, `&lt;`, `&gt;` stay encoded — Telegram decodes
- * those itself, and decoding them here would let an agent that wrote
- * `&lt;script&gt;` smuggle real `<` and `>` characters into the
- * sanitizer (which would then NOT re-escape them, since Phase 1b
- * looks for tag-shaped tokens like `<foo>` — a bare `<` inside text
- * survives). Ordering: this runs BEFORE Phase 0 so the decoded
- * content reaches the rest of the pipeline as raw chars.
+ * itself in content. `&amp;`, `&lt;`, `&gt;` stay encoded for two
+ * reasons: (1) Telegram decodes them itself when rendering, so the
+ * user sees the right characters either way; (2) decoding `&lt;` /
+ * `&gt;` here would inject raw `<` / `>` into the pipeline. Phase 1b
+ * catches tag-SHAPED tokens (`<word…>`) and escapes them, but
+ * non-tag patterns like `<3` or `<-x>` slip past Phase 1b's regex
+ * and end up as literal `<` in the output, which Telegram's HTML
+ * parser rejects as malformed and falls back to raw-text send.
+ * Leaving the three Telegram-decoded entities encoded end-to-end
+ * keeps the output well-formed.
+ *
+ * Ordering: this runs BEFORE Phase 0 so the decoded content reaches
+ * the rest of the pipeline as raw chars.
  */
 function decodeAgentEntities(s: string): string {
   return s
