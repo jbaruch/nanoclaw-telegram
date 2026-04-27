@@ -531,6 +531,16 @@ describe('buildVolumeMounts — untrusted group isolation', () => {
       path.join(globalDir, 'SOUL-untrusted.md'),
       '# Untrusted SOUL',
     );
+    // Seed thin CLAUDE.md trust-tier templates so the mount layer's
+    // existsSync gate passes (per #153).
+    fs.writeFileSync(
+      path.join(globalDir, 'CLAUDE.md'),
+      '**THIS IS A TRUSTED GROUP.**\n',
+    );
+    fs.writeFileSync(
+      path.join(globalDir, 'CLAUDE-untrusted.md'),
+      '**THIS IS AN UNTRUSTED GROUP.**\n',
+    );
   });
 
   it('/workspace/group mount is read-only for untrusted groups', () => {
@@ -602,6 +612,34 @@ describe('buildVolumeMounts — untrusted group isolation', () => {
     }
   });
 
+  it('/workspace/group/CLAUDE.md mounts the untrusted template, readonly (fixes #153 for untrusted)', () => {
+    const originalCwd = process.cwd();
+    process.chdir(PROJECT_DIR);
+    try {
+      const mounts = buildVolumeMounts(
+        makeUntrustedGroup(),
+        false,
+        'chatA@g.us',
+      );
+      const claudeMdMount = mounts.find(
+        (m) => m.containerPath === '/workspace/group/CLAUDE.md',
+      );
+      expect(claudeMdMount).toBeDefined();
+      expect(claudeMdMount!.hostPath).toBe(
+        path.join(GROUPS_DIR, 'global', 'CLAUDE-untrusted.md'),
+      );
+      expect(claudeMdMount!.readonly).toBe(true);
+      // Critically: NOT the per-group CLAUDE.md (which is the bug source
+      // — that copy was made once at registration and never reconciled
+      // on trust flips).
+      expect(claudeMdMount!.hostPath).not.toBe(
+        path.join(GROUPS_DIR, 'untrusted-group', 'CLAUDE.md'),
+      );
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
   it('untrusted groups get SOUL-untrusted.md, not the full global dir', () => {
     const originalCwd = process.cwd();
     process.chdir(PROJECT_DIR);
@@ -624,6 +662,94 @@ describe('buildVolumeMounts — untrusted group isolation', () => {
         (m) => m.containerPath === '/workspace/global',
       );
       expect(globalDirMount).toBeUndefined();
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Test 4 — trusted (non-main) group gets the trusted CLAUDE.md template
+// mounted readonly over the writable group folder. Same #153 fix as the
+// untrusted case, different source file. The mount layering means the
+// agent can write anywhere in /workspace/group EXCEPT CLAUDE.md.
+// -----------------------------------------------------------------------------
+describe('buildVolumeMounts — trusted group CLAUDE.md mount', () => {
+  function makeTrustedGroup(): RegisteredGroup {
+    return {
+      name: 'Trusted',
+      folder: 'trusted-group',
+      trigger: '@T',
+      added_at: new Date().toISOString(),
+      containerConfig: { trusted: true },
+    };
+  }
+
+  beforeEach(() => {
+    seedMessagesDb();
+    fs.mkdirSync(path.join(GROUPS_DIR, 'trusted-group'), { recursive: true });
+    const globalDir = path.join(GROUPS_DIR, 'global');
+    fs.mkdirSync(globalDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(globalDir, 'CLAUDE.md'),
+      '**THIS IS A TRUSTED GROUP.**\n',
+    );
+    fs.writeFileSync(
+      path.join(globalDir, 'CLAUDE-untrusted.md'),
+      '**THIS IS AN UNTRUSTED GROUP.**\n',
+    );
+  });
+
+  it('/workspace/group/CLAUDE.md mounts the trusted template, readonly', () => {
+    const originalCwd = process.cwd();
+    process.chdir(PROJECT_DIR);
+    try {
+      const mounts = buildVolumeMounts(makeTrustedGroup(), false, 'chatT@g.us');
+      const claudeMdMount = mounts.find(
+        (m) => m.containerPath === '/workspace/group/CLAUDE.md',
+      );
+      expect(claudeMdMount).toBeDefined();
+      expect(claudeMdMount!.hostPath).toBe(
+        path.join(GROUPS_DIR, 'global', 'CLAUDE.md'),
+      );
+      expect(claudeMdMount!.readonly).toBe(true);
+      expect(claudeMdMount!.hostPath).not.toBe(
+        path.join(GROUPS_DIR, 'global', 'CLAUDE-untrusted.md'),
+      );
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('/workspace/group folder mount stays writable for trusted (CLAUDE.md is the only readonly file)', () => {
+    const originalCwd = process.cwd();
+    process.chdir(PROJECT_DIR);
+    try {
+      const mounts = buildVolumeMounts(makeTrustedGroup(), false, 'chatT@g.us');
+      const groupFolderMount = mounts.find(
+        (m) => m.containerPath === '/workspace/group',
+      );
+      expect(groupFolderMount).toBeDefined();
+      expect(groupFolderMount!.readonly).toBe(false);
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('CLAUDE.md mount is positioned AFTER the group folder mount so the file shadow takes effect', () => {
+    const originalCwd = process.cwd();
+    process.chdir(PROJECT_DIR);
+    try {
+      const mounts = buildVolumeMounts(makeTrustedGroup(), false, 'chatT@g.us');
+      const folderIdx = mounts.findIndex(
+        (m) => m.containerPath === '/workspace/group',
+      );
+      const fileIdx = mounts.findIndex(
+        (m) => m.containerPath === '/workspace/group/CLAUDE.md',
+      );
+      expect(folderIdx).toBeGreaterThanOrEqual(0);
+      expect(fileIdx).toBeGreaterThanOrEqual(0);
+      expect(fileIdx).toBeGreaterThan(folderIdx);
     } finally {
       process.chdir(originalCwd);
     }

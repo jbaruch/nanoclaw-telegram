@@ -29,6 +29,7 @@ import {
   sanitizeToolResponse,
   shouldDenyTaskOutputBlock,
 } from './poison-defense.js';
+import { buildSubagentRuleFilePaths } from './subagent-prompt.js';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -574,20 +575,23 @@ async function runQuery(
   let lastStreamEmit = 0;
   const STREAM_THROTTLE_MS = 300;
 
-  // Load SOUL.md and global CLAUDE.md into systemPrompt.append so they survive
+  // Load SOUL.md and FORMATTING.md into systemPrompt.append so they survive
   // compaction. The SDK re-injects system prompt content every turn — behavioral
   // instructions placed here won't drift after long conversations or compaction.
   // NOTE: /workspace/global/SOUL.md resolves to the correct file per trust tier —
   // trusted containers mount the full SOUL.md, untrusted mount SOUL-untrusted.md
   // at the same path. No trust check needed here; the mount layer handles it.
+  // Per-group CLAUDE.md is no longer loaded here (it's a thin trust-marker
+  // + @import pointer post-#153) — the imported targets (SOUL/FORMATTING)
+  // are loaded directly so they make it into the persistent system prompt.
   const soulMdPath = '/workspace/global/SOUL.md';
-  const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
+  const formattingMdPath = '/workspace/global/FORMATTING.md';
   const appendParts: string[] = [];
   if (fs.existsSync(soulMdPath)) {
     appendParts.push(fs.readFileSync(soulMdPath, 'utf-8'));
   }
-  if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
-    appendParts.push(fs.readFileSync(globalClaudeMdPath, 'utf-8'));
+  if (fs.existsSync(formattingMdPath)) {
+    appendParts.push(fs.readFileSync(formattingMdPath, 'utf-8'));
   }
   const systemPromptAppend =
     appendParts.length > 0 ? appendParts.join('\n\n---\n\n') : undefined;
@@ -688,13 +692,17 @@ async function runQuery(
     'Report results via mcp__nanoclaw__send_message.',
   ];
 
-  // Load rules chain: CLAUDE.md → AGENTS.md → .tessl/RULES.md
-  const ruleFiles = [
-    '/workspace/group/CLAUDE.md',
-    '/workspace/group/.tessl/RULES.md',
+  // Build the rule/behavior chain. Group CLAUDE.md is now a thin
+  // pointer (post-#153), so loading it would only inject @import lines
+  // as raw text — this loader doesn't resolve @imports. The helper
+  // enumerates the imported targets directly and adds main-only files
+  // (project-root RULES.md + ADMIN.md) when the container is main.
+  // See `subagent-prompt.ts` for unit tests covering the branching.
+  const ruleFiles = buildSubagentRuleFilePaths({
+    isMain: !!containerInput.isMain,
     soulMdPath,
-    globalClaudeMdPath,
-  ];
+    formattingMdPath,
+  });
   for (const rulePath of ruleFiles) {
     if (fs.existsSync(rulePath)) {
       const content = fs.readFileSync(rulePath, 'utf-8').trim();

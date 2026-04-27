@@ -386,7 +386,7 @@ For each customization:
 4. If the target file has changed significantly from what the guide expects (function removed, file restructured, API changed), flag it and ask the user what to do
 5. Verify the file has no syntax errors or broken imports after each change
 
-For behavior customizations (CLAUDE.md files): copy from the main tree. These are user content, not code.
+For behavior customizations: SOUL.md / SOUL-untrusted.md / FORMATTING.md / MEMORY.md / `groups/main/ADMIN.md` are user content — copy from the main tree. Per-group `CLAUDE.md` files are mounted readonly trust-tier pointers (post-#153) and don't carry user customization; do not copy them.
 
 ## 2.6 Validate in worktree
 

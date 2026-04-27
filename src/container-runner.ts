@@ -407,6 +407,48 @@ export function buildVolumeMounts(
     readonly: !isMain && !group.containerConfig?.trusted,
   });
 
+  // CLAUDE.md trust-tier mount. The per-group folder is no longer the
+  // source of truth for this file — it's a thin pointer (trust marker
+  // + @imports of SOUL/MEMORY/RULES/FORMATTING) that depends on the
+  // CURRENT trust flag. Mounting it from the global directory at every
+  // spawn means a trust flip is reflected on the next message without
+  // any reconciliation step (#153). Mounted readonly so the agent can't
+  // accidentally diverge it from the template; per-group memory now
+  // lives in MEMORY.md (writable for trusted/main, readonly for
+  // untrusted by virtue of the group folder mount above).
+  //
+  // For main the source IS the per-group file (`groups/main/CLAUDE.md`),
+  // so this is a no-op layer that just adds the readonly bit. For
+  // trusted/untrusted the source is the global template, which shadows
+  // any stale per-group file the migration may have left behind.
+  const claudeMdSource = isMain
+    ? path.join(groupDir, 'CLAUDE.md')
+    : group.containerConfig?.trusted
+      ? path.join(GROUPS_DIR, 'global', 'CLAUDE.md')
+      : path.join(GROUPS_DIR, 'global', 'CLAUDE-untrusted.md');
+  if (fs.existsSync(claudeMdSource)) {
+    mounts.push({
+      hostPath: toHostPath(claudeMdSource),
+      containerPath: '/workspace/group/CLAUDE.md',
+      readonly: true,
+    });
+  } else {
+    // Silent fallback would let the container resolve /workspace/group/CLAUDE.md
+    // via the underlying group-folder mount — i.e. whatever stale or customized
+    // copy may still be on disk — which is exactly the #153 drift this fix is
+    // supposed to eliminate. Log loudly so a mis-deployed install is visible
+    // instead of looking healthy until the next trust flip exposes it.
+    logger.warn(
+      {
+        claudeMdSource,
+        groupFolder: group.folder,
+        isMain,
+        trusted: !!group.containerConfig?.trusted,
+      },
+      'CLAUDE.md trust-tier source missing; /workspace/group/CLAUDE.md will fall back to whatever the group folder contains. Run `git pull` and `scripts/migrate-thin-claude-md.ts --apply`.',
+    );
+  }
+
   // Global memory directory (SOUL.md, shared CLAUDE.md).
   // Trusted + main get the full directory. Untrusted get only SOUL-untrusted.md
   // mounted as SOUL.md so core-behavior's "read SOUL.md" still works.
@@ -426,6 +468,20 @@ export function buildVolumeMounts(
       mounts.push({
         hostPath: toHostPath(untrustedSoul),
         containerPath: '/workspace/global/SOUL.md',
+        readonly: true,
+      });
+    }
+    // Untrusted CLAUDE.md @-imports /workspace/global/FORMATTING.md so the
+    // agent picks the right Slack/WA/Telegram/Discord syntax. Mount the
+    // file individually instead of the whole global dir — sharing
+    // FORMATTING.md across trust tiers is safe (it's universal channel
+    // syntax with no owner state in it) but the rest of `global/` stays
+    // off-limits per the existing untrusted boundary.
+    const untrustedFormatting = path.join(globalDir, 'FORMATTING.md');
+    if (fs.existsSync(untrustedFormatting)) {
+      mounts.push({
+        hostPath: toHostPath(untrustedFormatting),
+        containerPath: '/workspace/global/FORMATTING.md',
         readonly: true,
       });
     }
