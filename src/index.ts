@@ -510,12 +510,21 @@ function unlinkJsonlInSlug(
 }
 
 /**
- * @internal Exported for tests only — real callers go through
- *   `nukeSession` which owns the order of operations. The JSDoc here
- *   sits directly above the export so `tsconfig.stripInternal: true`
- *   strips this symbol from the generated `.d.ts` (the `@internal` tag
- *   on the constant declaration above attaches to the const, not to
- *   the function).
+ * Production callers:
+ *   1. `nukeSession` (#100) — owns the multi-step order-of-operations
+ *      wipe (capture sessionIds → kill containers → drop DB rows →
+ *      unlink JSONL).
+ *   2. `startSchedulerLoop` (#193) — injects this as a dependency so
+ *      `runTask`'s post-run finally can wipe the per-run JSONL the
+ *      moment a scheduled run completes (its sessionId is never
+ *      persisted to the DB, so the time-based `cleanup-sessions.sh`
+ *      can't find it later).
+ *
+ * The JSDoc here sits directly above the export so `tsconfig.stripInternal:
+ * true` strips this symbol from the generated `.d.ts` (the `@internal`
+ * tag on the constant declaration above attaches to the const, not to
+ * the function). Tests also import this symbol directly to bypass the
+ * full `nukeSession` path.
  */
 export function wipeSessionJsonl(
   groupFolder: string,
