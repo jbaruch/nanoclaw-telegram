@@ -204,23 +204,27 @@ if [ "$PROMOTED" -eq 0 ]; then
   exit 0
 fi
 
-# --- Local skill review + optimize (fail-fast before PR) ---
-# Runs `tessl skill review --optimize` on each promoted skill before
-# we create the PR. Rationale: catch quality issues locally so the
-# PR starts clean, rather than pushing obvious problems and relying
-# on Copilot to reject them. tessl's auto-apply of common suggestions
-# (shorter prose, clearer structure) tightens the content before a
-# human/bot ever reads it. No frontmatter bypass — every skill gets
-# reviewed; if the review has a bad opinion on a specific skill,
-# argue with it in the PR, don't pre-opt-out.
+# --- Local skill review (read-only; never mutates content) ---
+# Runs `tessl skill review` on each promoted skill before opening the
+# PR. Reports the score so an obviously-broken skill surfaces locally
+# instead of waiting for the post-merge GHA gate at threshold 85.
+#
+# `--optimize` is intentionally NOT used here. Observed 2026-04-27 on
+# nanoclaw-admin#64 (closed): `--optimize --yes` rewrote check-cfps's
+# SKILL.md from 212 → 126 lines, dropped its score 85% → 65%, and
+# removed substantive content the agent author had deliberately kept.
+# We are promoting the *agent's authored content*; rewriting it in
+# transit defeats that contract. If a skill needs prose tightening,
+# do it in source (NAS staging or container side) where the change is
+# visible, reviewable, and survives the next promote.
 #
 # tessl may not be installed in every execution context. Fall back
-# with a warning instead of blocking — Copilot on the PR is the
-# next gate.
+# with a warning instead of blocking — Copilot on the PR + GHA at
+# merge time are the actual gates.
 if command -v tessl >/dev/null 2>&1; then
   for skill_name in $PROMOTED_SKILLS; do
     echo "reviewing: $skill_name"
-    tessl skill review --optimize --yes "$TILE_REPO_DIR/skills/$skill_name"
+    tessl skill review "$TILE_REPO_DIR/skills/$skill_name"
   done
 else
   echo "WARN: tessl not found, skipping local skill review (Copilot + GHA will review)"
