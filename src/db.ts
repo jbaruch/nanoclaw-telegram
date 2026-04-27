@@ -6,6 +6,7 @@ import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
+  ContainerConfig,
   NewMessage,
   RegisteredGroup,
   ScheduledTask,
@@ -317,6 +318,39 @@ export function _initTestDatabase(): void {
 /** @internal - for tests only. */
 export function _closeDatabase(): void {
   db.close();
+}
+
+/**
+ * @internal - for tests only.
+ *
+ * Writes a `registered_groups` row whose `container_config` column is a raw
+ * string the caller controls. Lets tests reproduce the malformed-JSON
+ * condition that the issue-156 fix guards against, without exporting the
+ * module-private `db` handle.
+ */
+export function _writeRawRegisteredGroup(args: {
+  jid: string;
+  name: string;
+  folder: string;
+  trigger: string;
+  added_at: string;
+  container_config: string | null;
+  requires_trigger?: number | null;
+  is_main?: number | null;
+}): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    args.jid,
+    args.name,
+    args.folder,
+    args.trigger,
+    args.added_at,
+    args.container_config,
+    args.requires_trigger ?? null,
+    args.is_main ?? 0,
+  );
 }
 
 /**
@@ -1016,6 +1050,25 @@ export function getAllSessions(): Record<string, Record<string, string>> {
 
 // --- Registered group accessors ---
 
+// Defensive parser shared by getRegisteredGroup and getAllRegisteredGroups.
+// A single malformed row (partial write, manual edit, schema-migration glitch)
+// must not crash startup — getAllRegisteredGroups runs at orchestrator boot.
+function parseContainerConfig(
+  raw: string | null,
+  jid: string,
+): ContainerConfig | undefined {
+  if (!raw) return undefined;
+  try {
+    return JSON.parse(raw) as ContainerConfig;
+  } catch (err) {
+    logger.warn(
+      { err, jid, raw },
+      'registered_groups: invalid container_config JSON, treating as undefined',
+    );
+    return undefined;
+  }
+}
+
 export function getRegisteredGroup(
   jid: string,
 ): (RegisteredGroup & { jid: string }) | undefined {
@@ -1047,9 +1100,7 @@ export function getRegisteredGroup(
     folder: row.folder,
     trigger: row.trigger_pattern,
     added_at: row.added_at,
-    containerConfig: row.container_config
-      ? JSON.parse(row.container_config)
-      : undefined,
+    containerConfig: parseContainerConfig(row.container_config, row.jid),
     requiresTrigger:
       row.requires_trigger === null ? undefined : row.requires_trigger === 1,
     isMain: row.is_main === 1 ? true : undefined,
@@ -1193,9 +1244,7 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
       folder: row.folder,
       trigger: row.trigger_pattern,
       added_at: row.added_at,
-      containerConfig: row.container_config
-        ? JSON.parse(row.container_config)
-        : undefined,
+      containerConfig: parseContainerConfig(row.container_config, row.jid),
       requiresTrigger:
         row.requires_trigger === null ? undefined : row.requires_trigger === 1,
       isMain: row.is_main === 1 ? true : undefined,
