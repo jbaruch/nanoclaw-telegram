@@ -111,11 +111,14 @@ function isReplyToBot(msg: NewMessage): boolean {
 }
 
 let lastTimestamp = '';
-// Nested by groupFolder → sessionName → sessionId. The `default` and
-// `maintenance` slots each maintain their own SDK session chain so that
-// maintenance tasks can resume THEIR prior run rather than inheriting the
-// user-facing container's sessionId (which wouldn't exist in maintenance's
-// per-session .claude/ mount).
+// Nested by groupFolder → sessionName → sessionId. Tracks the user-facing
+// `default` slot's SDK session chain so consecutive inbound messages
+// resume the prior turn. `maintenance` entries may still be present here
+// (e.g. loaded from persisted session state at startup, or written by a
+// pre-#193 build), but scheduled tasks no longer update or resume that
+// slot: they always start a fresh SDK turn (#193) to prevent cross-task
+// `last_result` bleed, and the scheduler wipes their JSONL transcripts
+// immediately after each run completes.
 let sessions: Record<string, Record<string, string>> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
@@ -522,12 +525,21 @@ function unlinkJsonlInSlug(
 }
 
 /**
- * @internal Exported for tests only — real callers go through
- *   `nukeSession` which owns the order of operations. The JSDoc here
- *   sits directly above the export so `tsconfig.stripInternal: true`
- *   strips this symbol from the generated `.d.ts` (the `@internal` tag
- *   on the constant declaration above attaches to the const, not to
- *   the function).
+ * Production callers:
+ *   1. `nukeSession` (#100) — owns the multi-step order-of-operations
+ *      wipe (capture sessionIds → kill containers → drop DB rows →
+ *      unlink JSONL).
+ *   2. `startSchedulerLoop` (#193) — injects this as a dependency so
+ *      `runTask`'s post-run finally can wipe the per-run JSONL the
+ *      moment a scheduled run completes (its sessionId is never
+ *      persisted to the DB, so the time-based `cleanup-sessions.sh`
+ *      can't find it later).
+ *
+ * The JSDoc here sits directly above the export so `tsconfig.stripInternal:
+ * true` strips this symbol from the generated `.d.ts` (the `@internal`
+ * tag on the constant declaration above attaches to the const, not to
+ * the function). Tests also import this symbol directly to bypass the
+ * full `nukeSession` path.
  */
 export function wipeSessionJsonl(
   groupFolder: string,
@@ -1697,10 +1709,15 @@ async function main(): Promise<void> {
   // post-deploy heartbeat use the current canonical prompt.
   syncNonMainHeartbeatPrompts();
 
-  // Start subsystems (independently of connection handler)
+  // Start subsystems (independently of connection handler).
+  // Scheduled tasks run through the shared queue under the parallel
+  // `maintenance` slot, but they do NOT resume or persist an SDK session
+  // chain across runs (#193). Each run gets a fresh sessionId; the
+  // scheduler wipes the JSONL transcript via `wipeSessionJsonl` once
+  // the run completes so the per-slot `.claude/projects/` tree doesn't
+  // accumulate orphan transcripts.
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
-    getSessions: () => sessions,
     queue,
     onProcess: (groupJid, sessionName, proc, containerName, groupFolder) =>
       queue.registerProcess(
@@ -1719,6 +1736,7 @@ async function main(): Promise<void> {
       const text = formatOutbound(rawText, channel.name as ChannelType);
       if (text) await channel.sendMessage(jid, text);
     },
+    wipeSessionJsonl,
   });
   startIpcWatcher({
     sendMessage: (jid, rawText, replyToMessageId) => {
