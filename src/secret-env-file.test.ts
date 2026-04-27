@@ -1,7 +1,21 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import * as crypto from 'crypto';
+
+// Mock crypto so tests can pin `randomBytes` to deterministic values
+// without depending on probabilistic non-collision (testing-standards:
+// "Tests must be deterministic — no self-generated random test data").
+// Default behavior is the real implementation; individual tests use
+// `mockReturnValueOnce(...)` to control specific calls.
+vi.mock('crypto', async () => {
+  const actual = await vi.importActual<typeof import('crypto')>('crypto');
+  return {
+    ...actual,
+    randomBytes: vi.fn(actual.randomBytes),
+  };
+});
 
 import {
   SECRET_CONTAINER_VARS,
@@ -116,14 +130,25 @@ describe('buildSecretEnvFile', () => {
     expect(fs.existsSync(filePath)).toBe(false);
   });
 
-  it('two consecutive calls produce different paths (no collisions)', () => {
-    const a = buildSecretEnvFile({ COMPOSIO_API_KEY: 'sk-a' });
-    const b = buildSecretEnvFile({ COMPOSIO_API_KEY: 'sk-b' });
-    expect(a).not.toBeNull();
-    expect(b).not.toBeNull();
-    tempFilesToCleanup.push(a!.args[1], b!.args[1]);
+  it('uses the random suffix from crypto.randomBytes (deterministic via mock)', () => {
+    // Pin randomBytes to a fixed buffer; assert the resulting path
+    // contains exactly that hex string. Earlier formulation asserted
+    // two random draws never collide — non-deterministic per the
+    // testing-standards rule. This formulation verifies the actual
+    // mapping (suffix sourced from randomBytes) without coupling to
+    // probabilistic behavior.
+    const fixedSuffix = Buffer.from('0123456789abcdef01234567', 'hex');
+    vi.mocked(crypto.randomBytes).mockReturnValueOnce(
+      fixedSuffix as unknown as ReturnType<typeof crypto.randomBytes>,
+    );
 
-    expect(a!.args[1]).not.toBe(b!.args[1]);
+    const result = buildSecretEnvFile({ COMPOSIO_API_KEY: 'sk-pinned' });
+    expect(result).not.toBeNull();
+    tempFilesToCleanup.push(result!.args[1]);
+
+    expect(result!.args[1]).toBe(
+      path.join(os.tmpdir(), `nanoclaw-env-0123456789abcdef01234567`),
+    );
   });
 
   it('writes the env-file before returning so docker can read it immediately', () => {
@@ -140,26 +165,32 @@ describe('buildSecretEnvFile', () => {
 });
 
 describe('buildSecretEnvFile — symlink-race defense', () => {
-  it('refuses to overwrite a pre-existing path (O_EXCL semantics)', () => {
-    // Pre-create a path that buildSecretEnvFile MIGHT try to use. We
-    // can't predict the random suffix, so we exercise the O_EXCL
-    // behavior directly by confirming that opening with the same
-    // flags it uses fails with EEXIST when the path is occupied.
-    const decoyPath = path.join(os.tmpdir(), `nanoclaw-env-${'a'.repeat(24)}`);
-    fs.writeFileSync(decoyPath, 'pre-existing', { mode: 0o644 });
-    tempFilesToCleanup.push(decoyPath);
+  it('throws and leaves a pre-existing path untouched (O_EXCL behavior)', () => {
+    // Pin randomBytes to a known suffix, pre-create the exact path
+    // buildSecretEnvFile will target, then assert the function's
+    // observable result: it throws (refusing to overwrite) AND the
+    // pre-existing content is preserved. Tests the module's outcome,
+    // not raw fs.openSync behavior.
+    const fixedSuffix = Buffer.from('deadbeefdeadbeefdeadbeef', 'hex');
+    vi.mocked(crypto.randomBytes).mockReturnValueOnce(
+      fixedSuffix as unknown as ReturnType<typeof crypto.randomBytes>,
+    );
+    const expectedPath = path.join(
+      os.tmpdir(),
+      `nanoclaw-env-deadbeefdeadbeefdeadbeef`,
+    );
+    fs.writeFileSync(expectedPath, 'pre-existing-decoy', { mode: 0o644 });
+    tempFilesToCleanup.push(expectedPath);
 
-    expect(() => {
-      fs.openSync(
-        decoyPath,
-        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
-        0o600,
-      );
-    }).toThrow(/EEXIST/);
+    expect(() =>
+      buildSecretEnvFile({ COMPOSIO_API_KEY: 'sk-symlink-race' }),
+    ).toThrow(/EEXIST/);
 
-    // Decoy still has its original content — proves the open didn't
-    // truncate or overwrite. (This is the property buildSecretEnvFile
-    // relies on for symlink-race protection.)
-    expect(fs.readFileSync(decoyPath, 'utf8')).toBe('pre-existing');
+    // The pre-existing file is unmodified — buildSecretEnvFile didn't
+    // overwrite or truncate it. This is the symlink-race defense
+    // property: a local attacker can't pre-create the path as a
+    // symlink to elsewhere and have buildSecretEnvFile silently
+    // write the secret through the symlink.
+    expect(fs.readFileSync(expectedPath, 'utf8')).toBe('pre-existing-decoy');
   });
 });
