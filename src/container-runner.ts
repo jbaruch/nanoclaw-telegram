@@ -69,9 +69,21 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
  * (placeholders, non-secret config like AGENT_MODEL, NANOCLAW_CHAT_JID)
  * `-e KEY=value` is fine.
  *
- * Add to this set when introducing a new container env var that carries
- * a real secret. Variables with placeholder values (proxied through
- * OneCLI) are NOT secrets and stay on the command line.
+ * Relationship with the `CONTAINER_VARS` list inside `buildContainerArgs`:
+ * `CONTAINER_VARS` decides WHICH variables get forwarded at all (and is
+ * gated by the trust tier — untrusted groups forward nothing).
+ * `SECRET_CONTAINER_VARS` decides, OF THE FORWARDED ONES, which must
+ * route through the env-file rather than `-e`. The two intentionally
+ * serve different concerns; do not collapse one into the other.
+ *
+ * When introducing a new container env var that carries a real secret:
+ * (1) add it to the local `CONTAINER_VARS` list so it's forwarded, AND
+ * (2) add it here so the value goes through the env-file. Missing
+ * either step leaves the secret either un-forwarded or back on the
+ * command line.
+ *
+ * Variables with placeholder values (proxied through OneCLI) are NOT
+ * secrets and stay on the command line.
  */
 export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
   'COMPOSIO_API_KEY',
@@ -131,10 +143,34 @@ export function buildSecretEnvFile(
     fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
     0o600,
   );
+  // success flag drives finally-block cleanup without a catch-all:
+  // exceptions from writeFileSync/closeSync propagate naturally, and
+  // finally unlinks the on-disk tempfile if the write didn't fully
+  // succeed. Without this, a write failure (disk full, EIO, EDQUOT)
+  // would leak a partial-secret tempfile because the outer caller
+  // never sees a cleanup callback from a throwing buildSecretEnvFile.
+  let writeSucceeded = false;
   try {
     fs.writeFileSync(fd, lines.join('\n') + '\n');
+    writeSucceeded = true;
   } finally {
     fs.closeSync(fd);
+    if (!writeSucceeded) {
+      // unlink failures other than ENOENT are logged but don't mask
+      // the original error — the outer try is propagating the real
+      // cause via finally semantics.
+      try {
+        fs.unlinkSync(tmpPath);
+      } catch (unlinkErr) {
+        const code = (unlinkErr as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT') {
+          logger.warn(
+            { err: unlinkErr, tmpPath },
+            'Failed to clean up secret env-file after write error',
+          );
+        }
+      }
+    }
   }
 
   let cleaned = false;
