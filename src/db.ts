@@ -894,6 +894,89 @@ export function deleteTask(id: string): void {
   db.prepare('DELETE FROM scheduled_tasks WHERE id = ?').run(id);
 }
 
+/**
+ * Delete completed once-tasks older than maxAgeMs.
+ *
+ * Age is measured from `COALESCE(last_run, created_at)` rather than
+ * `last_run` alone. The scheduler pre-advances `status='completed'`
+ * before dispatch (see `task-scheduler.ts`), and `updateTaskAfterRun`
+ * is what actually stamps `last_run`. If a task is marked completed but
+ * the dispatch path fails (container crash, maintenance slot wedged,
+ * task aborted before the streaming callback fires), `last_run` stays
+ * NULL forever — the original `last_run < cutoff` filter would never
+ * match, and the orphan row would linger indefinitely. Falling back to
+ * `created_at` guarantees these rows are eventually pruned by their
+ * own age.
+ *
+ * Trade-off: a once-task scheduled far in advance and only just now
+ * marked completed (with `last_run` NULL because dispatch failed) is
+ * pruned earlier than the user-facing "TTL after completion" intent —
+ * the row could disappear immediately if `created_at` is already past
+ * the cutoff. This is acceptable because (a) such rows were never
+ * visible to the user as completed during normal operation, so there's
+ * no observable regression vs. the case where the task ran and stamped
+ * last_run; (b) the alternative of letting NULL-last_run rows linger
+ * indefinitely (the bug we're fixing) is strictly worse. A future
+ * `completed_at` column would let us preserve the grace window even for
+ * orphans; until then COALESCE is the closest approximation that
+ * doesn't require a schema migration.
+ *
+ * Recurring tasks never reach status='completed' (computeNextRun only
+ * returns null for once-tasks), so the schedule_type='once' clause is
+ * defensive. Returns row count removed.
+ */
+export function pruneCompletedTasks(maxAgeMs: number): number {
+  const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+  const tx = db.transaction((cutoffIso: string): number => {
+    db.prepare(
+      `DELETE FROM task_run_logs
+       WHERE task_id IN (
+         SELECT id FROM scheduled_tasks
+         WHERE status = 'completed'
+           AND schedule_type = 'once'
+           AND COALESCE(last_run, created_at) < ?
+       )`,
+    ).run(cutoffIso);
+    return db
+      .prepare(
+        `DELETE FROM scheduled_tasks
+         WHERE status = 'completed'
+           AND schedule_type = 'once'
+           AND COALESCE(last_run, created_at) < ?`,
+      )
+      .run(cutoffIso).changes;
+  });
+  return tx(cutoff);
+}
+
+/**
+ * Find recurring (cron / interval) tasks that are still `status='active'`
+ * whose age (last_run, falling back to created_at) is older than
+ * `maxAgeMs`. These are NOT pruned — only surfaced so the scheduler can
+ * emit a warn-level log. A dormant cron is a symptom, not garbage: the
+ * row points at a real schedule; what's broken is dispatch (next_run
+ * not advancing, container queue stuck, etc.). Visibility first; humans
+ * decide whether to delete.
+ *
+ * `COALESCE(last_run, created_at) < ?` (vs the original
+ * `last_run IS NULL OR last_run < ?`) prevents false-positive warnings
+ * for freshly-created recurring tasks whose `last_run` is NULL because
+ * they simply haven't been due yet — matching the threshold-based
+ * semantics for the same NULL-last_run shape that `pruneCompletedTasks`
+ * already uses.
+ */
+export function getDormantRecurringTasks(maxAgeMs: number): ScheduledTask[] {
+  const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+  return db
+    .prepare(
+      `SELECT * FROM scheduled_tasks
+       WHERE status = 'active'
+         AND schedule_type IN ('cron', 'interval')
+         AND COALESCE(last_run, created_at) < ?`,
+    )
+    .all(cutoff) as ScheduledTask[];
+}
+
 export function getDueTasks(): ScheduledTask[] {
   const now = new Date().toISOString();
   return db
