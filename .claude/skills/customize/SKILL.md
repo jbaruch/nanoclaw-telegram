@@ -26,7 +26,12 @@ This skill helps users add capabilities or modify behavior. Use AskUserQuestion 
 | `src/config.ts` | Assistant name, trigger pattern, directories |
 | `src/db.ts` | Database initialization and queries |
 | `src/whatsapp-auth.ts` | Standalone WhatsApp authentication script |
-| `groups/CLAUDE.md` | Global memory/persona |
+| `groups/global/SOUL.md` | Global identity / persona (trusted) |
+| `groups/global/SOUL-untrusted.md` | Sanitized identity for untrusted groups |
+| `groups/global/FORMATTING.md` | Channel formatting rules |
+| `groups/global/MEMORY.md` | Global agent memory (cross-group facts) |
+| `groups/main/ADMIN.md` | Main-group operational instructions |
+| `groups/<name>/MEMORY.md` | Per-group writable agent memory |
 
 ## Common Customization Patterns
 
@@ -52,7 +57,7 @@ Questions to ask:
 
 Implementation:
 1. Add MCP server config to the container settings (see `src/container-runner.ts` for how MCP servers are mounted)
-2. Document available tools in `groups/CLAUDE.md`
+2. Document available tools in `groups/main/ADMIN.md` (main-only operational instructions) or in the global `SOUL.md` if every group should know about them
 
 ### Changing Assistant Behavior
 
@@ -61,8 +66,8 @@ Questions to ask:
 - Apply to all groups or specific ones?
 
 Simple changes → edit `src/config.ts`
-Persona changes → edit `groups/CLAUDE.md`
-Per-group behavior → edit specific group's `CLAUDE.md`
+Persona changes → edit `groups/global/SOUL.md` (and `SOUL-untrusted.md` if the change should also surface to untrusted groups)
+Per-group behavior → append to that group's `MEMORY.md` (per-group `CLAUDE.md` is now a thin trust-tier pointer mounted readonly — don't edit it)
 
 ### Adding New Commands
 
@@ -72,7 +77,7 @@ Questions to ask:
 - Does it need new MCP tools?
 
 Implementation:
-1. Commands are handled by the agent naturally — add instructions to `groups/CLAUDE.md` or the group's `CLAUDE.md`
+1. Commands are handled by the agent naturally — for global commands add instructions to `groups/global/SOUL.md`; for main-only operational commands add to `groups/main/ADMIN.md`. Per-group `CLAUDE.md` files are mounted readonly trust-tier pointers — don't edit them.
 2. For trigger-level routing changes, modify `processGroupMessages()` in `src/index.ts`
 
 ### Changing Deployment

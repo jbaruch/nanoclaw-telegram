@@ -780,29 +780,22 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   // Create group folder
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
 
-  // Copy CLAUDE.md template into the new group folder so agents have
-  // identity and instructions from the first run.  (Fixes #1391)
-  // Main: full admin template. Trusted: global template. Untrusted: dedicated template.
-  const groupMdFile = path.join(groupDir, 'CLAUDE.md');
-  if (!fs.existsSync(groupMdFile)) {
-    const isUntrusted = !group.isMain && !group.containerConfig?.trusted;
-    let templateFile: string;
-    if (group.isMain) {
-      templateFile = path.join(GROUPS_DIR, 'main', 'CLAUDE.md');
-    } else if (isUntrusted) {
-      templateFile = path.join(GROUPS_DIR, 'global', 'CLAUDE-untrusted.md');
-    } else {
-      templateFile = path.join(GROUPS_DIR, 'global', 'CLAUDE.md');
-    }
-    if (fs.existsSync(templateFile)) {
-      let content = fs.readFileSync(templateFile, 'utf-8');
-      if (ASSISTANT_NAME !== 'Andy') {
-        content = content.replace(/^# Andy$/m, `# ${ASSISTANT_NAME}`);
-        content = content.replace(/You are Andy/g, `You are ${ASSISTANT_NAME}`);
-      }
-      fs.writeFileSync(groupMdFile, content);
-      logger.info({ folder: group.folder }, 'Created CLAUDE.md from template');
-    }
+  // CLAUDE.md is no longer copied per-group — it's a thin trust-tier
+  // pointer mounted readonly by container-runner.ts at spawn time, so
+  // the trust flag at the moment of spawn picks the right template
+  // every time (fixes #153 by construction). The agent's mutable
+  // per-group memory lives in MEMORY.md; create an empty placeholder
+  // here so the @import in CLAUDE.md resolves on the very first
+  // message instead of the agent seeing a missing file.
+  const memoryMdFile = path.join(groupDir, 'MEMORY.md');
+  if (!fs.existsSync(memoryMdFile)) {
+    fs.writeFileSync(
+      memoryMdFile,
+      `# Memory — ${group.name || group.folder}\n\n` +
+        '_Persistent notes the agent has accumulated about this group. ' +
+        'Append facts the agent should recall in future sessions._\n',
+    );
+    logger.info({ folder: group.folder }, 'Created empty MEMORY.md for group');
   }
 
   // Chown group folder to the container user so the agent can write to it.
