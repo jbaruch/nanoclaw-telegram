@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [Unreleased]
+
+- Hooks epic — `bash-safety-net` PreToolUse hook denies known-destructive Bash commands deterministically (#143). Catalogue covers `rm -rf` on root / mount-root paths (combined and split flags, end-of-options marker, trailing-slash and dot-segment variants), force-push to `main`/`master` (`--force` flag and `+refspec` syntax), `mkfs.*`, raw-disk `dd`, raw block-device redirects, `chmod -R 777`, `chown -R` on mount roots, and the canonical fork bomb. Anchored to command-start positions so prose mentions of the same tokens (e.g. `echo mkfs.ext4 docs.md`) are not flagged.
+
 ## [1.2.54] - 2026-04-26
 
 - [BREAKING] Per-group `CLAUDE.md` is now a thin trust-tier pointer (TRUSTED/UNTRUSTED marker + `@import` to SOUL.md / FORMATTING.md / MEMORY.md / RULES.md) mounted readonly from `groups/global/` at every container spawn (#153). Trust flips are reflected on the next message with no reconciliation step. Identity and behavior live in `groups/global/SOUL.md`; channel formatting in `groups/global/FORMATTING.md`; per-group writable memory in each group's new `MEMORY.md`; main-only operational content in `groups/main/ADMIN.md`. Existing installs run `tsx scripts/migrate-thin-claude-md.ts --apply` on the host to delete vanilla per-group `CLAUDE.md` copies and seed `MEMORY.md`; customized files are flagged for manual reconciliation.

@@ -29,6 +29,7 @@ import {
   sanitizeToolResponse,
   shouldDenyTaskOutputBlock,
 } from './poison-defense.js';
+import { evaluateBashCommand } from './bash-safety-net.js';
 import { buildSubagentRuleFilePaths } from './subagent-prompt.js';
 import { fileURLToPath } from 'url';
 
@@ -345,6 +346,37 @@ function createMcpToolResultSanitizerHook(): HookCallback {
       hookSpecificOutput: {
         hookEventName: 'PostToolUse' as const,
         updatedMCPToolOutput: sanitized,
+      },
+    };
+  };
+}
+
+/**
+ * #143 — bash-safety-net. Block known-destructive Bash commands at the
+ * PreToolUse stage so a model under load can't talk itself into running
+ * `rm -rf /`, force-push to main, mkfs, raw-disk dd, etc. The catalogue
+ * + matching live in `bash-safety-net.ts` so they're unit-testable
+ * without spinning up the SDK.
+ */
+function createBashSafetyNetHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const pre = input as PreToolUseHookInput;
+    if (pre.tool_name !== 'Bash') {
+      return {};
+    }
+    const command = (pre.tool_input as { command?: unknown } | undefined)?.command;
+    const decision = evaluateBashCommand(command);
+    if (!decision.deny) {
+      return {};
+    }
+    log(
+      `PreToolUse: bash-safety-net denied Bash — rule=${decision.matched} reason=${decision.reason}`,
+    );
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: 'deny' as const,
+        permissionDecisionReason: decision.reason ?? 'denied by bash-safety-net',
       },
     };
   };
@@ -833,10 +865,17 @@ async function runQuery(
         // #116 — gate TaskOutput before it can leak the sub-agent
         // transcript. Matcher must be `TaskOutput` (not `mcp__*`) —
         // it's an SDK built-in, not an MCP tool.
+        // #143 — bash-safety-net denies known-destructive Bash
+        // commands. Separate matcher entry because the SDK runs
+        // matchers independently per tool name.
         PreToolUse: [
           {
             matcher: 'TaskOutput',
             hooks: [createTaskOutputBlockGateHook()],
+          },
+          {
+            matcher: 'Bash',
+            hooks: [createBashSafetyNetHook()],
           },
         ],
         // #117 — strip invisible-Unicode + cap byte size on every MCP
@@ -1131,6 +1170,7 @@ async function main(): Promise<void> {
             // single-sourced.
             PreToolUse: [
               { matcher: 'TaskOutput', hooks: [createTaskOutputBlockGateHook()] },
+              { matcher: 'Bash', hooks: [createBashSafetyNetHook()] },
             ],
             PostToolUse: [
               { matcher: 'mcp__.*', hooks: [createMcpToolResultSanitizerHook()] },
