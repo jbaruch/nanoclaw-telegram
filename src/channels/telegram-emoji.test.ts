@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 
-import { normalizeReactionEmoji } from './telegram.js';
+import {
+  normalizeReactionEmoji,
+  _isAllowedReaction,
+  _EMOJI_SHORTCODE_TO_UNICODE,
+} from './telegram.js';
 
 describe('normalizeReactionEmoji — passthrough for valid Unicode', () => {
   it('passes Unicode reactions through unchanged', () => {
@@ -10,6 +14,20 @@ describe('normalizeReactionEmoji — passthrough for valid Unicode', () => {
     expect(normalizeReactionEmoji('🤣')).toBe('🤣');
     expect(normalizeReactionEmoji('💯')).toBe('💯');
     expect(normalizeReactionEmoji('🤷')).toBe('🤷');
+  });
+
+  it('strips U+FE0F (variation selector 16) so emoji-presentation forms match', () => {
+    // Common emoji have two encodings: bare codepoint (`❤`, `☃`)
+    // and a `+ U+FE0F` form for emoji presentation (`❤️`, `☃️`).
+    // Telegram's reaction set uses the bare form; agents and clients
+    // commonly emit the VS16 form. Without the strip these would
+    // fail the .has() gate and fall back to 👍.
+    expect(normalizeReactionEmoji('❤️')).toBe('❤');
+    expect(normalizeReactionEmoji('☃️')).toBe('☃');
+    expect(normalizeReactionEmoji('✍️')).toBe('✍');
+    expect(normalizeReactionEmoji('🤷‍♂️')).toBe('🤷‍♂');
+    expect(normalizeReactionEmoji('🤷‍♀️')).toBe('🤷‍♀');
+    expect(normalizeReactionEmoji('🕊️')).toBe('🕊');
   });
 });
 
@@ -107,103 +125,32 @@ describe('normalizeReactionEmoji — unmapped input', () => {
 // Drift between EMOJI_SHORTCODE_TO_UNICODE and TELEGRAM_ALLOWED_REACTIONS
 // is the failure mode this normalization is supposed to PREVENT — a
 // shortcode that maps to a Unicode char Telegram doesn't accept would
-// still fall back to 👍, just at a different gate. Test by exhaustively
-// running every distinct mapped value through the normalizer and the
-// production gate (`sendReaction`'s `.has` check) via the same channel
-// of access an agent would use.
+// still fall back to 👍, just at a different gate. Test exhaustively by
+// iterating every entry of the actual map (exposed via @internal export)
+// and asserting each value clears the production allowed-reactions
+// predicate.
 
-describe('normalizeReactionEmoji — every mapped Unicode is Telegram-supported', () => {
-  // We can't reach the private TELEGRAM_ALLOWED_REACTIONS Set directly
-  // without changing the module exports. But we CAN drive the
-  // normalize → has chain by feeding the issue-#161 list of known
-  // Telegram-supported reactions through normalize and checking the
-  // round-trip is stable: a Telegram-supported Unicode reaction must
-  // pass through unchanged (TELEGRAM_ALLOWED_REACTIONS.has() short-
-  // circuits in normalizeReactionEmoji). If a future contributor adds
-  // a shortcode that maps to a Unicode char NOT in the allowed set,
-  // this same property test catches it because the new Unicode value
-  // wouldn't pass the .has() gate inside normalizeReactionEmoji's
-  // first branch — it'd fall through to the shortcode lookup, find
-  // nothing, and return the wrong mapping. Catches drift symmetrically.
-  const supportedReactions = [
-    '👍',
-    '👎',
-    '❤',
-    '🔥',
-    '🥰',
-    '👏',
-    '😁',
-    '🤔',
-    '🤯',
-    '😱',
-    '🤬',
-    '😢',
-    '🎉',
-    '🤩',
-    '🤮',
-    '💩',
-    '🙏',
-    '👌',
-    '🕊',
-    '🤡',
-    '🥱',
-    '🥴',
-    '😍',
-    '🐳',
-    '❤‍🔥',
-    '🌚',
-    '🌭',
-    '💯',
-    '🤣',
-    '⚡',
-    '🍌',
-    '🏆',
-    '💔',
-    '🤨',
-    '😐',
-    '🍓',
-    '🍾',
-    '💋',
-    '🖕',
-    '😈',
-    '😴',
-    '😭',
-    '🤓',
-    '👻',
-    '👨‍💻',
-    '👀',
-    '🎃',
-    '🙈',
-    '😇',
-    '😨',
-    '🤝',
-    '✍',
-    '🤗',
-    '🫡',
-    '🎅',
-    '🎄',
-    '☃',
-    '💅',
-    '🤪',
-    '🗿',
-    '🆒',
-    '💘',
-    '🙉',
-    '🦄',
-    '😘',
-    '💊',
-    '🙊',
-    '😎',
-    '👾',
-    '🤷‍♂',
-    '🤷',
-    '🤷‍♀',
-    '😡',
-  ];
-
-  for (const emoji of supportedReactions) {
-    it(`${emoji} round-trips through normalizeReactionEmoji unchanged`, () => {
-      expect(normalizeReactionEmoji(emoji)).toBe(emoji);
+describe('drift invariant — every shortcode maps to a Telegram-allowed reaction', () => {
+  // Iterating Object.entries directly exposes any future addition to
+  // EMOJI_SHORTCODE_TO_UNICODE the moment it lands. A hardcoded list
+  // here would have to be updated alongside, defeating the point of
+  // the invariant.
+  for (const [shortcode, unicode] of Object.entries(
+    _EMOJI_SHORTCODE_TO_UNICODE,
+  )) {
+    it(`'${shortcode}' → '${unicode}' is in TELEGRAM_ALLOWED_REACTIONS`, () => {
+      expect(_isAllowedReaction(unicode)).toBe(true);
     });
   }
+
+  it('every shortcode-mapped Unicode round-trips through normalizeReactionEmoji unchanged', () => {
+    // After mapping, the result must itself be a normalize fixed
+    // point — feeding the Unicode value back in should hit the
+    // first-branch short-circuit and return unchanged. Catches a
+    // map-table bug where someone wrote a non-canonical form that
+    // would re-enter the shortcode lookup loop.
+    for (const unicode of Object.values(_EMOJI_SHORTCODE_TO_UNICODE)) {
+      expect(normalizeReactionEmoji(unicode)).toBe(unicode);
+    }
+  });
 });

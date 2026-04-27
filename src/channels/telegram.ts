@@ -263,21 +263,49 @@ const EMOJI_SHORTCODE_TO_UNICODE: Record<string, string> = {
 /**
  * Normalize a reaction emoji input to a Telegram-supported Unicode
  * character, accepting both shortcodes (`thumbs_up`, `:thumbs_up:`)
- * and raw Unicode (`👍`). Returns the input unchanged if it can't be
- * mapped; the caller (`sendReaction`) then runs the
+ * and raw Unicode (`👍`, `❤️`). Returns the input unchanged if it
+ * can't be mapped; the caller (`sendReaction`) then runs the
  * TELEGRAM_ALLOWED_REACTIONS gate, which falls back to 👍 with a
  * warn log so unmapped inputs are visible rather than silently
  * accepted.
  *
- * Strips surrounding `:` so both `thumbs_up` and `:thumbs_up:` map
- * — Slack-style colon delimiters are common in agent output.
+ * Strips:
+ *   - U+FE0F (variation selector 16) so emoji-presentation forms
+ *     like `❤️`, `☃️`, `✍️`, `🤷‍♂️` match the no-VS16 entries in
+ *     TELEGRAM_ALLOWED_REACTIONS. Telegram's reaction set uses the
+ *     bare codepoints; agents and clients commonly emit the
+ *     VS16-suffixed form.
+ *   - Surrounding `:` so both `thumbs_up` and `:thumbs_up:` map —
+ *     Slack-style colon delimiters are common in agent output.
  */
 export function normalizeReactionEmoji(input: string): string {
-  if (TELEGRAM_ALLOWED_REACTIONS.has(input)) return input;
-  const stripped = input.replace(/^:|:$/g, '');
+  const noVS16 = input.replace(/️/g, '');
+  if (TELEGRAM_ALLOWED_REACTIONS.has(noVS16)) return noVS16;
+  const stripped = noVS16.replace(/^:|:$/g, '');
   const fromShortcode = EMOJI_SHORTCODE_TO_UNICODE[stripped];
   return fromShortcode ?? input;
 }
+
+/**
+ * Predicate exposed for tests so the drift invariant between
+ * EMOJI_SHORTCODE_TO_UNICODE and TELEGRAM_ALLOWED_REACTIONS can be
+ * asserted without exporting the Set itself. Returns true iff the
+ * given Unicode emoji is in Telegram's accepted reaction set.
+ *
+ * @internal
+ */
+export function _isAllowedReaction(emoji: string): boolean {
+  return TELEGRAM_ALLOWED_REACTIONS.has(emoji);
+}
+
+/**
+ * The shortcode → Unicode map exposed for tests so the drift
+ * invariant (every value is in TELEGRAM_ALLOWED_REACTIONS) can be
+ * asserted exhaustively rather than against a hardcoded list.
+ *
+ * @internal
+ */
+export const _EMOJI_SHORTCODE_TO_UNICODE = EMOJI_SHORTCODE_TO_UNICODE;
 
 // Telegram's allowed reaction emoji (as of Bot API 7.x)
 const TELEGRAM_ALLOWED_REACTIONS = new Set([
@@ -1434,10 +1462,12 @@ export class TelegramChannel implements Channel {
     // agents that emit Slack-style names don't silently fall back
     // to 👍 — see #161.
     const normalized = normalizeReactionEmoji(emoji);
-    const validEmoji = TELEGRAM_ALLOWED_REACTIONS.has(normalized)
-      ? normalized
-      : '👍';
-    if (validEmoji !== emoji) {
+    const reactionAllowed = TELEGRAM_ALLOWED_REACTIONS.has(normalized);
+    const validEmoji = reactionAllowed ? normalized : '👍';
+    if (!reactionAllowed) {
+      // Real recoverable issue — caller asked for an emoji Telegram
+      // doesn't support, we're substituting 👍 silently from the
+      // user's perspective. Operators want to see this.
       logger.warn(
         {
           jid,
@@ -1445,11 +1475,16 @@ export class TelegramChannel implements Channel {
           requested: emoji,
           normalized,
           using: validEmoji,
-          mapped: normalized !== emoji,
         },
-        validEmoji === normalized
-          ? 'Telegram reaction emoji normalized from shortcode'
-          : 'Invalid Telegram reaction emoji, falling back to 👍',
+        'Invalid Telegram reaction emoji, falling back to 👍',
+      );
+    } else if (normalized !== emoji) {
+      // Successful normalization (shortcode → Unicode, or VS16
+      // strip). Not a problem — log at debug so production logs
+      // aren't flooded when agents commonly emit shortcodes.
+      logger.debug(
+        { jid, messageId, requested: emoji, normalized },
+        'Telegram reaction emoji normalized to Unicode',
       );
     }
     try {
