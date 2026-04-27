@@ -113,10 +113,12 @@ function isReplyToBot(msg: NewMessage): boolean {
 let lastTimestamp = '';
 // Nested by groupFolder → sessionName → sessionId. Tracks the user-facing
 // `default` slot's SDK session chain so consecutive inbound messages
-// resume the prior turn. The `maintenance` slot is NOT tracked here —
-// scheduled tasks always start a fresh SDK turn (#193) to prevent
-// cross-task `last_result` bleed; their JSONL transcripts are wiped by
-// the scheduler immediately after each run completes.
+// resume the prior turn. `maintenance` entries may still be present here
+// (e.g. loaded from persisted session state at startup, or written by a
+// pre-#193 build), but scheduled tasks no longer update or resume that
+// slot: they always start a fresh SDK turn (#193) to prevent cross-task
+// `last_result` bleed, and the scheduler wipes their JSONL transcripts
+// immediately after each run completes.
 let sessions: Record<string, Record<string, string>> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};

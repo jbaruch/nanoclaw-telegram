@@ -369,7 +369,8 @@ describe('task scheduler', () => {
     // never persisted, neither nukeSession nor cleanup-sessions.sh can
     // find this run's transcript later. The scheduler must call
     // wipeSessionJsonl on every newSessionId observed during the run,
-    // immediately after logTaskRun lands.
+    // from the post-run finally block — i.e. after logTaskRun and the
+    // updateTaskAfterRun bookkeeping have been attempted.
     const MAIN_GROUP = {
       name: 'Main',
       folder: 'main',

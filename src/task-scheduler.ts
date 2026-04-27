@@ -404,9 +404,10 @@ async function runTask(
   // under `data/sessions/<group>/maintenance/.claude/projects/<slug>/`.
   // Because the sessionId is no longer persisted, neither `nukeSession`
   // nor the time-based `cleanup-sessions.sh` script can find these
-  // transcripts to wipe later. Collect every terminal newSessionId we
-  // observe during the run and pass them to `deps.wipeSessionJsonl`
-  // after `logTaskRun` lands — see `SchedulerDependencies` JSDoc.
+  // transcripts to wipe later. Collect every newSessionId observed
+  // during the run (streaming events plus the terminal runContainerAgent
+  // return) and pass them to `deps.wipeSessionJsonl` from the post-run
+  // finally block — see `SchedulerDependencies` JSDoc.
   const observedSessionIds = new Set<string>();
 
   // After the task produces a result, close the container promptly.
