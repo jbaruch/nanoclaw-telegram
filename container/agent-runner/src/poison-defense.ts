@@ -96,7 +96,8 @@ export function sanitizeText(
 }
 
 /**
- * Walks an MCP tool response and sanitizes each `text` field in place.
+ * Walks an MCP tool response and returns a sanitized copy in the same
+ * wire shape — the input object/array is not mutated.
  *
  * Accepts both shapes the MCP wire format produces:
  *   - wrapped:  `{ content: [{ type: 'text', text }, ...] }`
