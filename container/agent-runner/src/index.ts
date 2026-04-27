@@ -52,6 +52,11 @@ import {
   extractLatestInboundId,
 } from './reply-threading.js';
 import { composeAutoContext } from './session-start-context.js';
+import {
+  SilentTurnState,
+  createSilentTurnState,
+  decideSilentTurnAudit,
+} from './silent-turn-audit.js';
 import { buildSubagentRuleFilePaths } from './subagent-prompt.js';
 import { fileURLToPath } from 'url';
 
@@ -370,6 +375,91 @@ function createMcpToolResultSanitizerHook(): HookCallback {
         updatedMCPToolOutput: sanitized,
       },
     };
+  };
+}
+
+/**
+ * Path the silent-turn audit log is appended to. Mounted via the
+ * orchestrator alongside other host-logs.
+ */
+const SILENT_TURN_LOG = '/workspace/host-logs/silent-turns.log';
+
+/**
+ * Extract the LAST `<message id="...">` from a UserPromptSubmit
+ * prompt. Inlined here (rather than importing from reply-threading)
+ * to keep #142 reviewable independently — duplicating two lines is
+ * cheaper than coupling unrelated PRs.
+ */
+function extractTriggeringInboundIdForAudit(prompt: unknown): string | null {
+  if (typeof prompt !== 'string' || prompt.length === 0) {
+    return null;
+  }
+  const re = /<message\b[^>]*\bid="([^"]+)"/g;
+  let last: string | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(prompt)) !== null) {
+    last = m[1];
+  }
+  return last;
+}
+
+/**
+ * #142 — stop-hook-end-of-turn-audit. The most insidious failure
+ * mode: user sends a message, the agent runs a turn, exits — but
+ * never reacts to or replies to the user's actual message. From the
+ * user's view it looks like dropped silence.
+ *
+ * Three callbacks share an in-process state object:
+ *  - `createSilentTurnPromptHook` — UserPromptSubmit seeds
+ *    `triggeringInboundId` and resets the per-turn flags.
+ *  - `createSilentTurnTrackingHook` — PreToolUse on
+ *    `react_to_message` and `send_message` flips
+ *    `reactedToInbound` / `repliedToInbound`.
+ *  - `createSilentTurnStopHook` — Stop consults
+ *    `decideSilentTurnAudit` and appends a JSONL entry to
+ *    `/workspace/host-logs/silent-turns.log` on a silent turn.
+ *
+ * Observability only — never blocks the turn.
+ */
+function createSilentTurnPromptHook(state: SilentTurnState): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const submit = input as UserPromptSubmitHookInput;
+    state.triggeringInboundId = extractTriggeringInboundIdForAudit(submit.prompt);
+    state.turnStartedAtMs = Date.now();
+    state.reactedToInbound = false;
+    state.repliedToInbound = false;
+    state.anySendMessage = false;
+    return {};
+  };
+}
+
+function createSilentTurnTrackingHook(state: SilentTurnState): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const pre = input as PreToolUseHookInput;
+    if (pre.tool_name === 'mcp__nanoclaw__react_to_message') {
+      const args = (pre.tool_input as { messageId?: unknown } | undefined) ?? {};
+      const explicitId = typeof args.messageId === 'string' ? args.messageId : null;
+      // A reaction with no explicit id defaults to the most-recent
+      // message in the chat — which is the triggering inbound. Treat
+      // both shapes as "addressed".
+      if (
+        state.triggeringInboundId &&
+        (explicitId === null || explicitId === state.triggeringInboundId)
+      ) {
+        state.reactedToInbound = true;
+      }
+    } else if (pre.tool_name === 'mcp__nanoclaw__send_message') {
+      const args = (pre.tool_input as { reply_to?: unknown } | undefined) ?? {};
+      state.anySendMessage = true;
+      const replyTo = typeof args.reply_to === 'string' ? args.reply_to : null;
+      if (
+        state.triggeringInboundId &&
+        replyTo === state.triggeringInboundId
+      ) {
+        state.repliedToInbound = true;
+      }
+    }
+    return {};
   };
 }
 
@@ -877,6 +967,67 @@ function createPathHygieneCadenceHook(): HookCallback {
   };
 }
 
+/**
+ * #142 — silent-turn-audit Stop hook. Observability only — never
+ * blocks the turn. If neither a `react_to_message` to the triggering
+ * inbound nor a `send_message` with `reply_to === triggeringInboundId`
+ * landed, append a JSONL entry to /workspace/host-logs/silent-turns.log
+ * for later investigation. Tracking state populated by the prompt
+ * + pretool callbacks above.
+ */
+function createSilentTurnStopHook(
+  state: SilentTurnState,
+  containerInput: ContainerInput,
+): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const stop = input as StopHookInput;
+    const decision = decideSilentTurnAudit({
+      isSubagent: typeof stop.agent_id === 'string' && stop.agent_id.length > 0,
+      isMaintenanceSession: containerInput.sessionName === 'maintenance',
+      isScheduledTask: containerInput.isScheduledTask === true,
+      state,
+    });
+    if (decision.kind !== 'log') {
+      return {};
+    }
+    const auditEntry =
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        chatJid: containerInput.chatJid,
+        groupFolder: containerInput.groupFolder,
+        sessionName: containerInput.sessionName,
+        sessionId: stop.session_id,
+        ...decision.record,
+      }) + '\n';
+    let appendOk = true;
+    try {
+      fs.mkdirSync(path.dirname(SILENT_TURN_LOG), { recursive: true });
+      fs.appendFileSync(SILENT_TURN_LOG, auditEntry);
+    } catch (err) {
+      // Narrow to NodeJS.ErrnoException — host-log mount may be
+      // missing or full. Anything else (TypeError on a malformed
+      // entry, etc.) is a programming bug and propagates.
+      const errno = err as NodeJS.ErrnoException;
+      if (typeof errno.code !== 'string') {
+        throw err;
+      }
+      appendOk = false;
+      log(
+        `silent-turn-audit: failed to append to log (${errno.code}): ${errno.message}`,
+      );
+    }
+    // Only log success when the append actually landed — without
+    // this gate the log line printed even after an EACCES, which
+    // misled investigations into thinking the entry was on disk.
+    if (appendOk) {
+      log(
+        `Stop: silent-turn-audit logged silent turn — inbound=${decision.record.triggeringInboundId}`,
+      );
+    }
+    return {};
+  };
+}
+
 function sanitizeFilename(summary: string): string {
   return summary
     .toLowerCase()
@@ -1086,6 +1237,13 @@ async function runQuery(
   // that — the seed makes the gate strict from t=0).
   replyThreadingState.latestInboundId = extractLatestInboundId(prompt);
   const isMaintenanceSession = containerInput.sessionName === 'maintenance';
+
+  // #142 — silent-turn-audit state shared by the UserPromptSubmit /
+  // PreToolUse / Stop hooks. Lifetime: one runQuery() call.
+  // UserPromptSubmit resets the per-turn flags, so this single state
+  // safely handles the chained turns a MessageStream may carry.
+  const silentTurnState = createSilentTurnState(Date.now());
+  silentTurnState.triggeringInboundId = extractTriggeringInboundIdForAudit(prompt);
 
   // Poll IPC for follow-up messages and _close sentinel during the query
   let ipcPolling = true;
@@ -1386,17 +1544,27 @@ async function runQuery(
         // #137 — seed reply-threading state with the latest inbound id
         // on every new submitted prompt. Pairs with the PreToolUse
         // entry below.
+        // #142 — silent-turn-audit seeds + resets per-turn state on
+        // every new submitted prompt; the Stop hook below evaluates
+        // it.
         UserPromptSubmit: [
           { hooks: [createReactFirstHook(containerInput)] },
           {
             hooks: [createReplyThreadingPromptHook(replyThreadingState)],
           },
+          { hooks: [createSilentTurnPromptHook(silentTurnState)] },
         ],
         // #135 — block end-of-turn messages that surface banned
         // verification excuses without enumerating real attempts.
         // The hook re-runs the turn with a reminder injected.
+        // #142 — Stop hook appends a JSONL entry to silent-turns.log
+        // when the turn ended without acknowledging the triggering
+        // inbound. Observability only — never blocks.
         Stop: [
           { hooks: [createLazyVerificationDetectorHook()] },
+          {
+            hooks: [createSilentTurnStopHook(silentTurnState, containerInput)],
+          },
         ],
         // #116 — gate TaskOutput before it can leak the sub-agent
         // transcript. Matcher must be `TaskOutput` (not `mcp__*`) —
@@ -1414,6 +1582,8 @@ async function runQuery(
         // #139 — suppress duplicate path-hygiene reports within 4h.
         // State is per-runQuery + seeded from the daily-log mtime so
         // cadence persists across container restarts.
+        // #142 — track react / reply on the two MCP tools that
+        // address the inbound.
         PreToolUse: [
           {
             matcher: 'TaskOutput',
@@ -1439,6 +1609,10 @@ async function runQuery(
           {
             matcher: 'mcp__nanoclaw__send_message',
             hooks: [createPathHygieneCadenceHook()],
+          },
+          {
+            matcher: 'mcp__nanoclaw__(react_to_message|send_message)',
+            hooks: [createSilentTurnTrackingHook(silentTurnState)],
           },
         ],
         // #117 — strip invisible-Unicode + cap byte size on every MCP
