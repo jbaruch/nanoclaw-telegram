@@ -279,10 +279,21 @@ const EMOJI_SHORTCODE_TO_UNICODE: Record<string, string> = {
  *     Slack-style colon delimiters are common in agent output.
  */
 export function normalizeReactionEmoji(input: string): string {
+  // Use ️ (variation selector 16) explicitly rather than an
+  // invisible literal char in the regex — invisible chars are easy
+  // to accidentally alter via editor/formatter and impossible to
+  // audit.
   const noVS16 = input.replace(/️/g, '');
   if (TELEGRAM_ALLOWED_REACTIONS.has(noVS16)) return noVS16;
   const stripped = noVS16.replace(/^:|:$/g, '');
-  const fromShortcode = EMOJI_SHORTCODE_TO_UNICODE[stripped];
+  // Guard against prototype pollution: indexing a plain object with
+  // a string like `toString` / `__proto__` returns an inherited
+  // value (function / object) from Object.prototype, not undefined.
+  // Object.hasOwn restricts the lookup to own properties so the
+  // function's string-or-input contract holds for any input.
+  const fromShortcode = Object.hasOwn(EMOJI_SHORTCODE_TO_UNICODE, stripped)
+    ? EMOJI_SHORTCODE_TO_UNICODE[stripped]
+    : undefined;
   return fromShortcode ?? input;
 }
 

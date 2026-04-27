@@ -110,6 +110,19 @@ describe('normalizeReactionEmoji — unmapped input', () => {
     expect(normalizeReactionEmoji('not_a_real_emoji')).toBe('not_a_real_emoji');
   });
 
+  it('returns input unchanged for inherited Object.prototype keys (no proto pollution)', () => {
+    // Indexing a plain object with `toString`, `__proto__`, etc.
+    // returns inherited values from Object.prototype unless guarded.
+    // The own-property check must keep these falling through to the
+    // input-unchanged path. Without the guard `__proto__` would
+    // return `[object Object]` and `toString` would return a
+    // function reference — both violations of the string return.
+    expect(normalizeReactionEmoji('toString')).toBe('toString');
+    expect(normalizeReactionEmoji('__proto__')).toBe('__proto__');
+    expect(normalizeReactionEmoji('hasOwnProperty')).toBe('hasOwnProperty');
+    expect(normalizeReactionEmoji('constructor')).toBe('constructor');
+  });
+
   it('returns input unchanged for unsupported Unicode (issue #161 not_supported list)', () => {
     // These were reported as "Not supported at all" — Telegram has
     // no reaction slot for them. The normalizer should NOT fabricate
