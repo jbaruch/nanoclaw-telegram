@@ -34,6 +34,7 @@ import {
 import { evaluateBashCommand } from './bash-safety-net.js';
 import { detectComposioFidelity } from './composio-fidelity.js';
 import { detectLazyVerification } from './lazy-verification.js';
+import { rewriteMarkdownToHtml } from './markdown-to-html.js';
 import {
   applyReplyThreadingDecision,
   createReplyThreadingState,
@@ -356,6 +357,52 @@ function createMcpToolResultSanitizerHook(): HookCallback {
       hookSpecificOutput: {
         hookEventName: 'PostToolUse' as const,
         updatedMCPToolOutput: sanitized,
+      },
+    };
+  };
+}
+
+/**
+ * #138 — no-markdown-in-send-message. Telegram (and the rest of the
+ * channels routed through `send_message`) renders HTML only. The model
+ * leaks Markdown — `**bold**`, `[label](url)`, `` `code` ``, `- `
+ * bullets — especially under load or after compaction. This hook
+ * auto-rewrites the four common patterns to HTML before delivery.
+ *
+ * Rewriting (rather than denying) is deliberate: a deny just makes
+ * the model re-emit the same tokens and waste a turn. Code-block
+ * regions (``` fences, &lt;pre&gt;, &lt;code&gt;) are passed through
+ * bytewise so the agent can quote raw Markdown samples back at the
+ * user without the hook mangling them.
+ *
+ * Matches `mcp__nanoclaw__send_message` (`text` field) and
+ * `mcp__nanoclaw__send_file` (`caption` field). Both flow to the same
+ * Telegram render path with the same constraints.
+ */
+function createNoMarkdownInSendMessageHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const pre = input as PreToolUseHookInput;
+    const isSendMessage = pre.tool_name === 'mcp__nanoclaw__send_message';
+    const isSendFile = pre.tool_name === 'mcp__nanoclaw__send_file';
+    if (!isSendMessage && !isSendFile) {
+      return {};
+    }
+    const toolInput = (pre.tool_input as Record<string, unknown>) ?? {};
+    const fieldName = isSendMessage ? 'text' : 'caption';
+    const original = toolInput[fieldName];
+    const result = rewriteMarkdownToHtml(original);
+    if (!result.changed) {
+      return {};
+    }
+    log(
+      `PreToolUse: markdown→html ${pre.tool_name} field=${fieldName} ` +
+        `bold=${result.stats.bold} links=${result.stats.links} ` +
+        `code=${result.stats.codeSpans} bullets=${result.stats.bulletLines}`,
+    );
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse' as const,
+        updatedInput: { ...toolInput, [fieldName]: result.out },
       },
     };
   };
@@ -1089,6 +1136,10 @@ async function runQuery(
         // #143 — bash-safety-net denies known-destructive Bash
         // commands. Separate matcher entry because the SDK runs
         // matchers independently per tool name.
+        // #138 — auto-rewrite Markdown to HTML on send_message /
+        // send_file before delivery. Matcher restricts the regex sweep
+        // to those two MCP tools so unrelated MCP traffic isn't paid
+        // for on every call.
         // #137 — deny standalone send_message while the latest inbound
         // is unanswered. Matcher restricts to send_message so unrelated
         // MCP traffic isn't paid for on every call.
@@ -1100,6 +1151,10 @@ async function runQuery(
           {
             matcher: 'Bash',
             hooks: [createBashSafetyNetHook()],
+          },
+          {
+            matcher: 'mcp__nanoclaw__send_(message|file)',
+            hooks: [createNoMarkdownInSendMessageHook()],
           },
           {
             matcher: 'mcp__nanoclaw__send_message',
@@ -1411,6 +1466,10 @@ async function main(): Promise<void> {
             PreToolUse: [
               { matcher: 'TaskOutput', hooks: [createTaskOutputBlockGateHook()] },
               { matcher: 'Bash', hooks: [createBashSafetyNetHook()] },
+              {
+                matcher: 'mcp__nanoclaw__send_(message|file)',
+                hooks: [createNoMarkdownInSendMessageHook()],
+              },
             ],
             PostToolUse: [
               {
