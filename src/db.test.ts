@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import {
   _initTestDatabase,
@@ -826,7 +826,12 @@ describe('registered group malformed container_config', () => {
     }
   });
 
-  it('treats empty-string container_config as parse failure (corruption indicator), not "no config"', () => {
+  it('treats empty-string container_config as parse failure (corruption indicator), not "no config"', async () => {
+    const loggerMod = await import('./logger.js');
+    const warnSpy = vi
+      .spyOn(loggerMod.logger, 'warn')
+      .mockImplementation(() => loggerMod.logger);
+
     _writeRawRegisteredGroup({
       jid: 'empty@g.us',
       name: 'Empty Config Group',
@@ -835,9 +840,30 @@ describe('registered group malformed container_config', () => {
       added_at: '2024-01-01T00:00:00.000Z',
       container_config: '',
     });
-    const group = getRegisteredGroup('empty@g.us');
-    expect(group).toBeDefined();
-    expect(group?.containerConfig).toBeUndefined();
-    expect(group?.name).toBe('Empty Config Group');
+    _writeRawRegisteredGroup({
+      jid: 'null@g.us',
+      name: 'Null Config Group',
+      folder: 'whatsapp_null',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+      container_config: null,
+    });
+
+    const empty = getRegisteredGroup('empty@g.us');
+    expect(empty?.containerConfig).toBeUndefined();
+    // Behavioral DIFFERENCE vs the old `if (!raw)` shape: empty
+    // string now surfaces as a SyntaxError warning, while the
+    // documented NULL "no config" state stays silent.
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ jid: 'empty@g.us', errName: 'SyntaxError' }),
+      expect.stringContaining('invalid container_config JSON'),
+    );
+
+    warnSpy.mockClear();
+    const nul = getRegisteredGroup('null@g.us');
+    expect(nul?.containerConfig).toBeUndefined();
+    expect(warnSpy).not.toHaveBeenCalled();
+
+    warnSpy.mockRestore();
   });
 });
