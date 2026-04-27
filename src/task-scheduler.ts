@@ -273,17 +273,23 @@ export interface SchedulerDependencies {
   ) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
   /**
-   * Wipe the on-disk JSONL transcript and tool-results dir for a
-   * just-finished scheduled-task SDK session. Each scheduled run is a
-   * fresh SDK turn (#193) — its sessionId is never persisted to the
-   * sessions cache or DB, so `nukeSession` and the time-based
-   * `cleanup-sessions.sh` script cannot find it to wipe later. Without
-   * this hook, every run leaves an orphan JSONL under
-   * `data/sessions/<group>/<maintenance>/.claude/projects/<slug>/`. The
-   * scheduler invokes this on each terminal sessionId observed during
-   * the run, immediately after `logTaskRun` lands. Implemented by the
-   * orchestrator via `wipeSessionJsonl` (delete-while-open is safe on
-   * POSIX, so we don't need to wait for container teardown).
+   * Wipe the on-disk JSONL transcript for a just-finished scheduled-task
+   * SDK session. Each scheduled run is a fresh SDK turn (#193) — its
+   * sessionId is never persisted to the sessions cache or DB, so
+   * `nukeSession` and the time-based `cleanup-sessions.sh` script cannot
+   * find it to wipe later. Without this hook, every run leaves an orphan
+   * JSONL under `data/sessions/<group>/maintenance/.claude/projects/<slug>/`.
+   * The scheduler invokes this on each terminal sessionId observed
+   * during the run, immediately after `logTaskRun` lands. Implemented by
+   * the orchestrator via `wipeSessionJsonl` (delete-while-open is safe
+   * on POSIX, so we don't need to wait for container teardown).
+   *
+   * Scope note: only the `<sessionId>.jsonl` file is unlinked. The
+   * sibling per-session tool-results directory at
+   * `<slug>/<sessionId>/` is NOT removed here — extending the helper
+   * to wipe directories would also change `nukeSession` semantics and
+   * needs its own realpath-containment check + tests, so it's tracked
+   * as a separate disk-hygiene follow-up.
    */
   wipeSessionJsonl: (
     groupFolder: string,
