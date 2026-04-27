@@ -23,6 +23,7 @@ import {
   PostToolUseHookInput,
   PreCompactHookInput,
   PreToolUseHookInput,
+  StopHookInput,
   UserPromptSubmitHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import {
@@ -31,6 +32,7 @@ import {
   shouldDenyTaskOutputBlock,
 } from './poison-defense.js';
 import { evaluateBashCommand } from './bash-safety-net.js';
+import { detectLazyVerification } from './lazy-verification.js';
 import {
   applyReplyThreadingDecision,
   createReplyThreadingState,
@@ -451,6 +453,48 @@ function createReplyThreadingPreToolHook(
         permissionDecision: 'deny' as const,
         permissionDecisionReason: decision.reason,
       },
+    };
+  };
+}
+
+/**
+ * #135 — lazy-verification-detector. The agent has a banned-excuse
+ * catalogue ("site is JS-rendered", "page is thin", "can't access
+ * this", etc.) — each one collapses the moment the agent launches a
+ * real browser tool, hits a domain API, or runs code. Rules are
+ * advisory; the model under load surfaces these excuses anyway.
+ *
+ * The hook fires on `Stop` (the agent is about to ship its turn-end
+ * message). On detection, it returns `decision: 'block'` so the SDK
+ * runs another turn with the injected reminder in scope. The
+ * `last_assistant_message` field on `StopHookInput` carries the text
+ * — no transcript-parse needed.
+ *
+ * Genuine-failure carve-out: when the agent enumerates real attempts
+ * via the "Tried X — got Y; tried A — got B" shape, the message is
+ * allowed through even if a banned phrase appears in it. That shape
+ * is the rule-sanctioned way to report unverifiable.
+ */
+function createLazyVerificationDetectorHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const stop = input as StopHookInput;
+    // Avoid re-blocking ourselves: if the SDK already triggered a
+    // stop-hook re-run, `stop_hook_active` is true and re-blocking
+    // would loop indefinitely.
+    if (stop.stop_hook_active === true) {
+      return {};
+    }
+    const decision = detectLazyVerification(stop.last_assistant_message);
+    if (!decision.block) {
+      return {};
+    }
+    log(
+      `Stop: lazy-verification-detector blocked — phrases=${decision.matches.map((m) => m.phrase).join(',')}`,
+    );
+    return {
+      decision: 'block' as const,
+      reason: decision.reinjection,
+      systemMessage: decision.reinjection,
     };
   };
 }
@@ -958,6 +1002,12 @@ async function runQuery(
           {
             hooks: [createReplyThreadingPromptHook(replyThreadingState)],
           },
+        ],
+        // #135 — block end-of-turn messages that surface banned
+        // verification excuses without enumerating real attempts.
+        // The hook re-runs the turn with a reminder injected.
+        Stop: [
+          { hooks: [createLazyVerificationDetectorHook()] },
         ],
         // #116 — gate TaskOutput before it can leak the sub-agent
         // transcript. Matcher must be `TaskOutput` (not `mcp__*`) —
