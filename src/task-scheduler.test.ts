@@ -90,6 +90,7 @@ describe('task scheduler', () => {
       queue: { enqueueTask } as any,
       onProcess: () => {},
       sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
     });
 
     await vi.advanceTimersByTimeAsync(10);
@@ -344,6 +345,7 @@ describe('task scheduler', () => {
       queue: { enqueueTask, closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
     });
 
     await vi.advanceTimersByTimeAsync(10);
@@ -360,6 +362,82 @@ describe('task scheduler', () => {
     expect(getSession('main', MAINTENANCE_SESSION_NAME)).toBe(
       'prior-maint-session',
     );
+  });
+
+  it('wipes the just-finished JSONL transcript so orphans do not accumulate (#193)', async () => {
+    // Companion to the no-resume test above: because the sessionId is
+    // never persisted, neither nukeSession nor cleanup-sessions.sh can
+    // find this run's transcript later. The scheduler must call
+    // wipeSessionJsonl on every newSessionId observed during the run,
+    // immediately after logTaskRun lands.
+    const MAIN_GROUP = {
+      name: 'Main',
+      folder: 'main',
+      trigger: 'always',
+      added_at: '2026-01-01T00:00:00.000Z',
+      isMain: true,
+    };
+
+    createTask({
+      id: 'wipe-task',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'run',
+      schedule_type: 'once',
+      schedule_value: '2026-01-01T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result: 'ok',
+          newSessionId: 'fresh-turn-session',
+        } as ContainerOutput);
+        return {
+          status: 'success',
+          result: 'ok',
+          newSessionId: 'fresh-turn-session',
+        };
+      },
+    );
+
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+
+    const wipeSpy = vi.fn(() => 1);
+
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': MAIN_GROUP }),
+      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+      wipeSessionJsonl: wipeSpy,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(wipeSpy).toHaveBeenCalledWith(
+      'main',
+      MAINTENANCE_SESSION_NAME,
+      'fresh-turn-session',
+    );
+    // Streaming + terminal both reported the same id; the Set
+    // de-dups so wipeSpy fires exactly once.
+    expect(wipeSpy).toHaveBeenCalledTimes(1);
   });
 
   // --- continuation_cycle_id flow-through (#93/#130) ---
@@ -424,6 +502,7 @@ describe('task scheduler', () => {
       queue: { enqueueTask, closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
     });
 
     await vi.advanceTimersByTimeAsync(10);
@@ -483,6 +562,7 @@ describe('task scheduler', () => {
       queue: { enqueueTask, closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
     });
 
     await vi.advanceTimersByTimeAsync(10);
@@ -547,6 +627,7 @@ describe('task scheduler', () => {
       queue: { enqueueTask, closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
     });
 
     await vi.advanceTimersByTimeAsync(10);
@@ -627,6 +708,7 @@ describe('task scheduler', () => {
       sendMessage: async (_jid: string, text: string) => {
         sentTexts.push(text);
       },
+      wipeSessionJsonl: () => 0,
     });
 
     await vi.advanceTimersByTimeAsync(10);
@@ -705,6 +787,7 @@ describe('task scheduler', () => {
       queue: { enqueueTask, closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
     });
 
     await vi.advanceTimersByTimeAsync(10);
@@ -788,6 +871,7 @@ describe('task scheduler', () => {
       queue: { enqueueTask, closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
     });
 
     await vi.advanceTimersByTimeAsync(10);
@@ -858,6 +942,7 @@ describe('task scheduler', () => {
       queue: { enqueueTask, closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
     });
 
     await vi.advanceTimersByTimeAsync(10);
@@ -927,6 +1012,7 @@ describe('task scheduler', () => {
       sendMessage: async (_jid: string, text: string) => {
         sentTexts.push(text);
       },
+      wipeSessionJsonl: () => 0,
     });
 
     await vi.advanceTimersByTimeAsync(10);
@@ -1155,6 +1241,7 @@ describe('task scheduler', () => {
       queue: { enqueueTask: vi.fn(), closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
     });
 
     // SCHEDULER_POLL_INTERVAL is 60s — advance in poll-sized steps so
@@ -1249,6 +1336,7 @@ describe('task scheduler', () => {
       queue: { enqueueTask: vi.fn(), closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
     });
 
     await vi.advanceTimersByTimeAsync(10);
@@ -1304,6 +1392,7 @@ describe('task scheduler', () => {
       queue: { enqueueTask: vi.fn(), closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
     });
     await vi.advanceTimersByTimeAsync(10);
 
@@ -1365,6 +1454,7 @@ describe('task scheduler', () => {
       queue: { enqueueTask: vi.fn(), closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
     });
     await vi.advanceTimersByTimeAsync(10);
 
@@ -1455,6 +1545,7 @@ describe('task scheduler', () => {
       queue: { enqueueTask: vi.fn(), closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
     });
     // First tick passes the prune gate (lastPruneAt=0). The dormant
     // sweep runs; with the COALESCE fix it must NOT flag this task.

@@ -111,11 +111,12 @@ function isReplyToBot(msg: NewMessage): boolean {
 }
 
 let lastTimestamp = '';
-// Nested by groupFolder → sessionName → sessionId. The `default` and
-// `maintenance` slots each maintain their own SDK session chain so that
-// maintenance tasks can resume THEIR prior run rather than inheriting the
-// user-facing container's sessionId (which wouldn't exist in maintenance's
-// per-session .claude/ mount).
+// Nested by groupFolder → sessionName → sessionId. Tracks the user-facing
+// `default` slot's SDK session chain so consecutive inbound messages
+// resume the prior turn. The `maintenance` slot is NOT tracked here —
+// scheduled tasks always start a fresh SDK turn (#193) to prevent
+// cross-task `last_result` bleed; their JSONL transcripts are wiped by
+// the scheduler immediately after each run completes.
 let sessions: Record<string, Record<string, string>> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
@@ -1673,7 +1674,13 @@ async function main(): Promise<void> {
   // post-deploy heartbeat use the current canonical prompt.
   syncNonMainHeartbeatPrompts();
 
-  // Start subsystems (independently of connection handler)
+  // Start subsystems (independently of connection handler).
+  // Scheduled tasks run through the shared queue under the parallel
+  // `maintenance` slot, but they do NOT resume or persist an SDK session
+  // chain across runs (#193). Each run gets a fresh sessionId; the
+  // scheduler wipes the JSONL transcript via `wipeSessionJsonl` once
+  // the run completes so the per-slot `.claude/projects/` tree doesn't
+  // accumulate orphan transcripts.
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
     queue,
@@ -1694,6 +1701,7 @@ async function main(): Promise<void> {
       const text = formatOutbound(rawText, channel.name as ChannelType);
       if (text) await channel.sendMessage(jid, text);
     },
+    wipeSessionJsonl,
   });
   startIpcWatcher({
     sendMessage: (jid, rawText, replyToMessageId) => {

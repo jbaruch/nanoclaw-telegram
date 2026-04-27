@@ -272,6 +272,24 @@ export interface SchedulerDependencies {
     groupFolder: string,
   ) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
+  /**
+   * Wipe the on-disk JSONL transcript and tool-results dir for a
+   * just-finished scheduled-task SDK session. Each scheduled run is a
+   * fresh SDK turn (#193) — its sessionId is never persisted to the
+   * sessions cache or DB, so `nukeSession` and the time-based
+   * `cleanup-sessions.sh` script cannot find it to wipe later. Without
+   * this hook, every run leaves an orphan JSONL under
+   * `data/sessions/<group>/<maintenance>/.claude/projects/<slug>/`. The
+   * scheduler invokes this on each terminal sessionId observed during
+   * the run, immediately after `logTaskRun` lands. Implemented by the
+   * orchestrator via `wipeSessionJsonl` (delete-while-open is safe on
+   * POSIX, so we don't need to wait for container teardown).
+   */
+  wipeSessionJsonl: (
+    groupFolder: string,
+    sessionName: string,
+    sessionId: string,
+  ) => number;
 }
 
 async function runTask(
@@ -363,6 +381,15 @@ async function runTask(
   // slot, won't block default), but no `resume: sessionId` is passed and
   // no `newSessionId` is persisted on completion. `context_mode` is
   // retained on the schema for future use; it no longer gates SDK resume.
+  //
+  // Disk hygiene: every fresh SDK turn writes a new JSONL transcript
+  // under `data/sessions/<group>/maintenance/.claude/projects/<slug>/`.
+  // Because the sessionId is no longer persisted, neither `nukeSession`
+  // nor the time-based `cleanup-sessions.sh` script can find these
+  // transcripts to wipe later. Collect every terminal newSessionId we
+  // observe during the run and pass them to `deps.wipeSessionJsonl`
+  // after `logTaskRun` lands — see `SchedulerDependencies` JSDoc.
+  const observedSessionIds = new Set<string>();
 
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
@@ -421,7 +448,11 @@ async function runTask(
       async (streamedOutput: ContainerOutput) => {
         // #193: do not persist newSessionId. Each scheduled run is a
         // standalone turn; persisting would re-introduce the cross-task
-        // bleed via the next run's resume.
+        // bleed via the next run's resume. Collect for post-run wipe so
+        // the orphan JSONL doesn't accumulate under the maintenance slot.
+        if (streamedOutput.newSessionId) {
+          observedSessionIds.add(streamedOutput.newSessionId);
+        }
         if (streamedOutput.result) {
           result = streamedOutput.result;
           // Strip <internal> tags — suppress entirely if nothing remains
@@ -539,7 +570,12 @@ async function runTask(
     if (closeTimer) clearTimeout(closeTimer);
 
     // #193: terminal `output.newSessionId` is also discarded — see the
-    // streaming-path comment above. Same fresh-turn invariant.
+    // streaming-path comment above. Same fresh-turn invariant. Also
+    // collected so the post-run wipe catches it even if no streaming
+    // event delivered the same id.
+    if (output.newSessionId) {
+      observedSessionIds.add(output.newSessionId);
+    }
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
@@ -598,6 +634,28 @@ async function runTask(
       ? result.slice(0, 200)
       : 'Completed';
   updateTaskAfterRun(fresh.id, computed.nextRun, resultSummary);
+
+  // #193: wipe the JSONL transcripts created by this run. The sessionId
+  // is never persisted (no resume, no DB row), so without an explicit
+  // wipe here the file accumulates forever under the maintenance slot.
+  // Errors are logged-and-swallowed: a wipe failure must not mask the
+  // task's reported result. Multiple ids are possible if the SDK
+  // re-issued newSessionId mid-run; we wipe all of them.
+  for (const sid of observedSessionIds) {
+    try {
+      deps.wipeSessionJsonl(task.group_folder, MAINTENANCE_SESSION_NAME, sid);
+    } catch (wipeErr) {
+      logger.warn(
+        {
+          taskId: task.id,
+          groupFolder: task.group_folder,
+          sessionId: sid,
+          err: wipeErr instanceof Error ? wipeErr.message : String(wipeErr),
+        },
+        'Failed to wipe scheduled-task JSONL transcript — orphan may accumulate',
+      );
+    }
+  }
 }
 
 let schedulerRunning = false;
