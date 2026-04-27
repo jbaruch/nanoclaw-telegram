@@ -87,7 +87,6 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({}),
-      getSessions: () => ({}),
       queue: { enqueueTask } as any,
       onProcess: () => {},
       sendMessage: async () => {},
@@ -286,7 +285,14 @@ describe('task scheduler', () => {
     expect(getTaskById('cron-broken')?.status).toBe('paused');
   });
 
-  it('maintenance task with context_mode=group uses stored maintenance sessionId and persists newSessionId', async () => {
+  it('scheduled task ignores any cached maintenance sessionId and never persists a new one (#193)', async () => {
+    // Regression for #193: the lunch reminder bled heartbeat-loop
+    // language from a 6-day-old maintenance turn because every
+    // context_mode=group task on a folder shared the same
+    // sessions[folder][maintenance] resume slot. Each scheduled run
+    // must be a fresh SDK turn — even if a prior sessionId is sitting
+    // in the cache, it must NOT be passed in as `resume`, and the
+    // streamed `newSessionId` must NOT be persisted back to the slot.
     const MAIN_GROUP = {
       name: 'Main',
       folder: 'main',
@@ -295,8 +301,6 @@ describe('task scheduler', () => {
       isMain: true,
     };
 
-    // Seed a prior maintenance sessionId in the sessions cache. The
-    // scheduler should read this and pass it into runContainerAgent.
     setSession('main', MAINTENANCE_SESSION_NAME, 'prior-maint-session');
 
     createTask({
@@ -315,8 +319,6 @@ describe('task scheduler', () => {
 
     mockRunContainerAgent.mockImplementation(
       async (_group, _input, _onProc, onOutput) => {
-        // Simulate a streamed success with a new sessionId — this is what
-        // the container-runner reports back after the SDK's query() resolves.
         await onOutput({
           status: 'success',
           result: 'ok',
@@ -339,7 +341,6 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ 'main@g.us': MAIN_GROUP }),
-      getSessions: () => ({ main: { maintenance: 'prior-maint-session' } }),
       queue: { enqueueTask, closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
@@ -347,18 +348,18 @@ describe('task scheduler', () => {
 
     await vi.advanceTimersByTimeAsync(10);
 
-    // The stored prior sessionId was passed in as the resume target.
+    // Container ran in the maintenance slot — but with NO resume target.
     expect(mockRunContainerAgent).toHaveBeenCalled();
     const containerInput = mockRunContainerAgent.mock.calls[0][1];
-    expect(containerInput.sessionId).toBe('prior-maint-session');
+    expect(containerInput.sessionId).toBeUndefined();
     expect(containerInput.sessionName).toBe(MAINTENANCE_SESSION_NAME);
 
-    // The new sessionId from the streaming callback was persisted to the
-    // MAINTENANCE slot (not default).
+    // The seeded prior sessionId is left untouched (no overwrite) and
+    // the streamed newSessionId was NOT persisted — the next run also
+    // starts fresh.
     expect(getSession('main', MAINTENANCE_SESSION_NAME)).toBe(
-      'new-maint-session',
+      'prior-maint-session',
     );
-    expect(getSession('main', 'default')).toBeUndefined();
   });
 
   // --- continuation_cycle_id flow-through (#93/#130) ---
@@ -420,7 +421,6 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ 'main@g.us': MAIN_GROUP }),
-      getSessions: () => ({}),
       queue: { enqueueTask, closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
@@ -480,7 +480,6 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ 'main@g.us': MAIN_GROUP }),
-      getSessions: () => ({}),
       queue: { enqueueTask, closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
@@ -545,7 +544,6 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ 'main@g.us': MAIN_GROUP }),
-      getSessions: () => ({}),
       queue: { enqueueTask, closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
@@ -583,8 +581,6 @@ describe('task scheduler', () => {
     // the first real user message in the chat; in-test we create it
     // explicitly.
     storeChatMetadata(chatJid, '2026-01-01T00:00:00.000Z', 'Main');
-
-    setSession('main', MAINTENANCE_SESSION_NAME, 'prior-maint-session');
 
     createTask({
       id: 'store-msg-task',
@@ -626,7 +622,6 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ [chatJid]: MAIN_GROUP }),
-      getSessions: () => ({ main: { maintenance: 'prior-maint-session' } }),
       queue: { enqueueTask, closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async (_jid: string, text: string) => {
@@ -707,7 +702,6 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ [chatJid]: FRESH_GROUP }),
-      getSessions: () => ({}),
       queue: { enqueueTask, closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
@@ -791,7 +785,6 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ [groupJid]: GROUP_REG, [dmJid]: GROUP_REG }),
-      getSessions: () => ({}),
       queue: { enqueueTask, closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
@@ -862,7 +855,6 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ [chatJid]: GROUP_REG }),
-      getSessions: () => ({}),
       queue: { enqueueTask, closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
@@ -930,7 +922,6 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ [chatJid]: MAIN_GROUP }),
-      getSessions: () => ({}),
       queue: { enqueueTask, closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async (_jid: string, text: string) => {
@@ -1161,7 +1152,6 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({}),
-      getSessions: () => ({}),
       queue: { enqueueTask: vi.fn(), closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
@@ -1256,7 +1246,6 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({}),
-      getSessions: () => ({}),
       queue: { enqueueTask: vi.fn(), closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
@@ -1312,7 +1301,6 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({}),
-      getSessions: () => ({}),
       queue: { enqueueTask: vi.fn(), closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
@@ -1374,7 +1362,6 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({}),
-      getSessions: () => ({}),
       queue: { enqueueTask: vi.fn(), closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},
@@ -1465,7 +1452,6 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({}),
-      getSessions: () => ({}),
       queue: { enqueueTask: vi.fn(), closeStdin: vi.fn() } as never,
       onProcess: () => {},
       sendMessage: async () => {},

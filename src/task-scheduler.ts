@@ -16,7 +16,6 @@ import {
   getTaskById,
   logTaskRun,
   pruneCompletedTasks,
-  setSession,
   storeChatMetadata,
   storeMessage,
   updateTask,
@@ -264,13 +263,6 @@ const lastDormantWarnAt = new Map<string, number>();
 
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
-  /**
-   * Nested session cache: `folder → sessionName → sessionId`.
-   * Scheduled tasks look up the MAINTENANCE slot's sessionId here so
-   * consecutive heartbeat/nightly runs resume their own prior session
-   * chain, not the user-facing default container's.
-   */
-  getSessions: () => Record<string, Record<string, string>>;
   queue: GroupQueue;
   onProcess: (
     groupJid: string,
@@ -362,16 +354,15 @@ async function runTask(
   let result: string | null = null;
   let error: string | null = null;
 
-  // Scheduled tasks resume THEIR OWN session chain from the `maintenance`
-  // slot. The sessions map is keyed by `(groupFolder, sessionName)` —
-  // maintenance has its own per-session `.claude/` mount, so its
-  // sessionIds are stored and resumed separately from the user-facing
-  // default container. `context_mode: 'isolated'` starts fresh each run.
-  const sessions = deps.getSessions();
-  const sessionId =
-    task.context_mode === 'group'
-      ? sessions[task.group_folder]?.[MAINTENANCE_SESSION_NAME]
-      : undefined;
+  // #193: scheduled tasks NEVER resume the SDK session. Every run starts
+  // a fresh turn. Two distinct tasks (a lunch reminder firing minutes
+  // after a heartbeat) used to share `sessions[group][maintenance]` and
+  // the prior turn's terminal message bled into the next run's stream,
+  // cross-attributing `last_result`. Containers still mount the
+  // per-session `.claude/` dir under `MAINTENANCE_SESSION_NAME` (parallel
+  // slot, won't block default), but no `resume: sessionId` is passed and
+  // no `newSessionId` is persisted on completion. `context_mode` is
+  // retained on the schema for future use; it no longer gates SDK resume.
 
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
@@ -393,7 +384,6 @@ async function runTask(
       group,
       {
         prompt: task.prompt,
-        sessionId,
         groupFolder: task.group_folder,
         chatJid: task.chat_jid,
         isMain,
@@ -429,21 +419,9 @@ async function runTask(
           task.group_folder,
         ),
       async (streamedOutput: ContainerOutput) => {
-        // Persist the maintenance session's own sessionId so the NEXT
-        // scheduled task on this group can resume the same chain. Only
-        // for `context_mode: 'group'` tasks — an isolated task wants a
-        // fresh SDK session and its newSessionId would otherwise overwrite
-        // the slot and contaminate the next 'group' task's resume.
-        if (streamedOutput.newSessionId && task.context_mode === 'group') {
-          const groupSessions =
-            sessions[task.group_folder] ?? (sessions[task.group_folder] = {});
-          groupSessions[MAINTENANCE_SESSION_NAME] = streamedOutput.newSessionId;
-          setSession(
-            task.group_folder,
-            MAINTENANCE_SESSION_NAME,
-            streamedOutput.newSessionId,
-          );
-        }
+        // #193: do not persist newSessionId. Each scheduled run is a
+        // standalone turn; persisting would re-introduce the cross-task
+        // bleed via the next run's resume.
         if (streamedOutput.result) {
           result = streamedOutput.result;
           // Strip <internal> tags — suppress entirely if nothing remains
@@ -560,19 +538,8 @@ async function runTask(
 
     if (closeTimer) clearTimeout(closeTimer);
 
-    // Same write-back path for the terminal `output` (non-streaming case).
-    // Same `'group'`-only gate as the streaming path above — don't let an
-    // isolated task overwrite the maintenance slot's session chain.
-    if (output.newSessionId && task.context_mode === 'group') {
-      const groupSessions =
-        sessions[task.group_folder] ?? (sessions[task.group_folder] = {});
-      groupSessions[MAINTENANCE_SESSION_NAME] = output.newSessionId;
-      setSession(
-        task.group_folder,
-        MAINTENANCE_SESSION_NAME,
-        output.newSessionId,
-      );
-    }
+    // #193: terminal `output.newSessionId` is also discarded — see the
+    // streaming-path comment above. Same fresh-turn invariant.
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
