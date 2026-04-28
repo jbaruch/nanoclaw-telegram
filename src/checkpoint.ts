@@ -383,6 +383,23 @@ export function clearCheckpoints(groupDir: string): number {
       continue;
     }
 
+    // Defensive type check: only proceed with realpath+unlink if
+    // the leaf is a regular file. The SDK only writes regular files
+    // here, but a corrupt/weird filesystem state (entry is a
+    // directory, FIFO, socket, block device) would make unlinkSync
+    // throw EISDIR/EPERM/etc. With the throw-on-non-ENOENT
+    // discipline, that throw would abort the loop and skip the
+    // sibling file. Logging-and-skipping malformed entries keeps
+    // the helper resilient and matches the docstring's
+    // "regular file: …" branch.
+    if (!entryStat.isFile()) {
+      logger.warn(
+        { file },
+        'clearCheckpoints: skipping non-file, non-symlink checkpoint entry',
+      );
+      continue;
+    }
+
     // Regular file: realpath containment check before unlink.
     let realFile: string;
     try {

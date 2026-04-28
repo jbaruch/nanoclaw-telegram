@@ -441,4 +441,32 @@ describe('clearCheckpoints (#127)', () => {
       fs.rmSync(outside, { recursive: true, force: true });
     }
   });
+
+  it('skips a malformed non-file, non-symlink checkpoint entry and processes the sibling', () => {
+    // Defensive coverage: if `default.md` is unexpectedly a
+    // directory (corrupt filesystem state, manual operator
+    // mistake, broken interrupted write), `unlinkSync` would
+    // throw EISDIR. With throw-on-non-ENOENT discipline that
+    // would abort the whole loop and skip `previous.md`. The
+    // explicit `entryStat.isFile()` check makes the helper log
+    // the malformed entry and move on to the sibling.
+    const { dir, live, previous } = checkpointPaths(tmpDir);
+    fs.mkdirSync(dir, { recursive: true });
+    // default.md is a DIRECTORY (the malformed case).
+    fs.mkdirSync(live);
+    fs.writeFileSync(path.join(live, 'unexpected.txt'), 'oops');
+    // previous.md is a regular file (the legit case).
+    fs.writeFileSync(previous, '# previous');
+
+    const removed = clearCheckpoints(tmpDir);
+
+    // Only `previous.md` was removable; `default.md` was logged
+    // and skipped.
+    expect(removed).toBe(1);
+    expect(fs.existsSync(previous)).toBe(false);
+    // The malformed dir is left intact for the operator to
+    // inspect — we never attempted unlinkSync on it.
+    expect(fs.existsSync(live)).toBe(true);
+    expect(fs.statSync(live).isDirectory()).toBe(true);
+  });
 });
