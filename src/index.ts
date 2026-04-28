@@ -118,8 +118,9 @@ let lastTimestamp = '';
 // (e.g. loaded from persisted session state at startup, or written by a
 // pre-#193 build), but scheduled tasks no longer update or resume that
 // slot: they always start a fresh SDK turn (#193) to prevent cross-task
-// `last_result` bleed, and the scheduler wipes their JSONL transcripts
-// immediately after each run completes.
+// `last_result` bleed, and the scheduler wipes their on-disk session
+// artifacts (JSONL transcript + tool-results dir) immediately after
+// each run completes.
 let sessions: Record<string, Record<string, string>> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
@@ -1928,9 +1929,9 @@ async function main(): Promise<void> {
   // Scheduled tasks run through the shared queue under the parallel
   // `maintenance` slot, but they do NOT resume or persist an SDK session
   // chain across runs (#193). Each run gets a fresh sessionId; the
-  // scheduler wipes the JSONL transcript via `wipeSessionJsonl` once
-  // the run completes so the per-slot `.claude/projects/` tree doesn't
-  // accumulate orphan transcripts.
+  // scheduler wipes the per-run on-disk artifacts (JSONL transcript +
+  // tool-results dir) via `wipeSessionJsonl` once the run completes so
+  // the per-slot `.claude/projects/` tree doesn't accumulate orphans.
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
     queue,
@@ -2073,10 +2074,12 @@ async function main(): Promise<void> {
       //
       // Per #100, the nuke runs in four steps, in order:
       //   1. Capture the SDK sessionIds we're about to drop (before
-      //      clearing them — once they're gone we can't find the JSONL).
+      //      clearing them — once they're gone we can't find the
+      //      on-disk artifacts).
       //   2. Kill the running container(s) so nothing keeps writing.
       //   3. Delete the session rows from the DB and clear in-memory.
-      //   4. Delete the JSONL transcript files on disk.
+      //   4. Delete the on-disk session artifacts (JSONL transcript
+      //      and the per-session tool-results directory beside it).
       //
       // Without step 4, the next container spawn re-reads whatever poison
       // / stuck plan / corrupt state put the session in a bad state and
@@ -2124,16 +2127,20 @@ async function main(): Promise<void> {
         deleteSessionName(groupFolder, sessionName);
       }
 
-      // Step 4: wipe JSONL transcripts on disk. Delete-while-open is
+      // Step 4: wipe on-disk session artifacts (JSONL transcript +
+      // per-session tool-results directory). Delete-while-open is
       // safe on POSIX (the container's open FD keeps writing to a
       // phantom inode that vanishes on close), so we don't have to wait
-      // for closeStdin to actually terminate the process.
+      // for closeStdin to actually terminate the process. The returned
+      // `count` is the total number of filesystem entries removed: up
+      // to 2 per slug (1 transcript + 1 tool-results dir), summed
+      // across every project-slug subdirectory walked.
       for (const [slot, sessionId] of sessionIdsToWipe) {
         const wiped = wipeSessionJsonl(groupFolder, slot, sessionId);
         if (wiped > 0) {
           logger.info(
             { groupFolder, sessionName: slot, sessionId, count: wiped },
-            'Wiped session JSONL transcript(s)',
+            'Wiped session artifacts (transcript + tool-results dir)',
           );
         }
       }
