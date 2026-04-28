@@ -37,6 +37,7 @@ MODE="${3:-all}"
 TILE_OWNER="${TILE_OWNER:-jbaruch}"
 TOKEN="${GITHUB_TOKEN:?GITHUB_TOKEN required}"
 ASSISTANT_NAME="${ASSISTANT_NAME:-Agent}"
+AUTHOR_MODEL="${AUTHOR_MODEL:-claude-opus-4-7}"
 
 SKILLS_SRC="$STAGING_DIR/skills"
 RULES_SRC="$STAGING_DIR/rules"
@@ -261,7 +262,9 @@ git push -u origin -- "$BRANCH"
 # fixup commits.
 echo "Branch: $BRANCH"
 
-PR_BODY="Promoted by nanoclaw's promote-to-tile-repo.sh. $PROMOTED item(s) staged by $ASSISTANT_NAME.
+PR_BODY="**Author-Model:** $AUTHOR_MODEL
+
+Promoted by nanoclaw's promote-to-tile-repo.sh. $PROMOTED item(s) staged by $ASSISTANT_NAME.
 
 ## Review gate
 Copilot review requested below. Merge after the review is clean and any findings are addressed. GHA (tessl publish, lint) runs at merge time on main.
