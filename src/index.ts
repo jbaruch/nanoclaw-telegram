@@ -2345,7 +2345,13 @@ async function main(): Promise<void> {
       // doc (see `docs/proposals/kill-auto-compaction.md` §1, §2):
       // the Facts section is the orchestrator's view of "what just
       // happened in this group", not slot-specific.
-      if (options?.skipReentry) {
+      // Strict boolean check (defense in depth): the IPC layer
+      // already filters non-true values, but a future direct caller
+      // (test, new IPC handler, refactor) could pass a truthy
+      // non-boolean and accidentally erase reentry state. The dispatcher
+      // is the last gate before the disk operation, so it owns the
+      // strictest check.
+      if (options?.skipReentry === true) {
         let groupDir: string;
         try {
           groupDir = resolveGroupFolderPath(groupFolder);

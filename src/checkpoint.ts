@@ -239,11 +239,116 @@ export async function writeCheckpoint(inputs: CheckpointInputs): Promise<void> {
  * for the first-ever-write group (no `previous.md`). Other fs errors
  * are logged-and-swallowed so a single bad checkpoint file doesn't
  * block the rest of the nuke.
+ *
+ * **Security**: `<groupDir>/.checkpoints/` lives inside a writable
+ * container mount, so a compromised container could try to plant a
+ * symlink to redirect the unlink at host files. Defense in depth
+ * mirrors `wipeSessionJsonl` (#100):
+ *
+ *   1. lstat the `.checkpoints/` dir; refuse to traverse if it's a
+ *      symlink, regardless of where it points.
+ *   2. For each leaf, lstat first to learn the entry type. If it's
+ *      a symlink, `fs.unlinkSync` removes the LINK entry only — the
+ *      target is preserved. If it's a regular file, realpath both
+ *      the dir and the file, assert the file's real path is inside
+ *      the dir's real path, then unlink.
+ *
+ * The realpath check guards against an ancestor-symlink swap of the
+ * `.checkpoints/` dir between the outer lstat and the leaf unlink
+ * (TOCTOU). The symlink-branch keeps the "operator can opt to clear
+ * a poisoned checkpoint" promise honest even if the file was
+ * replaced with a link.
  */
 export function clearCheckpoints(groupDir: string): number {
-  const { live, previous } = checkpointPaths(groupDir);
+  const { dir, live, previous } = checkpointPaths(groupDir);
+
+  let dirLstat: fs.Stats;
+  try {
+    dirLstat = fs.lstatSync(dir);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return 0; // .checkpoints/ never created
+    logger.warn(
+      { dir, err: err instanceof Error ? err.message : String(err) },
+      'clearCheckpoints: lstat failed on .checkpoints/ — skipping',
+    );
+    return 0;
+  }
+  if (dirLstat.isSymbolicLink()) {
+    logger.error(
+      { dir },
+      'clearCheckpoints: refusing to traverse — .checkpoints/ itself is a symlink (possible escape attempt)',
+    );
+    return 0;
+  }
+  if (!dirLstat.isDirectory()) return 0;
+
+  let realDir: string;
+  try {
+    realDir = fs.realpathSync(dir);
+  } catch (err) {
+    logger.warn(
+      { dir, err: err instanceof Error ? err.message : String(err) },
+      'clearCheckpoints: realpath failed on .checkpoints/ — skipping',
+    );
+    return 0;
+  }
+
   let removed = 0;
   for (const file of [live, previous]) {
+    let entryStat: fs.Stats;
+    try {
+      entryStat = fs.lstatSync(file);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') continue;
+      logger.warn(
+        { file, err: err instanceof Error ? err.message : String(err) },
+        'clearCheckpoints: lstat failed — skipping',
+      );
+      continue;
+    }
+
+    if (entryStat.isSymbolicLink()) {
+      // Unlink the link entry only; target is preserved.
+      try {
+        fs.unlinkSync(file);
+        removed++;
+        logger.info(
+          { file },
+          'clearCheckpoints: unlinked symlinked checkpoint file (target preserved)',
+        );
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') continue;
+        logger.warn(
+          { file, err: err instanceof Error ? err.message : String(err) },
+          'clearCheckpoints: unlink-of-symlink failed',
+        );
+      }
+      continue;
+    }
+
+    // Regular file: realpath containment check before unlink.
+    let realFile: string;
+    try {
+      realFile = fs.realpathSync(file);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') continue;
+      logger.warn(
+        { file, err: err instanceof Error ? err.message : String(err) },
+        'clearCheckpoints: realpath failed — skipping',
+      );
+      continue;
+    }
+    if (!realFile.startsWith(realDir + path.sep)) {
+      logger.warn(
+        { file, realDir, realFile },
+        'clearCheckpoints: refusing to unlink — realpath escapes .checkpoints/',
+      );
+      continue;
+    }
     try {
       fs.unlinkSync(file);
       removed++;
@@ -251,11 +356,8 @@ export function clearCheckpoints(groupDir: string): number {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') continue;
       logger.warn(
-        {
-          file,
-          err: err instanceof Error ? err.message : String(err),
-        },
-        'clearCheckpoints: failed to unlink checkpoint file',
+        { file, err: err instanceof Error ? err.message : String(err) },
+        'clearCheckpoints: unlink failed',
       );
     }
   }

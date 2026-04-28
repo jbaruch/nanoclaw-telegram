@@ -1000,14 +1000,18 @@ server.tool(
         : session === 'maintenance'
           ? 'scheduled task'
           : 'message';
+    // The host applies this asynchronously after we write the IPC
+    // file, so the response is "requested" rather than "done". The
+    // surrounding "will be killed" / "starts fresh" wording is also
+    // future-tense for the same reason.
     const reentryText = skipReentry
-      ? ' Checkpoint files were also deleted — next spawn has no reentry context.'
+      ? ' Checkpoint files will also be cleared so the next spawn has no reentry context.'
       : '';
     return {
       content: [
         {
           type: 'text' as const,
-          text: `Session nuked (scope: ${session}). ${scopeText}. Next ${nextStartText} starts fresh.${reentryText}`,
+          text: `Session nuke requested (scope: ${session}). ${scopeText}. Next ${nextStartText} starts fresh.${reentryText}`,
         },
       ],
     };

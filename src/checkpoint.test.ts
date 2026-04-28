@@ -355,4 +355,59 @@ describe('clearCheckpoints (#127)', () => {
     expect(clearCheckpoints(tmpDir)).toBe(0);
     expect(clearCheckpoints(tmpDir)).toBe(0);
   });
+
+  it('refuses to traverse when .checkpoints/ itself is a symlink', () => {
+    // Compromised container plants `.checkpoints/` as a symlink to an
+    // attacker-chosen host path. realpath would resolve through the
+    // symlink and the leaf paths would land outside the group folder.
+    // Helper must refuse the whole operation regardless of where the
+    // link points (target is irrelevant — the structural check is
+    // "is it a symlink").
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'evil-target-'));
+    try {
+      const sentinel = path.join(outside, 'default.md');
+      fs.writeFileSync(sentinel, 'sentinel');
+
+      // Build the symlink: <tmpDir>/.checkpoints → <outside>
+      fs.symlinkSync(outside, path.join(tmpDir, '.checkpoints'), 'dir');
+
+      const removed = clearCheckpoints(tmpDir);
+
+      expect(removed).toBe(0);
+      expect(fs.existsSync(sentinel)).toBe(true);
+      expect(fs.readFileSync(sentinel, 'utf8')).toBe('sentinel');
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('unlinks a symlinked checkpoint file as a link only (target preserved)', () => {
+    // Tighter: `.checkpoints/` is legit, but `default.md` inside is a
+    // symlink to a sensitive host path. fs.unlinkSync removes the
+    // link entry without following it, so the target stays intact.
+    // Without this branch, the realpath check would refuse (the
+    // realpath escapes .checkpoints/) and the link would survive on
+    // disk — the operator's "give me a fresh checkpoint" intent
+    // would be silently ignored.
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'symlink-target-'));
+    try {
+      const sentinel = path.join(outside, 'must-survive.md');
+      fs.writeFileSync(sentinel, 'sentinel');
+
+      const { dir, live } = checkpointPaths(tmpDir);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.symlinkSync(sentinel, live);
+
+      const removed = clearCheckpoints(tmpDir);
+
+      // Symlink unlinked.
+      expect(removed).toBe(1);
+      expect(fs.existsSync(live)).toBe(false);
+      // Target preserved.
+      expect(fs.existsSync(sentinel)).toBe(true);
+      expect(fs.readFileSync(sentinel, 'utf8')).toBe('sentinel');
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
 });
