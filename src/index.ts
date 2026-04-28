@@ -2377,11 +2377,28 @@ async function main(): Promise<void> {
           logger.info({ groupFolder, session }, 'Session nuked via IPC');
           return;
         }
-        const checkpointsDeleted = clearCheckpoints(groupDir);
-        logger.info(
-          { groupFolder, checkpointsDeleted },
-          'Checkpoint files cleared (skipReentry=true)',
-        );
+        // Best-effort cleanup: if clearCheckpoints throws (e.g.
+        // EACCES on unlink — a file was found but couldn't be
+        // removed), log at error level and CONTINUE with the rest of
+        // the nuke. The main session state (DB rows + JSONL) is
+        // already wiped at this point; failing the whole IPC handler
+        // would be noisier than helpful and contradicts the
+        // best-effort framing the surrounding comments describe.
+        // Non-Error throws still propagate as upstream bugs per
+        // `jbaruch/coding-policy: error-handling`.
+        try {
+          const checkpointsDeleted = clearCheckpoints(groupDir);
+          logger.info(
+            { groupFolder, checkpointsDeleted },
+            'Checkpoint files cleared (skipReentry=true)',
+          );
+        } catch (err) {
+          if (!(err instanceof Error)) throw err;
+          logger.error(
+            { groupFolder, groupDir, session, err },
+            'skipReentry: failed to clear checkpoint files — continuing with session nuke',
+          );
+        }
       }
 
       logger.info(

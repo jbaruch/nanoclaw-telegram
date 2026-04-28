@@ -237,8 +237,12 @@ export async function writeCheckpoint(inputs: CheckpointInputs): Promise<void> {
  * Idempotent: ENOENT on either file is the expected case for groups
  * that never crossed the threshold (no checkpoint ever written) or
  * for the first-ever-write group (no `previous.md`). Other fs errors
- * are logged-and-swallowed so a single bad checkpoint file doesn't
- * block the rest of the nuke.
+ * (EACCES, EPERM, EROFS, EBUSY, EIO, …) are logged and then re-thrown
+ * to the caller per `jbaruch/coding-policy: error-handling` — claiming
+ * cleanup succeeded when the file is still on disk would be a lie. The
+ * caller (`nukeSession`) wraps this in a try/catch and continues the
+ * rest of the nuke, so the operator sees an error log but the main
+ * session wipe (DB rows + JSONL) is still applied.
  *
  * **Security**: `<groupDir>/.checkpoints/` lives inside a writable
  * container mount, so a compromised container could try to plant a

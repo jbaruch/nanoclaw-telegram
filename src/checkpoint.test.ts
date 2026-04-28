@@ -381,37 +381,22 @@ describe('clearCheckpoints (#127)', () => {
     }
   });
 
-  it('refuses when .checkpoints/ realpath does not equal the expected child of groupDir', () => {
-    // Tighter than the leaf-symlink case: the `.checkpoints/` lstat
-    // returned a directory (not a symlink), so the dir-symlink check
-    // passed. But realpath then resolves to somewhere outside
-    // `<groupDir>/.checkpoints/` — e.g. because `<groupDir>` itself
-    // contains an inner symlink that gets dereferenced. The
-    // expected-real-dir guard catches this.
-    //
-    // Construction: tmpDir has a real `.checkpoints/` dir, but we
-    // call clearCheckpoints with a DIFFERENT groupDir that's a
-    // symlink to tmpDir. `lstat` on `<symGroup>/.checkpoints` is the
-    // real `.checkpoints/` dir under tmpDir (POSIX lstat follows
-    // path components but not the leaf — the leaf here is
-    // `.checkpoints` and it's a real dir under the symlink target,
-    // so its lstat reports DIRECTORY not SYMLINK). realpath then
-    // resolves `<symGroup>/.checkpoints` to `<tmpDir>/.checkpoints`,
-    // while realGroupDir is `<tmpDir>` (realpath of the symlink),
-    // so the expected check is `<tmpDir>/.checkpoints` — and they
-    // match here, so this construction does NOT trigger the guard.
-    //
-    // To actually exercise the refusal we need realDir to differ
-    // from `realpath(groupDir) + /.checkpoints`. Simulating that
-    // requires either a TOCTOU race or a hand-crafted symlink
-    // graph. We use the latter:
-    //   - groupDir is a real directory.
-    //   - `.checkpoints/` is a symlink to a sibling real dir.
-    // The `lstat` on `.checkpoints` would report SYMLINK and hit
-    // the earlier dir-symlink refusal — same outcome, different
-    // gate. This test pins THAT outcome (refusal), confirming
-    // either guard rejects the escape regardless of which one
+  it('refuses (and preserves the decoy target) when .checkpoints/ is a symlink to a sibling dir', () => {
+    // Companion to "refuses to traverse when .checkpoints/ itself is
+    // a symlink" earlier in this describe — that test points the
+    // symlink at a tempdir from os.tmpdir(); this one points it at a
+    // dir that has a planted `default.md` masquerading as a real
+    // checkpoint. Both hit the same dir-symlink refusal branch, so
+    // the structurally-similar `expectedRealDir` (TOCTOU) guard
+    // farther down doesn't get exercised here — the symlink check
     // fires first.
+    //
+    // The expectedRealDir guard is defense-in-depth for a TOCTOU
+    // race (the dir is a real dir at lstat time, then becomes a
+    // symlink before the realpath call below). Reproducing that
+    // race deterministically in a unit test would require fs
+    // syscall injection; the guard stays in the production code as
+    // an audit trail even though it's not unit-testable.
     const decoy = fs.mkdtempSync(path.join(os.tmpdir(), 'decoy-checkpoints-'));
     try {
       fs.symlinkSync(decoy, path.join(tmpDir, '.checkpoints'), 'dir');
