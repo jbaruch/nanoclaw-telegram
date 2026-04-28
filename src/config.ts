@@ -58,9 +58,6 @@ export const HOST_GID = process.env.HOST_GID
 export const MOUNT_ALLOWLIST_PATH =
   process.env.MOUNT_ALLOWLIST_PATH ||
   path.join(HOME_DIR, '.config', 'nanoclaw', 'mount-allowlist.json');
-export const SENDER_ALLOWLIST_PATH =
-  process.env.SENDER_ALLOWLIST_PATH ||
-  path.join(HOME_DIR, '.config', 'nanoclaw', 'sender-allowlist.json');
 
 // Local paths for filesystem operations (mkdirSync, existsSync, etc.)
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');

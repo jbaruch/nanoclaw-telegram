@@ -74,12 +74,6 @@ import {
   startRemoteControl,
   stopRemoteControl,
 } from './remote-control.js';
-import {
-  isSenderAllowed,
-  isTriggerAllowed,
-  loadSenderAllowlist,
-  shouldDropMessage,
-} from './sender-allowlist.js';
 import { pruneOldContainerLogs } from './host-logs.js';
 import { startSessionCleanup } from './session-cleanup.js';
 import {
@@ -1219,27 +1213,27 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           msg.content.trim(),
         );
         const reqTrigger = !isMainGroup && group.requiresTrigger !== false;
-        return (
-          isMainGroup ||
-          !reqTrigger ||
-          (hasTrigger &&
-            (msg.is_from_me ||
-              isTriggerAllowed(chatJid, msg.sender, loadSenderAllowlist())))
-        );
+        // Per #145: trigger-gate is now pattern-match-only. The
+        // pre-removal sender-allowlist clause was unmanaged (host-only
+        // JSON config, no MCP/skill UI, no audit), redundant with the
+        // trigger pattern itself, and shipped with no chat overrides
+        // — every consulting call read the default `allow: '*'`.
+        return isMainGroup || !reqTrigger || hasTrigger;
       },
     },
   });
   if (cmdResult.handled) return cmdResult.success;
   // --- End session command interception ---
 
-  // For non-main groups, check if trigger is required and present
+  // For non-main groups, check if trigger is required and present.
+  // Per #145: trigger-gate is pattern-match-only (or reply-to-bot).
+  // The sender-allowlist clause that used to AND with this check was
+  // removed — see the dropped-block comment near the session-command
+  // gate above for rationale.
   if (!isMainGroup && group.requiresTrigger !== false) {
     const triggerPattern = getTriggerPattern(group.trigger);
-    const allowlistCfg = loadSenderAllowlist();
     const hasTrigger = missedMessages.some(
-      (m) =>
-        (triggerPattern.test(m.content.trim()) || isReplyToBot(m)) &&
-        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+      (m) => triggerPattern.test(m.content.trim()) || isReplyToBot(m),
     );
     if (!hasTrigger) {
       return true;
@@ -1680,12 +1674,11 @@ async function startMessageLoop(): Promise<void> {
           // context when a trigger eventually arrives.
           if (needsTrigger) {
             const triggerPattern = getTriggerPattern(group.trigger);
-            const allowlistCfg = loadSenderAllowlist();
+            // Per #145: pattern-match-only trigger gate (see comments
+            // at the two prior trigger gates in this file for the full
+            // rationale on dropping the sender-allowlist clause).
             const hasTrigger = groupMessages.some(
-              (m) =>
-                (triggerPattern.test(m.content.trim()) || isReplyToBot(m)) &&
-                (m.is_from_me ||
-                  isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+              (m) => triggerPattern.test(m.content.trim()) || isReplyToBot(m),
             );
             if (!hasTrigger) continue;
           }
@@ -1857,22 +1850,6 @@ async function main(): Promise<void> {
         return;
       }
 
-      // Sender allowlist drop mode: discard messages from denied senders before storing
-      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
-        const cfg = loadSenderAllowlist();
-        if (
-          shouldDropMessage(chatJid, cfg) &&
-          !isSenderAllowed(chatJid, msg.sender, cfg)
-        ) {
-          if (cfg.logDenied) {
-            logger.debug(
-              { chatJid, sender: msg.sender },
-              'sender-allowlist: dropping message (drop mode)',
-            );
-          }
-          return;
-        }
-      }
       storeMessage(msg);
     },
     onChatMetadata: (
