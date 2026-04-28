@@ -113,7 +113,7 @@ trap cleanup EXIT
 # --- Validate prerequisites ---
 if [ ! -x "$AUDIBLE" ]; then
   echo "ERROR: audible-cli not found at $AUDIBLE" >&2
-  echo "Install: python3 -m venv ~/audible-env && ~/audible-env/bin/pip install audible-cli"
+  echo "Install: python3 -m venv ~/audible-env && ~/audible-env/bin/pip install audible-cli" >&2
   exit 1
 fi
 
@@ -334,7 +334,7 @@ while IFS=$'\t' read -r ASIN TITLE; do
     # operator can see the real state (empty, or an unexpected
     # extension we don't classify yet).
     echo "FAILED: no source audio file from audible-cli for $ASIN" >&2
-    echo "  files touched in this run:"
+    echo "  files touched in this run:" >&2
     # Iterate line-by-line — don't use `printf '%s\n' $NEW_FILES`
     # because unquoted expansion word-splits and glob-expands. A
     # filename containing spaces or a wildcard char would otherwise
@@ -349,7 +349,7 @@ while IFS=$'\t' read -r ASIN TITLE; do
     TOUCHED_LIST=""
     while IFS= read -r _touched; do
       [ -z "$_touched" ] && continue
-      printf '    %s\n' "$_touched"
+      printf '    %s\n' "$_touched" >&2
       TOUCHED_LIST="${TOUCHED_LIST}${_touched}"$'\x1f'
     done <<< "$NEW_FILES"
     report_record \
@@ -368,7 +368,7 @@ while IFS=$'\t' read -r ASIN TITLE; do
       OUTPUT_M4B="$BOOKS_DIR/$SAFE_TITLE.m4b"
       if [ -z "$VOUCHER_FILE" ]; then
         echo "FAILED: AAXC source for $ASIN requires a .voucher but none was downloaded" >&2
-        echo "  source file left in tmp_download for retry: $AUDIO_FILE"
+        echo "  source file left in tmp_download for retry: $AUDIO_FILE" >&2
         report_record \
           "asin=$ASIN" "title=$TITLE" "stage=decrypt" "result=failure" \
           "reason=AAXC source missing .voucher" \
@@ -379,7 +379,7 @@ while IFS=$'\t' read -r ASIN TITLE; do
       echo "Decrypting AAXC (with voucher) to $SAFE_TITLE.m4b ..."
       if ! "$AUDIBLE" decrypt --input "$AUDIO_FILE" --voucher "$VOUCHER_FILE" --output "$OUTPUT_M4B"; then
         echo "FAILED: audible decrypt (aaxc) exit non-zero for $ASIN" >&2
-        echo "  source: $AUDIO_FILE (retained in tmp_download for retry)"
+        echo "  source: $AUDIO_FILE (retained in tmp_download for retry)" >&2
         report_record \
           "asin=$ASIN" "title=$TITLE" "stage=decrypt" "result=failure" \
           "reason=audible decrypt (aaxc) exit non-zero" \
@@ -393,8 +393,8 @@ while IFS=$'\t' read -r ASIN TITLE; do
       echo "Decrypting AAX (activation bytes) to $SAFE_TITLE.m4b ..."
       if ! "$AUDIBLE" decrypt --input "$AUDIO_FILE" --output "$OUTPUT_M4B"; then
         echo "FAILED: audible decrypt (aax) exit non-zero for $ASIN" >&2
-        echo "  source: $AUDIO_FILE (retained in tmp_download for retry)"
-        echo "  hint: verify ~/.audible/config.toml has activation_bytes set for the active profile"
+        echo "  source: $AUDIO_FILE (retained in tmp_download for retry)" >&2
+        echo "  hint: verify ~/.audible/config.toml has activation_bytes set for the active profile" >&2
         report_record \
           "asin=$ASIN" "title=$TITLE" "stage=decrypt" "result=failure" \
           "reason=audible decrypt (aax) exit non-zero — check activation_bytes in ~/.audible/config.toml" \
@@ -479,7 +479,7 @@ while IFS=$'\t' read -r ASIN TITLE; do
     fi
   else
     echo "FAILED: decrypt/copy produced no output for $ASIN (expected $OUTPUT_M4B)" >&2
-    echo "  source retained in tmp_download for inspection: $AUDIO_FILE"
+    echo "  source retained in tmp_download for inspection: $AUDIO_FILE" >&2
     report_record \
       "asin=$ASIN" "title=$TITLE" "stage=finalize" "result=failure" \
       "reason=decrypt/copy produced no output (expected $OUTPUT_M4B)" \
