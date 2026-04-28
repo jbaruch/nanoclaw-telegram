@@ -86,11 +86,7 @@ async function runHostOperation(
     ...extra,
   });
 
-  const resultPath = path.join(
-    IPC_DIR,
-    'input',
-    `_script_result_${requestId}.json`,
-  );
+  const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
   const pollMs = 500;
   const start = Date.now();
 
@@ -131,19 +127,12 @@ async function runHostOperation(
           isError: true,
         };
       }
-      return {
-        content: [
-          { type: 'text' as const, text: result.stdout || '(no output)' },
-        ],
-      };
+      return { content: [{ type: 'text' as const, text: result.stdout || '(no output)' }] };
     }
-    await new Promise((r) => setTimeout(r, pollMs));
+    await new Promise(r => setTimeout(r, pollMs));
   }
 
-  return {
-    content: [{ type: 'text' as const, text: `Operation ${type} timed out` }],
-    isError: true,
-  };
+  return { content: [{ type: 'text' as const, text: `Operation ${type} timed out` }], isError: true };
 }
 
 const server = new McpServer({
@@ -162,18 +151,8 @@ server.tool(
       .describe(
         'Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.',
       ),
-    reply_to: z
-      .string()
-      .optional()
-      .describe(
-        'Message ID to reply to (quote). Get this from the [id=...] tag in the message prompt. If omitted, the message is sent without quote-threading. For cross-chat sends (chat_jid set), only pass this if it refers to a message in the TARGET chat — Telegram message IDs are per-chat.',
-      ),
-    pin: z
-      .boolean()
-      .optional()
-      .describe(
-        'Pin this message in the chat after sending. Use for important messages like daily briefs.',
-      ),
+    reply_to: z.string().optional().describe('Message ID to reply to (quote). Get this from the [id=...] tag in the message prompt. If omitted, the message is sent without quote-threading. For cross-chat sends (chat_jid set), only pass this if it refers to a message in the TARGET chat — Telegram message IDs are per-chat.'),
+    pin: z.boolean().optional().describe('Pin this message in the chat after sending. Use for important messages like daily briefs.'),
     chat_jid: z
       .string()
       .optional()
@@ -206,14 +185,7 @@ server.tool(
 
     writeIpcFile(MESSAGES_DIR, data);
 
-    return {
-      content: [
-        {
-          type: 'text' as const,
-          text: args.pin ? 'Message sent and pinned.' : 'Message sent.',
-        },
-      ],
-    };
+    return { content: [{ type: 'text' as const, text: args.pin ? 'Message sent and pinned.' : 'Message sent.' }] };
   },
 );
 
@@ -221,15 +193,8 @@ server.tool(
   'send_file',
   'Send a file from the workspace to the user via Telegram. The file must exist on the container filesystem. Use for generated reports, exports, or any file the user asked you to create. Trusted containers only.',
   {
-    filePath: z
-      .string()
-      .describe(
-        'Absolute path to the file in the container (e.g., /workspace/group/report.csv)',
-      ),
-    caption: z
-      .string()
-      .optional()
-      .describe('Optional caption to send with the file'),
+    filePath: z.string().describe('Absolute path to the file in the container (e.g., /workspace/group/report.csv)'),
+    caption: z.string().optional().describe('Optional caption to send with the file'),
     reply_to: z.string().optional().describe('Message ID to reply to'),
   },
   async (args) => {
@@ -262,9 +227,7 @@ server.tool(
 
     if (!fs.existsSync(args.filePath)) {
       return {
-        content: [
-          { type: 'text' as const, text: `File not found: ${args.filePath}` },
-        ],
+        content: [{ type: 'text' as const, text: `File not found: ${args.filePath}` }],
         isError: true,
       };
     }
@@ -281,14 +244,7 @@ server.tool(
 
     writeIpcFile(MESSAGES_DIR, data);
 
-    return {
-      content: [
-        {
-          type: 'text' as const,
-          text: `File queued for sending: ${path.basename(args.filePath)}`,
-        },
-      ],
-    };
+    return { content: [{ type: 'text' as const, text: `File queued for sending: ${path.basename(args.filePath)}` }] };
   },
 );
 
@@ -296,9 +252,7 @@ server.tool(
   'send_voice',
   'Send a voice (audio) reply to the user via Telegram. Synthesizes the text using OpenAI TTS and uploads as a Telegram voice note. Use when the user sent a voice message and would prefer voice back, or when explicitly asked to reply by voice. Keep text under ~500 chars — TTS is cheap but very long messages feel awkward as audio. Use plain prose without HTML tags or markdown.',
   {
-    text: z
-      .string()
-      .describe('The text to speak (plain prose, no HTML/markdown).'),
+    text: z.string().describe('The text to speak (plain prose, no HTML/markdown).'),
     voice: z
       .enum(['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'])
       .optional()
@@ -328,17 +282,8 @@ server.tool(
   'react_to_message',
   'React to a message with an emoji. Use to acknowledge, approve, or express sentiment without sending a full text reply. Invalid emoji falls back to 👍.',
   {
-    messageId: z
-      .string()
-      .optional()
-      .describe(
-        'Message ID to react to. If omitted, reacts to the most recent message.',
-      ),
-    emoji: z
-      .string()
-      .describe(
-        'Telegram reaction emoji. 73 supported: 👍👎❤🔥🥰👏😁🤔🤯😱🤬😢🎉🤩🤮💩🙏👌🕊🤡🥱🥴😍🐳❤‍🔥🌚🌭💯🤣⚡🍌🏆💔🤨😐🍓🍾💋🖕😈😴😭🤓👻👨‍💻👀🎃🙈😇😨🤝✍🤗🫡🎅🎄☃💅🤪🗿🆒💘🙉🦄😘💊🙊😎👾🤷‍♂🤷🤷‍♀😡. Invalid falls back to 👍.',
-      ),
+    messageId: z.string().optional().describe('Message ID to react to. If omitted, reacts to the most recent message.'),
+    emoji: z.string().describe('Telegram reaction emoji. 73 supported: 👍👎❤🔥🥰👏😁🤔🤯😱🤬😢🎉🤩🤮💩🙏👌🕊🤡🥱🥴😍🐳❤‍🔥🌚🌭💯🤣⚡🍌🏆💔🤨😐🍓🍾💋🖕😈😴😭🤓👻👨‍💻👀🎃🙈😇😨🤝✍🤗🫡🎅🎄☃💅🤪🗿🆒💘🙉🦄😘💊🙊😎👾🤷‍♂🤷🤷‍♀😡. Invalid falls back to 👍.'),
   },
   async (args) => {
     const data: Record<string, string | undefined> = {
@@ -350,9 +295,7 @@ server.tool(
       timestamp: new Date().toISOString(),
     };
     writeIpcFile(MESSAGES_DIR, data);
-    return {
-      content: [{ type: 'text' as const, text: `Reacted with ${args.emoji}` }],
-    };
+    return { content: [{ type: 'text' as const, text: `Reacted with ${args.emoji}` }] };
   },
 );
 
@@ -851,44 +794,13 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       .describe(
         'Whether messages must start with the trigger word. Default: false (respond to all messages). Set to true for busy groups with many participants where you only want the agent to respond when explicitly mentioned.',
       ),
-    trusted: z
-      .boolean()
-      .optional()
-      .describe(
-        'Whether the group gets a trusted container (read-write filesystem, admin tiles, longer timeout). Default: false. Set true for personal/friends groups.',
-      ),
-    enableHeartbeat: z
-      .boolean()
-      .optional()
-      .describe(
-        'Opt this non-main group into the 15-min unanswered-message heartbeat. Default: false. Pre-#158 this was implicit on requiresTrigger; now explicit.',
-      ),
-    additionalMounts: z
-      .array(
-        z.object({
-          hostPath: z
-            .string()
-            .describe(
-              'Path on the host (supports "~" expansion; does not need to be absolute).',
-            ),
-          containerPath: z
-            .string()
-            .optional()
-            .describe(
-              'Optional mount name inside /workspace/extra/. When omitted, the host derives it from basename(hostPath).',
-            ),
-          readonly: z
-            .boolean()
-            .optional()
-            .describe(
-              'Mount as read-only (default). Set to false to request read-write access.',
-            ),
-        }),
-      )
-      .optional()
-      .describe(
-        'Extra volume mounts for the container, passed through to the host.',
-      ),
+    trusted: z.boolean().optional().describe('Whether the group gets a trusted container (read-write filesystem, admin tiles, longer timeout). Default: false. Set true for personal/friends groups.'),
+    enableHeartbeat: z.boolean().optional().describe('Opt this non-main group into the 15-min unanswered-message heartbeat. Default: false. Pre-#158 this was implicit on requiresTrigger; now explicit.'),
+    additionalMounts: z.array(z.object({
+      hostPath: z.string().describe('Path on the host (supports "~" expansion; does not need to be absolute).'),
+      containerPath: z.string().optional().describe('Optional mount name inside /workspace/extra/. When omitted, the host derives it from basename(hostPath).'),
+      readonly: z.boolean().optional().describe('Mount as read-only (default). Set to false to request read-write access.'),
+    })).optional().describe('Extra volume mounts for the container, passed through to the host.'),
   },
   async (args) => {
     if (!isMain) {
@@ -903,20 +815,13 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       };
     }
 
-    const containerConfig =
-      args.trusted !== undefined ||
-      args.enableHeartbeat !== undefined ||
-      args.additionalMounts
-        ? {
-            ...(args.trusted !== undefined ? { trusted: args.trusted } : {}),
-            ...(args.enableHeartbeat !== undefined
-              ? { enableHeartbeat: args.enableHeartbeat }
-              : {}),
-            ...(args.additionalMounts
-              ? { additionalMounts: args.additionalMounts }
-              : {}),
-          }
-        : undefined;
+    const containerConfig = (args.trusted !== undefined || args.enableHeartbeat !== undefined || args.additionalMounts)
+      ? {
+          ...(args.trusted !== undefined ? { trusted: args.trusted } : {}),
+          ...(args.enableHeartbeat !== undefined ? { enableHeartbeat: args.enableHeartbeat } : {}),
+          ...(args.additionalMounts ? { additionalMounts: args.additionalMounts } : {}),
+        }
+      : undefined;
 
     const data = {
       type: 'register_group',
@@ -1136,7 +1041,7 @@ server.tool(
       .boolean()
       .optional()
       .describe(
-        'When true, also delete the per-group checkpoint files (`.checkpoints/default.md` and `previous.md`) so the reentry skill has no Facts to load on the next spawn. Use when the checkpoint itself is the problem (poisoned plan, stale do-not-re-execute list). Default false — checkpoint files are preserved so reentry continues to work after the nuke.',
+        "When true, also delete the per-group checkpoint files (`.checkpoints/default.md` and `previous.md`) so the reentry skill has no Facts to load on the next spawn. Use when the checkpoint itself is the problem (poisoned plan, stale do-not-re-execute list). Default false — checkpoint files are preserved so reentry continues to work after the nuke.",
       ),
   },
   async (args) => {
@@ -1200,10 +1105,7 @@ server.tool(
   'audible_backup',
   'Back up Audible audiobooks. Checks for new purchases not in the existing library, downloads and decrypts them to M4B. The host handles authentication and file storage. Use --dry-run to preview without downloading.',
   {
-    dryRun: z
-      .boolean()
-      .optional()
-      .describe('Preview new books without downloading (default: false)'),
+    dryRun: z.boolean().optional().describe('Preview new books without downloading (default: false)'),
   },
   async (args) => {
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1216,11 +1118,7 @@ server.tool(
 
     writeIpcFile(TASKS_DIR, data);
 
-    const resultPath = path.join(
-      IPC_DIR,
-      'input',
-      `_script_result_${requestId}.json`,
-    );
+    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
     const timeoutMs = 600_000;
     const pollMs = 2000;
     const start = Date.now();
@@ -1231,31 +1129,19 @@ server.tool(
         fs.unlinkSync(resultPath);
         if (result.error) {
           return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Audible backup failed: ${result.error}\n${result.stderr || ''}`,
-              },
-            ],
+            content: [{ type: 'text' as const, text: `Audible backup failed: ${result.error}\n${result.stderr || ''}` }],
             isError: true,
           };
         }
         return {
-          content: [
-            { type: 'text' as const, text: JSON.stringify(result, null, 2) },
-          ],
+          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
         };
       }
-      await new Promise((r) => setTimeout(r, pollMs));
+      await new Promise(r => setTimeout(r, pollMs));
     }
 
     return {
-      content: [
-        {
-          type: 'text' as const,
-          text: 'Audible backup timed out after 10 minutes',
-        },
-      ],
+      content: [{ type: 'text' as const, text: 'Audible backup timed out after 10 minutes' }],
       isError: true,
     };
   },
@@ -1265,20 +1151,9 @@ server.tool(
   'dominos_pizza',
   "Order Domino's Pizza. Commands: find-stores (by address), menu (by storeId), build-order (validate+price, dry-run), place-order (requires confirm=true). For build-order and place-order, pass orderJson with storeId, customer (address, firstName, lastName, phone, email), items (array of {code, qty}), and payment (for place-order only: number, expiration, securityCode, postalCode, tipAmount).",
   {
-    command: z
-      .enum(['find-stores', 'menu', 'build-order', 'place-order'])
-      .describe('Command to run'),
-    payload: z
-      .string()
-      .describe(
-        'Address for find-stores, storeId for menu, or order JSON for build/place-order',
-      ),
-    confirm: z
-      .boolean()
-      .optional()
-      .describe(
-        'Required for place-order. Safety gate to prevent accidental orders.',
-      ),
+    command: z.enum(['find-stores', 'menu', 'build-order', 'place-order']).describe('Command to run'),
+    payload: z.string().describe('Address for find-stores, storeId for menu, or order JSON for build/place-order'),
+    confirm: z.boolean().optional().describe('Required for place-order. Safety gate to prevent accidental orders.'),
   },
   async (args) => {
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1293,11 +1168,7 @@ server.tool(
 
     writeIpcFile(TASKS_DIR, data);
 
-    const resultPath = path.join(
-      IPC_DIR,
-      'input',
-      `_script_result_${requestId}.json`,
-    );
+    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
     const timeoutMs = 120_000;
     const pollMs = 2000;
     const start = Date.now();
@@ -1308,31 +1179,19 @@ server.tool(
         fs.unlinkSync(resultPath);
         if (result.error) {
           return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Dominos order failed: ${result.error}\n${result.stderr || ''}`,
-              },
-            ],
+            content: [{ type: 'text' as const, text: `Dominos order failed: ${result.error}\n${result.stderr || ''}` }],
             isError: true,
           };
         }
         return {
-          content: [
-            { type: 'text' as const, text: JSON.stringify(result, null, 2) },
-          ],
+          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
         };
       }
-      await new Promise((r) => setTimeout(r, pollMs));
+      await new Promise(r => setTimeout(r, pollMs));
     }
 
     return {
-      content: [
-        {
-          type: 'text' as const,
-          text: "Domino's order timed out after 2 minutes",
-        },
-      ],
+      content: [{ type: 'text' as const, text: "Domino's order timed out after 2 minutes" }],
       isError: true,
     };
   },
@@ -1343,46 +1202,25 @@ server.tool(
 server.tool(
   'smarthome_status',
   'Query smart home event data from the Hubitat EventSocket database. ' +
-    'Use for real-time house status, room activity, device states, battery levels, anomalies. ' +
-    '366 devices across 32 rooms. DB at /workspace/store/messages.db.',
+  'Use for real-time house status, room activity, device states, battery levels, anomalies. ' +
+  '366 devices across 32 rooms. DB at /workspace/store/messages.db.',
   {
-    query: z
-      .enum([
-        'current_activity',
-        'room_status',
-        'battery_report',
-        'device_history',
-        'hub_health',
-        'custom_sql',
-      ])
-      .describe('Query type'),
-    room: z
-      .string()
-      .optional()
-      .describe(
-        'Room name for room_status (e.g., "Kitchen", "Master Bedroom")',
-      ),
-    device: z
-      .string()
-      .optional()
-      .describe(
-        'Device name pattern for device_history (e.g., "Front Door Lock")',
-      ),
-    minutes: z
-      .number()
-      .optional()
-      .describe(
-        'Lookback window in minutes (default: 5 for current_activity, 60 for history)',
-      ),
-    sql: z
-      .string()
-      .optional()
-      .describe('Raw SQL for custom_sql query. Read-only — SELECT only.'),
+    query: z.enum([
+      'current_activity',
+      'room_status',
+      'battery_report',
+      'device_history',
+      'hub_health',
+      'custom_sql',
+    ]).describe('Query type'),
+    room: z.string().optional().describe('Room name for room_status (e.g., "Kitchen", "Master Bedroom")'),
+    device: z.string().optional().describe('Device name pattern for device_history (e.g., "Front Door Lock")'),
+    minutes: z.number().optional().describe('Lookback window in minutes (default: 5 for current_activity, 60 for history)'),
+    sql: z.string().optional().describe('Raw SQL for custom_sql query. Read-only — SELECT only.'),
   },
   async (args) => {
     const DB_PATH = '/workspace/store/messages.db';
-    const minutes =
-      args.minutes || (args.query === 'current_activity' ? 5 : 60);
+    const minutes = args.minutes || (args.query === 'current_activity' ? 5 : 60);
 
     let pythonCode: string;
 
@@ -1546,24 +1384,14 @@ print(json.dumps({
       case 'custom_sql':
         if (!args.sql) {
           return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'Error: sql parameter required for custom_sql query',
-              },
-            ],
+            content: [{ type: 'text' as const, text: 'Error: sql parameter required for custom_sql query' }],
             isError: true,
           };
         }
         const sql = args.sql.trim();
         if (!sql.toUpperCase().startsWith('SELECT')) {
           return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'Error: only SELECT queries allowed (read-only)',
-              },
-            ],
+            content: [{ type: 'text' as const, text: 'Error: only SELECT queries allowed (read-only)' }],
             isError: true,
           };
         }
@@ -1581,12 +1409,7 @@ print(json.dumps({"results": result, "count": len(result)}, indent=2))
 
       default:
         return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `Unknown query type: ${args.query}`,
-            },
-          ],
+          content: [{ type: 'text' as const, text: `Unknown query type: ${args.query}` }],
           isError: true,
         };
     }
@@ -1604,17 +1427,11 @@ print(json.dumps({"results": result, "count": len(result)}, indent=2))
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return {
-        content: [
-          { type: 'text' as const, text: `Smart home query failed: ${msg}` },
-        ],
+        content: [{ type: 'text' as const, text: `Smart home query failed: ${msg}` }],
         isError: true,
       };
     } finally {
-      try {
-        fs.unlinkSync(tmpScript);
-      } catch {
-        /* ignore */
-      }
+      try { fs.unlinkSync(tmpScript); } catch { /* ignore */ }
     }
   },
 );
@@ -1623,10 +1440,7 @@ server.tool(
   'github_backup',
   'Commit and push the group backup repo to GitHub. Use for nightly backups or when important state changes. The host handles git credentials — the container just triggers it.',
   {
-    message: z
-      .string()
-      .optional()
-      .describe('Commit message. Default: "backup: <ISO date>"'),
+    message: z.string().optional().describe('Commit message. Default: "backup: <ISO date>"'),
   },
   async (args) => {
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1642,11 +1456,7 @@ server.tool(
     writeIpcFile(TASKS_DIR, data);
 
     // Poll for result file
-    const resultPath = path.join(
-      IPC_DIR,
-      'input',
-      `_script_result_${requestId}.json`,
-    );
+    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
     const timeoutMs = 60_000;
     const pollMs = 500;
     const start = Date.now();
@@ -1657,19 +1467,15 @@ server.tool(
         fs.unlinkSync(resultPath);
         if (result.error) {
           return {
-            content: [
-              { type: 'text' as const, text: `Backup failed: ${result.error}` },
-            ],
+            content: [{ type: 'text' as const, text: `Backup failed: ${result.error}` }],
             isError: true,
           };
         }
         return {
-          content: [
-            { type: 'text' as const, text: result.stdout || 'Backup pushed.' },
-          ],
+          content: [{ type: 'text' as const, text: result.stdout || 'Backup pushed.' }],
         };
       }
-      await new Promise((r) => setTimeout(r, pollMs));
+      await new Promise(r => setTimeout(r, pollMs));
     }
 
     return {
@@ -1683,16 +1489,10 @@ server.tool(
   'sessionize_get_event',
   'Fetch CFP and conference details from Sessionize by event slug. Returns normalized event data including CFP dates, conference dates, location, and website. Host handles the API key.',
   {
-    slug: z
-      .string()
-      .describe(
-        'Sessionize event slug (e.g., "devoxx-be-2026") or full URL (the slug is extracted automatically)',
-      ),
+    slug: z.string().describe('Sessionize event slug (e.g., "devoxx-be-2026") or full URL (the slug is extracted automatically)'),
   },
   async (args) => {
-    const slug = args.slug
-      .replace(/^https?:\/\/sessionize\.com\//, '')
-      .replace(/\/$/, '');
+    const slug = args.slug.replace(/^https?:\/\/sessionize\.com\//, '').replace(/\/$/, '');
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const data = {
       type: 'sessionize_get_event',
@@ -1703,11 +1503,7 @@ server.tool(
 
     writeIpcFile(TASKS_DIR, data);
 
-    const resultPath = path.join(
-      IPC_DIR,
-      'input',
-      `_script_result_${requestId}.json`,
-    );
+    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
     const timeoutMs = 30_000;
     const pollMs = 500;
     const start = Date.now();
@@ -1718,34 +1514,19 @@ server.tool(
         fs.unlinkSync(resultPath);
         if (result.error) {
           return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Sessionize error: ${result.error}`,
-              },
-            ],
+            content: [{ type: 'text' as const, text: `Sessionize error: ${result.error}` }],
             isError: true,
           };
         }
         return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify(result.data, null, 2),
-            },
-          ],
+          content: [{ type: 'text' as const, text: JSON.stringify(result.data, null, 2) }],
         };
       }
-      await new Promise((r) => setTimeout(r, pollMs));
+      await new Promise(r => setTimeout(r, pollMs));
     }
 
     return {
-      content: [
-        {
-          type: 'text' as const,
-          text: 'Sessionize request timed out after 30s',
-        },
-      ],
+      content: [{ type: 'text' as const, text: 'Sessionize request timed out after 30s' }],
       isError: true,
     };
   },
@@ -1760,9 +1541,7 @@ server.tool(
         isOnline: z
           .boolean()
           .optional()
-          .describe(
-            'If true, include online events. Default: false (in-person only)',
-          ),
+          .describe('If true, include online events. Default: false (in-person only)'),
         isUserGroup: z
           .boolean()
           .optional()
@@ -1782,11 +1561,7 @@ server.tool(
 
     writeIpcFile(TASKS_DIR, data);
 
-    const resultPath = path.join(
-      IPC_DIR,
-      'input',
-      `_script_result_${requestId}.json`,
-    );
+    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
     const timeoutMs = 30_000;
     const pollMs = 500;
     const start = Date.now();
@@ -1797,19 +1572,12 @@ server.tool(
         fs.unlinkSync(resultPath);
         if (result.error) {
           return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Sessionize error: ${result.error}`,
-              },
-            ],
+            content: [{ type: 'text' as const, text: `Sessionize error: ${result.error}` }],
             isError: true,
           };
         }
         return {
-          content: [
-            { type: 'text' as const, text: JSON.stringify(result.data) },
-          ],
+          content: [{ type: 'text' as const, text: JSON.stringify(result.data) }],
         };
       }
       await new Promise((r) => setTimeout(r, pollMs));
@@ -1840,22 +1608,12 @@ server.tool(
   'Promote staged skills and rules to a tile repo. Copies staging into a fresh clone, runs a read-only `tessl skill review` pass on each promoted skill when `tessl` is on PATH (reports score; never mutates content; skipped with a warning when unavailable — Copilot + the post-merge GHA review still gate the PR), pushes a timestamped `promote/<utc>-<tile>-<rand>` branch, opens a PR on the tile repo, and summons Copilot review via GraphQL. Does NOT merge, push to main, or publish to the registry — merge is manual (or via Composio), publish fires in GHA at merge time, and the agent calls `tessl_update` afterwards to pull the new version. Main group only.',
   {
     tileName: z.enum(TILE_NAMES).describe('Target tile repo.'),
-    skillName: z
-      .string()
-      .optional()
-      .describe(
-        'Specific skill to promote. Omit for all staging items. Use "--rules-only" to promote only rules.',
-      ),
+    skillName: z.string().optional().describe('Specific skill to promote. Omit for all staging items. Use "--rules-only" to promote only rules.'),
   },
   async (args) => {
     if (!isMain) {
       return {
-        content: [
-          {
-            type: 'text' as const,
-            text: 'Only the main group can promote tiles.',
-          },
-        ],
+        content: [{ type: 'text' as const, text: 'Only the main group can promote tiles.' }],
         isError: true,
       };
     }
@@ -1912,10 +1670,7 @@ skillName options:
     if (!isMain) {
       return {
         content: [
-          {
-            type: 'text' as const,
-            text: 'Only the main group can push to tile branches.',
-          },
+          { type: 'text' as const, text: 'Only the main group can push to tile branches.' },
         ],
         isError: true,
       };
@@ -2061,14 +1816,12 @@ server.tool(
 
 server.tool(
   'send_message_to_chat',
-  'Post a plain text message into another registered chat without spawning a container there. Use this when the user asks you (from the main group) to broadcast or relay a message into a different chat — e.g. "post X to #family-chat". Replaces the schedule_task + once: now+5s kludge. Provide chat_id (JID like "tg:-1003869886477") OR chat_name (display name from the registered groups list); ambiguous names error with candidate JIDs. Set sender to post as a named bot identity (Telegram only; routes through the bot pool). Set pin to pin the sent message — silently ignored on the bot-pool path because the pool send hook can\'t pin, so don\'t combine sender + pin. No reply_to: foreign chat message IDs aren\'t reachable from main, and Telegram message IDs are per-chat so guessing collides. Failures (unknown JID, blocked, rate-limit) return a clear error and do NOT write a phantom bot row into the target chat\'s DB. Main group only.',
+  "Post a plain text message into another registered chat without spawning a container there. Use this when the user asks you (from the main group) to broadcast or relay a message into a different chat — e.g. \"post X to #family-chat\". Replaces the schedule_task + once: now+5s kludge. Provide chat_id (JID like \"tg:-1003869886477\") OR chat_name (display name from the registered groups list); ambiguous names error with candidate JIDs. Set sender to post as a named bot identity (Telegram only; routes through the bot pool). Set pin to pin the sent message — silently ignored on the bot-pool path because the pool send hook can't pin, so don't combine sender + pin. No reply_to: foreign chat message IDs aren't reachable from main, and Telegram message IDs are per-chat so guessing collides. Failures (unknown JID, blocked, rate-limit) return a clear error and do NOT write a phantom bot row into the target chat's DB. Main group only.",
   {
     chat_id: z
       .string()
       .optional()
-      .describe(
-        'Target chat JID, e.g. "tg:-1003869886477". Mutually exclusive with chat_name.',
-      ),
+      .describe('Target chat JID, e.g. "tg:-1003869886477". Mutually exclusive with chat_name.'),
     chat_name: z
       .string()
       .optional()
@@ -2106,7 +1859,8 @@ server.tool(
         content: [
           {
             type: 'text' as const,
-            text: 'send_message_to_chat requires chat_id or chat_name — admin always operates cross-chat. Use the regular send_message tool to reply in the current chat.',
+            text:
+              'send_message_to_chat requires chat_id or chat_name — admin always operates cross-chat. Use the regular send_message tool to reply in the current chat.',
           },
         ],
         isError: true,
@@ -2152,10 +1906,7 @@ server.tool(
     if (!isMain) {
       return {
         content: [
-          {
-            type: 'text' as const,
-            text: 'Only the main group can trigger tessl_update.',
-          },
+          { type: 'text' as const, text: 'Only the main group can trigger tessl_update.' },
         ],
         isError: true,
       };
