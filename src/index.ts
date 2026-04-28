@@ -1926,13 +1926,19 @@ function ensureContainerSystemRunning(): void {
       },
       'Found graceful-shutdown handoff marker, adopting containers',
     );
-    // Open the spawn-collision detection window (#213 Phase A): for
-    // the next HANDOFF_TTL_MS, the spawn path checks `docker ps`
-    // before launching a new agent and logs WARN if a same-prefix
-    // container is already running. Outside the window, the check
-    // is skipped (no adopted containers can plausibly still be
-    // alive). See `src/handoff.ts` for the rationale.
-    markHandoffActive();
+    // Open the spawn-collision detection window (#213 Phase A) ONLY
+    // when there's actually something to collide with. An empty
+    // handoff (graceful shutdown with no active agents) means no
+    // adopted containers exist — opening the window would cost a
+    // `docker ps` per spawn for the next HANDOFF_TTL_MS and could
+    // produce misleading WARNs against this orchestrator's own
+    // freshly-spawned containers (the prefix check has no way to
+    // distinguish "leftover from prior run" from "just spawned by
+    // this run" once the prior run had nothing). Skip the window
+    // when the container list is empty.
+    if (handoff.containers.length > 0) {
+      markHandoffActive();
+    }
   }
   cleanupOrphans(skipNames);
 }

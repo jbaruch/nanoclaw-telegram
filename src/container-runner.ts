@@ -1581,12 +1581,31 @@ export async function runContainerAgent(
   // detector is the trigger to ship Phase B.
   if (isHandoffActive()) {
     const collisionPrefix = `nanoclaw-${safeName}${sessionSuffix}-`;
-    try {
-      const psResult = spawnSync(
-        'docker',
-        ['ps', '--format', '{{.Names}}', '--filter', `name=${collisionPrefix}`],
-        { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
+    // Use CONTAINER_RUNTIME_BIN, not a hard-coded 'docker', so the
+    // detector follows the codebase's "swap runtimes by changing one
+    // file" contract documented at the top of `container-runtime.ts`.
+    const psResult = spawnSync(
+      CONTAINER_RUNTIME_BIN,
+      ['ps', '--format', '{{.Names}}', '--filter', `name=${collisionPrefix}`],
+      { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
+    );
+    // spawnSync doesn't throw on non-zero exit; an unreachable docker
+    // daemon, permission error, or missing binary surfaces as
+    // `psResult.error` (spawn-side) or `psResult.status !== 0`
+    // (process-side). Either way, treat the detector as unavailable
+    // for this spawn and continue — the spawn itself must NOT be
+    // blocked by an observability surface.
+    if (psResult.error || psResult.status !== 0) {
+      logger.debug(
+        {
+          issue: 'jbaruch/nanoclaw#213',
+          err: psResult.error,
+          status: psResult.status,
+          stderr: psResult.stderr?.toString().slice(0, 500),
+        },
+        'Spawn-collision detector unavailable (docker ps failed) — skipping',
       );
+    } else {
       const collisions = (psResult.stdout || '')
         .split('\n')
         .map((n) => n.trim())
@@ -1611,14 +1630,6 @@ export async function runContainerAgent(
             'See src/handoff.ts and the comment block above this log.',
         );
       }
-    } catch (err) {
-      // Detector failure must NOT block the spawn. Log at debug so
-      // a transient `docker ps` error doesn't drown legitimate
-      // collision warnings; the spawn itself proceeds normally.
-      logger.debug(
-        { err, issue: 'jbaruch/nanoclaw#213' },
-        'Spawn-collision detector failed (non-fatal)',
-      );
     }
   }
   const { args: containerArgs, cleanup: cleanupSecretEnvFile } =

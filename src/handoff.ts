@@ -198,5 +198,35 @@ export function readAndConsumeHandoffMarker(): HandoffMarker | null {
     );
     return null;
   }
-  return marker;
+  // Per-entry shape validation. The shape check at the array level
+  // is necessary but not sufficient — a JSON-valid `[null]` or
+  // `[{}]` would otherwise crash callers like
+  // `handoff.containers.map(c => c.name)` at startup, dropping the
+  // orchestrator into a fail-OPEN state instead of the documented
+  // fail-closed-to-crash-recovery contract.
+  const validContainers: HandoffContainer[] = [];
+  for (const entry of marker.containers) {
+    if (
+      entry &&
+      typeof entry === 'object' &&
+      typeof (entry as HandoffContainer).name === 'string' &&
+      (entry as HandoffContainer).name.length > 0 &&
+      typeof (entry as HandoffContainer).groupJid === 'string' &&
+      typeof (entry as HandoffContainer).sessionName === 'string'
+    ) {
+      const e = entry as HandoffContainer;
+      validContainers.push({
+        name: e.name,
+        groupJid: e.groupJid,
+        sessionName: e.sessionName,
+        groupFolder: typeof e.groupFolder === 'string' ? e.groupFolder : null,
+      });
+    } else {
+      logger.warn(
+        { entry },
+        'handoff: dropping malformed container entry from marker',
+      );
+    }
+  }
+  return { ...marker, containers: validContainers };
 }

@@ -250,6 +250,67 @@ describe('readAndConsumeHandoffMarker', () => {
 
     expect(readAndConsumeHandoffMarker()).toBeNull();
   });
+
+  it('drops malformed entries (null, missing fields, wrong types) but keeps valid ones', async () => {
+    const { readAndConsumeHandoffMarker } = await import('./handoff.js');
+    fs.writeFileSync(
+      path.join(tempDir, 'handoff.json'),
+      JSON.stringify({
+        schema_version: 1,
+        shutdown_at: new Date().toISOString(),
+        containers: [
+          // Each malformed entry would otherwise crash a downstream
+          // `containers.map(c => c.name)` at startup, dropping the
+          // orchestrator into fail-OPEN instead of the documented
+          // fail-closed-to-crash-recovery contract.
+          null,
+          {},
+          { name: 123 }, // wrong type
+          { name: '', groupJid: 'a@g.us', sessionName: 'default' }, // empty name
+          { name: 'no-groupjid', sessionName: 'default' },
+          {
+            name: 'nanoclaw-keep',
+            groupJid: 'k@g.us',
+            sessionName: 'default',
+            groupFolder: 'k',
+          },
+        ],
+      }),
+    );
+
+    const marker = readAndConsumeHandoffMarker();
+    expect(marker).not.toBeNull();
+    // Only the well-formed entry survives; the rest are dropped
+    // with a warning. The orchestrator gets a clean adoption list.
+    expect(marker!.containers).toHaveLength(1);
+    expect(marker!.containers[0].name).toBe('nanoclaw-keep');
+  });
+
+  it('coerces missing groupFolder to null on an otherwise-valid entry', async () => {
+    const { readAndConsumeHandoffMarker } = await import('./handoff.js');
+    fs.writeFileSync(
+      path.join(tempDir, 'handoff.json'),
+      JSON.stringify({
+        schema_version: 1,
+        shutdown_at: new Date().toISOString(),
+        containers: [
+          // groupFolder is nullable in `GroupQueue` state per the
+          // existing type — the handoff round-trip must preserve
+          // the same shape rather than reject the entry outright.
+          {
+            name: 'nanoclaw-no-folder',
+            groupJid: 'x@g.us',
+            sessionName: 'default',
+          },
+        ],
+      }),
+    );
+
+    const marker = readAndConsumeHandoffMarker();
+    expect(marker).not.toBeNull();
+    expect(marker!.containers).toHaveLength(1);
+    expect(marker!.containers[0].groupFolder).toBeNull();
+  });
 });
 
 describe('handoff window (#213 Phase A spawn-collision detection)', () => {
