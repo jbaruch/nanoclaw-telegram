@@ -38,8 +38,8 @@ vi.mock('./config.js', async () => {
 // sendPoolMessage is imported directly into ipc.ts (not via deps) and
 // reaches into Telegram bot-pool state we don't want to spin up here.
 // Mock it as a vi.fn so the test can assert call shape and program a
-// return value (the per-test poolReturn variable below). Returning
-// undefined exercises the #232 phantom-row gate path.
+// return value per-test via `poolMockFn.mockResolvedValue(...)`.
+// Returning undefined exercises the #232 phantom-row gate path.
 const { poolMockFn } = vi.hoisted(() => ({
   poolMockFn: vi.fn(),
 }));
@@ -49,9 +49,12 @@ vi.mock('./channels/telegram.js', () => ({
 
 import path from 'path';
 
+import { ASSISTANT_NAME } from './config.js';
 import {
   _initTestDatabase,
   getLastFromMeMessage,
+  getLatestMessage,
+  getMessageById,
   storeChatMetadata,
 } from './db.js';
 import { processTaskIpc, IpcDeps } from './ipc.js';
@@ -551,6 +554,71 @@ describe('send_message_to_chat dispatch', () => {
     };
     const payload = JSON.parse(body.stdout);
     expect(payload.pinned).toBe(false);
+  });
+
+  it('whitespace-only sender is treated as no-sender — routes direct, not pool', async () => {
+    // Defense against the Copilot-spotted bug: a payload of `'   '`
+    // would, before the trim, take the `Boolean(sender)` branch and
+    // route through sendPoolMessage with a whitespace identity —
+    // binding a pool bot to nothing. Trim must collapse this to
+    // undefined so the direct path runs as if no sender was passed.
+    sendReturn = 'tg-msg-trim';
+
+    await processTaskIpc(
+      {
+        type: 'send_message_to_chat',
+        requestId: 'sender-ws',
+        chat_id: TG_JID,
+        text: 'hi',
+        sender: '   ',
+      },
+      MAIN_GROUP.folder,
+      true,
+      deps,
+    );
+
+    expect(poolMockFn).not.toHaveBeenCalled();
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0].jid).toBe(TG_JID);
+  });
+
+  it('records ASSISTANT_NAME in DB on the direct path even when caller passes sender (sender has no effect off the pool path)', async () => {
+    // Sender only takes effect on the Telegram bot pool. On the
+    // direct path (here: WhatsApp) the message goes from the
+    // channel's default identity, so the DB row must reflect that —
+    // not the caller's `sender`. Otherwise downstream consumers
+    // (heartbeat, audit) see a persona that never touched the wire.
+    sendReturn = 'wa-msg-effective';
+
+    await processTaskIpc(
+      {
+        type: 'send_message_to_chat',
+        requestId: 'effective-sender',
+        chat_id: WA_JID,
+        text: 'hi',
+        sender: 'Researcher',
+      },
+      MAIN_GROUP.folder,
+      true,
+      deps,
+    );
+
+    expect(poolMockFn).not.toHaveBeenCalled();
+    expect(sendCalls).toHaveLength(1);
+
+    // The DB row's sender must be ASSISTANT_NAME, not 'Researcher' —
+    // getLatestMessage gets the id, getMessageById gives full row
+    // (including sender + sender_name). Asserting the actual stored
+    // identity is the only way to catch the regression Copilot
+    // flagged: the prior code blindly recorded `sender || ASSISTANT_NAME`
+    // even when `usePool` was false and the persona never reached
+    // the wire.
+    const latest = getLatestMessage(WA_JID);
+    expect(latest).not.toBeNull();
+    const row = getMessageById(latest!.id, WA_JID);
+    expect(row).not.toBeNull();
+    expect(row!.sender).toBe(ASSISTANT_NAME);
+    expect(row!.sender_name).toBe(ASSISTANT_NAME);
   });
 });
 

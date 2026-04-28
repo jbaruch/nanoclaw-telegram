@@ -2032,10 +2032,14 @@ export async function processTaskIpc(
       }
 
       const targetGroup = registeredGroups[targetJid];
-      const sender =
-        typeof data.sender === 'string' && data.sender.length > 0
-          ? data.sender
-          : undefined;
+      // Trim before treating as present — a payload of `'   '` would
+      // otherwise route through the pool path (Boolean(' ') is true)
+      // and bind a pool bot to a whitespace identity. Empty-after-trim
+      // collapses to undefined so routing matches the documented
+      // contract ("named identity" → pool; nothing → direct).
+      const senderRaw =
+        typeof data.sender === 'string' ? data.sender.trim() : '';
+      const sender = senderRaw.length > 0 ? senderRaw : undefined;
       const wantsPin = data.pin === true;
 
       // Strip <internal> tags for parity with the regular 'message'
@@ -2114,11 +2118,20 @@ export async function processTaskIpc(
         }
 
         const botRowId = `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        // Persist the identity that ACTUALLY went out, not what the
+        // caller asked for. `sender` only takes effect on the pool
+        // path (Telegram + sender set). On the direct path (non-
+        // Telegram, or Telegram without sender) the message goes from
+        // the channel's default identity, so storing the caller's
+        // `sender` would make the DB row claim a persona that never
+        // touched the wire — misleading the heartbeat / unanswered-
+        // cron / future audits about who replied.
+        const effectiveSender = usePool && sender ? sender : ASSISTANT_NAME;
         storeMessage({
           id: botRowId,
           chat_jid: targetJid,
-          sender: sender || ASSISTANT_NAME,
-          sender_name: sender || ASSISTANT_NAME,
+          sender: effectiveSender,
+          sender_name: effectiveSender,
           content: cleanText,
           timestamp: new Date().toISOString(),
           is_from_me: true,
