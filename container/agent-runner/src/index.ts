@@ -643,8 +643,9 @@ function createReactFirstHook(containerInput: ContainerInput): HookCallback {
  * ground-truth at the same per-turn cadence SOUL enjoys.
  *
  * Decision logic lives in `ground-truth-reminder.ts` so the unit
- * tests can exercise skip cases (sub-agent, scheduled task, no
- * assistantName) without spinning up the SDK.
+ * tests can exercise skip cases (sub-agent, scheduled task,
+ * `[SCHEDULED TASK]` prompt wrap, no assistantName) without spinning
+ * up the SDK.
  */
 function createGroundTruthReminderHook(
   containerInput: ContainerInput,

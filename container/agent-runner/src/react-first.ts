@@ -66,7 +66,12 @@ export type ReactFirstDecision =
         | 'scheduled-task-prompt-wrap';
     };
 
-const SCHEDULED_TASK_PROMPT_PREFIX = '[SCHEDULED TASK]';
+/**
+ * Defence-in-depth prompt-wrap signal for scheduled-task containers.
+ * Exported so other UserPromptSubmit hooks (e.g. ground-truth-reminder)
+ * can short-circuit on the same signal without drift.
+ */
+export const SCHEDULED_TASK_PROMPT_PREFIX = '[SCHEDULED TASK]';
 
 /**
  * Pure decision: should the react-first hook fire on this submission?

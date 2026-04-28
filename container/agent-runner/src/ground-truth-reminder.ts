@@ -24,12 +24,19 @@
  *    noise the user never sees.
  *  - The `[SCHEDULED TASK]` prompt wrap is the defence-in-depth case
  *    for scheduled-task containers misreporting `isScheduledTask=false`.
- *  - Containers with no `assistantName` are bare runner contexts that
- *    aren't bound to a chat persona; the reminder has no addressee.
+ *  - Containers with no `assistantName` are bare runner / probe
+ *    contexts (no persona bound to the session); skipping there
+ *    keeps non-interactive runs uncluttered with per-turn salience
+ *    content they don't act on.
  *
  * Kept SDK-free so the root vitest can exercise it without spinning up
  * `@anthropic-ai/claude-agent-sdk`.
  */
+
+// Re-exported from `react-first.ts` so the wrap-skip signal is one
+// canonical string. Both hooks short-circuit on the same value, with
+// no drift if the wrap text is ever changed.
+import { SCHEDULED_TASK_PROMPT_PREFIX } from './react-first.js';
 
 export interface GroundTruthReminderInput {
   /** True iff this is a sub-agent (Task tool) sub-turn. */
@@ -64,13 +71,6 @@ export const GROUND_TRUTH_REMINDER =
   'Before answering: verify any factual claim. Memory is not a source. ' +
   'If you have an authoritative pointer (memory file, env var, hardcoded ' +
   'constant), read it first. If you can verify it, you must verify it.';
-
-/**
- * Defence-in-depth wrap recognised by `react-first.ts` for
- * scheduled-task containers whose `isScheduledTask` flag was not set.
- * Mirrored verbatim so both hooks short-circuit on the same signal.
- */
-const SCHEDULED_TASK_PROMPT_PREFIX = '[SCHEDULED TASK]';
 
 /**
  * Inspect a UserPromptSubmit context and decide whether to inject the
