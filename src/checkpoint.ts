@@ -262,14 +262,35 @@ export async function writeCheckpoint(inputs: CheckpointInputs): Promise<void> {
 export function clearCheckpoints(groupDir: string): number {
   const { dir, live, previous } = checkpointPaths(groupDir);
 
+  // Realpath the parent groupDir up front. We need it to assert that
+  // the resolved `.checkpoints/` real path lands at exactly the
+  // expected child of groupDir — not somewhere else through a
+  // TOCTOU symlink swap between the lstat below and the realpath
+  // call further down.
+  let realGroupDir: string;
+  try {
+    realGroupDir = fs.realpathSync(groupDir);
+  } catch (err) {
+    if (!(err instanceof Error)) throw err;
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return 0; // group folder doesn't exist → nothing to clear
+    logger.warn(
+      { groupDir, err },
+      'clearCheckpoints: realpath failed on groupDir — skipping',
+    );
+    return 0;
+  }
+  const expectedRealDir = path.join(realGroupDir, CHECKPOINTS_SUBDIR);
+
   let dirLstat: fs.Stats;
   try {
     dirLstat = fs.lstatSync(dir);
   } catch (err) {
+    if (!(err instanceof Error)) throw err;
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return 0; // .checkpoints/ never created
     logger.warn(
-      { dir, err: err instanceof Error ? err.message : String(err) },
+      { dir, err },
       'clearCheckpoints: lstat failed on .checkpoints/ — skipping',
     );
     return 0;
@@ -287,9 +308,23 @@ export function clearCheckpoints(groupDir: string): number {
   try {
     realDir = fs.realpathSync(dir);
   } catch (err) {
+    if (!(err instanceof Error)) throw err;
     logger.warn(
-      { dir, err: err instanceof Error ? err.message : String(err) },
+      { dir, err },
       'clearCheckpoints: realpath failed on .checkpoints/ — skipping',
+    );
+    return 0;
+  }
+  // TOCTOU defense: between the `lstatSync(dir)` above and this
+  // realpath, a compromised container could have swapped
+  // `.checkpoints/` for a symlink. The lstat-not-symlink branch
+  // would have passed (it ran on the original inode), but realpath
+  // now resolves through the new symlink. Assert the resolved real
+  // path equals the expected child of groupDir; refuse otherwise.
+  if (realDir !== expectedRealDir) {
+    logger.error(
+      { dir, realDir, expectedRealDir },
+      'clearCheckpoints: refusing — .checkpoints/ realpath escapes groupDir (TOCTOU?)',
     );
     return 0;
   }
@@ -300,12 +335,10 @@ export function clearCheckpoints(groupDir: string): number {
     try {
       entryStat = fs.lstatSync(file);
     } catch (err) {
+      if (!(err instanceof Error)) throw err;
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') continue;
-      logger.warn(
-        { file, err: err instanceof Error ? err.message : String(err) },
-        'clearCheckpoints: lstat failed — skipping',
-      );
+      logger.warn({ file, err }, 'clearCheckpoints: lstat failed — skipping');
       continue;
     }
 
@@ -319,10 +352,11 @@ export function clearCheckpoints(groupDir: string): number {
           'clearCheckpoints: unlinked symlinked checkpoint file (target preserved)',
         );
       } catch (err) {
+        if (!(err instanceof Error)) throw err;
         const code = (err as NodeJS.ErrnoException).code;
         if (code === 'ENOENT') continue;
         logger.warn(
-          { file, err: err instanceof Error ? err.message : String(err) },
+          { file, err },
           'clearCheckpoints: unlink-of-symlink failed',
         );
       }
@@ -334,10 +368,11 @@ export function clearCheckpoints(groupDir: string): number {
     try {
       realFile = fs.realpathSync(file);
     } catch (err) {
+      if (!(err instanceof Error)) throw err;
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') continue;
       logger.warn(
-        { file, err: err instanceof Error ? err.message : String(err) },
+        { file, err },
         'clearCheckpoints: realpath failed — skipping',
       );
       continue;
@@ -353,12 +388,10 @@ export function clearCheckpoints(groupDir: string): number {
       fs.unlinkSync(file);
       removed++;
     } catch (err) {
+      if (!(err instanceof Error)) throw err;
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') continue;
-      logger.warn(
-        { file, err: err instanceof Error ? err.message : String(err) },
-        'clearCheckpoints: unlink failed',
-      );
+      logger.warn({ file, err }, 'clearCheckpoints: unlink failed');
     }
   }
   return removed;

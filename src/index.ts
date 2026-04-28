@@ -2356,17 +2356,22 @@ async function main(): Promise<void> {
         try {
           groupDir = resolveGroupFolderPath(groupFolder);
         } catch (err) {
-          // resolveGroupFolderPath rejects path traversal; if it
-          // throws on a folder we just wiped DB rows for, something
-          // upstream is corrupt — log loudly but don't block the
-          // rest of the nuke. The reentry skill will find the
-          // checkpoint still on disk; operator can rerun with a
-          // fixed group_folder.
+          // Per `jbaruch/coding-policy: error-handling`: only handle
+          // the expected case (Error from path validation), let
+          // anything else propagate. resolveGroupFolderPath
+          // documents Error throws on path-traversal / invalid
+          // segment; non-Error throws here would indicate a bug
+          // upstream and should bubble up to the IPC dispatch
+          // wrapper, which logs and keeps the orchestrator alive.
+          if (!(err instanceof Error)) throw err;
+          // The expected case: bad groupFolder. Log full error
+          // object (logger handles `err` specially — preserves
+          // stack, formats nicely) and skip the checkpoint clear
+          // without blocking the rest of the nuke. Reentry skill
+          // will find the checkpoint still on disk; operator can
+          // rerun with a fixed group_folder.
           logger.error(
-            {
-              groupFolder,
-              err: err instanceof Error ? err.message : String(err),
-            },
+            { groupFolder, err },
             'skipReentry: cannot resolve group folder — checkpoint files left in place',
           );
           logger.info({ groupFolder, session }, 'Session nuked via IPC');

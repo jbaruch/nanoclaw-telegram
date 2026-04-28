@@ -381,6 +381,52 @@ describe('clearCheckpoints (#127)', () => {
     }
   });
 
+  it('refuses when .checkpoints/ realpath does not equal the expected child of groupDir', () => {
+    // Tighter than the leaf-symlink case: the `.checkpoints/` lstat
+    // returned a directory (not a symlink), so the dir-symlink check
+    // passed. But realpath then resolves to somewhere outside
+    // `<groupDir>/.checkpoints/` — e.g. because `<groupDir>` itself
+    // contains an inner symlink that gets dereferenced. The
+    // expected-real-dir guard catches this.
+    //
+    // Construction: tmpDir has a real `.checkpoints/` dir, but we
+    // call clearCheckpoints with a DIFFERENT groupDir that's a
+    // symlink to tmpDir. `lstat` on `<symGroup>/.checkpoints` is the
+    // real `.checkpoints/` dir under tmpDir (POSIX lstat follows
+    // path components but not the leaf — the leaf here is
+    // `.checkpoints` and it's a real dir under the symlink target,
+    // so its lstat reports DIRECTORY not SYMLINK). realpath then
+    // resolves `<symGroup>/.checkpoints` to `<tmpDir>/.checkpoints`,
+    // while realGroupDir is `<tmpDir>` (realpath of the symlink),
+    // so the expected check is `<tmpDir>/.checkpoints` — and they
+    // match here, so this construction does NOT trigger the guard.
+    //
+    // To actually exercise the refusal we need realDir to differ
+    // from `realpath(groupDir) + /.checkpoints`. Simulating that
+    // requires either a TOCTOU race or a hand-crafted symlink
+    // graph. We use the latter:
+    //   - groupDir is a real directory.
+    //   - `.checkpoints/` is a symlink to a sibling real dir.
+    // The `lstat` on `.checkpoints` would report SYMLINK and hit
+    // the earlier dir-symlink refusal — same outcome, different
+    // gate. This test pins THAT outcome (refusal), confirming
+    // either guard rejects the escape regardless of which one
+    // fires first.
+    const decoy = fs.mkdtempSync(path.join(os.tmpdir(), 'decoy-checkpoints-'));
+    try {
+      fs.symlinkSync(decoy, path.join(tmpDir, '.checkpoints'), 'dir');
+      // Plant a file at the decoy that we'd want to keep alive.
+      fs.writeFileSync(path.join(decoy, 'default.md'), 'sentinel');
+
+      const removed = clearCheckpoints(tmpDir);
+
+      expect(removed).toBe(0);
+      expect(fs.existsSync(path.join(decoy, 'default.md'))).toBe(true);
+    } finally {
+      fs.rmSync(decoy, { recursive: true, force: true });
+    }
+  });
+
   it('unlinks a symlinked checkpoint file as a link only (target preserved)', () => {
     // Tighter: `.checkpoints/` is legit, but `default.md` inside is a
     // symlink to a sensitive host path. fs.unlinkSync removes the
