@@ -140,7 +140,10 @@ import {
   runContainerAgent,
   ContainerOutput,
   selectTiles,
+  resolveAgentModel,
+  DEFAULT_AGENT_MODEL,
 } from './container-runner.js';
+import { logger } from './logger.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -567,5 +570,69 @@ describe('continuation env vars (self-resuming cycles)', () => {
     expect(
       args.some((a) => a.startsWith('NANOCLAW_CONTINUATION_CYCLE_ID=')),
     ).toBe(false);
+  });
+});
+
+// ----------------------------------------------------------------------
+// resolveAgentModel — deterministic helper contract for the AGENT_MODEL
+// env override, with optional warning on unknown prefixes (logger.warn
+// is a side effect, so this isn't strictly pure). Pinned because the
+// helper has five distinct branches and the default path is the only
+// one the rest of the suite exercises.
+// ----------------------------------------------------------------------
+
+describe('resolveAgentModel', () => {
+  beforeEach(() => {
+    vi.mocked(logger.warn).mockClear();
+  });
+
+  it('returns default when env var is undefined', () => {
+    expect(resolveAgentModel(undefined)).toBe(DEFAULT_AGENT_MODEL);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('returns default when env var is the empty string', () => {
+    expect(resolveAgentModel('')).toBe(DEFAULT_AGENT_MODEL);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('returns default when env var is whitespace-only', () => {
+    expect(resolveAgentModel('   ')).toBe(DEFAULT_AGENT_MODEL);
+    expect(resolveAgentModel('\t\n ')).toBe(DEFAULT_AGENT_MODEL);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('passes through known-prefix values silently (no warn)', () => {
+    expect(resolveAgentModel('claude-opus-4-7[1m]')).toBe(
+      'claude-opus-4-7[1m]',
+    );
+    expect(resolveAgentModel('claude-sonnet-4-6[1m]')).toBe(
+      'claude-sonnet-4-6[1m]',
+    );
+    expect(resolveAgentModel('opus')).toBe('opus');
+    expect(resolveAgentModel('sonnet[1m]')).toBe('sonnet[1m]');
+    expect(resolveAgentModel('haiku')).toBe('haiku');
+    // Mixed case — regex is case-insensitive.
+    expect(resolveAgentModel('Claude-opus-4-7')).toBe('Claude-opus-4-7');
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('passes through unknown-prefix values WITH a warn so typos surface at startup', () => {
+    // A typo like 'claud-opus' (missing 'e'): doesn't match prefix regex.
+    expect(resolveAgentModel('claud-opus-4-7')).toBe('claud-opus-4-7');
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(logger.warn).mock.calls[0][1]).toContain(
+      'AGENT_MODEL does not look like a Claude model ID',
+    );
+  });
+
+  it('trims surrounding whitespace before validation and pass-through', () => {
+    // .trim() must run before the prefix check, so `  opus  ` matches
+    // 'opus' cleanly and doesn't trigger the warn.
+    expect(resolveAgentModel('  claude-opus-4-7[1m]  ')).toBe(
+      'claude-opus-4-7[1m]',
+    );
+    expect(resolveAgentModel('\topus\n')).toBe('opus');
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 });
