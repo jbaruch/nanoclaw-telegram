@@ -228,7 +228,7 @@ summon_copilot_or_warn() {
   if summon_copilot "$owner" "$repo" "$pr_number"; then
     echo "Copilot review requested on $owner/$repo#$pr_number"
   else
-    echo "WARN: could not summon Copilot on $owner/$repo#$pr_number — the PR is up; summon manually via:"
-    echo "  gh api graphql -f query='mutation { requestReviews(input: { pullRequestId: <node_id>, botIds: [\"BOT_kgDOCnlnWA\"], union: true }) { pullRequest { number } } }'"
+    echo "WARN: could not summon Copilot on $owner/$repo#$pr_number — the PR is up; summon manually via:" >&2
+    echo "  gh api graphql -f query='mutation { requestReviews(input: { pullRequestId: <node_id>, botIds: [\"BOT_kgDOCnlnWA\"], union: true }) { pullRequest { number } } }'" >&2
   fi
 }
