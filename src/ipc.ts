@@ -2002,28 +2002,36 @@ export async function processTaskIpc(
             cwd: groupDir,
             env: traktEnv,
             timeout: 120_000,
-            // 8MB. Pre-#146 ceiling was 1MB, which silently truncated
-            // realistic Trakt history payloads (~328 shows + 117 movies
-            // + 77 ratings = >1MB JSON) — execFile would error with
-            // ENOBUFS and the agent's only signal was `Command failed:
-            // python3 ...` because the empty-stderr/dropped-stdout path
-            // ate the actual cause. 8MB headroom covers the long tail
-            // (large libraries, growth over years) without blowing the
-            // IPC envelope: even at 8MB stdout, the JSON payload is
-            // truncated to head/tail slices below before being written
-            // to the result file.
-            maxBuffer: 8 * 1024 * 1024,
+            // 4MB. Pre-#146 ceiling was 1MB, which silently truncated
+            // realistic Trakt history payloads (~328 shows + 117
+            // movies + 77 ratings = >1MB JSON) — execFile errored with
+            // ENOBUFS and the agent's only signal was `Command
+            // failed: python3 ...` because the empty-stderr /
+            // dropped-stdout path ate the actual cause. 4MB headroom
+            // covers years of library growth without inflating the
+            // worst-case success payload to an unreasonable size: the
+            // success path below writes raw stdout (truncating would
+            // produce broken JSON the agent can't parse), so the
+            // ceiling here directly bounds what the agent has to
+            // ingest. ERROR-path stdout/stderr is head/tail-truncated
+            // at ~64KB each below — that's safe to truncate because
+            // the agent only uses it as diagnostic prose, not as
+            // structured data.
+            maxBuffer: 4 * 1024 * 1024,
           },
           (error, stdout, stderr) => {
             const resultPath = scriptResultPath(sourceGroup, data);
-            // Cap each captured stream at ~64KB on the error path so
-            // the result-file JSON stays well under the IPC reader's
-            // 1MB limit (`startIpcWatcher` rejects files >1MB). 64KB
-            // is empirically enough to carry a full Python traceback
-            // plus a few hundred lines of leading context — the
-            // truncation issue the original `stderr.slice(-500)`
-            // caused was that a long traceback was clipped to its
-            // tail, hiding the most-informative top-of-stack lines.
+            // Cap each captured stream at ~64KB on the error path to
+            // keep the script-result JSON reasonably small while still
+            // preserving the most useful diagnostics. 64KB is
+            // empirically enough to carry a full Python traceback plus
+            // a few hundred lines of leading context — the truncation
+            // issue the original `stderr.slice(-500)` caused was that
+            // a long traceback was clipped to its tail, hiding the
+            // most-informative top-of-stack lines. (Script-result
+            // files don't go through `startIpcWatcher`'s 1MB inbound
+            // task/message check, so the cap here is pragmatic
+            // payload-size discipline, not a hard wall.)
             const ERROR_PAYLOAD_CAP = 64 * 1024;
             const headTail = (s: string) => {
               if (s.length <= ERROR_PAYLOAD_CAP) return s;
@@ -2036,13 +2044,20 @@ export async function processTaskIpc(
             };
             if (error) {
               // ExecException-typed fields the SDK populates: `code`
-              // is the exit code (or signal name on kill), `killed`
-              // is true on timeout / SIGTERM. Both are diagnostic gold
-              // the previous `error.message`-only payload was
-              // throwing away — the agent could see "Command failed"
-              // but not the exit code, so a 401 (auth expired), an
-              // ENOBUFS (stdout overflow), and a SIGTERM (timeout)
-              // all looked identical.
+              // is whatever Node attaches — for execFile that can be
+              // a numeric process exit code (a script's `sys.exit(2)`
+              // surfaces as `2`) OR a string error code for spawn-
+              // side failures (`ERR_CHILD_PROCESS_STDIO_MAXBUFFER`
+              // on stdout overflow, `ENOENT` if the binary is
+              // missing, etc.). Surface it as-is and let the agent
+              // treat it as a free-form indicator; trying to coerce
+              // it to a single shape (always int / always string)
+              // would lose information. `killed` is true on
+              // timeout / SIGTERM — diagnostic gold the previous
+              // `error.message`-only payload was throwing away,
+              // because 401 (auth expired), ENOBUFS (stdout
+              // overflow), and SIGTERM (timeout) all looked
+              // identical at `Command failed: python3 ...`.
               const execErr = error as NodeJS.ErrnoException & {
                 code?: string | number;
                 killed?: boolean;

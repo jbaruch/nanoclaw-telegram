@@ -95,7 +95,37 @@ async function runHostOperation(
       const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
       fs.unlinkSync(resultPath);
       if (result.error) {
-        return { content: [{ type: 'text' as const, text: `Error: ${result.error}` }], isError: true };
+        // Surface every diagnostic field the host wrote (#146): pre-fix
+        // the agent only saw `Error: ${result.error}` (typically just
+        // `Error: Command failed: python3 ...`), so a 401 (auth), an
+        // ENOBUFS (stdout overflow), and a SIGTERM (timeout) all looked
+        // identical. The host-side handler now optionally writes
+        // `exit_code`, `killed`, `stderr`, `stdout` alongside `error`;
+        // include each one when present so the agent gets the full
+        // failure context as a single text payload (MCP tool responses
+        // are flat strings — no structured fields to surface).
+        const errorParts: string[] = [`Error: ${result.error}`];
+        if (result.exit_code !== undefined && result.exit_code !== null) {
+          // `exit_code` is whatever Node's `error.code` was: a numeric
+          // process exit code on a normal non-zero exit, OR a string
+          // like `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` / `ENOENT` for
+          // spawn-side failures. The agent should treat this as a
+          // free-form error indicator, not assume integer.
+          errorParts.push(`exit_code: ${result.exit_code}`);
+        }
+        if (result.killed) {
+          errorParts.push(`killed: true (timeout or signal)`);
+        }
+        if (result.stderr) {
+          errorParts.push(`--- stderr ---\n${result.stderr}`);
+        }
+        if (result.stdout) {
+          errorParts.push(`--- stdout ---\n${result.stdout}`);
+        }
+        return {
+          content: [{ type: 'text' as const, text: errorParts.join('\n') }],
+          isError: true,
+        };
       }
       return { content: [{ type: 'text' as const, text: result.stdout || '(no output)' }] };
     }
