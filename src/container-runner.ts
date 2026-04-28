@@ -1195,6 +1195,47 @@ export function buildVolumeMounts(
     readonly: false,
   });
 
+  // Tile content read-only overlay (#247).
+  //
+  // The `/home/node/.claude` mount above MUST stay writable — the SDK
+  // writes session JSONL transcripts to `projects/<slug>/`, debug logs
+  // to `debug/`, todos to `todos/`, telemetry to `telemetry/`,
+  // session-env to `session-env/`, and the auto-memory overlay below
+  // also depends on a writable parent. We can't flip the parent
+  // readonly without breaking all of that.
+  //
+  // What we CAN flip readonly is the two specific subdirs that hold
+  // installed tile content: `skills/` (per-tile SKILL.md trees) and
+  // `.tessl/` (tile.json + rules + the generated RULES.md). The
+  // orchestrator wrote both host-side at the top of this function via
+  // cpSync from `tessl-workspace/.tessl/tiles/...`, so by the time
+  // the agent container starts the content is already in place. Layer
+  // two readonly bind-mounts on top of the writable parent so the
+  // kernel rejects any write from inside the container with EROFS.
+  // The agent's edit/write tools cannot patch installed content
+  // mid-session anymore — modifications must flow through staging →
+  // promote → publish → tessl update like every other tile change.
+  //
+  // Why `tessl update` is unaffected: it runs in the orchestrator
+  // container against `/app/tessl-workspace/.tessl/tiles/...`, a
+  // completely different filesystem path the agent never sees. The
+  // per-spawn cpSync that copies registry tiles into
+  // `<groupSessionsDir>/skills/` and `<groupSessionsDir>/.tessl/` ran
+  // host-side BEFORE the container starts, so the readonly overlay
+  // is not in effect during that copy. The next spawn's `rmSync`
+  // (force: true) at the top of this function also bypasses any
+  // readonly perms that lingered.
+  mounts.push({
+    hostPath: toHostPath(skillsDst),
+    containerPath: '/home/node/.claude/skills',
+    readonly: true,
+  });
+  mounts.push({
+    hostPath: toHostPath(dstTessl),
+    containerPath: '/home/node/.claude/.tessl',
+    readonly: true,
+  });
+
   // Shared auto-memory mount (issue #57). Claude Code's SDK writes
   // accumulated feedback and owner-profile memory to
   // ~/.claude/projects/<slug>/memory/. PR #55 mounted `.claude/` per-session,
