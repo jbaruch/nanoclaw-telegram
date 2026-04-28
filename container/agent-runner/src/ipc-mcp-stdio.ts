@@ -142,7 +142,7 @@ const server = new McpServer({
 
 server.tool(
   'send_message',
-  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times. Use reply_to with a message ID to quote-reply a specific message.",
+  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times. Use reply_to with a message ID to quote-reply a specific message. To send to a different chat (cross-chat broadcast from main), pass chat_jid — only main containers may target other chats; trusted/untrusted containers can only target their own chat regardless of what's passed (host-side authz enforces this). When chat_jid is set, do NOT pass reply_to unless you have a message ID from the TARGET chat — Telegram message IDs are per-chat, so a source-chat ID will resolve to an unrelated message in the target chat.",
   {
     text: z.string().describe('The message text to send'),
     sender: z
@@ -151,20 +151,30 @@ server.tool(
       .describe(
         'Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.',
       ),
-    reply_to: z.string().optional().describe('Message ID to reply to (quote). Get this from the [id=...] tag in the message prompt. If omitted, auto-replies to the most recent incoming message (first call only).'),
+    reply_to: z.string().optional().describe('Message ID to reply to (quote). Get this from the [id=...] tag in the message prompt. If omitted, the message is sent without quote-threading. For cross-chat sends (chat_jid set), only pass this if it refers to a message in the TARGET chat — Telegram message IDs are per-chat.'),
     pin: z.boolean().optional().describe('Pin this message in the chat after sending. Use for important messages like daily briefs.'),
+    chat_jid: z
+      .string()
+      .optional()
+      .describe(
+        'Target chat JID for cross-chat sends (e.g., "tg:-1003869886477"). Only honored when called from a main container; other tiers always send to their own chat. Use sparingly — most replies should go to the chat the prompt arrived in. Sent messages are recorded in messages.db just like normal sends, so the agent and heartbeat see them.',
+      ),
   },
   async (args) => {
     const data: Record<string, string | boolean | undefined> = {
       type: 'message',
-      chatJid,
+      chatJid: args.chat_jid || chatJid,
       text: args.text,
       sender: args.sender || undefined,
       groupFolder,
       timestamp: new Date().toISOString(),
     };
 
-    // Only reply-thread when explicitly requested
+    // Only reply-thread when the caller explicitly passes reply_to.
+    // We never auto-fill from "the most recent incoming message" — that
+    // pattern silently misthreads cross-chat broadcasts: Telegram message
+    // IDs are per-chat, so a source-chat ID resolves to an unrelated
+    // message in the target chat. See nanoclaw-public#7.
     if (args.reply_to) {
       data.replyToMessageId = args.reply_to;
     }
@@ -188,6 +198,33 @@ server.tool(
     reply_to: z.string().optional().describe('Message ID to reply to'),
   },
   async (args) => {
+    // Path must live under a host-readable mount. Anything else (notably
+    // /tmp — tmpfs inside the container, invisible to the host) gets
+    // dropped silently by the host-side validator. Reject upfront so the
+    // agent gets immediate, actionable feedback instead of fake-success.
+    // Keep this list aligned with the host's `send_file` translator in
+    // src/ipc.ts — it currently only translates `/workspace/group/` and
+    // `/workspace/trusted/`. Extra mounts (`/workspace/extra/...`) reach
+    // the host as raw container paths and get rejected, so listing them
+    // here would just trade silent drop for misleading client-side
+    // success.
+    const allowedPrefixes = ['/workspace/group/', '/workspace/trusted/'];
+    if (!allowedPrefixes.some((p) => args.filePath.startsWith(p))) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text:
+              `Path not deliverable: ${args.filePath}. ` +
+              `send_file only sends files from host-readable mounts. ` +
+              `Write the file under /workspace/group/ (your group folder) ` +
+              `instead — /tmp/ is container-only tmpfs and the host can't read it.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
     if (!fs.existsSync(args.filePath)) {
       return {
         content: [{ type: 'text' as const, text: `File not found: ${args.filePath}` }],
@@ -208,6 +245,36 @@ server.tool(
     writeIpcFile(MESSAGES_DIR, data);
 
     return { content: [{ type: 'text' as const, text: `File queued for sending: ${path.basename(args.filePath)}` }] };
+  },
+);
+
+server.tool(
+  'send_voice',
+  'Send a voice (audio) reply to the user via Telegram. Synthesizes the text using OpenAI TTS and uploads as a Telegram voice note. Use when the user sent a voice message and would prefer voice back, or when explicitly asked to reply by voice. Keep text under ~500 chars — TTS is cheap but very long messages feel awkward as audio. Use plain prose without HTML tags or markdown.',
+  {
+    text: z.string().describe('The text to speak (plain prose, no HTML/markdown).'),
+    voice: z
+      .enum(['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'])
+      .optional()
+      .describe('OpenAI TTS voice (default: alloy).'),
+    reply_to: z.string().optional().describe('Message ID to reply to.'),
+  },
+  async (_args) => {
+    // The host-side IPC processor (src/ipc.ts) doesn't yet implement a
+    // handler for `type: 'send_voice'`. If we wrote the IPC file anyway,
+    // the host's poll loop would unlink it on the next pass and the
+    // agent would see a "Voice queued" success while the user heard
+    // nothing. Fail fast until the host gains a TTS pipeline so the
+    // agent can fall back to send_message.
+    return {
+      isError: true,
+      content: [
+        {
+          type: 'text' as const,
+          text: 'send_voice is not available: the host IPC processor does not yet handle type: "send_voice". Reply via send_message instead.',
+        },
+      ],
+    };
   },
 );
 

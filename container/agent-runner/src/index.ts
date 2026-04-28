@@ -1281,7 +1281,19 @@ async function runQuery(
   const silentTurnState = createSilentTurnState(Date.now());
   silentTurnState.triggeringInboundId = extractTriggeringInboundIdForAudit(prompt);
 
-  // Poll IPC for follow-up messages and _close sentinel during the query
+  // Poll IPC for the _close sentinel during the query. We deliberately do
+  // NOT drain JSON message files here — there's a race where pollIpc fires
+  // after the SDK has emitted Result and agent-runner has broken out of
+  // the for-await over responses, but BEFORE runQuery returns and
+  // ipcPolling flips to false. In that window, draining a file consumes
+  // it from disk (delete + consumedInputFiles entry) and pushes it into a
+  // stream the SDK has stopped reading from — message is silently lost.
+  // Mid-query draining is also unnecessary: the SDK conversation is
+  // turn-based, and adding a second user message mid-turn doesn't get
+  // processed until after the current turn ends anyway. Letting
+  // waitForIpcMessage drain between queries gives the same throughput
+  // with deterministic delivery — files only disappear when their content
+  // has been read into a string that becomes the next runQuery's prompt.
   let ipcPolling = true;
   let closedDuringQuery = false;
   const pollIpcDuringQuery = () => {
@@ -1293,11 +1305,6 @@ async function runQuery(
       ipcPolling = false;
       return;
     }
-    const messages = drainIpcInput();
-    for (const text of messages) {
-      log(`Piping IPC message into active query (${text.length} chars)`);
-      stream.push(text);
-    }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
   setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
@@ -1306,6 +1313,16 @@ async function runQuery(
   let lastAssistantUuid: string | undefined;
   let messageCount = 0;
   let resultCount = 0;
+  // Track whether the agent invoked an explicit user-facing send tool
+  // AND the tool actually succeeded during this query. If so, the SDK's
+  // final `result.text` is a closing-thought / summary aimed at the
+  // harness, not a second answer to the user — forwarding it produces
+  // visible duplicates ("Awake, bud" + "Confirmed."). We require a
+  // successful tool_result (not is_error) so a hook-denied or errored
+  // send_message doesn't suppress the final text and leave the user
+  // staring at silence.
+  const pendingUserFacingToolUseIds = new Set<string>();
+  let userFacingSendSucceeded = false;
 
   // Streaming preview: accumulate assistant text and emit throttled
   let streamingTextAccum = '';
@@ -1702,7 +1719,7 @@ async function runQuery(
       // the result lands.
       const assistantMsg = message as {
         message?: {
-          content?: Array<{ type: string; text?: string }>;
+          content?: Array<{ type: string; text?: string; name?: string; id?: string; input?: unknown }>;
           usage?: {
             input_tokens?: number;
             output_tokens?: number;
@@ -1739,6 +1756,49 @@ async function runQuery(
               usage: latestUsage,
             });
             lastStreamEmit = now;
+          }
+        }
+        // Detect explicit user-facing send tool invocations during this
+        // turn. Stash the tool_use id so we can match the corresponding
+        // tool_result below — we only suppress the SDK's final text once
+        // we've seen a non-error result for one of these calls.
+        // Note: `send_voice` is intentionally excluded — the host IPC
+        // processor (src/ipc.ts) doesn't yet handle `type: 'send_voice'`,
+        // so the file is dropped silently. Suppressing the final text on a
+        // dropped voice send would leave the user with nothing. Until host
+        // support lands, the tool itself returns isError so this code path
+        // is unreachable for send_voice anyway, but pinning the allowlist
+        // keeps the two layers in sync if either is touched independently.
+        for (const block of content) {
+          if (
+            block.type === 'tool_use' &&
+            block.id &&
+            (block.name === 'mcp__nanoclaw__send_message' ||
+              block.name === 'mcp__nanoclaw__send_file')
+          ) {
+            pendingUserFacingToolUseIds.add(block.id);
+          }
+        }
+      }
+    }
+
+    // Track successful results for the send tools we recorded above.
+    // The SDK emits tool_result blocks inside `user`-typed messages.
+    // If `is_error` is true (rate limit, hook denial, exception), the
+    // user never received the message — leave userFacingSendSucceeded
+    // alone so the SDK's final text still goes out and the user sees
+    // *something*.
+    if (message.type === 'user') {
+      const userContent = (message as { message?: { content?: Array<{ type: string; tool_use_id?: string; is_error?: boolean }> } }).message?.content;
+      if (userContent) {
+        for (const block of userContent) {
+          if (
+            block.type === 'tool_result' &&
+            block.tool_use_id &&
+            pendingUserFacingToolUseIds.has(block.tool_use_id) &&
+            block.is_error !== true
+          ) {
+            userFacingSendSucceeded = true;
           }
         }
       }
@@ -1830,12 +1890,23 @@ async function runQuery(
         });
         sawErrorResult = true;
       } else {
+        // #47: if the agent already used send_message / send_file
+        // successfully (tracked above), suppress the SDK's final
+        // closing-thought text so it doesn't get echoed as a second
+        // user reply. The orchestrator's `if (result.result)` gate in
+        // src/index.ts skips when result is null.
+        const suppressFinalText = userFacingSendSucceeded && !!textResult;
+        if (suppressFinalText) {
+          log(
+            `Suppressing result.text echo (send tool already succeeded): ${textResult!.slice(0, 80)}`,
+          );
+        }
         log(
           `Result #${resultCount}: subtype=${subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
         );
         writeOutput({
           status: 'success',
-          result: textResult || null,
+          result: suppressFinalText ? null : textResult || null,
           newSessionId,
           usage: latestUsage,
         });

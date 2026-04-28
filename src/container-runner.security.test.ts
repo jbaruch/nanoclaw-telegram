@@ -72,7 +72,8 @@ import type { RegisteredGroup } from './types.js';
 
 const { TEST_ROOT, STORE_DIR, DATA_DIR, GROUPS_DIR, PROJECT_DIR } = paths;
 
-function seedMessagesDb(): string {
+function seedMessagesDb(opts: { withReactions?: boolean } = {}): string {
+  const withReactions = opts.withReactions ?? true;
   fs.mkdirSync(STORE_DIR, { recursive: true });
   const dbPath = path.join(STORE_DIR, 'messages.db');
   if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
@@ -105,6 +106,26 @@ function seedMessagesDb(): string {
   insertMsg.run('a2', 'chatA@g.us', 'alice', 'second from A', 1002);
   insertMsg.run('b1', 'chatB@g.us', 'bob', 'hello from B', 2001);
   insertMsg.run('b2', 'chatB@g.us', 'bob', 'second from B', 2002);
+  // Reactions are optional so the fallback path (no src.reactions table,
+  // pre-migration source DB) can be exercised separately.
+  if (withReactions) {
+    db.exec(`
+      CREATE TABLE reactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT NOT NULL,
+        message_chat_jid TEXT NOT NULL,
+        reactor_jid TEXT NOT NULL,
+        reactor_name TEXT NOT NULL,
+        emoji TEXT NOT NULL,
+        timestamp TEXT NOT NULL
+      )
+    `);
+    const insertReact = db.prepare(
+      'INSERT INTO reactions (message_id, message_chat_jid, reactor_jid, reactor_name, emoji, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
+    );
+    insertReact.run('a1', 'chatA@g.us', 'alice', 'Alice', '👀', '1001');
+    insertReact.run('b1', 'chatB@g.us', 'bob', 'Bob', '👀', '2001');
+  }
   db.close();
   return dbPath;
 }
@@ -152,6 +173,50 @@ describe('createFilteredDb (untrusted DB isolation)', () => {
       // Explicit negative: chatB must not leak through
       expect(messages.find((m) => m.id === 'b1')).toBeUndefined();
       expect(messages.find((m) => m.id === 'b2')).toBeUndefined();
+
+      // Reactions must exist (check-unanswered.py joins on this) and be
+      // scoped to the target chat — chatB reactions must not leak.
+      const reactionsTable = db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        )
+        .get('reactions');
+      expect(reactionsTable).toBeDefined();
+      const outOfScopeReaction = db
+        .prepare('SELECT 1 FROM reactions WHERE message_chat_jid <> ? LIMIT 1')
+        .get('chatA@g.us');
+      expect(outOfScopeReaction).toBeUndefined();
+      const reactionCount = (
+        db.prepare('SELECT COUNT(*) AS c FROM reactions').get() as { c: number }
+      ).c;
+      expect(reactionCount).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('filtered DB has empty reactions table when source DB has no reactions table (pre-migration)', () => {
+    // Source DB without reactions — simulates a fresh install before the
+    // reactions migration ran. The filtered DB must still expose an empty
+    // reactions table so check-unanswered.py's join doesn't abort with
+    // "no such table: reactions". Specific existence check on
+    // src.sqlite_master replaced an earlier bare try/catch that would
+    // have masked corruption / lock errors as "no reactions".
+    seedMessagesDb({ withReactions: false });
+    const filtered = createFilteredDb('chatA@g.us', 'folder-a');
+    expect(filtered).not.toBe(null);
+    const db = new Database(filtered!, { readonly: true });
+    try {
+      const reactionsTable = db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        )
+        .get('reactions');
+      expect(reactionsTable).toBeDefined();
+      const reactionCount = (
+        db.prepare('SELECT COUNT(*) AS c FROM reactions').get() as { c: number }
+      ).c;
+      expect(reactionCount).toBe(0);
     } finally {
       db.close();
     }
