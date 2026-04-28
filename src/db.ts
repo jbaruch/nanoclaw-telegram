@@ -1051,6 +1051,66 @@ export function pruneCompletedTasks(maxAgeMs: number): number {
 }
 
 /**
+ * Recover once-tasks whose pre-advance landed but whose dispatch did
+ * not. The pre-advance write at `task-scheduler.ts` flips a once-task
+ * to `status='completed'` *before* `enqueueTask` is called, so a host
+ * crash, a queue shutdown, or a streaming-callback failure between
+ * those two lines leaves a row with the orphan signature
+ * `status='completed' AND schedule_type='once' AND last_run IS NULL
+ * AND next_run IS NOT NULL`. `getDueTasks()` filters on
+ * `status='active'`, so the row never re-tries; `pruneCompletedTasks`
+ * eventually GCs it via the `COALESCE(last_run, created_at)` fallback,
+ * but by then the schedule is silently lost.
+ *
+ * Called once at scheduler startup (see `task-scheduler.ts`). Flips
+ * matching rows back to `active` so the next `getDueTasks()` poll
+ * picks them up and `runTask` dispatches them — late but firing.
+ *
+ * If dispatch fails *again* for the same row (same race), the next
+ * restart resurrects it again, and `pruneCompletedTasks` still GCs it
+ * on age via the `created_at` fallback — no risk of zombie loop.
+ *
+ * Returns the list of resurrected task ids (sorted by id for
+ * deterministic output) for logging and assertion in tests.
+ *
+ * Atomicity: SELECT and the per-id UPDATEs run inside a single
+ * transaction. The UPDATE re-asserts the full zombie predicate so a
+ * row that races (e.g., a concurrent dispatch landing between SELECT
+ * and UPDATE) is left alone — the UPDATE is a no-op and the id is
+ * dropped from the returned list.
+ */
+export function resurrectZombieTasks(): string[] {
+  const tx = db.transaction((): string[] => {
+    const rows = db
+      .prepare(
+        `SELECT id FROM scheduled_tasks
+         WHERE status = 'completed'
+           AND schedule_type = 'once'
+           AND last_run IS NULL
+           AND next_run IS NOT NULL
+         ORDER BY id`,
+      )
+      .all() as Array<{ id: string }>;
+    if (rows.length === 0) return [];
+    const stmt = db.prepare(
+      `UPDATE scheduled_tasks
+       SET status = 'active'
+       WHERE id = ?
+         AND status = 'completed'
+         AND schedule_type = 'once'
+         AND last_run IS NULL
+         AND next_run IS NOT NULL`,
+    );
+    const resurrectedIds: string[] = [];
+    for (const { id } of rows) {
+      if (stmt.run(id).changes > 0) resurrectedIds.push(id);
+    }
+    return resurrectedIds;
+  });
+  return tx();
+}
+
+/**
  * Find recurring (cron / interval) tasks that are still `status='active'`
  * whose age (last_run, falling back to created_at) is older than
  * `maxAgeMs`. These are NOT pruned — only surfaced so the scheduler can

@@ -13,6 +13,7 @@ import {
   getAllTasks,
   getDormantRecurringTasks,
   getDueTasks,
+  resurrectZombieTasks,
   getTaskById,
   logTaskRun,
   pruneCompletedTasks,
@@ -687,6 +688,27 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
     logger.debug('Scheduler loop already running, skipping duplicate start');
     return;
   }
+
+  // Recover zombie once-tasks (#37): rows pre-advanced to
+  // `status='completed'` whose dispatch was dropped before
+  // `updateTaskAfterRun` ran. Flipping them back to `active` lets the
+  // first `getDueTasks()` poll pick them up — late dispatch beats
+  // silent loss for once-tasks (reminders, T-30 traffic checks,
+  // scheduled briefings). Idempotent across restarts; if dispatch
+  // fails again, `pruneCompletedTasks` eventually GCs via age.
+  //
+  // Runs BEFORE `schedulerRunning` is set so a transient DB error
+  // (e.g., SQLite busy) propagates without leaving the module flag
+  // stuck at `true`. A retried `startSchedulerLoop` call then gets a
+  // clean second attempt rather than no-op'ing on the stale flag.
+  const resurrected = resurrectZombieTasks();
+  if (resurrected.length > 0) {
+    logger.info(
+      { count: resurrected.length, ids: resurrected },
+      'Resurrected zombie once-tasks at startup',
+    );
+  }
+
   schedulerRunning = true;
   logger.info('Scheduler loop started');
 
