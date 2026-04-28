@@ -691,12 +691,16 @@ function removeToolResultsDirInSlug(
     // that scattered symlinks to host paths in its own tool-results
     // tree cannot redirect the wipe.
     //
-    // `force: true` swallows ENOENT if the path vanished between
-    // lstat and rm (a concurrent cleanup, an in-flight container
-    // teardown). Other errors still surface from the inner walk.
-    fs.rmSync(dirPath, { recursive: true, force: true });
+    // No `force: true`: we want ENOENT to surface as an error so the
+    // returned count reflects actual removals. Without that distinction,
+    // a concurrent cleanup that vanished the path between our lstat
+    // and rmSync would still count as `1` here, inflating the caller's
+    // "entries removed" total.
+    fs.rmSync(dirPath, { recursive: true });
     return 1;
   } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return 0;
     logger.warn(
       { err, groupFolder, sessionName, sessionId, dirPath },
       'removeToolResultsDirInSlug: rmSync failed',
@@ -730,6 +734,11 @@ function removeToolResultsDirInSlug(
  *
  * Tests also import this symbol directly to bypass the full
  * `nukeSession` path.
+ *
+ * @internal — the orchestrator builds with `tsconfig.stripInternal: true`,
+ * so this tag keeps the symbol out of the emitted `.d.ts`. The two
+ * production callers above are in-tree and don't need d.ts visibility;
+ * tests reach the symbol through the source `.ts` import, not the d.ts.
  */
 export function wipeSessionJsonl(
   groupFolder: string,
