@@ -4,10 +4,11 @@
 #
 # Reports:
 #   - Version mismatches and missing tiles
-#   - Content-hash drift between GitHub HEAD and the installed copy in
-#     the orchestrator container, even when version numbers match (catches
-#     same-version-republished-with-different-content and legacy-path
-#     stale-install)
+#   - Content-hash drift between the registry's canonical tarball for
+#     the installed version (fetched via `tessl install <name>@<version>`)
+#     and the installed copy in the orchestrator container, even when
+#     version numbers match (catches same-version-republished-with-
+#     different-content and legacy-path stale-install)
 #   - Other `.tessl/tiles` directories visible inside the container that
 #     are NOT the canonical install root (operator-inspecting these
 #     would see stale content)
@@ -44,6 +45,21 @@ TILE_OWNER_VAL="${TILE_OWNER_VAL:-jbaruch}"
 # this path explicitly so the operator knows which tree was inspected.
 INSTALL_ROOT="${NANOCLAW_TESSL_ROOT:-/app/tessl-workspace/.tessl/tiles}"
 
+# Pick a SHA-256 hasher available on the host. Linux defaults to
+# `sha256sum`; macOS ships `shasum -a 256` instead. Probe in that
+# order. Without this detection a host missing one would crash the
+# whole reconcile under `set -e` instead of producing the intended
+# `HASH-CHECK FAILED` line per tile.
+if command -v sha256sum >/dev/null 2>&1; then
+  HASHER=("sha256sum")
+elif command -v shasum >/dev/null 2>&1; then
+  HASHER=("shasum" "-a" "256")
+else
+  echo "ERROR: neither sha256sum nor shasum is available on PATH" >&2
+  echo "  Install one of them and re-run, or set PATH to include the binary." >&2
+  exit 2
+fi
+
 TILES="nanoclaw-admin nanoclaw-core nanoclaw-trusted nanoclaw-untrusted nanoclaw-host"
 ISSUES=0
 
@@ -67,13 +83,20 @@ echo ""
 # are not what the orchestrator's `tessl update` writes.
 LEGACY_PATHS=$(nas "docker exec nanoclaw find /app -maxdepth 5 -type d -path '*/tessl-workspace/.tessl/tiles' 2>/dev/null" || true)
 if [ -n "$LEGACY_PATHS" ]; then
-  OTHER_PATHS=$(echo "$LEGACY_PATHS" | grep -v "^$INSTALL_ROOT$" || true)
+  # `grep -Fvx` does an exact fixed-string line match (no regex), so a
+  # path with `.` or `*` doesn't accidentally match the wrong line.
+  OTHER_PATHS=$(echo "$LEGACY_PATHS" | grep -Fvx -- "$INSTALL_ROOT" || true)
   if [ -n "$OTHER_PATHS" ]; then
-    echo "WARN: non-canonical tessl-workspace install detected in the container:"
-    echo "$OTHER_PATHS" | sed 's/^/  /'
-    echo "  Operators inspecting these will see stale content. This script"
-    echo "  reconciles only against $INSTALL_ROOT."
-    echo ""
+    # Diagnostic, not program output — route to stderr per
+    # `jbaruch/coding-policy: file-hygiene` ("stdout for program
+    # output, stderr for errors and diagnostics").
+    {
+      echo "WARN: non-canonical tessl-workspace install detected in the container:"
+      echo "$OTHER_PATHS" | sed 's/^/  /'
+      echo "  Operators inspecting these will see stale content. This script"
+      echo "  reconciles only against $INSTALL_ROOT."
+      echo ""
+    } >&2
   fi
 fi
 
@@ -83,12 +106,13 @@ fi
 # version — not GitHub HEAD, which races ahead via `patch-version-publish`'s
 # auto-bump commits and would produce false-positive drift reports.
 #
-# We hash the union of `tile.json`, every file under `rules/`, and
-# every file under `skills/` — that's the entire surface the registry
-# tarball ships (per `rules/context-artifacts.md`) and the entire
-# surface the installed copy exposes to the agent. Returns the SHA256
-# hex digest of a sorted manifest of `<sha256>  <relpath>` lines, or
-# the literal string `ERR` on failure.
+# We hash `tile.json` plus every regular file under `rules/` and
+# `skills/` (no extension filter — drift in `*.txt`, `*.yaml`, raw
+# scripts, etc. is real drift). The output of the per-file hasher
+# already includes the relative path, so a sorted concatenation +
+# final hash captures both content AND structure (file rename =
+# different manifest = different hash). Returns the SHA256 hex digest
+# of the sorted manifest, or the literal string `ERR` on failure.
 registry_tile_hash() {
   local tile="$1" version="$2"
   local tmp; tmp="$(mktemp -d -t reconcile-tile-XXXXXX)"
@@ -108,36 +132,50 @@ EOF
     fi
     cd "$installed_dir"
     {
-      [ -f tile.json ] && shasum -a 256 tile.json
-      find rules skills -type f \( -name '*.md' -o -name '*.json' -o -name '*.py' -o -name '*.sh' \) 2>/dev/null \
+      [ -f tile.json ] && "${HASHER[@]}" tile.json
+      find rules skills -type f 2>/dev/null \
         | sort \
-        | xargs shasum -a 256 2>/dev/null
-    } | sort | shasum -a 256 | awk '{print $1}'
+        | xargs "${HASHER[@]}" 2>/dev/null
+    } | sort | "${HASHER[@]}" | awk '{print $1}'
   )
   rm -rf "$tmp"
 }
 
 # Same hash function applied to the container's installed copy of the
 # tile. Operates inside the orchestrator container via the existing
-# `nas` SSH helper. Mirrors the github_tile_hash file selection
+# `nas` SSH helper. Mirrors `registry_tile_hash`'s file selection
 # exactly so the two are directly comparable.
+#
+# The container is Linux so we hardcode `sha256sum` here (the host's
+# detected $HASHER is an array reference that won't survive the
+# `docker exec` boundary). The local `tessl install` in
+# `registry_tile_hash` runs on the host, so its hashes go through
+# whichever local binary $HASHER picked. Both produce the same
+# `<hex-digest>  <path>` format, so the manifests are directly
+# comparable as long as we pin to SHA-256 on each side.
+#
+# Args are passed via positional parameters to avoid `sh -c "$VAR"`
+# interpolation injection through `INSTALL_ROOT` (overridable via
+# env), `TILE_OWNER_VAL` (read from `.env` or env), and `tile`
+# (loop var, but defense in depth).
 installed_tile_hash() {
   local tile="$1"
-  nas "docker exec nanoclaw sh -c 'cd $INSTALL_ROOT/$TILE_OWNER_VAL/$tile 2>/dev/null && {
+  nas "docker exec nanoclaw sh -c 'cd \"\$1/\$2/\$3\" 2>/dev/null && {
     [ -f tile.json ] && sha256sum tile.json
-    find rules skills -type f \( -name \"*.md\" -o -name \"*.json\" -o -name \"*.py\" -o -name \"*.sh\" \) 2>/dev/null \
+    find rules skills -type f 2>/dev/null \
       | sort \
       | xargs sha256sum 2>/dev/null
-  } | sort | sha256sum | awk \"{print \\\$1}\"'" 2>/dev/null
+  } | sort | sha256sum | awk \"{print \\\$1}\"' _ '$INSTALL_ROOT' '$TILE_OWNER_VAL' '$tile'" 2>/dev/null
 }
 
 # mtime + size of a file inside the installed tile. Used for the
 # drift report so an operator can correlate "old install" vs "wrong
-# content same time" at a glance.
+# content same time" at a glance. Same positional-parameter
+# discipline as `installed_tile_hash`.
 installed_file_summary() {
   local tile="$1"
   local relpath="$2"
-  nas "docker exec nanoclaw sh -c 'stat -c \"%y  %s\" $INSTALL_ROOT/$TILE_OWNER_VAL/$tile/$relpath 2>/dev/null'" 2>/dev/null
+  nas "docker exec nanoclaw sh -c 'stat -c \"%y  %s\" \"\$1/\$2/\$3/\$4\" 2>/dev/null' _ '$INSTALL_ROOT' '$TILE_OWNER_VAL' '$tile' '$relpath'" 2>/dev/null
 }
 
 echo "Tile versions (repo vs registry vs installed):"
@@ -181,9 +219,13 @@ for tile in $TILES; do
 
   if [ "$REGISTRY_HASH" = "ERR" ] || [ -z "$REGISTRY_HASH" ]; then
     echo "  $tile: $REPO_VERSION (in sync; HASH-CHECK FAILED — registry install of @$INSTALLED_VERSION errored)"
+    echo "    To diagnose: 'tessl install $TILE_OWNER_VAL/$tile@$INSTALLED_VERSION --yes' in a temp dir to see the error,"
+    echo "    then verify network access to the tessl registry and that the version is still published."
     ISSUES=$((ISSUES + 1))
   elif [ "$INSTALLED_HASH" = "ERR" ] || [ -z "$INSTALLED_HASH" ]; then
     echo "  $tile: $REPO_VERSION (in sync; HASH-CHECK FAILED — installed read error)"
+    echo "    To diagnose: 'ssh nas docker exec nanoclaw ls $INSTALL_ROOT/$TILE_OWNER_VAL/$tile' to confirm install presence,"
+    echo "    then re-run after './scripts/deploy.sh --tiles-only' if the path is missing."
     ISSUES=$((ISSUES + 1))
   elif [ "$REGISTRY_HASH" = "$INSTALLED_HASH" ]; then
     echo "  $tile: $REPO_VERSION (in sync; content verified against registry@$INSTALLED_VERSION)"
