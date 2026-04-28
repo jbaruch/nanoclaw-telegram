@@ -15,6 +15,7 @@ import {
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
+  ENABLE_THRESHOLD_NUKE,
   GROUPS_DIR,
   HOST_GID,
   HOST_PROJECT_ROOT,
@@ -355,6 +356,20 @@ export interface ContainerOutput {
   newSessionId?: string;
   error?: string;
   streamText?: string;
+  /**
+   * Per-turn token usage from the agent-runner's most recent SDK
+   * assistant message. Used by the kill-auto-compaction telemetry +
+   * threshold detector (issue #104, design at
+   * `docs/proposals/kill-auto-compaction.md`). Optional because
+   * non-assistant outputs (errors before any model turn fires)
+   * may not carry a usage payload.
+   */
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
 }
 
 interface VolumeMount {
@@ -1420,6 +1435,21 @@ function buildContainerArgs(
   // ship with an orchestrator rebuild only.
   args.push('-e', `AGENT_MODEL=${AGENT_MODEL}`);
   args.push('-e', `AGENT_EFFORT=${AGENT_EFFORT}`);
+
+  // Kill-auto-compaction master flag (issue #104, design at
+  // docs/proposals/kill-auto-compaction.md). When the orchestrator's
+  // `ENABLE_THRESHOLD_NUKE` is set, the SDK's auto-compaction is
+  // disabled — the orchestrator's threshold-nuke handshake replaces
+  // it end-to-end. When the flag is off (default), DISABLE_COMPACT is
+  // NOT set, auto-compaction stays on, and the orchestrator's
+  // threshold detector runs in observe-only mode (telemetry +
+  // checkpoint format validation, no destructive nuke). The two
+  // halves are gated by the same flag because they must ship
+  // together — disabling compaction without the replacement leaves
+  // long sessions with no overflow safety net.
+  if (ENABLE_THRESHOLD_NUKE) {
+    args.push('-e', 'DISABLE_COMPACT=1');
+  }
 
   // Pass chat JID so container scripts know which group they're in
   if (chatJid) {

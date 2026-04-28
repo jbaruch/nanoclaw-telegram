@@ -107,6 +107,28 @@ interface ContainerOutput {
   newSessionId?: string;
   error?: string;
   streamText?: string;
+  /**
+   * Per-turn token usage from the most recent assistant message of
+   * this query. Captured from the SDK message stream's
+   * `message.usage` field (the Anthropic Messages API echoes
+   * input_tokens / output_tokens / cache fields on every response).
+   *
+   * `input_tokens` is the size of the conversation context the model
+   * saw on this turn, which the orchestrator's threshold-cross
+   * detector reads as "current context size." Other fields are
+   * surfaced for telemetry / forensic curves; the orchestrator does
+   * not gate on them.
+   *
+   * Optional because non-assistant turns (errors, init-only messages)
+   * may not carry a usage payload. Absent → telemetry skips this
+   * turn; threshold detector reads it as below_warn (no trigger).
+   */
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
 }
 
 interface SessionEntry {
@@ -499,7 +521,20 @@ function createSessionStartAutoContextHook(
     const memoryFile = '/home/node/.claude/projects/-workspace-group/memory/MEMORY.md';
     const runbookFile = '/workspace/group/RUNBOOK.md';
     const dailyLogDir = '/workspace/group/daily';
-    const result = composeAutoContext({ memoryFile, runbookFile, dailyLogDir });
+    // Kill-auto-compaction reentry (#104, design at
+    // docs/proposals/kill-auto-compaction.md). The orchestrator
+    // writes this file at threshold-cross before nuking the session;
+    // on the next spawn the hook reads it and injects it as
+    // additional context. When the file is missing (first-ever
+    // spawn, no recent threshold-cross, or operator-cleared), the
+    // composer silently skips this section.
+    const checkpointFile = '/workspace/group/.checkpoints/default.md';
+    const result = composeAutoContext({
+      memoryFile,
+      runbookFile,
+      dailyLogDir,
+      checkpointFile,
+    });
     if (result.composed.length === 0) {
       log('SessionStart: auto-context found no source files');
       return {};
@@ -1277,6 +1312,14 @@ async function runQuery(
   let lastStreamEmit = 0;
   const STREAM_THROTTLE_MS = 300;
 
+  // Most-recent per-turn token usage from the SDK message stream.
+  // Pinned onto every writeOutput payload (stream + final result) so
+  // the orchestrator can drive the kill-auto-compaction telemetry +
+  // threshold detector. See ContainerOutput.usage docstring for why
+  // it's optional. Carries across turns within a single runQuery
+  // invocation; a fresh runQuery starts undefined.
+  let latestUsage: ContainerOutput['usage'] | undefined;
+
   // Load SOUL.md and FORMATTING.md into systemPrompt.append so they survive
   // compaction. The SDK re-injects system prompt content every turn — behavioral
   // instructions placed here won't drift after long conversations or compaction.
@@ -1649,8 +1692,36 @@ async function runQuery(
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
+      // Capture per-turn token usage off the assistant message's
+      // wrapped Anthropic API response. Stored as `latestUsage` so the
+      // final result emit (below) can pin it onto the ContainerOutput
+      // payload — kill-auto-compaction Phase 1 (#125, tracks #104)
+      // requires the orchestrator to see input_tokens to drive the
+      // threshold detector. Stream-throttled emits below also include
+      // it so the orchestrator can fire the warn-level note before
+      // the result lands.
+      const assistantMsg = message as {
+        message?: {
+          content?: Array<{ type: string; text?: string }>;
+          usage?: {
+            input_tokens?: number;
+            output_tokens?: number;
+            cache_read_input_tokens?: number;
+            cache_creation_input_tokens?: number;
+          };
+        };
+      };
+      const u = assistantMsg.message?.usage;
+      if (u && typeof u.input_tokens === 'number' && typeof u.output_tokens === 'number') {
+        latestUsage = {
+          input_tokens: u.input_tokens,
+          output_tokens: u.output_tokens,
+          cache_read_input_tokens: u.cache_read_input_tokens,
+          cache_creation_input_tokens: u.cache_creation_input_tokens,
+        };
+      }
       // Extract text content for streaming preview
-      const content = (message as { message?: { content?: Array<{ type: string; text?: string }> } }).message?.content;
+      const content = assistantMsg.message?.content;
       if (content) {
         const text = content
           .filter((c) => c.type === 'text' && c.text)
@@ -1660,7 +1731,13 @@ async function runQuery(
           streamingTextAccum = text;
           const now = Date.now();
           if (now - lastStreamEmit >= STREAM_THROTTLE_MS) {
-            writeOutput({ status: 'success', result: null, streamText: streamingTextAccum, newSessionId });
+            writeOutput({
+              status: 'success',
+              result: null,
+              streamText: streamingTextAccum,
+              newSessionId,
+              usage: latestUsage,
+            });
             lastStreamEmit = now;
           }
         }
@@ -1749,6 +1826,7 @@ async function runQuery(
           result: null,
           newSessionId,
           error: `${subtype}: ${summary}`,
+          usage: latestUsage,
         });
         sawErrorResult = true;
       } else {
@@ -1759,6 +1837,7 @@ async function runQuery(
           status: 'success',
           result: textResult || null,
           newSessionId,
+          usage: latestUsage,
         });
       }
       // Break out of the for-await loop after receiving the result.

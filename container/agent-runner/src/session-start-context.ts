@@ -39,6 +39,19 @@ export interface AutoContextPaths {
    */
   dailyLogDir: string;
   /**
+   * Absolute path to the kill-auto-compaction checkpoint file
+   * (issue #104, design at
+   * `docs/proposals/kill-auto-compaction.md`). Optional — when
+   * the orchestrator's threshold-nuke handshake fires, it writes
+   * `## Facts` + (best-effort) `## Reasoning` here before the nuke;
+   * the next session's startup hook reads it and injects it as
+   * additional context so the agent picks up where the just-nuked
+   * session left off. Absent or missing → silent no-op (first-ever
+   * spawn, no recent threshold-cross, or operator deleted the file
+   * for a clean reset).
+   */
+  checkpointFile?: string;
+  /**
    * Optional ceiling on the bytes injected per file. Truncates with a
    * `[truncated]` marker when exceeded. Default 32 KiB per file.
    */
@@ -81,6 +94,13 @@ export function composeAutoContext(paths: AutoContextPaths): AutoContextResult {
   sections.push(loadFileSection('MEMORY', paths.memoryFile, cap));
   sections.push(loadFileSection('RUNBOOK', paths.runbookFile, cap));
   sections.push(loadDailyLogSection(paths.dailyLogDir, cap));
+  // CHECKPOINT (kill-auto-compaction reentry, #104) is loaded last so
+  // it lands closest to the user prompt in the composed block — the
+  // model treats nearer context as more salient, and the just-nuked
+  // session's facts are the most-actionable input on first turn.
+  if (paths.checkpointFile) {
+    sections.push(loadFileSection('CHECKPOINT', paths.checkpointFile, cap));
+  }
 
   const present = sections.filter((s) => s.found);
   if (present.length === 0) {

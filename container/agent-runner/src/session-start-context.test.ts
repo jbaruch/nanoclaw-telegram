@@ -114,4 +114,81 @@ describe('composeAutoContext', () => {
     const result = composeAutoContext({ memoryFile, runbookFile, dailyLogDir });
     expect(result.composed).toContain(`source="${memoryFile}"`);
   });
+
+  // Kill-auto-compaction reentry section (#104). The CHECKPOINT
+  // section is opt-in via `checkpointFile` so the existing tests
+  // (which don't pass it) keep their three-section assertions valid.
+  // When the path is supplied AND the file exists, the loader appends
+  // a fourth section after DAILY so it lands closest to the prompt.
+  describe('CHECKPOINT section (kill-auto-compaction reentry)', () => {
+    it('skipped when checkpointFile is undefined', () => {
+      fs.writeFileSync(memoryFile, 'M');
+      const result = composeAutoContext({ memoryFile, runbookFile, dailyLogDir });
+      expect(result.sections.find((s) => s.label === 'CHECKPOINT')).toBeUndefined();
+    });
+
+    it('found:false when checkpointFile is set but missing', () => {
+      fs.writeFileSync(memoryFile, 'M');
+      const result = composeAutoContext({
+        memoryFile,
+        runbookFile,
+        dailyLogDir,
+        checkpointFile: path.join(tmpRoot, 'no-such.md'),
+      });
+      const cp = result.sections.find((s) => s.label === 'CHECKPOINT');
+      expect(cp).toBeDefined();
+      expect(cp!.found).toBe(false);
+      // Composed text doesn't include a CHECKPOINT block when missing.
+      expect(result.composed).not.toContain('section="CHECKPOINT"');
+    });
+
+    it('injects CHECKPOINT contents when the file exists', () => {
+      const checkpointFile = path.join(tmpRoot, 'default.md');
+      fs.writeFileSync(checkpointFile, '# Session Checkpoint\n\n## Facts\n- x\n');
+      const result = composeAutoContext({
+        memoryFile,
+        runbookFile,
+        dailyLogDir,
+        checkpointFile,
+      });
+      expect(result.composed).toContain('section="CHECKPOINT"');
+      expect(result.composed).toContain('# Session Checkpoint');
+      expect(result.composed).toContain('## Facts');
+    });
+
+    it('CHECKPOINT lands after DAILY (closest to prompt = most salient)', () => {
+      const checkpointFile = path.join(tmpRoot, 'default.md');
+      fs.writeFileSync(memoryFile, 'M');
+      fs.mkdirSync(dailyLogDir);
+      fs.writeFileSync(path.join(dailyLogDir, '2026-04-27.md'), 'D');
+      fs.writeFileSync(checkpointFile, 'CHECKPOINT-CONTENT');
+      const result = composeAutoContext({
+        memoryFile,
+        runbookFile,
+        dailyLogDir,
+        checkpointFile,
+      });
+      const memIdx = result.composed.indexOf('section="MEMORY"');
+      const dailyIdx = result.composed.indexOf('section="DAILY"');
+      const cpIdx = result.composed.indexOf('section="CHECKPOINT"');
+      expect(memIdx).toBeGreaterThanOrEqual(0);
+      expect(dailyIdx).toBeGreaterThan(memIdx);
+      expect(cpIdx).toBeGreaterThan(dailyIdx);
+    });
+
+    it('truncates oversized checkpoint content per the byte cap', () => {
+      const checkpointFile = path.join(tmpRoot, 'default.md');
+      fs.writeFileSync(checkpointFile, 'x'.repeat(2000));
+      const result = composeAutoContext({
+        memoryFile,
+        runbookFile,
+        dailyLogDir,
+        checkpointFile,
+        perFileMaxBytes: 256,
+      });
+      const cp = result.sections.find((s) => s.label === 'CHECKPOINT')!;
+      expect(Buffer.byteLength(cp.body, 'utf-8')).toBeLessThanOrEqual(256);
+      expect(cp.body).toContain('truncated by session-start-auto-context');
+    });
+  });
 });

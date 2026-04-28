@@ -89,6 +89,31 @@ export const MAX_MESSAGES_PER_PROMPT = Math.max(
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 
+// Kill-auto-compaction master flag (issue #104, design at
+// docs/proposals/kill-auto-compaction.md). When OFF (default), the
+// orchestrator collects token-usage telemetry and writes ## Facts
+// checkpoints at threshold-cross — both side-effect-free observability —
+// but does NOT pass DISABLE_COMPACT=1 to containers and does NOT fire
+// the threshold-nuke handshake. Auto-compaction stays on; nothing
+// destructive activates. When ON, DISABLE_COMPACT=1 is set on container
+// spawn AND the threshold-cross handshake (system-reminder + grace
+// timer + nuke_session + session-reentry) replaces auto-compaction
+// end-to-end. The two halves are gated by the same flag because they
+// must ship together — disabling compaction without the replacement
+// leaves long sessions with no overflow safety net.
+export const ENABLE_THRESHOLD_NUKE = process.env.ENABLE_THRESHOLD_NUKE === '1';
+
+// Model context window in tokens. Mirrors the SDK env
+// `CLAUDE_CODE_MAX_CONTEXT_WINDOW` we set per-session in
+// container-runner.ts settings.json (currently 1,000,000 for Opus 4.7).
+// The threshold formula reads this; if it ever drifts from the SDK env,
+// the threshold will fire at the wrong percentage. Override via
+// MODEL_CONTEXT_WINDOW for tests / smaller-context model bumps.
+export const MODEL_CONTEXT_WINDOW = parseInt(
+  process.env.MODEL_CONTEXT_WINDOW || '1000000',
+  10,
+);
+
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

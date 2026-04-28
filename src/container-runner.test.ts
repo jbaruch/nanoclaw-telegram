@@ -14,12 +14,14 @@ vi.mock('./config.js', () => ({
   CONTAINER_TIMEOUT: 1800000, // 30min
   CREDENTIAL_PROXY_PORT: 3001,
   DATA_DIR: '/tmp/nanoclaw-test-data',
+  ENABLE_THRESHOLD_NUKE: false,
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   STORE_DIR: '/tmp/nanoclaw-test-store',
   HOST_PROJECT_ROOT: process.cwd(),
   HOST_UID: undefined,
   HOST_GID: undefined,
   IDLE_TIMEOUT: 1800000, // 30min
+  MODEL_CONTEXT_WINDOW: 1000000,
   TILE_OWNER: 'test',
   TIMEZONE: 'America/Los_Angeles',
 }));

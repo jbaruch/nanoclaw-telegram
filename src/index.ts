@@ -6,16 +6,20 @@ import {
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   DEFAULT_TRIGGER,
+  ENABLE_THRESHOLD_NUKE,
   getTriggerPattern,
   GROUPS_DIR,
   HOST_GID,
   HOST_UID,
   IDLE_TIMEOUT,
   MAX_MESSAGES_PER_PROMPT,
+  MODEL_CONTEXT_WINDOW,
   POLL_INTERVAL,
   TELEGRAM_BOT_POOL,
   TIMEZONE,
 } from './config.js';
+import { writeCheckpoint } from './checkpoint.js';
+import { classifyUsage, computeThresholds } from './threshold.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
 import {
@@ -1462,6 +1466,19 @@ async function runAgent(
     isTrusted,
   );
 
+  // Kill-auto-compaction state for this runAgent invocation. Captured
+  // off the stream callback below so the post-run handler (after
+  // runContainerAgent resolves) can decide whether to write a
+  // checkpoint and — if `ENABLE_THRESHOLD_NUKE` is on — nuke the
+  // default slot. Always-on telemetry vs. flag-gated nuke is the
+  // separation the design (issue #104, docs/proposals/
+  // kill-auto-compaction.md) calls for: the flag-off period generates
+  // calibration data and validates the `## Facts` file format on
+  // real transcripts before the destructive flip.
+  const thresholds = computeThresholds(MODEL_CONTEXT_WINDOW);
+  let lastUsedTokens = 0;
+  let thresholdReached: 'warn' | 'nuke' | null = null;
+
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
@@ -1482,6 +1499,51 @@ async function runAgent(
             setSession(group.folder, DEFAULT_SESSION_NAME, output.newSessionId);
           }
         }
+
+        // Kill-auto-compaction telemetry: log every per-turn usage
+        // payload so the operator can curve "context size over time"
+        // for any session via host-logs. The classifier raises the
+        // log level at warn / nuke so a `grep -E "WARN|ERROR"` on
+        // host-logs surfaces the rare events without scrolling
+        // through the per-turn noise. Telemetry is always-on
+        // (decoupled from ENABLE_THRESHOLD_NUKE) — collecting curves
+        // before the flip is exactly the data the flip decision
+        // needs.
+        if (output.usage) {
+          lastUsedTokens = output.usage.input_tokens;
+          const state = classifyUsage(output.usage.input_tokens, thresholds);
+          const logFields = {
+            group: group.name,
+            session: sessions[group.folder]?.[DEFAULT_SESSION_NAME],
+            input_tokens: output.usage.input_tokens,
+            output_tokens: output.usage.output_tokens,
+            cache_read: output.usage.cache_read_input_tokens,
+            cache_creation: output.usage.cache_creation_input_tokens,
+            percent: Number(
+              (
+                (output.usage.input_tokens / thresholds.contextWindow) *
+                100
+              ).toFixed(1),
+            ),
+            threshold_state: state,
+            threshold_warn: thresholds.warn,
+            threshold_nuke: thresholds.nuke,
+          };
+          if (state === 'nuke') {
+            logger.error(logFields, 'session_tokens_nuke');
+            // Latch on first nuke crossing this turn — multiple
+            // assistant messages in one runQuery can each emit usage
+            // above the threshold, and we only want one checkpoint
+            // write per turn.
+            if (thresholdReached !== 'nuke') thresholdReached = 'nuke';
+          } else if (state === 'warn') {
+            logger.warn(logFields, 'session_tokens_warn');
+            if (thresholdReached === null) thresholdReached = 'warn';
+          } else {
+            logger.info(logFields, 'session_tokens');
+          }
+        }
+
         await onOutput(output);
       }
     : undefined;
@@ -1586,6 +1648,90 @@ async function runAgent(
         'Container agent error',
       );
       return 'error';
+    }
+
+    // Kill-auto-compaction threshold-cross handler (issue #104, design
+    // at docs/proposals/kill-auto-compaction.md). Always-on checkpoint
+    // write; flag-gated nuke. Runs on the success path only — error
+    // turns either already cleared the session above or didn't reach
+    // any model state worth checkpointing.
+    if (thresholdReached === 'nuke' && !wasNukedDuringSpawn()) {
+      const sessionForCheckpoint =
+        sessions[group.folder]?.[DEFAULT_SESSION_NAME];
+      if (sessionForCheckpoint) {
+        const groupDir = resolveGroupFolderPath(group.folder);
+        // Fast-path slug `-workspace-group` mirrors the convention
+        // documented in `wipeSessionJsonl` (src/index.ts:#581 — see
+        // the comment about the container's project dir layout).
+        // Falls through to an empty Facts list if the slug differs;
+        // the writer tolerates a missing JSONL via parseSessionTranscript.
+        const jsonlPath = path.join(
+          DATA_DIR,
+          'sessions',
+          group.folder,
+          DEFAULT_SESSION_NAME,
+          '.claude',
+          'projects',
+          '-workspace-group',
+          `${sessionForCheckpoint}.jsonl`,
+        );
+        try {
+          await writeCheckpoint({
+            groupDir,
+            jsonlPath,
+            sessionId: sessionForCheckpoint,
+            thresholds,
+            usedTokens: lastUsedTokens,
+            groupName: group.name,
+          });
+        } catch (err) {
+          logger.error(
+            { group: group.name, err },
+            'Threshold-cross checkpoint write failed',
+          );
+        }
+
+        if (ENABLE_THRESHOLD_NUKE) {
+          // Mirror the deps.nukeSession 'default' branch in this
+          // file. Kept intentionally inline (rather than refactored
+          // into a shared helper) because the IPC nuke path has
+          // additional bookkeeping for 'all' / 'maintenance' that
+          // doesn't apply here, and a partial extraction would
+          // create more drift surface than parallel logic. If a
+          // third caller appears, refactor.
+          nukeTimestamps[group.folder] = Date.now();
+          queue.closeStdin(chatJid, DEFAULT_SESSION_NAME);
+          if (sessions[group.folder]) {
+            delete sessions[group.folder][DEFAULT_SESSION_NAME];
+          }
+          deleteSessionName(group.folder, DEFAULT_SESSION_NAME);
+          const wiped = wipeSessionJsonl(
+            group.folder,
+            DEFAULT_SESSION_NAME,
+            sessionForCheckpoint,
+          );
+          logger.error(
+            {
+              group: group.name,
+              session: sessionForCheckpoint,
+              used_tokens: lastUsedTokens,
+              context_window: thresholds.contextWindow,
+              wiped,
+            },
+            'threshold_nuke_fired',
+          );
+        } else {
+          logger.warn(
+            {
+              group: group.name,
+              session: sessionForCheckpoint,
+              used_tokens: lastUsedTokens,
+              context_window: thresholds.contextWindow,
+            },
+            'threshold_nuke_inert (ENABLE_THRESHOLD_NUKE=0)',
+          );
+        }
+      }
     }
 
     return 'success';
