@@ -1516,7 +1516,13 @@ async function runQuery(
     log(`Discovered ${installedSkills.length} skills for subagent definitions`);
   }
 
-  // MCP servers config — shared between main agent and subagents
+  // MCP servers config — shared between main agent and subagents.
+  //
+  // `ToolSearch` is in `allowedTools` (below) which enables deferred MCP
+  // tool loading: schemas for unmarked servers stay out of the prompt and
+  // the agent discovers them on demand via ToolSearch. `alwaysLoad: true`
+  // pins servers whose tools fire on most turns, so they bypass the
+  // discovery hop. See https://github.com/jbaruch/nanoclaw/issues/30.
   const mcpServersConfig = {
     nanoclaw: {
       command: 'node',
@@ -1535,6 +1541,10 @@ async function runQuery(
           ? { NANOCLAW_REPLY_TO_MESSAGE_ID: containerInput.replyToMessageId }
           : {}),
       },
+      // IPC tools (send_message, react_to_message, schedule_task, …)
+      // fire on most turns; deferring them would force a ToolSearch hop
+      // before every reply.
+      alwaysLoad: true,
     },
     ...(process.env.COMPOSIO_API_KEY
       ? {
