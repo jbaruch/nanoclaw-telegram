@@ -33,6 +33,7 @@ import {
   stripAnsi,
 } from './host-logs.js';
 import { logger } from './logger.js';
+import { onAgentLine } from './observer.js';
 import {
   CONTAINER_HOST_GATEWAY,
   CONTAINER_RUNTIME_BIN,
@@ -1604,6 +1605,24 @@ function buildContainerArgs(
   args.push('-e', `AGENT_MODEL=${AGENT_MODEL}`);
   args.push('-e', `AGENT_EFFORT=${AGENT_EFFORT}`);
 
+  // Tell agent-runner whether the host is running the optional
+  // observer pipeline (src/observer.ts). When true, agent-runner
+  // emits raw thinking / text / tool_use input / tool_result preview
+  // content on stderr — those payloads carry credentials, tokens,
+  // and personal data per jbaruch/coding-policy: no-secrets, so they
+  // are intentionally disclosed only when the operator explicitly
+  // opted into observation by setting OBSERVER_CHAT_JID. With the
+  // flag unset (default), agent-runner logs metadata only (block
+  // counts, tool name, ok/error status). Same env-source order as
+  // observer.ts so a setting in either process.env or .env file
+  // toggles both halves consistently.
+  const observerHostJid =
+    process.env.OBSERVER_CHAT_JID ||
+    readEnvFile(['OBSERVER_CHAT_JID']).OBSERVER_CHAT_JID;
+  if (observerHostJid) {
+    args.push('-e', 'OBSERVER_ENABLED=1');
+  }
+
   // Kill-auto-compaction master flag (issue #104, design at
   // docs/proposals/kill-auto-compaction.md). When the orchestrator's
   // `ENABLE_THRESHOLD_NUKE` is set, the SDK's auto-compaction is
@@ -2016,7 +2035,10 @@ export async function runContainerAgent(
       stderrPrefixer.writeLines(chunk);
       const lines = chunk.trim().split('\n');
       for (const line of lines) {
-        if (line) logger.debug({ container: group.folder }, line);
+        if (line) {
+          logger.debug({ container: group.folder }, line);
+          onAgentLine(group.folder, line);
+        }
       }
       // Don't reset timeout on stderr — SDK writes debug logs continuously.
       // Timeout only resets on actual output (OUTPUT_MARKER in stdout).

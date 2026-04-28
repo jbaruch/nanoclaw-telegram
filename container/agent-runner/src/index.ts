@@ -44,10 +44,7 @@ import {
   decideHygieneCadence,
   extractHygieneSignatures,
 } from './path-hygiene-cadence.js';
-import {
-  ReactToMessageIpcPayload,
-  runReactFirstHook,
-} from './react-first.js';
+import { ReactToMessageIpcPayload, runReactFirstHook } from './react-first.js';
 import {
   applyReplyThreadingDecision,
   createReplyThreadingState,
@@ -83,11 +80,7 @@ interface ContainerInput {
    * from the verified source-group trust tier at schedule_task time);
    * this side just honors the decision.
    */
-  createdByRole?:
-    | 'owner'
-    | 'main_agent'
-    | 'trusted_agent'
-    | 'untrusted_agent';
+  createdByRole?: 'owner' | 'main_agent' | 'trusted_agent' | 'untrusted_agent';
   /**
    * Which per-group session this container run belongs to. Mirrors the
    * orchestrator-side `ContainerInput.sessionName` in `src/container-runner.ts`.
@@ -161,13 +154,7 @@ const IPC_POLL_MS = 500;
  * whitelist so a typo in `AGENT_EFFORT` doesn't propagate to the API
  * as a 400 — we fall back to the default and log.
  */
-const VALID_AGENT_EFFORTS = [
-  'low',
-  'medium',
-  'high',
-  'xhigh',
-  'max',
-] as const;
+const VALID_AGENT_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 type AgentEffort = (typeof VALID_AGENT_EFFORTS)[number];
 const DEFAULT_AGENT_EFFORT: AgentEffort = 'xhigh';
 
@@ -245,6 +232,25 @@ function writeOutput(output: ContainerOutput): void {
 function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
 }
+
+/**
+ * Observer-content gate. When `OBSERVER_ENABLED=1` is set on the
+ * container env (the orchestrator sets it iff the host has
+ * `OBSERVER_CHAT_JID` configured), the agent-runner emits the full
+ * raw payloads the observer pipeline needs: thinking text, assistant
+ * text, tool_use input JSON, tool_result preview. Those payloads can
+ * carry credentials, tokens, and personal data copied by users into
+ * messages — they are intentionally disclosed to the operator who
+ * opted into observing. With the flag unset (default), the agent
+ * logs metadata only (block counts, tool name, ok/error status, ids)
+ * so `docker logs` post-mortems still work without leaking content.
+ *
+ * The gate is read once at module load: containers are short-lived
+ * and the orchestrator's container-runner sets the env var per spawn
+ * based on whether the host observer is enabled, so there's no need
+ * to re-check at every log call.
+ */
+const OBSERVER_ENABLED = process.env.OBSERVER_ENABLED === '1';
 
 function getSessionSummary(
   sessionId: string,
@@ -387,7 +393,10 @@ function createMcpToolResultSanitizerHook(): HookCallback {
     if (!post.tool_name?.startsWith('mcp__')) {
       return {};
     }
-    const { sanitized, stats } = sanitizeToolResponse(post.tool_response, byteCap);
+    const { sanitized, stats } = sanitizeToolResponse(
+      post.tool_response,
+      byteCap,
+    );
     if (stats.strippedBytes === 0 && stats.truncatedBytes === 0) {
       return {};
     }
@@ -449,7 +458,9 @@ function extractTriggeringInboundIdForAudit(prompt: unknown): string | null {
 function createSilentTurnPromptHook(state: SilentTurnState): HookCallback {
   return async (input, _toolUseId, _context) => {
     const submit = input as UserPromptSubmitHookInput;
-    state.triggeringInboundId = extractTriggeringInboundIdForAudit(submit.prompt);
+    state.triggeringInboundId = extractTriggeringInboundIdForAudit(
+      submit.prompt,
+    );
     state.turnStartedAtMs = Date.now();
     state.reactedToInbound = false;
     state.repliedToInbound = false;
@@ -462,8 +473,10 @@ function createSilentTurnTrackingHook(state: SilentTurnState): HookCallback {
   return async (input, _toolUseId, _context) => {
     const pre = input as PreToolUseHookInput;
     if (pre.tool_name === 'mcp__nanoclaw__react_to_message') {
-      const args = (pre.tool_input as { messageId?: unknown } | undefined) ?? {};
-      const explicitId = typeof args.messageId === 'string' ? args.messageId : null;
+      const args =
+        (pre.tool_input as { messageId?: unknown } | undefined) ?? {};
+      const explicitId =
+        typeof args.messageId === 'string' ? args.messageId : null;
       // A reaction with no explicit id defaults to the most-recent
       // message in the chat — which is the triggering inbound. Treat
       // both shapes as "addressed".
@@ -477,10 +490,7 @@ function createSilentTurnTrackingHook(state: SilentTurnState): HookCallback {
       const args = (pre.tool_input as { reply_to?: unknown } | undefined) ?? {};
       state.anySendMessage = true;
       const replyTo = typeof args.reply_to === 'string' ? args.reply_to : null;
-      if (
-        state.triggeringInboundId &&
-        replyTo === state.triggeringInboundId
-      ) {
+      if (state.triggeringInboundId && replyTo === state.triggeringInboundId) {
         state.repliedToInbound = true;
       }
     }
@@ -513,14 +523,18 @@ function createSessionStartAutoContextHook(
     if (start.source !== 'startup') {
       return {};
     }
-    if (!containerInput.assistantName || containerInput.assistantName.length === 0) {
+    if (
+      !containerInput.assistantName ||
+      containerInput.assistantName.length === 0
+    ) {
       log('SessionStart: auto-context skipped (no assistantName)');
       return {};
     }
     // Memory file path mirrors the orchestrator's mount layout. The
     // dash-prefixed dir name encodes the original `/workspace/group`
     // path the way Claude Code projects the dir under `~/.claude`.
-    const memoryFile = '/home/node/.claude/projects/-workspace-group/memory/MEMORY.md';
+    const memoryFile =
+      '/home/node/.claude/projects/-workspace-group/memory/MEMORY.md';
     const runbookFile = '/workspace/group/RUNBOOK.md';
     const dailyLogDir = '/workspace/group/daily';
     // Kill-auto-compaction reentry (#104, design at
@@ -600,7 +614,8 @@ function createReactFirstHook(containerInput: ContainerInput): HookCallback {
     const result = runReactFirstHook(
       {
         isScheduledTask: containerInput.isScheduledTask === true,
-        isSubagent: typeof submit.agent_id === 'string' && submit.agent_id.length > 0,
+        isSubagent:
+          typeof submit.agent_id === 'string' && submit.agent_id.length > 0,
         prompt: typeof submit.prompt === 'string' ? submit.prompt : '',
         assistantName: containerInput.assistantName,
         chatJid: containerInput.chatJid,
@@ -735,7 +750,8 @@ function createBashSafetyNetHook(): HookCallback {
     if (pre.tool_name !== 'Bash') {
       return {};
     }
-    const command = (pre.tool_input as { command?: unknown } | undefined)?.command;
+    const command = (pre.tool_input as { command?: unknown } | undefined)
+      ?.command;
     const decision = evaluateBashCommand(command);
     if (!decision.deny) {
       return {};
@@ -747,7 +763,8 @@ function createBashSafetyNetHook(): HookCallback {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse' as const,
         permissionDecision: 'deny' as const,
-        permissionDecisionReason: decision.reason ?? 'denied by bash-safety-net',
+        permissionDecisionReason:
+          decision.reason ?? 'denied by bash-safety-net',
       },
     };
   };
@@ -812,7 +829,9 @@ function createReplyThreadingPromptHook(
     state.latestInboundId = inboundId;
     state.repliedToInbound = false;
     if (inboundId) {
-      log(`UserPromptSubmit: reply-threading seeded latestInboundId=${inboundId}`);
+      log(
+        `UserPromptSubmit: reply-threading seeded latestInboundId=${inboundId}`,
+      );
     }
     return {};
   };
@@ -982,7 +1001,9 @@ function createComposioFidelityHook(): HookCallback {
  */
 const HYGIENE_DAILY_LOG_DIR = '/workspace/group/daily';
 
-function loadHygieneSignaturesFromDailyLogs(nowMs: number): Map<string, number> {
+function loadHygieneSignaturesFromDailyLogs(
+  nowMs: number,
+): Map<string, number> {
   const out = new Map<string, number>();
   if (!fs.existsSync(HYGIENE_DAILY_LOG_DIR)) {
     return out;
@@ -1244,7 +1265,12 @@ function drainIpcInput(): string[] {
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
     const files = fs
       .readdirSync(IPC_INPUT_DIR)
-      .filter((f) => f.endsWith('.json') && !f.startsWith('_script_result_') && !consumedInputFiles.has(f))
+      .filter(
+        (f) =>
+          f.endsWith('.json') &&
+          !f.startsWith('_script_result_') &&
+          !consumedInputFiles.has(f),
+      )
       .sort();
 
     const messages: string[] = [];
@@ -1254,7 +1280,9 @@ function drainIpcInput(): string[] {
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         consumedInputFiles.add(file);
-        try { fs.unlinkSync(filePath); } catch (e: any) {
+        try {
+          fs.unlinkSync(filePath);
+        } catch (e: any) {
           if (e.code !== 'EROFS' && e.code !== 'EACCES') throw e;
         }
         if (data.type === 'message' && data.text) {
@@ -1268,14 +1296,21 @@ function drainIpcInput(): string[] {
           `Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`,
         );
         consumedInputFiles.add(file);
-        try { fs.unlinkSync(filePath); } catch (e: any) {
-          if (e.code !== 'EROFS' && e.code !== 'EACCES' && e.code !== 'ENOENT') throw e;
+        try {
+          fs.unlinkSync(filePath);
+        } catch (e: any) {
+          if (e.code !== 'EROFS' && e.code !== 'EACCES' && e.code !== 'ENOENT')
+            throw e;
         }
       }
     }
     // Write the latest replyToMessageId so the MCP server can pick it up
     if (latestReplyTo) {
-      try { fs.writeFileSync(REPLY_TO_FILE, latestReplyTo); } catch { /* ignore */ }
+      try {
+        fs.writeFileSync(REPLY_TO_FILE, latestReplyTo);
+      } catch {
+        /* ignore */
+      }
     }
     return messages;
   } catch (err) {
@@ -1349,7 +1384,25 @@ async function runQuery(
   // UserPromptSubmit resets the per-turn flags, so this single state
   // safely handles the chained turns a MessageStream may carry.
   const silentTurnState = createSilentTurnState(Date.now());
-  silentTurnState.triggeringInboundId = extractTriggeringInboundIdForAudit(prompt);
+  silentTurnState.triggeringInboundId =
+    extractTriggeringInboundIdForAudit(prompt);
+
+  // Observability: emit a structured "query started" stderr line so the
+  // optional observer channel (src/observer.ts) can detect query
+  // boundaries and arm its watchdog. Emits explicit metadata fields
+  // (length, the resolved target message id, scheduled-task flag) —
+  // never the raw prompt body, which can contain user-pasted
+  // credentials, API keys, auth links, and personal data per
+  // jbaruch/coding-policy: no-secrets. The explicit
+  // `target_message_id` field also fixes the previous "preview slice
+  // didn't include the trailing <message id="…">" race that pinned
+  // observer reactions to an earlier message.
+  const queryStartedAt = Date.now();
+  const targetMessageId = replyThreadingState.latestInboundId ?? '-';
+  const isScheduledTask = containerInput.isScheduledTask === true;
+  log(
+    `Query input: ${prompt.length} chars, target_message_id=${targetMessageId}, scheduled_task=${isScheduledTask}`,
+  );
 
   // Poll IPC for the _close sentinel during the query. We deliberately do
   // NOT drain JSON message files here — there's a race where pollIpc fires
@@ -1506,9 +1559,19 @@ async function runQuery(
 
   // Subagent tools — same as parent minus TeamCreate/TeamDelete (no nesting)
   const subagentTools = [
-    'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep',
-    'WebSearch', 'WebFetch', 'TodoWrite', 'ToolSearch',
-    'Skill', 'NotebookEdit', 'mcp__nanoclaw__*',
+    'Bash',
+    'Read',
+    'Write',
+    'Edit',
+    'Glob',
+    'Grep',
+    'WebSearch',
+    'WebFetch',
+    'TodoWrite',
+    'ToolSearch',
+    'Skill',
+    'NotebookEdit',
+    'mcp__nanoclaw__*',
   ];
 
   // Define a general-purpose subagent that inherits all skills and MCP
@@ -1539,7 +1602,9 @@ async function runQuery(
     if (fs.existsSync(rulePath)) {
       const content = fs.readFileSync(rulePath, 'utf-8').trim();
       if (content) {
-        subagentPromptParts.push(`\n---\n# ${path.basename(rulePath)}\n${content}`);
+        subagentPromptParts.push(
+          `\n---\n# ${path.basename(rulePath)}\n${content}`,
+        );
       }
     }
   }
@@ -1565,7 +1630,9 @@ async function runQuery(
   }
 
   const subagentPrompt = subagentPromptParts.join('\n');
-  log(`Subagent prompt built: ${subagentPrompt.length} chars, ${installedSkills.length} skills`);
+  log(
+    `Subagent prompt built: ${subagentPrompt.length} chars, ${installedSkills.length} skills`,
+  );
 
   const agentDefinitions = {
     'general-purpose': {
@@ -1807,7 +1874,14 @@ async function runQuery(
       // the result lands.
       const assistantMsg = message as {
         message?: {
-          content?: Array<{ type: string; text?: string; name?: string; id?: string; input?: unknown }>;
+          content?: Array<{
+            type: string;
+            text?: string;
+            thinking?: string;
+            name?: string;
+            id?: string;
+            input?: unknown;
+          }>;
           usage?: {
             input_tokens?: number;
             output_tokens?: number;
@@ -1817,7 +1891,11 @@ async function runQuery(
         };
       };
       const u = assistantMsg.message?.usage;
-      if (u && typeof u.input_tokens === 'number' && typeof u.output_tokens === 'number') {
+      if (
+        u &&
+        typeof u.input_tokens === 'number' &&
+        typeof u.output_tokens === 'number'
+      ) {
         latestUsage = {
           input_tokens: u.input_tokens,
           output_tokens: u.output_tokens,
@@ -1825,7 +1903,13 @@ async function runQuery(
           cache_creation_input_tokens: u.cache_creation_input_tokens,
         };
       }
-      // Extract text content for streaming preview
+      // Extract text content for streaming preview, and emit per-block
+      // observability log lines so the optional observer channel
+      // (src/observer.ts on the host) can mirror live agent reasoning
+      // to a status chat. These lines have no behavioral effect — they
+      // go to stderr (docker logs) only. The observer parses them via
+      // regex when OBSERVER_CHAT_JID is set; when unset, they're just
+      // useful post-mortem context.
       const content = assistantMsg.message?.content;
       if (content) {
         const text = content
@@ -1846,47 +1930,116 @@ async function runQuery(
             lastStreamEmit = now;
           }
         }
-        // Detect explicit user-facing send tool invocations during this
-        // turn. Stash the tool_use id so we can match the corresponding
-        // tool_result below — we only suppress the SDK's final text once
-        // we've seen a non-error result for one of these calls.
-        // Note: `send_voice` is intentionally excluded — the host IPC
-        // processor (src/ipc.ts) doesn't yet handle `type: 'send_voice'`,
-        // so the file is dropped silently. Suppressing the final text on a
-        // dropped voice send would leave the user with nothing. Until host
-        // support lands, the tool itself returns isError so this code path
-        // is unreachable for send_voice anyway, but pinning the allowlist
-        // keeps the two layers in sync if either is touched independently.
+        // Per-block observability lines (whitespace collapsed so each
+        // block is one stderr line; downstream parsers split on \n).
+        // Also stash any user-facing send tool_use ids so the
+        // success-gated suppression branch below can match them up
+        // with their tool_result.
+        //
+        // Note on send_voice (preserved from main): `send_voice` is
+        // intentionally excluded from `pendingUserFacingToolUseIds`
+        // because the host IPC processor (src/ipc.ts) doesn't yet
+        // handle `type: 'send_voice'`, so the file is dropped silently.
+        // Suppressing the final text on a dropped voice send would
+        // leave the user with nothing. Until host support lands, the
+        // tool itself returns isError so this code path is unreachable
+        // for send_voice anyway, but pinning the allowlist keeps the
+        // two layers in sync if either is touched independently.
         for (const block of content) {
-          if (
-            block.type === 'tool_use' &&
-            block.id &&
-            (block.name === 'mcp__nanoclaw__send_message' ||
-              block.name === 'mcp__nanoclaw__send_file')
-          ) {
-            pendingUserFacingToolUseIds.add(block.id);
+          if (block.type === 'thinking' && block.thinking) {
+            // Content-bearing logs are gated on OBSERVER_ENABLED — see
+            // the gate's docblock above. Default emission is metadata
+            // only (block kind + length) so post-mortem `docker logs`
+            // greps still work without leaking reasoning content.
+            if (OBSERVER_ENABLED) {
+              log(
+                `[msg #${messageCount}] thinking="${block.thinking.replace(/\s+/g, ' ')}"`,
+              );
+            } else {
+              log(
+                `[msg #${messageCount}] thinking len=${block.thinking.length}`,
+              );
+            }
+          } else if (block.type === 'redacted_thinking') {
+            log(`[msg #${messageCount}] redacted_thinking (encrypted)`);
+          } else if (block.type === 'text' && block.text) {
+            if (OBSERVER_ENABLED) {
+              log(
+                `[msg #${messageCount}] text="${block.text.replace(/\s+/g, ' ').slice(0, 400)}"`,
+              );
+            } else {
+              log(`[msg #${messageCount}] text len=${block.text.length}`);
+            }
+          } else if (block.type === 'tool_use') {
+            // Tool inputs frequently carry tokens, email content, IDs,
+            // and other sensitive user data. Default emission is just
+            // the tool name + id; the full input JSON is gated on
+            // OBSERVER_ENABLED.
+            if (OBSERVER_ENABLED) {
+              const inputStr = JSON.stringify(block.input ?? {}).slice(0, 400);
+              log(
+                `[msg #${messageCount}] tool_use=${block.name} id=${block.id} input=${inputStr}`,
+              );
+            } else {
+              log(
+                `[msg #${messageCount}] tool_use=${block.name} id=${block.id}`,
+              );
+            }
+            if (
+              block.id &&
+              (block.name === 'mcp__nanoclaw__send_message' ||
+                block.name === 'mcp__nanoclaw__send_file')
+            ) {
+              pendingUserFacingToolUseIds.add(block.id);
+            }
           }
         }
       }
-    }
-
-    // Track successful results for the send tools we recorded above.
-    // The SDK emits tool_result blocks inside `user`-typed messages.
-    // If `is_error` is true (rate limit, hook denial, exception), the
-    // user never received the message — leave userFacingSendSucceeded
-    // alone so the SDK's final text still goes out and the user sees
-    // *something*.
-    if (message.type === 'user') {
-      const userContent = (message as { message?: { content?: Array<{ type: string; tool_use_id?: string; is_error?: boolean }> } }).message?.content;
-      if (userContent) {
-        for (const block of userContent) {
-          if (
-            block.type === 'tool_result' &&
-            block.tool_use_id &&
-            pendingUserFacingToolUseIds.has(block.tool_use_id) &&
-            block.is_error !== true
-          ) {
-            userFacingSendSucceeded = true;
+    } else if (message.type === 'user' && 'message' in message) {
+      // tool_result lives on user-typed messages following a tool_use.
+      // Log success/error + a short preview so observers can spot tool
+      // failures live and so post-mortem `docker logs` greps work.
+      // Also flip the user-facing-send-succeeded flag here (only on
+      // non-error results) so the final-text suppression at result-
+      // time doesn't fire for hook-denied or errored sends.
+      const content = (
+        message as {
+          message?: {
+            content?: Array<{
+              type: string;
+              tool_use_id?: string;
+              is_error?: boolean;
+              content?: unknown;
+            }>;
+          };
+        }
+      ).message?.content;
+      if (content) {
+        for (const block of content) {
+          if (block.type === 'tool_result') {
+            const status = block.is_error ? 'error' : 'ok';
+            // Tool results echo back arbitrary external data — emails,
+            // API responses, file contents, search results. Default
+            // emission is status only (id + ok|error); the content
+            // preview is gated on OBSERVER_ENABLED so the operator
+            // explicitly opts in to logging it.
+            if (OBSERVER_ENABLED) {
+              const preview = JSON.stringify(block.content ?? '').slice(0, 200);
+              log(
+                `[msg #${messageCount}] tool_result id=${block.tool_use_id} ${status} preview=${preview}`,
+              );
+            } else {
+              log(
+                `[msg #${messageCount}] tool_result id=${block.tool_use_id} ${status}`,
+              );
+            }
+            if (
+              block.tool_use_id &&
+              pendingUserFacingToolUseIds.has(block.tool_use_id) &&
+              block.is_error !== true
+            ) {
+              userFacingSendSucceeded = true;
+            }
           }
         }
       }
@@ -1966,9 +2119,7 @@ async function runQuery(
           (errMsg.errors && errMsg.errors[0]) ||
           textResult ||
           subtype;
-        const summary = String(rawSummary)
-          .replace(/\s+/g, ' ')
-          .slice(0, 500);
+        const summary = String(rawSummary).replace(/\s+/g, ' ').slice(0, 500);
         writeOutput({
           status: 'error',
           result: null,
@@ -2009,10 +2160,32 @@ async function runQuery(
   }
 
   ipcPolling = false;
+  // Build the metrics tail for the observer summary. Wall is
+  // measured from the runQuery entry point. Tokens come from the
+  // most recent assistant message's `usage` payload (already
+  // captured for #125's threshold detector). Cache hit rate follows
+  // Anthropic's documented definition:
+  //   cache_read_input_tokens / (cache_read_input_tokens + input_tokens)
+  // i.e. the share of context that came from cache vs. fresh
+  // tokenization. Output tokens are excluded by definition. When the
+  // denominator is 0 (no assistant turn / dry run), report n/a so
+  // the observer renders it as "n/a" instead of NaN%.
+  const wallMs = Date.now() - queryStartedAt;
+  const tokensIn = latestUsage?.input_tokens ?? 0;
+  const tokensOut = latestUsage?.output_tokens ?? 0;
+  const cacheRead = latestUsage?.cache_read_input_tokens ?? 0;
+  const cacheDenom = cacheRead + tokensIn;
+  const cacheHitRate =
+    cacheDenom > 0 ? `${((cacheRead / cacheDenom) * 100).toFixed(1)}` : 'n/a';
   log(
-    `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`,
+    `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, wall_ms=${wallMs}, tokens_in=${tokensIn}, tokens_out=${tokensOut}, cache_hit_rate=${cacheHitRate}`,
   );
-  return { newSessionId, lastAssistantUuid, closedDuringQuery, errorResult: sawErrorResult };
+  return {
+    newSessionId,
+    lastAssistantUuid,
+    closedDuringQuery,
+    errorResult: sawErrorResult,
+  };
 }
 
 interface ScriptResult {
@@ -2150,14 +2323,19 @@ async function main(): Promise<void> {
           allowDangerouslySkipPermissions: true,
           settingSources: ['project', 'user'] as const,
           hooks: {
-            PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
+            PreCompact: [
+              { hooks: [createPreCompactHook(containerInput.assistantName)] },
+            ],
             // Mirror the main query()'s poison-defense hooks so the two
             // configurations don't drift if `allowedTools` is ever broadened
             // on this branch. Today the slash-command path has no tools, so
             // these are inert — but defining them here keeps the contract
             // single-sourced.
             PreToolUse: [
-              { matcher: 'TaskOutput', hooks: [createTaskOutputBlockGateHook()] },
+              {
+                matcher: 'TaskOutput',
+                hooks: [createTaskOutputBlockGateHook()],
+              },
               { matcher: 'Bash', hooks: [createBashSafetyNetHook()] },
               {
                 matcher: 'mcp__nanoclaw__send_(message|file)',
@@ -2176,9 +2354,10 @@ async function main(): Promise<void> {
           },
         },
       })) {
-        const msgType = message.type === 'system'
-          ? `system/${(message as { subtype?: string }).subtype}`
-          : message.type;
+        const msgType =
+          message.type === 'system'
+            ? `system/${(message as { subtype?: string }).subtype}`
+            : message.type;
         log(`[slash-cmd] type=${msgType}`);
 
         if (message.type === 'system' && message.subtype === 'init') {
@@ -2187,14 +2366,20 @@ async function main(): Promise<void> {
         }
 
         // Observe compact_boundary to confirm compaction completed
-        if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
+        if (
+          message.type === 'system' &&
+          (message as { subtype?: string }).subtype === 'compact_boundary'
+        ) {
           compactBoundarySeen = true;
           log('Compact boundary observed — compaction completed');
         }
 
         if (message.type === 'result') {
           const resultSubtype = (message as { subtype?: string }).subtype;
-          const textResult = 'result' in message ? (message as { result?: string }).result : null;
+          const textResult =
+            'result' in message
+              ? (message as { result?: string }).result
+              : null;
 
           if (resultSubtype?.startsWith('error')) {
             hadError = true;
@@ -2221,11 +2406,15 @@ async function main(): Promise<void> {
       writeOutput({ status: 'error', result: null, error: errorMsg });
     }
 
-    log(`Slash command done. compactBoundarySeen=${compactBoundarySeen}, hadError=${hadError}`);
+    log(
+      `Slash command done. compactBoundarySeen=${compactBoundarySeen}, hadError=${hadError}`,
+    );
 
     // Warn if compact_boundary was never observed — compaction may not have occurred
     if (!hadError && !compactBoundarySeen) {
-      log('WARNING: compact_boundary was not observed. Compaction may not have completed.');
+      log(
+        'WARNING: compact_boundary was not observed. Compaction may not have completed.',
+      );
     }
 
     // Only emit final session marker if no result was emitted yet and no error occurred
@@ -2239,7 +2428,11 @@ async function main(): Promise<void> {
       });
     } else if (!hadError) {
       // Emit session-only marker so host updates session tracking
-      writeOutput({ status: 'success', result: null, newSessionId: slashSessionId });
+      writeOutput({
+        status: 'success',
+        result: null,
+        newSessionId: slashSessionId,
+      });
     }
     return;
   }
@@ -2300,9 +2493,7 @@ async function main(): Promise<void> {
   let consecutiveErrors = 0;
   try {
     while (true) {
-      log(
-        `Starting query (session: ${sessionId || 'new'})...`,
-      );
+      log(`Starting query (session: ${sessionId || 'new'})...`);
 
       let queryResult;
       try {
@@ -2314,7 +2505,8 @@ async function main(): Promise<void> {
           sdkEnv,
         );
       } catch (resumeErr) {
-        const msg = resumeErr instanceof Error ? resumeErr.message : String(resumeErr);
+        const msg =
+          resumeErr instanceof Error ? resumeErr.message : String(resumeErr);
         // Use the centralised predicate (#152): the previous narrow
         // regex `/session|conversation not found|resume/i` missed the
         // `error_during_execution` and `ENOENT.*\.jsonl` shapes that
@@ -2326,7 +2518,13 @@ async function main(): Promise<void> {
         if (sessionId && isStaleSessionError(msg)) {
           log(`Session resume failed (${msg}), retrying with fresh session`);
           sessionId = undefined;
-          queryResult = await runQuery(prompt, undefined, mcpServerPath, containerInput, sdkEnv);
+          queryResult = await runQuery(
+            prompt,
+            undefined,
+            mcpServerPath,
+            containerInput,
+            sdkEnv,
+          );
         } else {
           // Drift surface for #155 lives on the orchestrator side
           // (`src/index.ts` debug-log when sessionId+error don't match
@@ -2355,7 +2553,9 @@ async function main(): Promise<void> {
         consecutiveErrors++;
         log(
           `Error result detected (consecutive=${consecutiveErrors}).` +
-            (consecutiveErrors >= 2 ? ` Dropping sessionId=${sessionId || 'none'}` : ''),
+            (consecutiveErrors >= 2
+              ? ` Dropping sessionId=${sessionId || 'none'}`
+              : ''),
         );
         if (consecutiveErrors >= 2) {
           sessionId = undefined;

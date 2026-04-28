@@ -176,6 +176,17 @@ export interface Channel {
   syncGroups?(force: boolean): Promise<void>;
   // Optional: send an emoji reaction to a message.
   sendReaction?(jid: string, messageId: string, emoji: string): Promise<void>;
+  // Optional: report whether a JID points at a 1:1 / DM chat (true) vs.
+  // a multi-participant group / channel (false). Used by the observer
+  // module to verify chat privacy when possible before mirroring
+  // reasoning. A `false` result currently triggers a loud warning at
+  // startup but still enables the observer (some operators run a
+  // single-user private group as the observer chat); refusal is
+  // reserved for cases where no channel owns the JID or chat-type
+  // verification throws. Channels that can't determine this may leave
+  // the method unimplemented — observer treats missing support as a
+  // refusal, since "unknown" is the unsafe default for a leak surface.
+  isPrivateChat?(jid: string): Promise<boolean>;
   // Optional: react to the most recent message in a chat.
   reactToLatestMessage?(jid: string, emoji: string): Promise<void>;
   // Optional: pin a message in the chat.

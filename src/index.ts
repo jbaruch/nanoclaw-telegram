@@ -98,6 +98,7 @@ import { startSchedulerLoop } from './task-scheduler.js';
 import { installTelegramOutboundTap } from './telegram-outbound-tap.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { initObserver } from './observer.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -2104,6 +2105,14 @@ async function main(): Promise<void> {
   // Surface registered-but-invisible-to-spawner rows (#159) at startup
   // so we notice future drift instead of growing dormant rows silently.
   logRegisteredGroupOrphans();
+
+  // Initialize the optional observer channel — opt-in via OBSERVER_CHAT_JID
+  // env var (no-op when unset). See src/observer.ts. Awaited so the
+  // privacy-gate verification (warn loudly when the configured chat
+  // is a multi-participant group, refuse only when no channel owns
+  // the JID or chat-type lookup fails) finishes before we start
+  // spawning queries that would feed the observer.
+  await initObserver(channels, () => registeredGroups);
 
   // Start subsystems (independently of connection handler).
   // Scheduled tasks run through the shared queue under the parallel

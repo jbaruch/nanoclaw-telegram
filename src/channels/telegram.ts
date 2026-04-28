@@ -13,6 +13,7 @@ import {
 } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
+import { noteLatestUserMessage } from '../observer.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import { sanitizeTelegramHtml } from './telegram-sanitize.js';
 import {
@@ -1023,6 +1024,14 @@ export class TelegramChannel implements Channel {
         { chatJid, chatName, sender: senderName },
         'Telegram message stored',
       );
+
+      // Tell the observer which message ID is "live" in this chat so
+      // later observer/agent stages can update its reaction emoji as
+      // processing progresses (🤔 → ⚡ → ✍ → 🤝). This call only
+      // records the latest inbound message ID and seeds the dedupe
+      // map with 👀 — it does NOT send the 👀 reaction itself.
+      // No-op when OBSERVER_CHAT_JID isn't set.
+      noteLatestUserMessage(chatJid, msgId);
     });
 
     // Handle non-text messages with placeholders so the agent knows something was sent
@@ -1485,6 +1494,17 @@ export class TelegramChannel implements Channel {
 
   ownsJid(jid: string): boolean {
     return jid.startsWith('tg:');
+  }
+
+  async isPrivateChat(jid: string): Promise<boolean> {
+    if (!this.bot) return false;
+    const numericId = jid.replace(/^tg:/, '');
+    // Telegram getChat returns type ∈ {private, group, supergroup, channel}.
+    // Only "private" (a 1:1 DM with the bot) is safe for the observer
+    // chat — the other three types have multiple readers, including
+    // potentially-untrusted external participants.
+    const chat = await this.bot.api.getChat(numericId);
+    return chat.type === 'private';
   }
 
   async disconnect(): Promise<void> {
