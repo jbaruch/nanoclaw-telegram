@@ -413,30 +413,43 @@ function logRegisteredGroupOrphans(): void {
 }
 
 /**
- * Delete the on-disk JSONL transcript file(s) for a given session slot,
- * given the SDK sessionId. Returns the number of files actually deleted.
+ * Delete the on-disk session artifacts (JSONL transcript and per-session
+ * tool-results directory) for a given session slot, given the SDK
+ * sessionId. Returns the number of filesystem entries actually removed —
+ * up to 2 per slug (1 transcript + 1 tool-results dir) summed across
+ * every project-slug subdirectory found.
  *
  * Path layout (host side):
  *   ${DATA_DIR}/sessions/<groupFolder>/<sessionName>/.claude/projects/<project-slug>/<sessionId>.jsonl
+ *   ${DATA_DIR}/sessions/<groupFolder>/<sessionName>/.claude/projects/<project-slug>/<sessionId>/
  *
  * The project-slug is `-workspace-group` for our containers (see
  * CLAUDE_PROJECT_SLUG in container-runner.ts). We glob the projects/
  * directory rather than hardcoding the slug so a future change to the
  * slug — or any operator who renamed the workspace path — doesn't
- * silently leave stale JSONLs behind.
+ * silently leave stale artifacts behind.
  *
- * Used by `nukeSession` (#100) to actually wipe transcript state. Without
- * this, the next container spawn re-reads the JSONL and the bad state
- * (poison, stuck plan, corrupt memory) is immediately back.
+ * Used by `nukeSession` (#100) to actually wipe transcript state, and
+ * by the scheduler's per-run finally (#193) to wipe scheduled-task
+ * artifacts that aren't tracked in the sessions cache. Without this,
+ * the next container spawn re-reads the JSONL and the bad state
+ * (poison, stuck plan, corrupt memory) is immediately back, AND
+ * orphan tool-results directories accumulate forever under the
+ * maintenance slot.
  *
  * **Security**: `sessionId` ultimately originates from container stdout
  * (parsed `newSessionId` from the SDK's stream), which is *untrusted*
  * for untrusted-tier groups. A crafted value containing path separators
- * or `..` segments would otherwise be interpolated into `${sessionId}.jsonl`
- * and could escape `projectsDir/<slug>/` to delete arbitrary `*.jsonl`
- * files anywhere the orchestrator process can write. Defense in depth:
+ * or `..` segments would otherwise be interpolated into the artifact
+ * paths and could escape `projectsDir/<slug>/` to delete arbitrary
+ * files or directories anywhere the orchestrator process can write.
+ * Defense in depth:
  *   1. Reject anything that isn't a strict UUID-or-token charset.
  *   2. After joining, assert the resolved path stays inside `projectsDir`.
+ *   3. The tool-results-dir helper additionally relies on Node's
+ *      `fs.rmSync` not following symlinks during recursive removal,
+ *      so a malicious container that scattered host-pointing symlinks
+ *      inside its own dir cannot redirect the wipe outward.
  */
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -460,6 +473,9 @@ const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
  *     Without this branch, the prior realpath-containment check would
  *     refuse to unlink a symlink-out-of-tree and leave the entry on
  *     disk — defeating the nuke entirely.
+ *
+ * Companion helper `removeToolResultsDirInSlug` mirrors this for the
+ * sibling per-session tool-results directory at `${slugPath}/${sessionId}/`.
  */
 function unlinkJsonlInSlug(
   slugPath: string,
@@ -555,21 +571,165 @@ function unlinkJsonlInSlug(
 }
 
 /**
+ * Try to remove `${slugPath}/${sessionId}/` (the per-session tool-results
+ * directory the SDK writes alongside `${sessionId}.jsonl`). Returns 1
+ * if a filesystem entry was removed, 0 otherwise.
+ *
+ * Mirrors `unlinkJsonlInSlug` with the same lstat → branch on type →
+ * realpath-containment discipline; only the leaf operation differs.
+ *
+ *   - **Symlink**: unlink the symlink itself. `fs.unlinkSync` removes
+ *     the link entry without following it, so a compromised container
+ *     can't redirect the wipe to walk into an arbitrary host directory
+ *     and `recursive: true` it. Same "nuke really nukes" promise as
+ *     the JSONL path.
+ *
+ *   - **Directory**: realpath the dir and the slug, verify the dir's
+ *     real path is inside the slug's real path, then `fs.rmSync` with
+ *     `recursive: true`. Node's `rmSync` does NOT traverse symlinks
+ *     it encounters inside the tree — they're removed as link entries,
+ *     never followed — so a malicious container that drops a symlink
+ *     to `/etc` inside its own tool-results dir cannot trick us into
+ *     deleting host files. The realpath check guards the parent path
+ *     itself against ancestor-symlink swap (TOCTOU between the outer
+ *     `wipeSessionJsonl` lstat and this call).
+ *
+ *   - **Regular file at the dir path**: not something the SDK writes,
+ *     but if a compromised container plants one we leave it alone and
+ *     log — wiping it would be outside the helper's contract (it's a
+ *     directory remover) and could mask whatever produced the file.
+ */
+function removeToolResultsDirInSlug(
+  slugPath: string,
+  sessionId: string,
+  groupFolder: string,
+  sessionName: string,
+): number {
+  const dirPath = path.join(slugPath, sessionId);
+
+  let entryStat: fs.Stats;
+  try {
+    entryStat = fs.lstatSync(dirPath);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return 0;
+    logger.warn(
+      { err, groupFolder, sessionName, dirPath },
+      'removeToolResultsDirInSlug: lstat failed — skipping',
+    );
+    return 0;
+  }
+
+  if (entryStat.isSymbolicLink()) {
+    try {
+      fs.unlinkSync(dirPath);
+      logger.info(
+        { groupFolder, sessionName, sessionId, dirPath },
+        'removeToolResultsDirInSlug: unlinked symlinked tool-results dir (target preserved)',
+      );
+      return 1;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return 0;
+      logger.warn(
+        { err, groupFolder, sessionName, sessionId, dirPath },
+        'removeToolResultsDirInSlug: unlink-of-symlink failed',
+      );
+      return 0;
+    }
+  }
+
+  if (!entryStat.isDirectory()) {
+    // The SDK only writes directories at this path. A regular file
+    // here means something else put it there — leave it alone rather
+    // than deleting state we can't account for.
+    logger.warn(
+      { groupFolder, sessionName, sessionId, dirPath },
+      'removeToolResultsDirInSlug: refusing — entry exists but is neither symlink nor directory',
+    );
+    return 0;
+  }
+
+  // Directory path: realpath containment check before rm. Same TOCTOU
+  // defense as the JSONL helper — a slugPath ancestor symlink swap
+  // between the outer lstat and here would otherwise let `rmSync`
+  // recurse into an unintended tree.
+  let realSlug: string;
+  let realDir: string;
+  try {
+    realSlug = fs.realpathSync(slugPath);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return 0;
+    logger.warn(
+      { err, groupFolder, sessionName, slugPath },
+      'removeToolResultsDirInSlug: realpath failed on slug — skipping',
+    );
+    return 0;
+  }
+  try {
+    realDir = fs.realpathSync(dirPath);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return 0;
+    logger.warn(
+      { err, groupFolder, sessionName, dirPath },
+      'removeToolResultsDirInSlug: realpath failed on dir — skipping',
+    );
+    return 0;
+  }
+  if (!realDir.startsWith(realSlug + path.sep)) {
+    logger.warn(
+      { groupFolder, sessionName, sessionId, dirPath, realSlug, realDir },
+      'removeToolResultsDirInSlug: refusing to remove — realpath escapes slug directory',
+    );
+    return 0;
+  }
+  try {
+    // `recursive: true` walks the tree. Node never follows symlinks
+    // inside — they're removed as entries — so a compromised container
+    // that scattered symlinks to host paths in its own tool-results
+    // tree cannot redirect the wipe.
+    //
+    // `force: true` swallows ENOENT if the path vanished between
+    // lstat and rm (a concurrent cleanup, an in-flight container
+    // teardown). Other errors still surface from the inner walk.
+    fs.rmSync(dirPath, { recursive: true, force: true });
+    return 1;
+  } catch (err) {
+    logger.warn(
+      { err, groupFolder, sessionName, sessionId, dirPath },
+      'removeToolResultsDirInSlug: rmSync failed',
+    );
+    return 0;
+  }
+}
+
+/**
+ * Wipe the on-disk session artifacts (JSONL transcript and the
+ * sibling per-session tool-results directory) for the given sessionId
+ * across every project-slug subdirectory under the slot's `projects/`.
+ * Returns the total number of filesystem entries removed.
+ *
+ * The function name retains the historical "Jsonl" suffix from when it
+ * only unlinked transcripts; the contract is now a full session-artifact
+ * wipe. Both artifact types share one realpath-containment regime, one
+ * DoS-cap regime, and one slug-walk traversal — keeping them in a single
+ * function avoids walking `projects/` twice for what is conceptually one
+ * "wipe everything tied to this sessionId" operation.
+ *
  * Production callers:
  *   1. `nukeSession` (#100) — owns the multi-step order-of-operations
  *      wipe (capture sessionIds → kill containers → drop DB rows →
- *      unlink JSONL).
+ *      remove session artifacts).
  *   2. `startSchedulerLoop` (#193) — injects this as a dependency so
- *      `runTask`'s post-run finally can wipe the per-run JSONL the
+ *      `runTask`'s post-run finally can wipe the per-run artifacts the
  *      moment a scheduled run completes (its sessionId is never
  *      persisted to the DB, so the time-based `cleanup-sessions.sh`
- *      can't find it later).
+ *      can't find them later).
  *
- * The JSDoc here sits directly above the export so `tsconfig.stripInternal:
- * true` strips this symbol from the generated `.d.ts` (the `@internal`
- * tag on the constant declaration above attaches to the const, not to
- * the function). Tests also import this symbol directly to bypass the
- * full `nukeSession` path.
+ * Tests also import this symbol directly to bypass the full
+ * `nukeSession` path.
  */
 export function wipeSessionJsonl(
   groupFolder: string,
@@ -662,6 +822,12 @@ export function wipeSessionJsonl(
     );
   } else if (fastPathLstat?.isDirectory()) {
     deleted += unlinkJsonlInSlug(
+      fastPathSlug,
+      sessionId,
+      groupFolder,
+      sessionName,
+    );
+    deleted += removeToolResultsDirInSlug(
       fastPathSlug,
       sessionId,
       groupFolder,
@@ -781,6 +947,12 @@ export function wipeSessionJsonl(
       }
 
       deleted += unlinkJsonlInSlug(
+        slugPath,
+        sessionId,
+        groupFolder,
+        sessionName,
+      );
+      deleted += removeToolResultsDirInSlug(
         slugPath,
         sessionId,
         groupFolder,
