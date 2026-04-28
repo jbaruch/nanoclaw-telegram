@@ -344,6 +344,27 @@ export function initDatabase(): void {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
   db = new Database(dbPath);
+  // WAL keeps cross-process readers from seeing partially-written pages
+  // (the bot writes from the orchestrator while agent containers and
+  // ad-hoc sqlite3 readers query the same file). Without WAL, readers
+  // hitting a mid-write rollback journal occasionally surface a false
+  // "database disk image is malformed" error. NORMAL is the standard
+  // synchronous pairing for WAL; busy_timeout smooths the rare contention.
+  // `journal_mode = WAL` can silently fall back to the previous mode when
+  // the filesystem can't host WAL (rare network FS, some FUSE mounts) —
+  // verify the effective mode so the malformed-image fix can't be a no-op
+  // we don't notice.
+  const journalMode = String(
+    db.pragma('journal_mode = WAL', { simple: true }),
+  ).toLowerCase();
+  if (journalMode !== 'wal') {
+    throw new Error(
+      `SQLite WAL mode is required at ${dbPath} but the database reports journal_mode="${journalMode}". ` +
+        `Check the underlying filesystem — WAL needs shared-memory mmap support.`,
+    );
+  }
+  db.pragma('synchronous = NORMAL');
+  db.pragma('busy_timeout = 5000');
   createSchema(db);
 
   // Migrate from JSON files if they exist

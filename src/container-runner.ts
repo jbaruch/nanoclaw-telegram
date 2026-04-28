@@ -263,6 +263,12 @@ export function createFilteredDb(
 
   // Use ATTACH to copy schema-agnostically — picks up new columns automatically
   const dst = new Database(filteredPath);
+  // Source `messages.db` is WAL-mode and actively written by the orchestrator.
+  // Without busy_timeout this connection would fail immediately on any lock
+  // contention against the source (e.g. during a checkpoint), defeating the
+  // whole point of the orchestrator-side WAL setup. Match the orchestrator
+  // value (5000ms) so contention smoothing is symmetric across readers.
+  dst.pragma('busy_timeout = 5000');
   try {
     dst.exec(`ATTACH DATABASE '${srcDb.replace(/'/g, "''")}' AS src`);
     dst.exec(
