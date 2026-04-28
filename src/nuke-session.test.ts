@@ -337,3 +337,195 @@ describe('wipeSessionJsonl (#100)', () => {
     expect(fs.existsSync(sentinel)).toBe(true);
   });
 });
+
+describe('wipeSessionJsonl tool-results directory wipe', () => {
+  // Companion coverage to the JSONL transcript suite above. The SDK
+  // writes a per-session sub-directory at `<slug>/<sessionId>/`
+  // (containing tool-call result snapshots like image attachments,
+  // search outputs) alongside `<sessionId>.jsonl`. Pre-existing
+  // behavior unlinked only the JSONL, leaving the dir orphaned. These
+  // tests pin the extended contract: both artifacts go away on wipe,
+  // and the same realpath-containment / symlink-as-link / DoS-cap
+  // discipline applies.
+  it('removes the tool-results directory alongside the JSONL', () => {
+    const slugDir = path.join(
+      projectsDir('test_group', 'default'),
+      '-workspace-group',
+    );
+    fs.mkdirSync(slugDir, { recursive: true });
+    const jsonlPath = path.join(slugDir, 'abc-123.jsonl');
+    const toolResultsDir = path.join(slugDir, 'abc-123');
+    fs.writeFileSync(jsonlPath, 'transcript');
+    fs.mkdirSync(toolResultsDir);
+    fs.writeFileSync(path.join(toolResultsDir, 'tool-1.json'), '{}');
+    fs.writeFileSync(path.join(toolResultsDir, 'tool-2.json'), '{}');
+
+    const deleted = wipeSessionJsonl('test_group', 'default', 'abc-123');
+
+    // 1 jsonl + 1 tool-results dir = 2.
+    expect(deleted).toBe(2);
+    expect(fs.existsSync(jsonlPath)).toBe(false);
+    expect(fs.existsSync(toolResultsDir)).toBe(false);
+  });
+
+  it('removes the tool-results directory even when the JSONL is absent', () => {
+    // Real failure mode: the SDK can land tool-result files before the
+    // first transcript flush, and a crash mid-run can leave the dir
+    // without its companion .jsonl. The wipe should still clean up.
+    const slugDir = path.join(
+      projectsDir('orphan_group', 'maintenance'),
+      '-workspace-group',
+    );
+    fs.mkdirSync(slugDir, { recursive: true });
+    const toolResultsDir = path.join(slugDir, 'crashed-sess');
+    fs.mkdirSync(toolResultsDir);
+    fs.writeFileSync(path.join(toolResultsDir, 'half-written.json'), '{');
+
+    const deleted = wipeSessionJsonl(
+      'orphan_group',
+      'maintenance',
+      'crashed-sess',
+    );
+
+    expect(deleted).toBe(1);
+    expect(fs.existsSync(toolResultsDir)).toBe(false);
+  });
+
+  it('returns 0 when neither artifact exists', () => {
+    const slugDir = path.join(
+      projectsDir('empty_group', 'default'),
+      '-workspace-group',
+    );
+    fs.mkdirSync(slugDir, { recursive: true });
+
+    const deleted = wipeSessionJsonl('empty_group', 'default', 'never-was');
+    expect(deleted).toBe(0);
+  });
+
+  it('removes a symlinked tool-results directory without following it', () => {
+    // Defense against a compromised container that swaps its tool-
+    // results dir for a symlink pointing at a sensitive host path
+    // ($HOME, /etc, etc.) hoping the wipe's `recursive: true` walks
+    // through and deletes it. We must unlink the LINK only.
+    const slugDir = path.join(
+      projectsDir('symlink_dir_group', 'default'),
+      '-workspace-group',
+    );
+    fs.mkdirSync(slugDir, { recursive: true });
+
+    // Build a target tree the symlink points at. If the helper
+    // followed the link, it would `rmSync` this whole tree.
+    const decoyTarget = path.join(TEST_DATA_DIR, 'decoy_target');
+    fs.mkdirSync(decoyTarget, { recursive: true });
+    const sentinel = path.join(decoyTarget, 'must_survive.txt');
+    fs.writeFileSync(sentinel, 'sentinel');
+
+    const symlinkPath = path.join(slugDir, 'sid');
+    fs.symlinkSync(decoyTarget, symlinkPath, 'dir');
+
+    const deleted = wipeSessionJsonl('symlink_dir_group', 'default', 'sid');
+
+    // Symlink itself was unlinked.
+    expect(deleted).toBe(1);
+    expect(fs.existsSync(symlinkPath)).toBe(false);
+    // Target tree untouched.
+    expect(fs.existsSync(sentinel)).toBe(true);
+    expect(fs.readFileSync(sentinel, 'utf8')).toBe('sentinel');
+  });
+
+  it('leaves a regular file at the dir path alone (refuses to unlink unexpected entry)', () => {
+    // The SDK only writes directories at this path. A regular file
+    // here means something else put it there — leave it alone rather
+    // than deleting state we can't account for.
+    const slugDir = path.join(
+      projectsDir('file_at_dir_group', 'default'),
+      '-workspace-group',
+    );
+    fs.mkdirSync(slugDir, { recursive: true });
+    const unexpectedFile = path.join(slugDir, 'sid');
+    fs.writeFileSync(unexpectedFile, 'mystery');
+
+    const deleted = wipeSessionJsonl('file_at_dir_group', 'default', 'sid');
+
+    expect(deleted).toBe(0);
+    expect(fs.existsSync(unexpectedFile)).toBe(true);
+    expect(fs.readFileSync(unexpectedFile, 'utf8')).toBe('mystery');
+  });
+
+  it('does not follow symlinks INSIDE the tool-results directory during recursive remove', () => {
+    // Compromised container scatters host-pointing symlinks inside
+    // its own tool-results dir; rmSync's recursive walk must remove
+    // the LINKS only, never traverse through to delete host files.
+    // Node's fs.rmSync does not follow symlinks by default — this
+    // test pins that guarantee against future Node behavior changes.
+    const slugDir = path.join(
+      projectsDir('inner_symlink_group', 'default'),
+      '-workspace-group',
+    );
+    fs.mkdirSync(slugDir, { recursive: true });
+
+    const sensitiveTarget = path.join(TEST_DATA_DIR, 'sensitive_outside');
+    fs.mkdirSync(sensitiveTarget, { recursive: true });
+    const sensitiveFile = path.join(sensitiveTarget, 'secret.txt');
+    fs.writeFileSync(sensitiveFile, 'secret');
+
+    const toolResultsDir = path.join(slugDir, 'sid');
+    fs.mkdirSync(toolResultsDir);
+    // A regular file inside the dir (legitimate SDK output).
+    fs.writeFileSync(path.join(toolResultsDir, 'tool-1.json'), '{}');
+    // A symlink inside the dir pointing OUT to a sensitive host path.
+    fs.symlinkSync(
+      sensitiveTarget,
+      path.join(toolResultsDir, 'attack-link'),
+      'dir',
+    );
+
+    const deleted = wipeSessionJsonl('inner_symlink_group', 'default', 'sid');
+
+    expect(deleted).toBe(1);
+    expect(fs.existsSync(toolResultsDir)).toBe(false);
+    // Sensitive target tree must still be intact.
+    expect(fs.existsSync(sensitiveFile)).toBe(true);
+    expect(fs.readFileSync(sensitiveFile, 'utf8')).toBe('secret');
+  });
+
+  // Note on coverage gap: `removeToolResultsDirInSlug`'s realpath-
+  // containment refusal path (the directory-branch check that compares
+  // the dir's realpath against the slug's realpath) is not exercised
+  // by these tests. Triggering it requires a TOCTOU race where an
+  // ancestor symlink is swapped between the outer slug lstat in
+  // `wipeSessionJsonl` and the inner realpath in
+  // `removeToolResultsDirInSlug` — not deterministically reproducible
+  // in a unit test. The JSONL helper carries an analogous gap. The
+  // realpath check remains as defense-in-depth alongside the
+  // symlink-branch and slug-lstat checks that ARE tested above.
+
+  it('removes the tool-results dir across multiple project-slug subdirectories', () => {
+    // Mirror of the JSONL slow-path test: an operator-renamed slug
+    // makes the fast-path miss; the slow-path walk must still find
+    // and wipe the tool-results dir under every slug it visits.
+    const slugA = path.join(
+      projectsDir('group_x', 'maintenance'),
+      '-workspace-group',
+    );
+    const slugB = path.join(
+      projectsDir('group_x', 'maintenance'),
+      '-workspace-renamed',
+    );
+    fs.mkdirSync(slugA, { recursive: true });
+    fs.mkdirSync(slugB, { recursive: true });
+    const dirA = path.join(slugA, 'sess-1');
+    const dirB = path.join(slugB, 'sess-1');
+    fs.mkdirSync(dirA);
+    fs.mkdirSync(dirB);
+    fs.writeFileSync(path.join(dirA, 'a.json'), '{}');
+    fs.writeFileSync(path.join(dirB, 'b.json'), '{}');
+
+    const deleted = wipeSessionJsonl('group_x', 'maintenance', 'sess-1');
+
+    // 2 dirs (no JSONLs in this fixture).
+    expect(deleted).toBe(2);
+    expect(fs.existsSync(dirA)).toBe(false);
+    expect(fs.existsSync(dirB)).toBe(false);
+  });
+});

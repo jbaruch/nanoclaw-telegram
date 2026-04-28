@@ -273,12 +273,14 @@ export interface SchedulerDependencies {
   ) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
   /**
-   * Wipe the on-disk JSONL transcript for a just-finished scheduled-task
-   * SDK session. Each scheduled run is a fresh SDK turn (#193) — its
-   * sessionId is never persisted to the sessions cache or DB, so
-   * `nukeSession` and the time-based `cleanup-sessions.sh` script cannot
-   * find it to wipe later. Without this hook, every run leaves an orphan
-   * JSONL under `data/sessions/<group>/maintenance/.claude/projects/<slug>/`.
+   * Wipe the on-disk session artifacts (JSONL transcript and the
+   * sibling per-session tool-results directory) for a just-finished
+   * scheduled-task SDK session. Each scheduled run is a fresh SDK turn
+   * (#193) — its sessionId is never persisted to the sessions cache or
+   * DB, so `nukeSession` and the time-based `cleanup-sessions.sh`
+   * script cannot find it to wipe later. Without this hook, every run
+   * leaves orphan files under
+   * `data/sessions/<group>/maintenance/.claude/projects/<slug>/`.
    *
    * Invocation contract: the scheduler de-duplicates every `newSessionId`
    * the SDK reports during the run (streaming events plus the terminal
@@ -288,20 +290,15 @@ export interface SchedulerDependencies {
    * bookkeeping (`logTaskRun`, `updateTaskAfterRun`). The `finally`
    * placement guarantees the wipe still fires when those DB writes throw
    * — otherwise a transient SQLite error would leave the just-created
-   * JSONL orphan-on-disk, defeating #193.
+   * artifacts orphan-on-disk, defeating #193.
    *
    * Implemented by the orchestrator via `wipeSessionJsonl` (delete-
    * while-open is safe on POSIX, so we don't have to wait for container
    * teardown). The implementation is defensive — ENOENT and other
    * expected fs errors are swallowed internally and reflected in the
-   * returned count.
-   *
-   * Scope note: only the `<sessionId>.jsonl` file is unlinked. The
-   * sibling per-session tool-results directory at
-   * `<slug>/<sessionId>/` is NOT removed here — extending the helper
-   * to wipe directories would also change `nukeSession` semantics and
-   * needs its own realpath-containment check + tests, so it's tracked
-   * as a separate disk-hygiene follow-up.
+   * returned count. Returned count is the total number of filesystem
+   * entries removed: up to 2 per slug (1 JSONL + 1 tool-results dir),
+   * summed across every project-slug subdirectory walked.
    */
   wipeSessionJsonl: (
     groupFolder: string,
