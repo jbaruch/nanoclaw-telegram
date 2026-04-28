@@ -283,7 +283,8 @@ echo ""
 # folders containing underscores get sanitised to dashes in the
 # container name, losing the original spelling).
 echo "5. Gracefully closing agent containers..."
-# `grep` exits 1 when no agents match — the empty-string case is handled by the `-n` check below.
+# `grep` exits 1 when no agents match — the empty-string case is
+# handled by the `[[ -z ... ]]` check on the next line.
 AGENTS=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -v '^nanoclaw$' || true)
 if [[ -z "$AGENTS" ]]; then
     echo "  no agent containers running"
@@ -291,10 +292,20 @@ else
     AGENT_COUNT=$(echo "$AGENTS" | wc -l | tr -d ' ')
     echo "  $AGENT_COUNT agent(s) running — sending _close sentinel"
 
+    # The grace-window poll and the final force-kill must operate
+    # on the SAME set of names this loop signals — NOT on a fresh
+    # `docker ps` later. A new agent that spawns mid-deploy (e.g.
+    # an inbound message during the grace window) is unrelated to
+    # this deploy's "give in-flight work a chance to finish" intent
+    # and must NOT be force-killed at the end. Track the original
+    # set in `ORIGINAL_AGENTS` and re-derive holdouts as
+    # `intersect(ORIGINAL_AGENTS, currently-running)`.
+    declare -A ORIGINAL_AGENTS=()
     SIGNALED_COUNT=0
     UNRESOLVED=()
     while IFS= read -r container; do
         [[ -z "$container" ]] && continue
+        ORIGINAL_AGENTS["$container"]=1
         # Resolve the agent's IPC input dir on the host. The
         # template extracts the Source (host path) of the mount
         # whose Destination matches the agent-runner's constant. A
@@ -305,17 +316,29 @@ else
         IPC_INPUT_HOST=$(docker inspect "$container" \
             --format '{{range .Mounts}}{{if eq .Destination "/workspace/ipc/input"}}{{.Source}}{{end}}{{end}}' \
             2>/dev/null || true)
-        if [[ -n "$IPC_INPUT_HOST" && -d "$IPC_INPUT_HOST" ]]; then
-            # `touch` is the idiomatic empty-file create; the
-            # agent-runner only checks for existence, not contents.
-            touch "$IPC_INPUT_HOST/_close" 2>/dev/null && SIGNALED_COUNT=$((SIGNALED_COUNT + 1))
+        if [[ -z "$IPC_INPUT_HOST" || ! -d "$IPC_INPUT_HOST" ]]; then
+            # Mount not resolvable — fall through to force-kill.
+            UNRESOLVED+=("$container")
+            continue
+        fi
+        # `touch` is the idiomatic empty-file create; the
+        # agent-runner only checks for existence, not contents. A
+        # touch failure (permissions, transient FS error) means
+        # the agent will NOT see the sentinel and will run until
+        # the grace window expires — track it in UNRESOLVED so
+        # the operator-visible "signaled X/Y" count and the
+        # eventual force-kill story are accurate. Without this,
+        # a silently-failed touch would be reported as success
+        # while the container kept running until force-killed.
+        if touch "$IPC_INPUT_HOST/_close" 2>/dev/null; then
+            SIGNALED_COUNT=$((SIGNALED_COUNT + 1))
         else
             UNRESOLVED+=("$container")
         fi
     done <<< "$AGENTS"
     echo "  signaled $SIGNALED_COUNT/$AGENT_COUNT with _close sentinel"
     if (( ${#UNRESOLVED[@]} > 0 )); then
-        echo "  WARN: could not resolve IPC input dir for ${#UNRESOLVED[@]} container(s) — will force-kill after grace"
+        echo "  WARN: ${#UNRESOLVED[@]} container(s) could not be signaled (mount unresolved or _close write failed) — will force-kill after grace"
     fi
 
     # Poll for natural exit. 30s covers typical turn completion
@@ -323,29 +346,48 @@ else
     # slow MCP calls) hit the force-kill below — same destructive
     # behaviour as pre-#221, just narrowed to the genuinely-stuck
     # minority instead of every running agent.
+    #
+    # Compare against ORIGINAL_AGENTS, not `docker ps` directly —
+    # a freshly-spawned agent (inbound message mid-deploy) is none
+    # of this loop's business and must not extend the grace window
+    # nor land in the holdout-kill set.
     GRACE_SECONDS=30
     POLL_INTERVAL=2
     elapsed=0
     while (( elapsed < GRACE_SECONDS )); do
-        STILL_RUNNING=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -v '^nanoclaw$' || true)
-        if [[ -z "$STILL_RUNNING" ]]; then
-            echo "  all agents exited gracefully after ${elapsed}s"
+        still_running_count=0
+        currently_running=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -v '^nanoclaw$' || true)
+        while IFS= read -r name; do
+            [[ -z "$name" ]] && continue
+            if [[ -n "${ORIGINAL_AGENTS[$name]:-}" ]]; then
+                still_running_count=$((still_running_count + 1))
+            fi
+        done <<< "$currently_running"
+        if (( still_running_count == 0 )); then
+            echo "  all signaled agents exited gracefully after ${elapsed}s"
             break
         fi
         sleep "$POLL_INTERVAL"
         elapsed=$((elapsed + POLL_INTERVAL))
     done
 
-    # Force-kill any holdouts. Pre-#221 every container was killed
-    # unconditionally; post-#221 only the genuinely-stuck minority
-    # is destroyed. A container may exit between this `docker ps`
+    # Force-kill holdouts FROM THE ORIGINAL SET only. Pre-#221
+    # every container was killed unconditionally; post-#221 only
+    # the genuinely-stuck minority of the original set is
+    # destroyed. A container may exit between this `docker ps`
     # and the kill below — `docker kill` on a dead container is a
     # benign race, not a failure.
-    HOLDOUTS=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -v '^nanoclaw$' || true)
-    if [[ -n "$HOLDOUTS" ]]; then
-        HOLDOUT_COUNT=$(echo "$HOLDOUTS" | wc -l | tr -d ' ')
-        echo "  $HOLDOUT_COUNT agent(s) didn't exit in ${GRACE_SECONDS}s — force-killing"
-        echo "$HOLDOUTS" | xargs docker kill 2>/dev/null || true
+    HOLDOUTS=()
+    currently_running=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -v '^nanoclaw$' || true)
+    while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
+        if [[ -n "${ORIGINAL_AGENTS[$name]:-}" ]]; then
+            HOLDOUTS+=("$name")
+        fi
+    done <<< "$currently_running"
+    if (( ${#HOLDOUTS[@]} > 0 )); then
+        echo "  ${#HOLDOUTS[@]} agent(s) from the original set didn't exit in ${GRACE_SECONDS}s — force-killing"
+        printf '%s\n' "${HOLDOUTS[@]}" | xargs docker kill 2>/dev/null || true
     fi
 fi
 echo ""
