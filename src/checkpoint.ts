@@ -267,6 +267,19 @@ export function clearCheckpoints(groupDir: string): number {
   // expected child of groupDir — not somewhere else through a
   // TOCTOU symlink swap between the lstat below and the realpath
   // call further down.
+  // Error-handling discipline (per `jbaruch/coding-policy: error-handling`):
+  // ENOENT is the ONE recoverable code — it means the path the caller
+  // asked us to wipe doesn't exist, which is what a successful clear
+  // leaves anyway. Every other fs errno (EACCES, EPERM, EROFS, EBUSY,
+  // EIO, …) is unexpected: we DID find the file but couldn't remove
+  // it, so claiming the cleanup succeeded would be a lie. Log
+  // diagnostic context, then re-throw so the caller (nukeSession) and
+  // the IPC dispatch wrapper see the failure. Same for non-Error
+  // throws — those indicate upstream bugs.
+  //
+  // Trade-off: a partial wipe (one file gone, the other throws) is
+  // acceptable. Disk is consistent — the file we couldn't unlink is
+  // still there for the operator to inspect and clean up manually.
   let realGroupDir: string;
   try {
     realGroupDir = fs.realpathSync(groupDir);
@@ -276,9 +289,9 @@ export function clearCheckpoints(groupDir: string): number {
     if (code === 'ENOENT') return 0; // group folder doesn't exist → nothing to clear
     logger.warn(
       { groupDir, err },
-      'clearCheckpoints: realpath failed on groupDir — skipping',
+      'clearCheckpoints: realpath failed on groupDir',
     );
-    return 0;
+    throw err;
   }
   const expectedRealDir = path.join(realGroupDir, CHECKPOINTS_SUBDIR);
 
@@ -291,9 +304,9 @@ export function clearCheckpoints(groupDir: string): number {
     if (code === 'ENOENT') return 0; // .checkpoints/ never created
     logger.warn(
       { dir, err },
-      'clearCheckpoints: lstat failed on .checkpoints/ — skipping',
+      'clearCheckpoints: lstat failed on .checkpoints/',
     );
-    return 0;
+    throw err;
   }
   if (dirLstat.isSymbolicLink()) {
     logger.error(
@@ -309,11 +322,13 @@ export function clearCheckpoints(groupDir: string): number {
     realDir = fs.realpathSync(dir);
   } catch (err) {
     if (!(err instanceof Error)) throw err;
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return 0;
     logger.warn(
       { dir, err },
-      'clearCheckpoints: realpath failed on .checkpoints/ — skipping',
+      'clearCheckpoints: realpath failed on .checkpoints/',
     );
-    return 0;
+    throw err;
   }
   // TOCTOU defense: between the `lstatSync(dir)` above and this
   // realpath, a compromised container could have swapped
@@ -338,8 +353,8 @@ export function clearCheckpoints(groupDir: string): number {
       if (!(err instanceof Error)) throw err;
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') continue;
-      logger.warn({ file, err }, 'clearCheckpoints: lstat failed — skipping');
-      continue;
+      logger.warn({ file, err }, 'clearCheckpoints: lstat failed');
+      throw err;
     }
 
     if (entryStat.isSymbolicLink()) {
@@ -359,6 +374,7 @@ export function clearCheckpoints(groupDir: string): number {
           { file, err },
           'clearCheckpoints: unlink-of-symlink failed',
         );
+        throw err;
       }
       continue;
     }
@@ -371,11 +387,8 @@ export function clearCheckpoints(groupDir: string): number {
       if (!(err instanceof Error)) throw err;
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') continue;
-      logger.warn(
-        { file, err },
-        'clearCheckpoints: realpath failed — skipping',
-      );
-      continue;
+      logger.warn({ file, err }, 'clearCheckpoints: realpath failed');
+      throw err;
     }
     if (!realFile.startsWith(realDir + path.sep)) {
       logger.warn(
@@ -392,6 +405,7 @@ export function clearCheckpoints(groupDir: string): number {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') continue;
       logger.warn({ file, err }, 'clearCheckpoints: unlink failed');
+      throw err;
     }
   }
   return removed;
