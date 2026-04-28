@@ -601,6 +601,44 @@ export function getMessageById(
 }
 
 /**
+ * Cross-chat reply_to safety check (one half of the call-site
+ * predicate; see `safeReplyToForChat` in `src/channels/telegram.ts`).
+ *
+ * Returns true when the message id is stored under at least one
+ * chat_jid that is NOT the expected one — i.e. "we have evidence the
+ * id belongs to some other chat". This is intentionally NOT a
+ * sufficient signal on its own to drop `reply_parameters`: Telegram
+ * message IDs are per-chat sequential, so the same numeric id
+ * routinely exists in many chats, including the target. The call
+ * site MUST first check `getMessageById(id, jid)` for positive
+ * evidence the id is local; only if that returns null does this
+ * helper's "exists in another chat" answer flip the safety verdict
+ * to "drop". Inverting that order is how you accidentally strip
+ * reply threading from every legitimate same-chat reply once a
+ * deployment has more than one Telegram chat.
+ *
+ * Why not collapse this into `getMessageById`: that helper takes
+ * both id AND chat and returns a single row. We want a single SQL
+ * pass with the inverse predicate ("exists in some chat OTHER than
+ * X") so the chat_jid != comparison stays inside the query (where
+ * the index helps) and the call site reads as two clean predicates.
+ */
+export function messageExistsInDifferentChat(
+  messageId: string,
+  expectedChatJid: string,
+): boolean {
+  const row = db
+    .prepare(
+      `SELECT 1 AS hit
+       FROM messages
+       WHERE id = ? AND chat_jid != ?
+       LIMIT 1`,
+    )
+    .get(messageId, expectedChatJid) as { hit: number } | undefined;
+  return !!row;
+}
+
+/**
  * Look up a bot-sent message by the Telegram-native message ID
  * returned when it was posted. Exists so "what did we post at
  * Telegram ID X in chat Y" stops being a logs-grep exercise — the

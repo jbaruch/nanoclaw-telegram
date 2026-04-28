@@ -14,6 +14,7 @@ import {
   getNewMessages,
   getRegisteredGroup,
   getTaskById,
+  messageExistsInDifferentChat,
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
@@ -975,5 +976,84 @@ describe('registered group malformed container_config', () => {
     expect(warnSpy).not.toHaveBeenCalled();
 
     warnSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------
+// messageExistsInDifferentChat — cross-chat reply_to safety helper
+// (See `src/channels/telegram.ts` cross-chat guard for the call site.)
+// ---------------------------------------------------------------
+
+describe('messageExistsInDifferentChat', () => {
+  it('returns true when the same message id exists under a different chat_jid', () => {
+    // Telegram message IDs are per-chat sequential, so the same numeric
+    // id legitimately exists in multiple chats. This helper detects the
+    // cross-chat collision so the channel layer can drop a reply_to
+    // that came from a foreign chat.
+    storeChatMetadata('tg:-1001111', '2026-04-28T00:00:00.000Z');
+    store({
+      id: '12345',
+      chat_jid: 'tg:-1001111',
+      sender: 'user',
+      sender_name: 'Alice',
+      content: 'message in chat A',
+      timestamp: '2026-04-28T00:00:00.000Z',
+    });
+    expect(messageExistsInDifferentChat('12345', 'tg:-1002222')).toBe(true);
+  });
+
+  it('returns false when the message id exists only in the target chat', () => {
+    // The id IS in our DB but for the chat we're sending to —
+    // legitimate same-chat reply, must not be dropped.
+    storeChatMetadata('tg:-1003333', '2026-04-28T00:00:00.000Z');
+    store({
+      id: '67890',
+      chat_jid: 'tg:-1003333',
+      sender: 'user',
+      sender_name: 'Bob',
+      content: 'message in target chat',
+      timestamp: '2026-04-28T00:00:00.000Z',
+    });
+    expect(messageExistsInDifferentChat('67890', 'tg:-1003333')).toBe(false);
+  });
+
+  it('returns false when we have no record of the message id at all', () => {
+    // No row at all — Telegram remains authoritative; the helper
+    // refuses to claim cross-chat without evidence so a reply_to from
+    // before the orchestrator was running isn't silently dropped.
+    expect(messageExistsInDifferentChat('99999', 'tg:-1004444')).toBe(false);
+  });
+
+  it('returns true when id exists in BOTH the target chat and a different chat', () => {
+    // Telegram message IDs are per-chat sequential, so the same numeric
+    // id legitimately exists in many chats. Asserting only on this
+    // helper, the answer is "yes, an other-chat occurrence exists" —
+    // but that fact alone is NOT a sufficient signal to drop
+    // `reply_parameters`, or we'd strip threading from most legitimate
+    // same-chat replies. The call-site predicate
+    // (`safeReplyToForChat` in src/channels/telegram.ts) consults
+    // `getMessageById(id, target)` first as positive evidence of a
+    // local target; this helper only fires when that returns null.
+    // See that file for the channel-level test that asserts the
+    // composite "shared id => keep reply_to" behavior.
+    storeChatMetadata('tg:-1005555', '2026-04-28T00:00:00.000Z');
+    storeChatMetadata('tg:-1006666', '2026-04-28T00:00:00.000Z');
+    store({
+      id: 'shared',
+      chat_jid: 'tg:-1005555',
+      sender: 'u1',
+      sender_name: 'Alice',
+      content: 'in target',
+      timestamp: '2026-04-28T00:00:00.000Z',
+    });
+    store({
+      id: 'shared',
+      chat_jid: 'tg:-1006666',
+      sender: 'u2',
+      sender_name: 'Bob',
+      content: 'in foreign',
+      timestamp: '2026-04-28T00:00:00.000Z',
+    });
+    expect(messageExistsInDifferentChat('shared', 'tg:-1005555')).toBe(true);
   });
 });

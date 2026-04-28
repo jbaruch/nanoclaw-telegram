@@ -91,6 +91,7 @@ vi.mock('grammy', () => ({
 
 import { TelegramChannel, TelegramChannelOpts } from './telegram.js';
 import { logger } from '../logger.js';
+import { _initTestDatabase, storeChatMetadata, storeMessage } from '../db.js';
 
 // --- Test helpers ---
 
@@ -202,6 +203,13 @@ async function triggerMediaMessage(
 describe('TelegramChannel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Reset to a fresh in-memory DB before every test. The cross-chat
+    // reply_to safety check in `sendMessage` / `sendFile` consults the
+    // messages table, so the helpers need a real schema to query —
+    // without this every send-with-reply test would throw on an
+    // uninitialized `db` global and the outer try/catch would swallow
+    // the error, masking the failure as a "no API call" assertion miss.
+    _initTestDatabase();
   });
 
   afterEach(() => {
@@ -912,6 +920,129 @@ describe('TelegramChannel', () => {
 
       // No error, no API call
     });
+
+    // --- cross-chat reply_to safety (PR #232) ---
+    //
+    // Telegram message IDs are per-chat sequential, so a `replyToMessageId`
+    // captured in chat A may both (a) coincidentally match an unrelated
+    // message in chat B and (b) routinely match a legitimate same-chat
+    // reply target whose id ALSO happens to exist in some other chat.
+    // The channel-level guard must:
+    //   - keep `reply_parameters` when the id is present in the target chat
+    //     (positive evidence of a local target — pathological "shared id in
+    //     BOTH chats" case collapses to "keep");
+    //   - keep `reply_parameters` when the id is absent from the DB entirely
+    //     (let Telegram be authoritative; covers ids from before the
+    //     orchestrator was running);
+    //   - drop `reply_parameters` only when the id is present ONLY in some
+    //     other chat (positive evidence the id is foreign).
+
+    it('keeps reply_parameters when reply_to id exists in the target chat', async () => {
+      storeChatMetadata('tg:100200300', '2026-04-28T00:00:00.000Z');
+      storeMessage({
+        id: '4242',
+        chat_jid: 'tg:100200300',
+        sender: 'user',
+        sender_name: 'Alice',
+        content: 'message in target chat',
+        timestamp: '2026-04-28T00:00:00.000Z',
+        is_from_me: false,
+      });
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.sendMessage('tg:100200300', 'Hello back', '4242');
+
+      const options = currentBot().api.sendMessage.mock.calls[0][2];
+      expect(options.reply_parameters).toEqual({ message_id: 4242 });
+    });
+
+    it('drops reply_parameters when reply_to id only exists in a different chat', async () => {
+      storeChatMetadata('tg:100200300', '2026-04-28T00:00:00.000Z');
+      storeChatMetadata('tg:999888777', '2026-04-28T00:00:00.000Z');
+      storeMessage({
+        id: '4242',
+        chat_jid: 'tg:999888777',
+        sender: 'user',
+        sender_name: 'ForeignAlice',
+        content: 'message in foreign chat',
+        timestamp: '2026-04-28T00:00:00.000Z',
+        is_from_me: false,
+      });
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.sendMessage('tg:100200300', 'Cross-chat broadcast', '4242');
+
+      const options = currentBot().api.sendMessage.mock.calls[0][2];
+      expect(options.reply_parameters).toBeUndefined();
+      // The drop is logged at warn so operators can spot orchestrator bugs
+      // that produce cross-chat reply_to ids in the first place — silence
+      // would let those bugs continue to push misrouted reply ids forever.
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          jid: 'tg:100200300',
+          replyToMessageId: '4242',
+        }),
+        expect.stringContaining('Dropping cross-chat reply_to'),
+      );
+    });
+
+    it('keeps reply_parameters when the same id exists in BOTH the target and another chat', async () => {
+      // Per-chat-sequential ids guarantee this case in any deployment with
+      // more than one Telegram chat. Positive evidence (id-in-target) wins
+      // over "id exists elsewhere", or threading would be stripped from
+      // most legitimate same-chat replies.
+      storeChatMetadata('tg:100200300', '2026-04-28T00:00:00.000Z');
+      storeChatMetadata('tg:999888777', '2026-04-28T00:00:00.000Z');
+      storeMessage({
+        id: '4242',
+        chat_jid: 'tg:100200300',
+        sender: 'user',
+        sender_name: 'LocalAlice',
+        content: 'in target',
+        timestamp: '2026-04-28T00:00:00.000Z',
+        is_from_me: false,
+      });
+      storeMessage({
+        id: '4242',
+        chat_jid: 'tg:999888777',
+        sender: 'user',
+        sender_name: 'ForeignBob',
+        content: 'in foreign',
+        timestamp: '2026-04-28T00:00:00.000Z',
+        is_from_me: false,
+      });
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.sendMessage('tg:100200300', 'Same-chat reply', '4242');
+
+      const options = currentBot().api.sendMessage.mock.calls[0][2];
+      expect(options.reply_parameters).toEqual({ message_id: 4242 });
+      // Importantly, no warn — there's nothing to flag here.
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining('Dropping cross-chat reply_to'),
+      );
+    });
+
+    it('keeps reply_parameters when reply_to id is absent from the DB entirely', async () => {
+      // Covers ids from before the orchestrator was running, or from a
+      // freshly-deployed bot. We refuse to drop without positive evidence
+      // the id is foreign — Telegram remains authoritative on existence.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.sendMessage('tg:100200300', 'Reply to legacy', '9999');
+
+      const options = currentBot().api.sendMessage.mock.calls[0][2];
+      expect(options.reply_parameters).toEqual({ message_id: 9999 });
+    });
   });
 
   // --- sendFile ---
@@ -1023,6 +1154,36 @@ describe('TelegramChannel', () => {
       await expect(
         channel.sendFile('tg:100200300', '/tmp/nanoclaw-test.png', 'hi'),
       ).resolves.toBeUndefined();
+    });
+
+    it('drops reply_parameters when reply_to id only exists in a different chat', async () => {
+      // sendFile shares the same `safeReplyToForChat` predicate as
+      // sendMessage — verify the wire-up so a regression on either path
+      // wouldn't silently bypass the cross-chat guard.
+      storeChatMetadata('tg:100200300', '2026-04-28T00:00:00.000Z');
+      storeChatMetadata('tg:999888777', '2026-04-28T00:00:00.000Z');
+      storeMessage({
+        id: '4242',
+        chat_jid: 'tg:999888777',
+        sender: 'user',
+        sender_name: 'ForeignAlice',
+        content: 'message in foreign chat',
+        timestamp: '2026-04-28T00:00:00.000Z',
+        is_from_me: false,
+      });
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.sendFile(
+        'tg:100200300',
+        '/tmp/nanoclaw-test.png',
+        'hello',
+        '4242',
+      );
+
+      const options = currentBot().api.sendDocument.mock.calls[0][2];
+      expect(options.reply_parameters).toBeUndefined();
     });
   });
 

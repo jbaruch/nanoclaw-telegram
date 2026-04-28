@@ -254,6 +254,41 @@ export function applyMaintenancePrefix(
   return MAINTENANCE_MESSAGE_PREFIX + text;
 }
 
+/**
+ * Decide whether to record a `bot-…` row in `messages.db` after the
+ * IPC `send_message` handler dispatches a send. For Telegram we MUST
+ * have a Telegram-native message id back from the channel — its
+ * absence is the only reliable signal that the send was swallowed
+ * (400 from a bad reply_to, network blip, malformed HTML even after
+ * the plain-text fallback, blocked-by-user, rate-limit, etc.). A
+ * row written without that id is a phantom: the heartbeat /
+ * unanswered-cron treats it as evidence of a reply on a chat the
+ * user never received anything in, and downstream agents quote-reply
+ * to a message id Telegram has no record of.
+ *
+ * Non-Telegram channels are not gated — their `Channel.sendMessage`
+ * contract permits returning `void` on success (see `src/types.ts`),
+ * so absence of an id isn't a failure signal there. Until those
+ * channels grow their own success-id surface, the gate would punish
+ * a passing send.
+ *
+ * The undefined check is `!== undefined` rather than truthiness on
+ * purpose, matching the comment on `sentMsgId` upstream: a future
+ * Telegram id of `''` or `'0'` (we don't expect this today, but the
+ * contract is `string | undefined`) must still record the row.
+ *
+ * @internal — test-only export, should not be part of the public
+ * `.d.ts` surface (we build with `stripInternal: true`).
+ */
+export function shouldStoreBotMessage(
+  chatJid: string,
+  sentMsgId: string | undefined,
+): boolean {
+  const isTelegram = chatJid.startsWith('tg:');
+  if (!isTelegram) return true;
+  return sentMsgId !== undefined;
+}
+
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
     logger.debug('IPC watcher already running, skipping duplicate start');
@@ -611,33 +646,44 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       );
                     }
                   }
-                  // Store bot response so heartbeat can track answered messages.
-                  // If we reach here the send path (pool or direct) returned
-                  // without an unhandled throw — so a DB row should ALWAYS
-                  // appear unless the storeMessage call itself throws (see
-                  // outer catch).
-                  const botRowId = `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-                  storeMessage({
-                    id: botRowId,
-                    chat_jid: data.chatJid,
-                    sender: data.sender || ASSISTANT_NAME,
-                    sender_name: data.sender || ASSISTANT_NAME,
-                    content: cleanText,
-                    timestamp: new Date().toISOString(),
-                    is_from_me: true,
-                    is_bot_message: true,
-                    reply_to_message_id: data.replyToMessageId,
-                    telegram_message_id: sentMsgId,
-                  });
-                  logger.info(
-                    {
-                      chatJid: data.chatJid,
-                      sourceGroup,
-                      botRowId,
-                      contentLen: cleanText.length,
-                    },
-                    '[ipc] send_message complete — DB row written',
-                  );
+                  // Gate the bot-row write on send success — see the
+                  // `shouldStoreBotMessage` helper for the full rationale
+                  // (phantom rows on swallowed Telegram sends would
+                  // silence the heartbeat / unanswered-cron and feed
+                  // cascading hallucinated quote-replies downstream).
+                  if (shouldStoreBotMessage(data.chatJid, sentMsgId)) {
+                    const botRowId = `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+                    storeMessage({
+                      id: botRowId,
+                      chat_jid: data.chatJid,
+                      sender: data.sender || ASSISTANT_NAME,
+                      sender_name: data.sender || ASSISTANT_NAME,
+                      content: cleanText,
+                      timestamp: new Date().toISOString(),
+                      is_from_me: true,
+                      is_bot_message: true,
+                      reply_to_message_id: data.replyToMessageId,
+                      telegram_message_id: sentMsgId,
+                    });
+                    logger.info(
+                      {
+                        chatJid: data.chatJid,
+                        sourceGroup,
+                        botRowId,
+                        contentLen: cleanText.length,
+                      },
+                      '[ipc] send_message complete — DB row written',
+                    );
+                  } else {
+                    logger.error(
+                      {
+                        chatJid: data.chatJid,
+                        sourceGroup,
+                        contentLen: cleanText.length,
+                      },
+                      '[ipc] send_message failed — Telegram returned no message id; skipping DB row to avoid phantom bot reply (would silence heartbeat / unanswered alerts)',
+                    );
+                  }
                 } else {
                   logger.warn(
                     {

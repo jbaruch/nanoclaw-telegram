@@ -5,7 +5,12 @@ import { Api, Bot, InputFile } from 'grammy';
 import OpenAI from 'openai';
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
-import { getLatestMessage, getMessageById, storeReaction } from '../db.js';
+import {
+  getLatestMessage,
+  getMessageById,
+  messageExistsInDifferentChat,
+  storeReaction,
+} from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -459,6 +464,47 @@ export function splitMessage(text: string): string[] {
  */
 function truncate(s: string, max = 120): string {
   return s.length > max ? s.slice(0, max) + '...' : s;
+}
+
+/**
+ * Cross-chat reply_to safety check for outbound Telegram sends.
+ *
+ * Telegram message IDs are per-chat sequential, so a `replyToMessageId`
+ * captured in chat A can both (a) coincidentally match an unrelated
+ * message in chat B and (b) routinely match a legitimate same-chat
+ * reply target whose id ALSO happens to exist in some other chat.
+ * Either case alone — "exists somewhere else" — therefore can't be the
+ * trigger to drop the reply, or we'd strip threading from most
+ * legitimate same-chat replies in any deployment with more than one
+ * Telegram chat.
+ *
+ * Predicate (true == it's safe to attach `reply_parameters`):
+ *  - the id is present in the target chat → safe (positive evidence
+ *    of a local target wins over any cross-chat occurrence).
+ *  - the id is absent from our DB entirely → safe; let Telegram be
+ *    authoritative on existence so a missing-from-DB reply target
+ *    (e.g. a message from before the orchestrator started) isn't
+ *    silently dropped.
+ *  - the id is present ONLY in some OTHER chat → unsafe; drop with a
+ *    warn log so the send doesn't 400 or attach the reply arrow to a
+ *    coincidentally-matching unrelated message.
+ *
+ * `getMessageById` is the positive check; `messageExistsInDifferentChat`
+ * is only consulted when the positive check failed, so the
+ * pathological "shared id in BOTH chats" case (per-chat-sequential ids)
+ * collapses to "safe" — we'd rather keep a legitimate reply arrow than
+ * paranoia-drop it.
+ */
+function safeReplyToForChat(replyToMessageId: string, jid: string): boolean {
+  if (getMessageById(replyToMessageId, jid)) return true;
+  if (messageExistsInDifferentChat(replyToMessageId, jid)) {
+    logger.warn(
+      { jid, replyToMessageId },
+      'Dropping cross-chat reply_to (id belongs to a different chat)',
+    );
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -1298,7 +1344,7 @@ export class TelegramChannel implements Channel {
         reply_parameters?: { message_id: number };
       } = {};
 
-      if (replyToMessageId) {
+      if (replyToMessageId && safeReplyToForChat(replyToMessageId, jid)) {
         options.reply_parameters = {
           message_id: parseInt(replyToMessageId, 10),
         };
@@ -1374,7 +1420,7 @@ export class TelegramChannel implements Channel {
         options.caption = sanitizedCaption;
         options.parse_mode = 'HTML';
       }
-      if (replyToMessageId) {
+      if (replyToMessageId && safeReplyToForChat(replyToMessageId, jid)) {
         options.reply_parameters = {
           message_id: parseInt(replyToMessageId, 10),
         };
@@ -1405,7 +1451,7 @@ export class TelegramChannel implements Channel {
           reply_parameters?: { message_id: number };
         } = {};
         if (caption) plainOptions.caption = caption;
-        if (replyToMessageId) {
+        if (replyToMessageId && safeReplyToForChat(replyToMessageId, jid)) {
           plainOptions.reply_parameters = {
             message_id: parseInt(replyToMessageId, 10),
           };
