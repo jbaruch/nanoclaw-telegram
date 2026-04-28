@@ -677,6 +677,47 @@ export function buildVolumeMounts(
     });
   }
 
+  // Per-group writable state dir — mounted into EVERY container
+  // regardless of trust tier (#99 Cat 4). Solves the silent-EACCES
+  // failure mode for skills that need to persist state across runs:
+  // `/workspace/group/` is read-only for untrusted, so any skill that
+  // wrote there worked for trusted/main but silently broke for
+  // untrusted (the audit's "strictly worse than no precheck" case
+  // that `unanswered-precheck.py` worked around by routing through
+  // `/home/node/.claude/nanoclaw-state/`). With this mount, every tier
+  // has a single canonical writable location to write to.
+  //
+  // Per-group (not per-session): matches the established mental model
+  // where skills think in terms of "this group's state". A scheduled
+  // task and a user-facing turn in the same group can read each
+  // other's state; cross-group leakage is impossible by virtue of the
+  // bind being scoped to `<folder>`.
+  //
+  // Always writable. Operators can `rm -rf data/state/<folder>/` to
+  // wipe; otherwise grows monotonically with whatever skills choose
+  // to persist. Distinct from `/workspace/group/` (group-shared,
+  // trust-conditional readonly), `/workspace/trusted/` (trusted-only),
+  // `/workspace/store/` (messages.db, readonly), `/workspace/global/`
+  // (global config). Skills that previously wrote to
+  // `/workspace/group/` for cross-run state should migrate to
+  // `/workspace/state/`.
+  const stateDir = path.join(DATA_DIR, 'state', group.folder);
+  fs.mkdirSync(stateDir, { recursive: true });
+  const stateUid = HOST_UID ?? 1000;
+  const stateGid = HOST_GID ?? 1000;
+  if (stateUid !== 0) {
+    try {
+      fs.chownSync(stateDir, stateUid, stateGid);
+    } catch (err: unknown) {
+      logger.warn({ err, stateDir }, 'Failed to chown state dir');
+    }
+  }
+  mounts.push({
+    hostPath: toHostPath(stateDir),
+    containerPath: '/workspace/state',
+    readonly: false,
+  });
+
   // Store directory (messages.db).
   // Trusted/main: full DB (all groups). Untrusted: filtered copy (own chat only).
   if (isMain || group.containerConfig?.trusted) {
