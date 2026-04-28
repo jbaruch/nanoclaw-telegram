@@ -116,36 +116,49 @@ fi
 registry_tile_hash() {
   local tile="$1" version="$2"
   local tmp; tmp="$(mktemp -d -t reconcile-tile-XXXXXX)"
+  # Guarantee the temp dir is removed even if the subshell aborts
+  # mid-hash (hasher fails, xargs sees an unreadable file, etc.).
+  # Otherwise repeated reconcile runs would leak temp dirs each
+  # failure.
+  trap "rm -rf '$tmp'" RETURN
+  # Drop into a subshell that disables strict-mode so a single
+  # hasher / xargs failure doesn't abort the parent reconcile.
+  # The whole hash pipeline is wrapped in `... || echo ERR` so any
+  # internal failure surfaces as a structured ERR result that the
+  # caller branches on, instead of crashing the script.
   (
-    cd "$tmp"
+    set +e
+    cd "$tmp" || { echo "ERR"; exit 0; }
     cat > tessl.json <<EOF
 {"name":"reconcile-verify","mode":"managed","dependencies":{}}
 EOF
     if ! tessl install "$TILE_OWNER_VAL/$tile@$version" --yes --dangerously-ignore-security >/dev/null 2>&1; then
       echo "ERR"
-      return
+      exit 0
     fi
     local installed_dir=".tessl/tiles/$TILE_OWNER_VAL/$tile"
     if [ ! -d "$installed_dir" ]; then
       echo "ERR"
-      return
+      exit 0
     fi
-    cd "$installed_dir"
-    # Guard each `find` with a directory existence check. Under
-    # `set -euo pipefail` (inherited into this subshell), a missing
-    # `rules/` or `skills/` would otherwise make `find` exit non-zero
-    # and abort the whole reconcile rather than treating the missing
-    # directory as "no files to hash". Tiles often have one but not
-    # the other (e.g. nanoclaw-untrusted is rules-only).
-    {
+    cd "$installed_dir" || { echo "ERR"; exit 0; }
+    # Guard each `find` with a directory existence check. A missing
+    # `rules/` or `skills/` would otherwise make `find` exit
+    # non-zero. Tiles often have one but not the other (e.g.
+    # nanoclaw-untrusted is rules-only).
+    HASH_OUTPUT=$({
       [ -f tile.json ] && "${HASHER[@]}" tile.json
       {
         if [ -d rules ]; then find rules -type f; fi
         if [ -d skills ]; then find skills -type f; fi
       } | sort | xargs "${HASHER[@]}" 2>/dev/null
-    } | sort | "${HASHER[@]}" | awk '{print $1}'
+    } | sort | "${HASHER[@]}" 2>/dev/null | awk '{print $1}')
+    if [ -z "$HASH_OUTPUT" ]; then
+      echo "ERR"
+    else
+      echo "$HASH_OUTPUT"
+    fi
   )
-  rm -rf "$tmp"
 }
 
 # Same hash function applied to the container's installed copy of the
@@ -189,7 +202,7 @@ installed_file_summary() {
 echo "Tile versions (repo vs registry vs installed):"
 for tile in $TILES; do
   # Get version from tile GitHub repo
-  REPO_VERSION=$(gh api "repos/$TILE_OWNER_VAL/$tile/contents/tile.json" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])" 2>/dev/null)
+  REPO_VERSION=$(gh api "repos/$TILE_OWNER_VAL/$tile/contents/tile.json" --jq '.content' 2>/dev/null | base64 --decode 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])" 2>/dev/null)
   if [ -z "$REPO_VERSION" ]; then
     echo "  $tile: repo NOT FOUND"
     ISSUES=$((ISSUES + 1))
