@@ -113,14 +113,19 @@ export function detectAuthoritativeLookup(
   if (typeof toolName !== 'string' || toolName.length === 0) {
     return { nudge: false, systemMessage: '' };
   }
+  // Filter catalogue by tool name first so the JSON.stringify cost is
+  // only paid when at least one entity could plausibly match.
+  const candidates = catalogue.filter((entity) =>
+    entity.toolNames.some((re) => re.test(toolName)),
+  );
+  if (candidates.length === 0) {
+    return { nudge: false, systemMessage: '' };
+  }
   const inputStr = serialiseToolInput(toolInput);
   if (inputStr === null) {
     return { nudge: false, systemMessage: '' };
   }
-  for (const entity of catalogue) {
-    if (!entity.toolNames.some((re) => re.test(toolName))) {
-      continue;
-    }
+  for (const entity of candidates) {
     if (!entity.inputPattern.test(inputStr)) {
       continue;
     }
@@ -146,8 +151,14 @@ function serialiseToolInput(input: unknown): string | null {
   }
   try {
     return JSON.stringify(input);
-  } catch {
-    return null;
+  } catch (err: unknown) {
+    // Only the documented circular-structure case (TypeError on
+    // self-referential objects) is expected here. Anything else is
+    // a real bug — propagate so it isn't silently masked.
+    if (err instanceof TypeError) {
+      return null;
+    }
+    throw err;
   }
 }
 

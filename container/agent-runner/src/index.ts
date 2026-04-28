@@ -1672,11 +1672,14 @@ async function runQuery(
           // #226 (tracks #214) — nudge the agent toward known
           // authoritative pointers when it's about to run a fresh
           // entity-lookup. Matcher restricts the regex sweep to the
-          // tool families documented in the incident table; the
-          // catalogue further narrows by tool input shape so unrelated
-          // calls inside this family don't pay the cost.
+          // tool families documented in the incident table, and
+          // includes only the Composio tools whose names indicate
+          // lookup-style search/list operations; the catalogue further
+          // narrows by tool input shape so unrelated calls inside this
+          // family don't pay the cost.
           {
-            matcher: '^(Bash|Read|Grep|Glob|WebSearch|mcp__composio__.*)$',
+            matcher:
+              '^(Bash|Read|Grep|Glob|WebSearch|mcp__composio__.*(?:search|list).*)$',
             hooks: [createAuthoritativeSourceNudgeHook()],
           },
           {
