@@ -962,7 +962,7 @@ Use this when renaming the assistant in a chat or switching between always-respo
 
 server.tool(
   'nuke_session',
-  "Destructive: kill this group's container(s), drop the session DB row(s), AND delete the on-disk JSONL transcript for the targeted slot(s). Next message/scheduled tick starts a TRULY fresh session — no resumed transcript. Use when context is corrupted, rules are stale, poison reached the model, or user asks to start fresh. Parallel-maintenance groups run two containers per group (user-facing `default` + scheduled-task `maintenance`) — pass `session` to narrow the nuke: 'default' keeps maintenance running, 'maintenance' keeps user-facing running, 'all' (default) wipes both. Cannot be undone — the JSONL is gone after this.",
+  "Destructive: kill this group's container(s), drop the session DB row(s), AND delete the on-disk JSONL transcript for the targeted slot(s). Next message/scheduled tick starts a TRULY fresh session — no resumed transcript. Use when context is corrupted, rules are stale, poison reached the model, or user asks to start fresh. Parallel-maintenance groups run two containers per group (user-facing `default` + scheduled-task `maintenance`) — pass `session` to narrow the nuke: 'default' keeps maintenance running, 'maintenance' keeps user-facing running, 'all' (default) wipes both. Pass `skipReentry: true` to also delete the checkpoint files (`.checkpoints/default.md` + `previous.md`) so the next spawn has no reentry context — use when the checkpoint itself is suspect (stuck plan, poisoned Facts) and the operator wants to start genuinely fresh. Cannot be undone — the JSONL is gone after this.",
   {
     session: z
       .enum(['default', 'maintenance', 'all'])
@@ -970,13 +970,21 @@ server.tool(
       .describe(
         "Which session slot to kill. 'default' = user-facing container only (preserves scheduled-task session chain). 'maintenance' = scheduled-task container only (preserves user-facing conversation state). 'all' or omitted = both.",
       ),
+    skipReentry: z
+      .boolean()
+      .optional()
+      .describe(
+        "When true, also delete the per-group checkpoint files (`.checkpoints/default.md` and `previous.md`) so the reentry skill has no Facts to load on the next spawn. Use when the checkpoint itself is the problem (poisoned plan, stale do-not-re-execute list). Default false — checkpoint files are preserved so reentry continues to work after the nuke.",
+      ),
   },
   async (args) => {
     const session = args.session ?? 'all';
+    const skipReentry = args.skipReentry ?? false;
     const data = {
       type: 'nuke_session',
       groupFolder,
       session,
+      skipReentry,
       timestamp: new Date().toISOString(),
     };
 
@@ -992,11 +1000,18 @@ server.tool(
         : session === 'maintenance'
           ? 'scheduled task'
           : 'message';
+    // The host applies this asynchronously after we write the IPC
+    // file, so the response is "requested" rather than "done". The
+    // surrounding "will be killed" / "starts fresh" wording is also
+    // future-tense for the same reason.
+    const reentryText = skipReentry
+      ? ' Checkpoint files will also be cleared so the next spawn has no reentry context.'
+      : '';
     return {
       content: [
         {
           type: 'text' as const,
-          text: `Session nuked (scope: ${session}). ${scopeText}. Next ${nextStartText} starts fresh.`,
+          text: `Session nuke requested (scope: ${session}). ${scopeText}. Next ${nextStartText} starts fresh.${reentryText}`,
         },
       ],
     };

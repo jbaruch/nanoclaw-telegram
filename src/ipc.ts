@@ -95,6 +95,7 @@ export interface IpcDeps {
   nukeSession: (
     groupFolder: string,
     session: 'default' | 'maintenance' | 'all',
+    options?: { skipReentry?: boolean },
   ) => void;
   /**
    * Read the derived container status for a given (jid, sessionName)
@@ -1539,16 +1540,25 @@ export async function processTaskIpc(
           sessionArg === 'default' || sessionArg === 'maintenance'
             ? sessionArg
             : 'all';
+        // Optional `skipReentry` (#127): when true, the dispatcher also
+        // deletes `.checkpoints/default.md` + `previous.md` after the
+        // standard wipe so the next spawn has no reentry Facts to load.
+        // Strict boolean check — anything non-true (missing, null, the
+        // string "true", etc.) falls back to the safe default of
+        // preserving the checkpoint, so a malformed payload can't
+        // accidentally erase reentry state.
+        const skipReentryArg = (data as Record<string, unknown>).skipReentry;
+        const skipReentry = skipReentryArg === true;
         // `sourceGroup` is authoritative (derived from the IPC dir the
         // request arrived in); `data.groupFolder` is only used as a
         // "yes-really-nuke" opt-in flag above and its value isn't honoured
         // downstream. Log sourceGroup to avoid misleading audit trails if
         // they ever differ.
         logger.info(
-          { sourceGroup, session: validSession },
+          { sourceGroup, session: validSession, skipReentry },
           'Session nuke requested via IPC',
         );
-        deps.nukeSession(sourceGroup, validSession);
+        deps.nukeSession(sourceGroup, validSession, { skipReentry });
       }
       break;
 

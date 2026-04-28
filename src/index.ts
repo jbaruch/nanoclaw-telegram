@@ -18,7 +18,7 @@ import {
   TELEGRAM_BOT_POOL,
   TIMEZONE,
 } from './config.js';
-import { writeCheckpoint } from './checkpoint.js';
+import { clearCheckpoints, writeCheckpoint } from './checkpoint.js';
 import { classifyUsage, computeThresholds } from './threshold.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
@@ -2234,6 +2234,7 @@ async function main(): Promise<void> {
     nukeSession: (
       groupFolder: string,
       session: 'default' | 'maintenance' | 'all',
+      options?: { skipReentry?: boolean },
     ) => {
       // Stamp the nuke's wall-clock timestamp BEFORE doing any of the
       // wipe work — the in-flight spawn handler (runAgent) compares
@@ -2325,7 +2326,85 @@ async function main(): Promise<void> {
         }
       }
 
-      logger.info({ groupFolder, session }, 'Session nuked via IPC');
+      // Step 5 (#127, optional): when `skipReentry` is set, also
+      // delete the per-group checkpoint files so the next container
+      // spawn has no Facts/Reasoning to load via the reentry skill.
+      // Default behaviour (option absent or false) preserves the
+      // checkpoint — the standard nuke is "fresh session, but the
+      // reentry skill still runs" because checkpoints typically
+      // outlive a single nuke (they're written by the threshold-cross
+      // path). Skip-reentry exists for the case where the checkpoint
+      // itself is the problem (poisoned plan, stale do-not-re-execute
+      // list); without this, the operator's only workaround was a
+      // manual `rm` from the host.
+      //
+      // Checkpoint files are per-group, NOT per-slot — there's one
+      // pair under `<groupDir>/.checkpoints/` shared by both default
+      // and maintenance. So skipReentry deletes the same files
+      // regardless of which slot was nuked. That matches the design
+      // doc (see `docs/proposals/kill-auto-compaction.md` §1, §2):
+      // the Facts section is the orchestrator's view of "what just
+      // happened in this group", not slot-specific.
+      // Strict boolean check (defense in depth): the IPC layer
+      // already filters non-true values, but a future direct caller
+      // (test, new IPC handler, refactor) could pass a truthy
+      // non-boolean and accidentally erase reentry state. The dispatcher
+      // is the last gate before the disk operation, so it owns the
+      // strictest check.
+      if (options?.skipReentry === true) {
+        let groupDir: string;
+        try {
+          groupDir = resolveGroupFolderPath(groupFolder);
+        } catch (err) {
+          // Per `jbaruch/coding-policy: error-handling`: only handle
+          // the expected case (Error from path validation), let
+          // anything else propagate. resolveGroupFolderPath
+          // documents Error throws on path-traversal / invalid
+          // segment; non-Error throws here would indicate a bug
+          // upstream and should bubble up to the IPC dispatch
+          // wrapper, which logs and keeps the orchestrator alive.
+          if (!(err instanceof Error)) throw err;
+          // The expected case: bad groupFolder. Log full error
+          // object (logger handles `err` specially — preserves
+          // stack, formats nicely) and skip the checkpoint clear
+          // without blocking the rest of the nuke. Reentry skill
+          // will find the checkpoint still on disk; operator can
+          // rerun with a fixed group_folder.
+          logger.error(
+            { groupFolder, err },
+            'skipReentry: cannot resolve group folder — checkpoint files left in place',
+          );
+          logger.info({ groupFolder, session }, 'Session nuked via IPC');
+          return;
+        }
+        // Best-effort cleanup: if clearCheckpoints throws (e.g.
+        // EACCES on unlink — a file was found but couldn't be
+        // removed), log at error level and CONTINUE with the rest of
+        // the nuke. The main session state (DB rows + JSONL) is
+        // already wiped at this point; failing the whole IPC handler
+        // would be noisier than helpful and contradicts the
+        // best-effort framing the surrounding comments describe.
+        // Non-Error throws still propagate as upstream bugs per
+        // `jbaruch/coding-policy: error-handling`.
+        try {
+          const checkpointsDeleted = clearCheckpoints(groupDir);
+          logger.info(
+            { groupFolder, checkpointsDeleted },
+            'Checkpoint files cleared (skipReentry=true)',
+          );
+        } catch (err) {
+          if (!(err instanceof Error)) throw err;
+          logger.error(
+            { groupFolder, groupDir, session, err },
+            'skipReentry: failed to clear checkpoint files — continuing with session nuke',
+          );
+        }
+      }
+
+      logger.info(
+        { groupFolder, session, skipReentry: options?.skipReentry === true },
+        'Session nuked via IPC',
+      );
     },
     getContainerStatus: (chatJid, sessionName) => {
       // Combine the GroupQueue's per-slot signals (active/idleWaiting/

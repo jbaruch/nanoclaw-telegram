@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import {
   checkpointPaths,
+  clearCheckpoints,
   renderFacts,
   summariseInput,
   writeCheckpoint,
@@ -281,5 +282,191 @@ describe('writeCheckpoint — rotation + write', () => {
     expect(body).toContain('`Write`');
     expect(body).toContain('`/tmp/log.txt`');
     expect(body).not.toContain('`Read`');
+  });
+});
+
+describe('clearCheckpoints (#127)', () => {
+  // Pins the disk contract for `nuke_session({ skipReentry: true })`:
+  // delete the per-group checkpoint pair and report how many were
+  // actually unlinked. Idempotent — never-written groups and missing
+  // `previous.md` (first-ever-write) are normal.
+  it('removes both default.md and previous.md when present', () => {
+    const { dir, live, previous } = checkpointPaths(tmpDir);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(live, '# Session Checkpoint (live)');
+    fs.writeFileSync(previous, '# Session Checkpoint (previous)');
+
+    const removed = clearCheckpoints(tmpDir);
+
+    expect(removed).toBe(2);
+    expect(fs.existsSync(live)).toBe(false);
+    expect(fs.existsSync(previous)).toBe(false);
+    // The dir itself is left in place — cheap to keep, and
+    // `writeCheckpoint` re-creates it via mkdirSync(recursive: true)
+    // on the next write anyway.
+    expect(fs.existsSync(dir)).toBe(true);
+  });
+
+  it('returns 1 when only default.md exists (first-ever-write group)', () => {
+    // `previous.md` is created on the SECOND checkpoint write (rotated
+    // from the first live). A group that crossed the threshold exactly
+    // once has only `default.md` on disk. skipReentry should clear it
+    // and report 1.
+    const { dir, live } = checkpointPaths(tmpDir);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(live, '# Session Checkpoint');
+
+    const removed = clearCheckpoints(tmpDir);
+
+    expect(removed).toBe(1);
+    expect(fs.existsSync(live)).toBe(false);
+  });
+
+  it('returns 0 when neither file exists (group never crossed the threshold)', () => {
+    // The most common skipReentry-on-a-fresh-group case: the
+    // `.checkpoints/` directory may not exist at all. Helper must not
+    // throw, and the count reports the truth (zero).
+    const removed = clearCheckpoints(tmpDir);
+
+    expect(removed).toBe(0);
+  });
+
+  it('returns 0 and does not throw when the .checkpoints dir is absent', () => {
+    // Tighter than the previous case: explicitly assert the helper
+    // tolerates a missing parent dir, since `unlinkSync` on a
+    // non-existent path with a non-existent parent dir also returns
+    // ENOENT and we lump that into the "nothing to clear" outcome.
+    const fresh = fs.mkdtempSync(path.join(os.tmpdir(), 'no-checkpoints-'));
+    try {
+      const removed = clearCheckpoints(fresh);
+      expect(removed).toBe(0);
+    } finally {
+      fs.rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+
+  it('is idempotent across repeated calls', () => {
+    const { dir, live, previous } = checkpointPaths(tmpDir);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(live, '# live');
+    fs.writeFileSync(previous, '# previous');
+
+    expect(clearCheckpoints(tmpDir)).toBe(2);
+    expect(clearCheckpoints(tmpDir)).toBe(0);
+    expect(clearCheckpoints(tmpDir)).toBe(0);
+  });
+
+  it('refuses to traverse when .checkpoints/ itself is a symlink', () => {
+    // Compromised container plants `.checkpoints/` as a symlink to an
+    // attacker-chosen host path. realpath would resolve through the
+    // symlink and the leaf paths would land outside the group folder.
+    // Helper must refuse the whole operation regardless of where the
+    // link points (target is irrelevant — the structural check is
+    // "is it a symlink").
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'evil-target-'));
+    try {
+      const sentinel = path.join(outside, 'default.md');
+      fs.writeFileSync(sentinel, 'sentinel');
+
+      // Build the symlink: <tmpDir>/.checkpoints → <outside>
+      fs.symlinkSync(outside, path.join(tmpDir, '.checkpoints'), 'dir');
+
+      const removed = clearCheckpoints(tmpDir);
+
+      expect(removed).toBe(0);
+      expect(fs.existsSync(sentinel)).toBe(true);
+      expect(fs.readFileSync(sentinel, 'utf8')).toBe('sentinel');
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses (and preserves the decoy target) when .checkpoints/ is a symlink to a sibling dir', () => {
+    // Companion to "refuses to traverse when .checkpoints/ itself is
+    // a symlink" earlier in this describe — that test points the
+    // symlink at a tempdir from os.tmpdir(); this one points it at a
+    // dir that has a planted `default.md` masquerading as a real
+    // checkpoint. Both hit the same dir-symlink refusal branch, so
+    // the structurally-similar `expectedRealDir` (TOCTOU) guard
+    // farther down doesn't get exercised here — the symlink check
+    // fires first.
+    //
+    // The expectedRealDir guard is defense-in-depth for a TOCTOU
+    // race (the dir is a real dir at lstat time, then becomes a
+    // symlink before the realpath call below). Reproducing that
+    // race deterministically in a unit test would require fs
+    // syscall injection; the guard stays in the production code as
+    // an audit trail even though it's not unit-testable.
+    const decoy = fs.mkdtempSync(path.join(os.tmpdir(), 'decoy-checkpoints-'));
+    try {
+      fs.symlinkSync(decoy, path.join(tmpDir, '.checkpoints'), 'dir');
+      // Plant a file at the decoy that we'd want to keep alive.
+      fs.writeFileSync(path.join(decoy, 'default.md'), 'sentinel');
+
+      const removed = clearCheckpoints(tmpDir);
+
+      expect(removed).toBe(0);
+      expect(fs.existsSync(path.join(decoy, 'default.md'))).toBe(true);
+    } finally {
+      fs.rmSync(decoy, { recursive: true, force: true });
+    }
+  });
+
+  it('unlinks a symlinked checkpoint file as a link only (target preserved)', () => {
+    // Tighter: `.checkpoints/` is legit, but `default.md` inside is a
+    // symlink to a sensitive host path. fs.unlinkSync removes the
+    // link entry without following it, so the target stays intact.
+    // Without this branch, the realpath check would refuse (the
+    // realpath escapes .checkpoints/) and the link would survive on
+    // disk — the operator's "give me a fresh checkpoint" intent
+    // would be silently ignored.
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'symlink-target-'));
+    try {
+      const sentinel = path.join(outside, 'must-survive.md');
+      fs.writeFileSync(sentinel, 'sentinel');
+
+      const { dir, live } = checkpointPaths(tmpDir);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.symlinkSync(sentinel, live);
+
+      const removed = clearCheckpoints(tmpDir);
+
+      // Symlink unlinked.
+      expect(removed).toBe(1);
+      expect(fs.existsSync(live)).toBe(false);
+      // Target preserved.
+      expect(fs.existsSync(sentinel)).toBe(true);
+      expect(fs.readFileSync(sentinel, 'utf8')).toBe('sentinel');
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a malformed non-file, non-symlink checkpoint entry and processes the sibling', () => {
+    // Defensive coverage: if `default.md` is unexpectedly a
+    // directory (corrupt filesystem state, manual operator
+    // mistake, broken interrupted write), `unlinkSync` would
+    // throw EISDIR. With throw-on-non-ENOENT discipline that
+    // would abort the whole loop and skip `previous.md`. The
+    // explicit `entryStat.isFile()` check makes the helper log
+    // the malformed entry and move on to the sibling.
+    const { dir, live, previous } = checkpointPaths(tmpDir);
+    fs.mkdirSync(dir, { recursive: true });
+    // default.md is a DIRECTORY (the malformed case).
+    fs.mkdirSync(live);
+    fs.writeFileSync(path.join(live, 'unexpected.txt'), 'oops');
+    // previous.md is a regular file (the legit case).
+    fs.writeFileSync(previous, '# previous');
+
+    const removed = clearCheckpoints(tmpDir);
+
+    // Only `previous.md` was removable; `default.md` was logged
+    // and skipped.
+    expect(removed).toBe(1);
+    expect(fs.existsSync(previous)).toBe(false);
+    // The malformed dir is left intact for the operator to
+    // inspect — we never attempted unlinkSync on it.
+    expect(fs.existsSync(live)).toBe(true);
+    expect(fs.statSync(live).isDirectory()).toBe(true);
   });
 });
