@@ -531,6 +531,33 @@ describe('readonly tile-content overlay (#247)', () => {
     expect(tesslArg).toBeDefined();
   });
 
+  it('parent /home/node/.claude mount is declared BEFORE the readonly overlays', async () => {
+    // Mount order matters: Docker applies bind mounts in
+    // declaration order, so a later parent mount would shadow
+    // earlier child overlays and silently restore writability.
+    // The argv index of the parent's `:/home/node/.claude` arg
+    // must come before both readonly overlay args, otherwise
+    // the kernel-level enforcement is structurally broken.
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    const parentIdx = args.findIndex((a) => a.endsWith(':/home/node/.claude'));
+    const skillsRoIdx = args.findIndex((a) =>
+      a.endsWith(':/home/node/.claude/skills:ro'),
+    );
+    const tesslRoIdx = args.findIndex((a) =>
+      a.endsWith(':/home/node/.claude/.tessl:ro'),
+    );
+    expect(parentIdx).toBeGreaterThanOrEqual(0);
+    expect(skillsRoIdx).toBeGreaterThanOrEqual(0);
+    expect(tesslRoIdx).toBeGreaterThanOrEqual(0);
+    expect(parentIdx).toBeLessThan(skillsRoIdx);
+    expect(parentIdx).toBeLessThan(tesslRoIdx);
+  });
+
   it('keeps /home/node/.claude itself writable (parent mount unchanged)', async () => {
     // The readonly subdir overlays must NOT regress the parent mount,
     // because the SDK writes session JSONL / debug / todos / telemetry

@@ -1228,6 +1228,25 @@ export function buildVolumeMounts(
   // `rmSync` calls at the top of this function also run host-side
   // (between the previous container's death and the next one's
   // start) — no overlay in effect at rmSync time either.
+  // Pre-create both host directories so Docker doesn't auto-create
+  // them as root with surprising permissions when bind-mounting.
+  // `skillsDst` is already mkdir'd at the top of this function, but
+  // `dstTessl` is only mkdir'd inside the `if (anyTileAvailable)`
+  // branch — when no tiles are available (registry mount glitched,
+  // first boot, partial install), the .tessl mount source would be
+  // missing. Idempotent recursive mkdir handles both cases without
+  // disturbing the populated content path.
+  fs.mkdirSync(skillsDst, { recursive: true });
+  fs.mkdirSync(dstTessl, { recursive: true });
+  // Mount-order discipline: these two readonly overlays MUST be
+  // pushed AFTER the writable `/home/node/.claude` parent (which
+  // happened ~30 lines above this comment). Docker applies bind
+  // mounts in declaration order; a later parent mount would shadow
+  // earlier child overlays, which would silently restore writability
+  // and quietly defeat the whole #247 enforcement. The
+  // `readonly tile-content overlay` test in container-runner.test.ts
+  // pins this ordering by asserting argv index of the parent mount
+  // arg is less than the index of both ro overlay args.
   mounts.push({
     hostPath: toHostPath(skillsDst),
     containerPath: '/home/node/.claude/skills',
