@@ -45,14 +45,16 @@ fi
 # next to the artifacts the script produces (rather than a per-host
 # /tmp path that vanishes on reboot).
 #
-# Schema:
-#   {"asin","title","stage":"download|classify|decrypt|copy|finalize|success",
+# Schema (`schema_version: 1` per `jbaruch/coding-policy: stateful-artifacts`):
+#   {"schema_version":1,"asin","title",
+#    "stage":"download|classify|decrypt|copy|finalize|success",
 #    "result":"failure|success","reason":"<string>","source_file":"<path>",
-#    "output":"<path>"}
-# Final line is a summary record:
-#   {"summary":true,"started_at":"...","ended_at":"...",
+#    "output":"<path>","touched_files":["<path>",...]}
+# Final line is a summary record (also schema_version: 1):
+#   {"schema_version":1,"summary":true,"started_at":"...","ended_at":"...",
 #    "downloaded":N,"failed":N}
 REPORT_FILE="$AUDIOBOOK_DIR/.audible-backup-last-run.jsonl"
+REPORT_SCHEMA_VERSION=1
 REPORT_STARTED_AT=""
 
 # Append a JSON record. Bash-only, no jq dep — careful field escaping
@@ -60,17 +62,46 @@ REPORT_STARTED_AT=""
 # parse. All input goes through `python3 -c json.dumps` so quoting
 # bugs (a backslash inside a title, an embedded newline) can't corrupt
 # the JSONL stream the way printf %s would.
+#
+# Field encoding: values default to JSON strings. To emit a JSON
+# number, boolean, or array, prefix the value with a type tag:
+#   key=str      → "key": "str"  (default; tag-free)
+#   key=int:5    → "key": 5
+#   key=bool:true → "key": true
+#   key=jsonl:a/b/c → "key": ["a","b","c"]   (NUL-free pipe-separated list — see TOUCHED_LIST below)
+#                                              (caller chooses delimiter via the helper, here `/` for paths)
+# Unknown type tags fall back to string (defense in depth — a typo
+# emits "<value>" rather than a parse-fail; the schema_version on
+# every record makes drift visible if the caller relied on a typed
+# field that ended up stringified).
+#
+# Schema_version is auto-injected so callers can't forget it.
 report_record() {
-  python3 - "$REPORT_FILE" "$@" <<'PYEOF'
+  python3 - "$REPORT_FILE" "$REPORT_SCHEMA_VERSION" "$@" <<'PYEOF'
 import json, sys
 report_path = sys.argv[1]
-fields = sys.argv[2:]
-record = {}
+schema_version = int(sys.argv[2])
+fields = sys.argv[3:]
+record = {"schema_version": schema_version}
 for entry in fields:
     if "=" not in entry:
         continue
-    key, _, value = entry.partition("=")
-    record[key] = value
+    key, _, raw = entry.partition("=")
+    if raw.startswith("int:"):
+        try:
+            record[key] = int(raw[4:])
+        except ValueError:
+            record[key] = raw
+    elif raw.startswith("bool:"):
+        record[key] = raw[5:].lower() == "true"
+    elif raw.startswith("jsonl:"):
+        # Pipe-separated list. Caller is responsible for picking a
+        # delimiter that won't appear inside any value (file paths
+        # never contain `\x1f` aka US, used here).
+        body = raw[6:]
+        record[key] = [p for p in body.split("\x1f") if p]
+    else:
+        record[key] = raw
 with open(report_path, "a", encoding="utf-8") as f:
     f.write(json.dumps(record, ensure_ascii=False) + "\n")
 PYEOF
@@ -308,16 +339,23 @@ while IFS=$'\t' read -r ASIN TITLE; do
     # because unquoted expansion word-splits and glob-expands. A
     # filename containing spaces or a wildcard char would otherwise
     # be mangled or (worse) match other paths on disk.
+    # Build the touched-files list as a JSON array via the
+    # `jsonl:`-prefixed record helper. Use US (\x1f, ASCII 31) as the
+    # delimiter — paths cannot contain control bytes, so the split is
+    # unambiguous. Avoids the literal `\n` bug a quoted "${...}\n"
+    # concatenation produces (double-quoted `\n` is two characters,
+    # not a newline; downstream JSON would carry "foo\\nbar" and
+    # confuse anyone trying to split on real newlines).
     TOUCHED_LIST=""
     while IFS= read -r _touched; do
       [ -z "$_touched" ] && continue
       printf '    %s\n' "$_touched"
-      TOUCHED_LIST="${TOUCHED_LIST}${_touched}\n"
+      TOUCHED_LIST="${TOUCHED_LIST}${_touched}"$'\x1f'
     done <<< "$NEW_FILES"
     report_record \
       "asin=$ASIN" "title=$TITLE" "stage=classify" "result=failure" \
       "reason=no recognizable audio artifact (aax/aaxc/mp3) in tmp_download" \
-      "touched_files=$TOUCHED_LIST"
+      "touched_files=jsonl:$TOUCHED_LIST"
     FAILED=$((FAILED + 1))
     continue
   fi
@@ -486,11 +524,14 @@ echo "Failed: $FAILED"
 # executed (NEW_COUNT=0 already exited above, but a future caller that
 # trips a different early-out path benefits from a deterministic
 # "summary always present" contract). Schema documented at the top of
-# this script next to REPORT_FILE.
+# this script next to REPORT_FILE. Counts use the `int:` type tag so
+# they land in the JSON as numbers (not strings) — downstream
+# consumers can `>= N` directly. `summary` is a boolean for the same
+# reason.
 report_record \
-  "summary=true" \
+  "summary=bool:true" \
   "started_at=$REPORT_STARTED_AT" \
   "ended_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  "downloaded=$DOWNLOADED" \
-  "failed=$FAILED"
+  "downloaded=int:$DOWNLOADED" \
+  "failed=int:$FAILED"
 echo "Per-title report: $REPORT_FILE"
