@@ -1195,6 +1195,69 @@ export function buildVolumeMounts(
     readonly: false,
   });
 
+  // Tile content read-only overlay (#247).
+  //
+  // The `/home/node/.claude` mount above MUST stay writable — the SDK
+  // writes session JSONL transcripts to `projects/<slug>/`, debug logs
+  // to `debug/`, todos to `todos/`, telemetry to `telemetry/`,
+  // session-env to `session-env/`, and the auto-memory overlay below
+  // also depends on a writable parent. We can't flip the parent
+  // readonly without breaking all of that.
+  //
+  // What we CAN flip readonly is the two specific subdirs that hold
+  // installed tile content: `skills/` (per-tile SKILL.md trees, plus
+  // bundled scripts and assets) and `.tessl/` (per-tile rules
+  // markdown copied under `tiles/<owner>/<tile>/rules/` plus the
+  // aggregated RULES.md the orchestrator generates from them). The
+  // orchestrator wrote both host-side at the top of this function via
+  // cpSync from `tessl-workspace/.tessl/tiles/...`, so by the time
+  // the agent container starts the content is already in place. Layer
+  // two readonly bind-mounts on top of the writable parent so the
+  // kernel rejects any write from inside the container with EROFS.
+  // The agent's edit/write tools cannot patch installed content
+  // mid-session anymore — modifications must flow through staging →
+  // promote → publish → tessl update like every other tile change.
+  //
+  // Why `tessl update` is unaffected: it runs in the orchestrator
+  // container against `/app/tessl-workspace/.tessl/tiles/...`, a
+  // completely different filesystem path the agent never sees. The
+  // per-spawn cpSync that copies registry tiles into
+  // `<groupSessionsDir>/skills/` and `<groupSessionsDir>/.tessl/`
+  // runs host-side BEFORE the container starts, so the readonly
+  // overlay is not in effect during that copy. The next spawn's
+  // `rmSync` calls at the top of this function also run host-side
+  // (between the previous container's death and the next one's
+  // start) — no overlay in effect at rmSync time either.
+  // Pre-create both host directories so Docker doesn't auto-create
+  // them as root with surprising permissions when bind-mounting.
+  // `skillsDst` is already mkdir'd at the top of this function, but
+  // `dstTessl` is only mkdir'd inside the `if (anyTileAvailable)`
+  // branch — when no tiles are available (registry mount glitched,
+  // first boot, partial install), the .tessl mount source would be
+  // missing. Idempotent recursive mkdir handles both cases without
+  // disturbing the populated content path.
+  fs.mkdirSync(skillsDst, { recursive: true });
+  fs.mkdirSync(dstTessl, { recursive: true });
+  // Mount-order discipline: these two readonly overlays MUST be
+  // pushed AFTER the writable `/home/node/.claude` parent (which
+  // happened ~30 lines above this comment). Docker applies bind
+  // mounts in declaration order; a later parent mount would shadow
+  // earlier child overlays, which would silently restore writability
+  // and quietly defeat the whole #247 enforcement. The
+  // `readonly tile-content overlay` test in container-runner.test.ts
+  // pins this ordering by asserting argv index of the parent mount
+  // arg is less than the index of both ro overlay args.
+  mounts.push({
+    hostPath: toHostPath(skillsDst),
+    containerPath: '/home/node/.claude/skills',
+    readonly: true,
+  });
+  mounts.push({
+    hostPath: toHostPath(dstTessl),
+    containerPath: '/home/node/.claude/.tessl',
+    readonly: true,
+  });
+
   // Shared auto-memory mount (issue #57). Claude Code's SDK writes
   // accumulated feedback and owner-profile memory to
   // ~/.claude/projects/<slug>/memory/. PR #55 mounted `.claude/` per-session,

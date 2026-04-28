@@ -482,6 +482,142 @@ describe('/workspace/state mount (#99 Cat 4)', () => {
   });
 });
 
+describe('readonly tile-content overlay (#247)', () => {
+  // Pins the contract that installed tile content (skills + .tessl)
+  // is mounted READONLY inside the agent container, while the parent
+  // /home/node/.claude stays writable for SDK transcript / debug /
+  // todos / telemetry / session-env / projects-memory writes.
+  //
+  // Why this matters: pre-fix, an agent could `Write` over its own
+  // installed SKILL.md or RULES.md from inside the container. Edits
+  // didn't survive container restart (the host-side cpSync at the
+  // top of every spawn re-overwrote them) but were live for the
+  // current container's lifetime — sometimes minutes-to-hours of
+  // monkey-patched behaviour before reset. The kernel-level RO
+  // overlay makes those writes fail with EROFS instead.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('mounts /home/node/.claude/skills as readonly', async () => {
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    const skillsArg = args.find((a) =>
+      a.endsWith(':/home/node/.claude/skills:ro'),
+    );
+    expect(skillsArg).toBeDefined();
+  });
+
+  it('mounts /home/node/.claude/.tessl as readonly', async () => {
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    const tesslArg = args.find((a) =>
+      a.endsWith(':/home/node/.claude/.tessl:ro'),
+    );
+    expect(tesslArg).toBeDefined();
+  });
+
+  it('parent /home/node/.claude mount is declared BEFORE the readonly overlays', async () => {
+    // Mount order matters: Docker applies bind mounts in
+    // declaration order, so a later parent mount would shadow
+    // earlier child overlays and silently restore writability.
+    // The argv index of the parent's `:/home/node/.claude` arg
+    // must come before both readonly overlay args, otherwise
+    // the kernel-level enforcement is structurally broken.
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    const parentIdx = args.findIndex((a) => a.endsWith(':/home/node/.claude'));
+    const skillsRoIdx = args.findIndex((a) =>
+      a.endsWith(':/home/node/.claude/skills:ro'),
+    );
+    const tesslRoIdx = args.findIndex((a) =>
+      a.endsWith(':/home/node/.claude/.tessl:ro'),
+    );
+    expect(parentIdx).toBeGreaterThanOrEqual(0);
+    expect(skillsRoIdx).toBeGreaterThanOrEqual(0);
+    expect(tesslRoIdx).toBeGreaterThanOrEqual(0);
+    expect(parentIdx).toBeLessThan(skillsRoIdx);
+    expect(parentIdx).toBeLessThan(tesslRoIdx);
+  });
+
+  it('keeps /home/node/.claude itself writable (parent mount unchanged)', async () => {
+    // The readonly subdir overlays must NOT regress the parent mount,
+    // because the SDK writes session JSONL / debug / todos / telemetry
+    // into siblings of skills/ and .tessl/. If the parent flipped to
+    // readonly, every transcript write would fail and break the agent.
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    // The parent mount is a `<host>:/home/node/.claude` argument
+    // WITHOUT `:ro`. The two readonly subdir mounts share the path
+    // prefix but end with `/skills:ro` or `/.tessl:ro`, so an exact
+    // suffix match on the parent's `:/home/node/.claude` form
+    // cleanly distinguishes them.
+    const claudeArg = args.find((a) => a.endsWith(':/home/node/.claude'));
+    expect(claudeArg).toBeDefined();
+    expect(args.some((a) => a.endsWith(':/home/node/.claude:ro'))).toBe(false);
+  });
+
+  it('readonly overlay applies uniformly across trust tiers', async () => {
+    // The orchestrator's per-spawn cpSync writes installed tile
+    // content into <groupSessionsDir> for every tier (main, trusted,
+    // untrusted) — see selectTiles. The readonly overlay should
+    // also apply to every tier; otherwise a less-trusted container
+    // would have weaker enforcement than a more-trusted one, which
+    // is precisely backwards.
+    for (const profile of [
+      { isMain: true, trusted: false },
+      { isMain: false, trusted: true },
+      { isMain: false, trusted: false },
+    ]) {
+      vi.mocked(spawn).mockClear();
+      fakeProc = createFakeProcess();
+      const group: RegisteredGroup = {
+        ...testGroup,
+        ...(profile.isMain && { isMain: true }),
+        ...(profile.trusted && { containerConfig: { trusted: true } }),
+      };
+      const promise = runContainerAgent(
+        group,
+        { ...testInput, isMain: profile.isMain, isTrusted: profile.trusted },
+        () => {},
+      );
+      fakeProc.emit('close', 0);
+      await vi.advanceTimersByTimeAsync(10);
+      await promise;
+
+      const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+      expect(
+        args.some((a) => a.endsWith(':/home/node/.claude/skills:ro')),
+      ).toBe(true);
+      expect(
+        args.some((a) => a.endsWith(':/home/node/.claude/.tessl:ro')),
+      ).toBe(true);
+    }
+  });
+});
+
 // --- continuation env vars (#93/#130) ---
 //
 // Self-resuming cycles depend on the container being able to tell
