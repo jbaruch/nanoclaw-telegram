@@ -48,7 +48,7 @@ cd .. && docker compose restart  # restart orchestrator to use new image
 **Known issues with tessl tiles in Docker:**
 - Tessl creates skills as **symlinks** to vendored tiles in `.tessl/tiles/`. The entrypoint uses `cp -rL` to dereference them when copying to the bind-mounted `.claude/skills/`.
 - Tessl sets tile directories to **700 permissions**. The Dockerfile runs `chmod -R a+rX /opt/tessl-staging` to make them readable by any UID (needed because agent containers run as HOST_UID, not the image's node user).
-- If a tile appears missing after rebuild, check for **stale broken symlinks** in `data/sessions/telegram_swarm/.claude/skills/`. Delete them: `find data/sessions/telegram_swarm/.claude/skills/ -type l -delete`
+- If a tile appears missing after rebuild, check for **stale broken symlinks** in `data/sessions/telegram_swarm/<slot>/.claude/skills/` (where `<slot>` is `default` or `maintenance`). Delete them: `find data/sessions/telegram_swarm/*/.claude/skills/ -type l -delete`
 - Tessl requires **BuildKit** for secret mounts. buildx is installed on the NAS at `~/.docker/cli-plugins/docker-buildx`.
 - Tessl credentials at `~/.tessl/api-credentials.json` are mounted as a Docker secret during build — never baked into the image layer.
 
@@ -199,8 +199,8 @@ Media handling in orchestrator (`telegram.ts`):
 3. Check group logs: `ls groups/telegram_swarm/logs/`
 
 ### Skills not loading
-1. Check `.claude/skills/`: `ls data/sessions/telegram_swarm/.claude/skills/`
-2. Check RULES.md: `cat data/sessions/telegram_swarm/.claude/RULES.md | head -20`
+1. Check `.claude/skills/` (replace `<slot>` with `default` for user-facing or `maintenance` for scheduled): `ls data/sessions/telegram_swarm/<slot>/.claude/skills/`
+2. Check RULES.md: `cat data/sessions/telegram_swarm/<slot>/.claude/RULES.md | head -20`
 3. Rebuild agent image if tiles changed: `cd container && ./build.sh`
 
 ### Credential proxy not working
