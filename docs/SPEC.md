@@ -55,8 +55,9 @@ A personal Claude assistant with multi-channel support, persistent memory per co
 │  │  Working directory: /workspace/group (mounted from host)       │    │
 │  │  Volume mounts:                                                │    │
 │  │    • groups/{name}/ → /workspace/group                         │    │
-│  │    • groups/global/ → /workspace/global/ (non-main only)       │    │
-│  │    • data/state/{name}/ → /workspace/state (writable, all tiers)│   │
+│  │    • groups/global/ → /workspace/global (trusted/main: full;   │    │
+│  │                       untrusted: SOUL.md only)                 │    │
+│  │    • data/state/{name}/ → /workspace/state (RW, all tiers)     │    │
 │  │    • sessions/{group}/{slot}/.claude/ → /home/node/.claude/    │    │
 │  │    • Additional dirs → /workspace/extra/*                      │    │
 │  │                                                                │    │

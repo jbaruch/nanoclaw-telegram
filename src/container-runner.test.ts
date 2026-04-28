@@ -63,6 +63,14 @@ vi.mock('fs', async () => {
       copyFileSync: vi.fn(),
       renameSync: vi.fn(),
       rmSync: vi.fn(),
+      // chownSync is a no-op so the post-mkdir chown on the
+      // /workspace/state mount (and the trusted-dir mount above) doesn't
+      // ENOENT against the never-created mock path. Pre-#99-Cat-4 the
+      // production code swallowed all chown errors via a broad catch;
+      // the narrowed catch (EPERM/EACCES only) lets ENOENT propagate,
+      // so the mock must satisfy the call rather than rely on a
+      // catch-all.
+      chownSync: vi.fn(),
       symlinkSync: vi.fn(),
       readlinkSync: vi.fn(() => ''),
       lstatSync: vi.fn(() => {

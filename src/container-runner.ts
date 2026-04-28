@@ -709,7 +709,22 @@ export function buildVolumeMounts(
     try {
       fs.chownSync(stateDir, stateUid, stateGid);
     } catch (err: unknown) {
-      logger.warn({ err, stateDir }, 'Failed to chown state dir');
+      // Narrow per `error-handling: Catch specific exception types`.
+      // EPERM (we're not the owner and not root) and EACCES (insufficient
+      // privileges to chown) are the two expected failure modes when the
+      // orchestrator runs without root and the dir is owned by something
+      // else — log and continue, the agent can still read/write via its
+      // own uid because of the mode bits. Anything else (ENOENT after we
+      // just mkdir'd, EROFS, EIO, etc.) is a real bug we want to surface.
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === 'EPERM' || code === 'EACCES') {
+        logger.warn(
+          { err, stateDir, code },
+          'Failed to chown state dir (insufficient privileges) — continuing',
+        );
+      } else {
+        throw err;
+      }
     }
   }
   mounts.push({
