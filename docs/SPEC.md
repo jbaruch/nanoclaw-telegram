@@ -56,7 +56,7 @@ A personal Claude assistant with multi-channel support, persistent memory per co
 │  │  Volume mounts:                                                │    │
 │  │    • groups/{name}/ → /workspace/group                         │    │
 │  │    • groups/global/ → /workspace/global/ (non-main only)       │    │
-│  │    • data/sessions/{group}/.claude/ → /home/node/.claude/      │    │
+│  │    • sessions/{group}/{slot}/.claude/ → /home/node/.claude/    │    │
 │  │    • Additional dirs → /workspace/extra/*                      │    │
 │  │                                                                │    │
 │  │  Tools (all groups):                                           │    │
@@ -458,10 +458,10 @@ Sessions enable conversation continuity - Claude remembers what you talked about
 
 ### How Sessions Work
 
-1. Each group has a session ID stored in SQLite (`sessions` table, keyed by `group_folder`)
-2. Session ID is passed to Claude Agent SDK's `resume` option
-3. Claude continues the conversation with full context
-4. Session transcripts are stored as JSONL files in `data/sessions/{group}/.claude/`
+1. Each `(group, slot)` pair has a session ID stored in SQLite (`sessions` table, primary key `(group_folder, session_name)`). Slots are `default` for user-facing AyeAye and `maintenance` for scheduled-task AyeAye, so a single group can hold both a user conversation chain and a parallel maintenance chain at the same time.
+2. The `default` slot's session ID is passed to Claude Agent SDK's `resume` option on the next inbound message so user conversations carry context turn to turn.
+3. The `maintenance` slot intentionally does NOT persist or resume a session ID (#193). Each scheduled task starts a fresh SDK turn and the per-run JSONL transcript is wiped from `data/sessions/{group}/maintenance/.claude/projects/<slug>/` immediately after the run completes — this prevents one task's output from bleeding into a subsequent task on the same group.
+4. Session transcripts (for whichever slot persists state) are stored as JSONL files at `data/sessions/{group}/{slot}/.claude/projects/<project-slug>/<sessionId>.jsonl`.
 
 ---
 
@@ -743,7 +743,7 @@ WhatsApp messages could contain malicious instructions attempting to manipulate 
 
 | Credential | Storage Location | Notes |
 |------------|------------------|-------|
-| Claude CLI Auth | data/sessions/{group}/.claude/ | Per-group isolation, mounted to /home/node/.claude/ |
+| Claude CLI Auth | data/sessions/{group}/{slot}/.claude/ | Per-group, per-slot isolation (`default`/`maintenance`); mounted to /home/node/.claude/ |
 | WhatsApp Session | store/auth/ | Auto-created, persists ~20 days |
 
 ### File Permissions

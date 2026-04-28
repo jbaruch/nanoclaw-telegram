@@ -65,8 +65,10 @@ grep 'groupCount' logs/nanoclaw.log | tail -3
 ## Session Transcript Branching
 
 ```bash
-# Check for concurrent CLI processes in session debug logs
-ls -la data/sessions/<group>/.claude/debug/
+# Check for concurrent CLI processes in session debug logs.
+# Per-session-slot mounts: <slot> is `default` for user-facing AyeAye
+# or `maintenance` for scheduled-task AyeAye.
+ls -la data/sessions/<group>/<slot>/.claude/debug/
 
 # Count unique SDK processes that handled messages
 # Each .txt file = one CLI subprocess. Multiple = concurrent queries.
@@ -74,7 +76,7 @@ ls -la data/sessions/<group>/.claude/debug/
 # Check parentUuid branching in transcript
 python3 -c "
 import json, sys
-lines = open('data/sessions/<group>/.claude/projects/-workspace-group/<session>.jsonl').read().strip().split('\n')
+lines = open('data/sessions/<group>/<slot>/.claude/projects/-workspace-group/<session>.jsonl').read().strip().split('\n')
 for i, line in enumerate(lines):
   try:
     d = json.loads(line)
