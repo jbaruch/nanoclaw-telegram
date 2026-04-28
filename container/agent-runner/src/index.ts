@@ -32,6 +32,7 @@ import {
   sanitizeToolResponse,
   shouldDenyTaskOutputBlock,
 } from './poison-defense.js';
+import { detectAuthoritativeLookup } from './authoritative-source.js';
 import { evaluateBashCommand } from './bash-safety-net.js';
 import { detectComposioFidelity } from './composio-fidelity.js';
 import { detectLazyVerification } from './lazy-verification.js';
@@ -705,6 +706,32 @@ function createBashSafetyNetHook(): HookCallback {
         permissionDecision: 'deny' as const,
         permissionDecisionReason: decision.reason ?? 'denied by bash-safety-net',
       },
+    };
+  };
+}
+
+/**
+ * #226 (tracks #214) — authoritative-source-nudge. Intercept entity-
+ * lookup tool calls (Composio search/list, raw `SELECT FROM chats
+ * LIMIT`, reads of the `available_groups.json` snapshot) and inject a
+ * `systemMessage` pointing the agent at the canonical source. The
+ * tool call is NOT denied — this is a nudge, because some entity
+ * lookups legitimately need search when no pointer exists. Catalogue
+ * + matching live in `authoritative-source.ts` so they're unit-
+ * testable without spinning up the SDK.
+ */
+function createAuthoritativeSourceNudgeHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const pre = input as PreToolUseHookInput;
+    const decision = detectAuthoritativeLookup(pre.tool_name, pre.tool_input);
+    if (!decision.nudge) {
+      return {};
+    }
+    log(
+      `PreToolUse: authoritative-source nudge fired — tool=${pre.tool_name} entity=${decision.matched?.id}`,
+    );
+    return {
+      systemMessage: decision.systemMessage,
     };
   };
 }
@@ -1641,6 +1668,16 @@ async function runQuery(
           {
             matcher: 'Bash',
             hooks: [createBashSafetyNetHook()],
+          },
+          // #226 (tracks #214) — nudge the agent toward known
+          // authoritative pointers when it's about to run a fresh
+          // entity-lookup. Matcher restricts the regex sweep to the
+          // tool families documented in the incident table; the
+          // catalogue further narrows by tool input shape so unrelated
+          // calls inside this family don't pay the cost.
+          {
+            matcher: '^(Bash|Read|Grep|Glob|WebSearch|mcp__composio__.*)$',
+            hooks: [createAuthoritativeSourceNudgeHook()],
           },
           {
             matcher: 'mcp__nanoclaw__send_(message|file)',
