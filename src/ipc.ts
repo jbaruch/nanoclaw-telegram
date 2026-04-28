@@ -832,10 +832,14 @@ export async function processTaskIpc(
     command?: string;
     payload?: string | Record<string, unknown>;
     confirm?: boolean;
-    // chat_status / nuke_chat
+    // chat_status / nuke_chat / send_message_to_chat
     chat_id?: string;
     chat_name?: string;
     session?: 'default' | 'maintenance' | 'all';
+    // send_message_to_chat
+    text?: string;
+    pin?: boolean;
+    sender?: string;
     /**
      * Continuation marker for self-resuming cycles (#93/#130). Set by the
      * resumable-cycle helper skill when scheduling the next link of a
@@ -1917,6 +1921,249 @@ export async function processTaskIpc(
             chat_id: targetJid,
             chat_name: targetGroup.name,
             killed_sessions: [],
+            status: 'error',
+          }),
+        );
+      }
+      break;
+    }
+
+    case 'send_message_to_chat': {
+      // Admin tile only. Cross-chat broadcast — resolves chat_id or
+      // chat_name against registeredGroups, then dispatches via the
+      // same channel router used by the existing 'message' IPC path
+      // (pool send for sender-tagged Telegram broadcasts, direct send
+      // otherwise). Replaces the schedule_task + once: now+5s kludge
+      // the agent used to reach when asked "post X to #other-chat".
+      //
+      // Bypassing the MESSAGES_DIR fire-and-forget path is deliberate:
+      // the tool's contract surfaces failure (unknown JID, ambiguous
+      // name, blocked-by-user, rate-limit) synchronously to the
+      // calling agent so it can retry or explain. MESSAGES_DIR drops
+      // failures into a log nobody reads from the agent's POV.
+      const resultPath = scriptResultPath(sourceGroup, data);
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized send_message_to_chat attempt blocked',
+        );
+        fs.writeFileSync(
+          resultPath,
+          JSON.stringify({ error: 'send_message_to_chat is admin-tile only' }),
+        );
+        break;
+      }
+
+      const rawText = typeof data.text === 'string' ? data.text : '';
+      if (rawText.trim().length === 0) {
+        fs.writeFileSync(
+          resultPath,
+          JSON.stringify({
+            error: 'send_message_to_chat requires non-empty text',
+          }),
+        );
+        break;
+      }
+
+      const hasId =
+        typeof data.chat_id === 'string' && data.chat_id.trim().length > 0;
+      const hasName =
+        typeof data.chat_name === 'string' && data.chat_name.trim().length > 0;
+      if (!hasId && !hasName) {
+        fs.writeFileSync(
+          resultPath,
+          JSON.stringify({
+            error:
+              'send_message_to_chat requires chat_id or chat_name — admin always operates cross-chat. Use the regular send_message tool to reply in the current chat.',
+          }),
+        );
+        break;
+      }
+      // Two identifiers are an unsafe-targeting smell — same rule as
+      // chat_status / nuke_chat. Reject before resolving so the caller
+      // can't get a silent JID-wins-over-name surprise.
+      if (hasId && hasName) {
+        fs.writeFileSync(
+          resultPath,
+          JSON.stringify({
+            error:
+              'send_message_to_chat accepts chat_id OR chat_name, not both — they may disagree',
+          }),
+        );
+        break;
+      }
+
+      let targetJid = '';
+      if (hasId) {
+        const trimmed = (data.chat_id as string).trim();
+        if (!registeredGroups[trimmed]) {
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({ error: `chat_id ${trimmed} not registered` }),
+          );
+          break;
+        }
+        targetJid = trimmed;
+      } else {
+        const wanted = (data.chat_name as string).trim();
+        const matches = Object.entries(registeredGroups).filter(
+          ([, g]) => g.name === wanted,
+        );
+        if (matches.length === 0) {
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({
+              error: `chat_name "${wanted}" did not match any registered chat`,
+            }),
+          );
+          break;
+        }
+        if (matches.length > 1) {
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({
+              error: `chat_name "${wanted}" is ambiguous — matches ${matches.length} chats`,
+              candidates: matches.map(([jid]) => jid),
+            }),
+          );
+          break;
+        }
+        targetJid = matches[0][0];
+      }
+
+      const targetGroup = registeredGroups[targetJid];
+      const sender =
+        typeof data.sender === 'string' && data.sender.length > 0
+          ? data.sender
+          : undefined;
+      const wantsPin = data.pin === true;
+
+      // Strip <internal> tags for parity with the regular 'message'
+      // handler — keeps agent reasoning out of cross-chat broadcasts.
+      // We don't apply the maintenance-prefix here: this tool is an
+      // explicit admin broadcast, and tagging it `[M]` would mislead
+      // the recipient into thinking a scheduled-task heartbeat fired.
+      const cleanText = stripInternalTags(rawText);
+      if (!cleanText) {
+        fs.writeFileSync(
+          resultPath,
+          JSON.stringify({
+            error:
+              'send_message_to_chat: text was empty after stripping <internal> tags',
+          }),
+        );
+        break;
+      }
+
+      try {
+        // Mirror the routing decision in the 'message' IPC handler:
+        // sender + Telegram → bot pool (named identity), else the
+        // channel's default sendMessage. Pool sends don't expose a
+        // pin hook, so pin is silently dropped on the pool path —
+        // matching existing send_message behavior. The `pinned` field
+        // in the success payload tells the agent what actually
+        // happened so it can flag the asymmetry to the user.
+        const usePool = Boolean(sender && targetJid.startsWith('tg:'));
+        let sentMsgId: string | undefined;
+        let pinned = false;
+        if (usePool) {
+          const poolResult = await sendPoolMessage(
+            targetJid,
+            cleanText,
+            sender!,
+            sourceGroup,
+          );
+          sentMsgId = typeof poolResult === 'string' ? poolResult : undefined;
+        } else {
+          const directResult = await deps.sendMessage(targetJid, cleanText);
+          sentMsgId =
+            typeof directResult === 'string' ? directResult : undefined;
+          if (wantsPin && sentMsgId && deps.pinMessage) {
+            await deps.pinMessage(targetJid, sentMsgId);
+            pinned = true;
+          }
+        }
+
+        // Gate the messages.db write on send success — see
+        // shouldStoreBotMessage for the phantom-row rationale (#232).
+        // A failed cross-chat send that wrote a bot- row would silence
+        // the target chat's heartbeat / unanswered-cron on a chat the
+        // recipient never received the message in. Critical here
+        // because the entire purpose of this tool is sending into
+        // chats the agent isn't watching.
+        if (!shouldStoreBotMessage(targetJid, sentMsgId)) {
+          logger.error(
+            {
+              sourceGroup,
+              targetJid,
+              contentLen: cleanText.length,
+              usedPool: usePool,
+            },
+            'send_message_to_chat: target returned no message id; skipping DB row',
+          );
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({
+              error: `send_message_to_chat: target ${targetJid} did not return a message id — likely blocked, rate-limited, or an invalid recipient. No DB row written.`,
+              chat_id: targetJid,
+              chat_name: targetGroup.name,
+              status: 'failed',
+            }),
+          );
+          break;
+        }
+
+        const botRowId = `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        storeMessage({
+          id: botRowId,
+          chat_jid: targetJid,
+          sender: sender || ASSISTANT_NAME,
+          sender_name: sender || ASSISTANT_NAME,
+          content: cleanText,
+          timestamp: new Date().toISOString(),
+          is_from_me: true,
+          is_bot_message: true,
+          telegram_message_id: sentMsgId,
+        });
+
+        logger.info(
+          {
+            sourceGroup,
+            targetJid,
+            sentMsgId,
+            usedPool: usePool,
+            pinned,
+          },
+          'send_message_to_chat completed',
+        );
+        fs.writeFileSync(
+          resultPath,
+          JSON.stringify({
+            stdout: JSON.stringify({
+              chat_id: targetJid,
+              chat_name: targetGroup.name,
+              sent_message_id: sentMsgId,
+              pinned,
+              status: 'success',
+            }),
+          }),
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(
+          { sourceGroup, targetJid, err },
+          'send_message_to_chat failed',
+        );
+        // Top-level `error` field — runHostOperation in the
+        // agent-runner only treats `result.error` as a tool failure
+        // and surfaces `isError: true` to the MCP caller. Same
+        // contract as nuke_chat's catch branch.
+        fs.writeFileSync(
+          resultPath,
+          JSON.stringify({
+            error: `send_message_to_chat failed for ${targetJid}: ${msg}`,
+            chat_id: targetJid,
+            chat_name: targetGroup.name,
             status: 'error',
           }),
         );

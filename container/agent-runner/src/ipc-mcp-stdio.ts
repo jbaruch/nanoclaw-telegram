@@ -1815,6 +1815,83 @@ server.tool(
 );
 
 server.tool(
+  'send_message_to_chat',
+  "Post a plain text message into another registered chat without spawning a container there. Use this when the user asks you (from the main group) to broadcast or relay a message into a different chat — e.g. \"post X to #family-chat\". Replaces the schedule_task + once: now+5s kludge. Provide chat_id (JID like \"tg:-1003869886477\") OR chat_name (display name from the registered groups list); ambiguous names error with candidate JIDs. Set sender to post as a named bot identity (Telegram only; routes through the bot pool). Set pin to pin the sent message — silently ignored on the bot-pool path because the pool send hook can't pin, so don't combine sender + pin. No reply_to: foreign chat message IDs aren't reachable from main, and Telegram message IDs are per-chat so guessing collides. Failures (unknown JID, blocked, rate-limit) return a clear error and do NOT write a phantom bot row into the target chat's DB. Main group only.",
+  {
+    chat_id: z
+      .string()
+      .optional()
+      .describe('Target chat JID, e.g. "tg:-1003869886477". Mutually exclusive with chat_name.'),
+    chat_name: z
+      .string()
+      .optional()
+      .describe(
+        'Target chat display name (looked up against the registered groups list). Errors with candidate JIDs if ambiguous.',
+      ),
+    text: z.string().describe('The message body to post in the target chat.'),
+    pin: z
+      .boolean()
+      .optional()
+      .describe(
+        'Pin the message in the target chat after sending. Ignored on the sender (bot-pool) path — pool sends do not expose a pin hook. The response will report what actually happened.',
+      ),
+    sender: z
+      .string()
+      .optional()
+      .describe(
+        'Bot identity to post as in the target Telegram chat (e.g. "Researcher"). Routes through the bot pool. Without sender, the message goes from the default channel identity.',
+      ),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'send_message_to_chat is admin-tile only.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    if (!args.chat_id && !args.chat_name) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text:
+              'send_message_to_chat requires chat_id or chat_name — admin always operates cross-chat. Use the regular send_message tool to reply in the current chat.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    // Two identifiers are an unsafe-targeting smell — see the same
+    // rule on chat_status / nuke_chat above. Reject before the IPC
+    // round-trip so the agent gets a clean schema-style error
+    // instead of waiting on the host to surface it.
+    if (args.chat_id && args.chat_name) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Provide chat_id OR chat_name, not both.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    return runHostOperation('send_message_to_chat', {
+      chat_id: args.chat_id,
+      chat_name: args.chat_name,
+      text: args.text,
+      pin: args.pin,
+      sender: args.sender,
+    });
+  },
+);
+
+server.tool(
   'tessl_update',
   'Run `tessl update` on the host to pull the latest tile versions from the registry. Call this after a promote PR merges (GHA publishes on merge, then the agent triggers this to get the new version). If new tiles land, sessions are cleared automatically so the next message picks them up. A periodic 15-min catch-up runs in the orchestrator as a safety net. Main group only.',
   {},
