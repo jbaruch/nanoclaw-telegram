@@ -18,7 +18,7 @@ import {
   TELEGRAM_BOT_POOL,
   TIMEZONE,
 } from './config.js';
-import { writeCheckpoint } from './checkpoint.js';
+import { clearCheckpoints, writeCheckpoint } from './checkpoint.js';
 import { classifyUsage, computeThresholds } from './threshold.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
@@ -2234,6 +2234,7 @@ async function main(): Promise<void> {
     nukeSession: (
       groupFolder: string,
       session: 'default' | 'maintenance' | 'all',
+      options?: { skipReentry?: boolean },
     ) => {
       // Stamp the nuke's wall-clock timestamp BEFORE doing any of the
       // wipe work — the in-flight spawn handler (runAgent) compares
@@ -2325,7 +2326,57 @@ async function main(): Promise<void> {
         }
       }
 
-      logger.info({ groupFolder, session }, 'Session nuked via IPC');
+      // Step 5 (#127, optional): when `skipReentry` is set, also
+      // delete the per-group checkpoint files so the next container
+      // spawn has no Facts/Reasoning to load via the reentry skill.
+      // Default behaviour (option absent or false) preserves the
+      // checkpoint — the standard nuke is "fresh session, but the
+      // reentry skill still runs" because checkpoints typically
+      // outlive a single nuke (they're written by the threshold-cross
+      // path). Skip-reentry exists for the case where the checkpoint
+      // itself is the problem (poisoned plan, stale do-not-re-execute
+      // list); without this, the operator's only workaround was a
+      // manual `rm` from the host.
+      //
+      // Checkpoint files are per-group, NOT per-slot — there's one
+      // pair under `<groupDir>/.checkpoints/` shared by both default
+      // and maintenance. So skipReentry deletes the same files
+      // regardless of which slot was nuked. That matches the design
+      // doc (see `docs/proposals/kill-auto-compaction.md` §1, §2):
+      // the Facts section is the orchestrator's view of "what just
+      // happened in this group", not slot-specific.
+      if (options?.skipReentry) {
+        let groupDir: string;
+        try {
+          groupDir = resolveGroupFolderPath(groupFolder);
+        } catch (err) {
+          // resolveGroupFolderPath rejects path traversal; if it
+          // throws on a folder we just wiped DB rows for, something
+          // upstream is corrupt — log loudly but don't block the
+          // rest of the nuke. The reentry skill will find the
+          // checkpoint still on disk; operator can rerun with a
+          // fixed group_folder.
+          logger.error(
+            {
+              groupFolder,
+              err: err instanceof Error ? err.message : String(err),
+            },
+            'skipReentry: cannot resolve group folder — checkpoint files left in place',
+          );
+          logger.info({ groupFolder, session }, 'Session nuked via IPC');
+          return;
+        }
+        const checkpointsDeleted = clearCheckpoints(groupDir);
+        logger.info(
+          { groupFolder, checkpointsDeleted },
+          'Checkpoint files cleared (skipReentry=true)',
+        );
+      }
+
+      logger.info(
+        { groupFolder, session, skipReentry: options?.skipReentry === true },
+        'Session nuked via IPC',
+      );
     },
     getContainerStatus: (chatJid, sessionName) => {
       // Combine the GroupQueue's per-slot signals (active/idleWaiting/

@@ -222,3 +222,42 @@ export async function writeCheckpoint(inputs: CheckpointInputs): Promise<void> {
     'checkpoint_written',
   );
 }
+
+/**
+ * Delete the per-group checkpoint pair (`default.md` + `previous.md`)
+ * under `<groupDir>/.checkpoints/`. Returns the number of files that
+ * were actually unlinked (0 = both already absent, 1 = one of the
+ * pair was missing, 2 = both were present and deleted).
+ *
+ * Used by `nukeSession({ skipReentry: true })` (#127) when the
+ * operator wants the next spawn to start without ANY reentry context.
+ * Default `nukeSession` preserves the checkpoint — only this opt-in
+ * path clears it.
+ *
+ * Idempotent: ENOENT on either file is the expected case for groups
+ * that never crossed the threshold (no checkpoint ever written) or
+ * for the first-ever-write group (no `previous.md`). Other fs errors
+ * are logged-and-swallowed so a single bad checkpoint file doesn't
+ * block the rest of the nuke.
+ */
+export function clearCheckpoints(groupDir: string): number {
+  const { live, previous } = checkpointPaths(groupDir);
+  let removed = 0;
+  for (const file of [live, previous]) {
+    try {
+      fs.unlinkSync(file);
+      removed++;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') continue;
+      logger.warn(
+        {
+          file,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'clearCheckpoints: failed to unlink checkpoint file',
+      );
+    }
+  }
+  return removed;
+}

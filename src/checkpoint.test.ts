@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import {
   checkpointPaths,
+  clearCheckpoints,
   renderFacts,
   summariseInput,
   writeCheckpoint,
@@ -281,5 +282,77 @@ describe('writeCheckpoint — rotation + write', () => {
     expect(body).toContain('`Write`');
     expect(body).toContain('`/tmp/log.txt`');
     expect(body).not.toContain('`Read`');
+  });
+});
+
+describe('clearCheckpoints (#127)', () => {
+  // Pins the disk contract for `nuke_session({ skipReentry: true })`:
+  // delete the per-group checkpoint pair and report how many were
+  // actually unlinked. Idempotent — never-written groups and missing
+  // `previous.md` (first-ever-write) are normal.
+  it('removes both default.md and previous.md when present', () => {
+    const { dir, live, previous } = checkpointPaths(tmpDir);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(live, '# Session Checkpoint (live)');
+    fs.writeFileSync(previous, '# Session Checkpoint (previous)');
+
+    const removed = clearCheckpoints(tmpDir);
+
+    expect(removed).toBe(2);
+    expect(fs.existsSync(live)).toBe(false);
+    expect(fs.existsSync(previous)).toBe(false);
+    // The dir itself is left in place — cheap to keep, and
+    // `writeCheckpoint` re-creates it via mkdirSync(recursive: true)
+    // on the next write anyway.
+    expect(fs.existsSync(dir)).toBe(true);
+  });
+
+  it('returns 1 when only default.md exists (first-ever-write group)', () => {
+    // `previous.md` is created on the SECOND checkpoint write (rotated
+    // from the first live). A group that crossed the threshold exactly
+    // once has only `default.md` on disk. skipReentry should clear it
+    // and report 1.
+    const { dir, live } = checkpointPaths(tmpDir);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(live, '# Session Checkpoint');
+
+    const removed = clearCheckpoints(tmpDir);
+
+    expect(removed).toBe(1);
+    expect(fs.existsSync(live)).toBe(false);
+  });
+
+  it('returns 0 when neither file exists (group never crossed the threshold)', () => {
+    // The most common skipReentry-on-a-fresh-group case: the
+    // `.checkpoints/` directory may not exist at all. Helper must not
+    // throw, and the count reports the truth (zero).
+    const removed = clearCheckpoints(tmpDir);
+
+    expect(removed).toBe(0);
+  });
+
+  it('returns 0 and does not throw when the .checkpoints dir is absent', () => {
+    // Tighter than the previous case: explicitly assert the helper
+    // tolerates a missing parent dir, since `unlinkSync` on a
+    // non-existent path with a non-existent parent dir also returns
+    // ENOENT and we lump that into the "nothing to clear" outcome.
+    const fresh = fs.mkdtempSync(path.join(os.tmpdir(), 'no-checkpoints-'));
+    try {
+      const removed = clearCheckpoints(fresh);
+      expect(removed).toBe(0);
+    } finally {
+      fs.rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+
+  it('is idempotent across repeated calls', () => {
+    const { dir, live, previous } = checkpointPaths(tmpDir);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(live, '# live');
+    fs.writeFileSync(previous, '# previous');
+
+    expect(clearCheckpoints(tmpDir)).toBe(2);
+    expect(clearCheckpoints(tmpDir)).toBe(0);
+    expect(clearCheckpoints(tmpDir)).toBe(0);
   });
 });
