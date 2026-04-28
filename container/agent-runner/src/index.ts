@@ -2089,15 +2089,15 @@ async function main(): Promise<void> {
           log(`Session resume failed (${msg}), retrying with fresh session`);
           sessionId = undefined;
           queryResult = await runQuery(prompt, undefined, mcpServerPath, containerInput, sdkEnv);
-        } else if (sessionId) {
-          // Drift surface (#155): we had a sessionId AND an exception,
-          // but the predicate didn't match. Either the throw is a
-          // genuine non-stale failure, or the SDK changed its wording.
-          // The log makes the unmatched message visible without
-          // expanding the match set greedily.
-          log(`Throw with sessionId did not match stale-session predicate: ${msg}`);
-          throw resumeErr;
         } else {
+          // Drift surface for #155 lives on the orchestrator side
+          // (`src/index.ts` debug-log when sessionId+error don't match
+          // the predicate). The rethrown exception here propagates up
+          // to the orchestrator as `output.error`, where that log
+          // fires — adding a duplicate here would double-log every
+          // miss and use the agent-runner's unconditional
+          // console.error path (no level gating), making it
+          // effectively error-level instead of debug-level.
           throw resumeErr;
         }
       }
