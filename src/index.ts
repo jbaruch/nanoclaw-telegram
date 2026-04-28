@@ -1385,26 +1385,24 @@ async function runAgent(
         if (sessions[group.folder])
           delete sessions[group.folder][DEFAULT_SESSION_NAME];
         deleteSessionName(group.folder, DEFAULT_SESSION_NAME);
+      } else if (sessionId && output.error) {
+        // Drift surface (#155): we had a sessionId AND an error, but
+        // the predicate didn't match. Either the error genuinely isn't
+        // a stale-session signal (model rate limit, OAuth, etc.) — fine —
+        // or the SDK changed its wording and the regex needs an update.
+        // Debug-level so steady-state noise stays low; an operator who
+        // sees recovery stop working can flip the log level and the
+        // unmatched string surfaces immediately.
+        logger.debug(
+          { group: group.name, error: output.error },
+          'Container error did not match stale-session predicate (no sessionId clear)',
+        );
       }
 
       logger.error(
         { group: group.name, error: output.error },
         'Container agent error',
       );
-      // Detect stale session — clear so next invocation starts fresh.
-      // Same scope: user-facing path, only touch the default slot.
-      if (
-        output.error &&
-        /session|conversation not found|resume/i.test(output.error)
-      ) {
-        if (sessions[group.folder])
-          delete sessions[group.folder][DEFAULT_SESSION_NAME];
-        deleteSessionName(group.folder, DEFAULT_SESSION_NAME);
-        logger.info(
-          { group: group.name },
-          'Cleared stale default session after resume error',
-        );
-      }
       return 'error';
     }
 

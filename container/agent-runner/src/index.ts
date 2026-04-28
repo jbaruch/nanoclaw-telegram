@@ -36,6 +36,7 @@ import { evaluateBashCommand } from './bash-safety-net.js';
 import { detectComposioFidelity } from './composio-fidelity.js';
 import { detectLazyVerification } from './lazy-verification.js';
 import { rewriteMarkdownToHtml } from './markdown-to-html.js';
+import { isStaleSessionError } from './stale-session.js';
 import {
   DEFAULT_HYGIENE_WINDOW_MS,
   decideHygieneCadence,
@@ -2076,10 +2077,26 @@ async function main(): Promise<void> {
         );
       } catch (resumeErr) {
         const msg = resumeErr instanceof Error ? resumeErr.message : String(resumeErr);
-        if (sessionId && /session|conversation not found|resume/i.test(msg)) {
+        // Use the centralised predicate (#152): the previous narrow
+        // regex `/session|conversation not found|resume/i` missed the
+        // `error_during_execution` and `ENOENT.*\.jsonl` shapes that
+        // #144 broadened the orchestrator-side check to catch. Without
+        // this fix, a stale-session error THROWN out of `runQuery`
+        // (rather than reported via the result-message path) would
+        // bubble up as a generic failure instead of triggering the
+        // fresh-session retry that the throw branch is meant to enact.
+        if (sessionId && isStaleSessionError(msg)) {
           log(`Session resume failed (${msg}), retrying with fresh session`);
           sessionId = undefined;
           queryResult = await runQuery(prompt, undefined, mcpServerPath, containerInput, sdkEnv);
+        } else if (sessionId) {
+          // Drift surface (#155): we had a sessionId AND an exception,
+          // but the predicate didn't match. Either the throw is a
+          // genuine non-stale failure, or the SDK changed its wording.
+          // The log makes the unmatched message visible without
+          // expanding the match set greedily.
+          log(`Throw with sessionId did not match stale-session predicate: ${msg}`);
+          throw resumeErr;
         } else {
           throw resumeErr;
         }
