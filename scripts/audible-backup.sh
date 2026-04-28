@@ -35,6 +35,78 @@ if [ "${1:-}" = "--dry-run" ]; then
   DRY_RUN=true
 fi
 
+# Per-title structured report (#147). The aggregate counters in the
+# tail summary tell weekly housekeeping how MANY failed but lose every
+# title-specific reason — operators and skills consuming the run output
+# have to re-derive the per-title state from stdout. Write each
+# per-title outcome as a single JSON object on its own line so a
+# downstream consumer can parse with `jq -c .` or equivalent without
+# heuristic regex on prose. Path is under the library root so it lives
+# next to the artifacts the script produces (rather than a per-host
+# /tmp path that vanishes on reboot).
+#
+# Schema (`schema_version: 1` per `jbaruch/coding-policy: stateful-artifacts`):
+#   {"schema_version":1,"asin","title",
+#    "stage":"download|classify|decrypt|copy|finalize|success",
+#    "result":"failure|success","reason":"<string>","source_file":"<path>",
+#    "output":"<path>","touched_files":["<path>",...]}
+# Final line is a summary record (also schema_version: 1):
+#   {"schema_version":1,"summary":true,"started_at":"...","ended_at":"...",
+#    "downloaded":N,"failed":N}
+REPORT_FILE="$AUDIOBOOK_DIR/.audible-backup-last-run.jsonl"
+REPORT_SCHEMA_VERSION=1
+REPORT_STARTED_AT=""
+
+# Append a JSON record. Bash-only, no jq dep — careful field escaping
+# so titles containing quotes or newlines don't break a downstream
+# parse. All input goes through `python3 -c json.dumps` so quoting
+# bugs (a backslash inside a title, an embedded newline) can't corrupt
+# the JSONL stream the way printf %s would.
+#
+# Field encoding: values default to JSON strings. To emit a JSON
+# number, boolean, or array, prefix the value with a type tag:
+#   key=str      → "key": "str"  (default; tag-free)
+#   key=int:5    → "key": 5
+#   key=bool:true → "key": true
+#   key=jsonl:a/b/c → "key": ["a","b","c"]   (NUL-free pipe-separated list — see TOUCHED_LIST below)
+#                                              (caller chooses delimiter via the helper, here `/` for paths)
+# Unknown type tags fall back to string (defense in depth — a typo
+# emits "<value>" rather than a parse-fail; the schema_version on
+# every record makes drift visible if the caller relied on a typed
+# field that ended up stringified).
+#
+# Schema_version is auto-injected so callers can't forget it.
+report_record() {
+  python3 - "$REPORT_FILE" "$REPORT_SCHEMA_VERSION" "$@" <<'PYEOF'
+import json, sys
+report_path = sys.argv[1]
+schema_version = int(sys.argv[2])
+fields = sys.argv[3:]
+record = {"schema_version": schema_version}
+for entry in fields:
+    if "=" not in entry:
+        continue
+    key, _, raw = entry.partition("=")
+    if raw.startswith("int:"):
+        try:
+            record[key] = int(raw[4:])
+        except ValueError:
+            record[key] = raw
+    elif raw.startswith("bool:"):
+        record[key] = raw[5:].lower() == "true"
+    elif raw.startswith("jsonl:"):
+        # Pipe-separated list. Caller is responsible for picking a
+        # delimiter that won't appear inside any value (file paths
+        # never contain `\x1f` aka US, used here).
+        body = raw[6:]
+        record[key] = [p for p in body.split("\x1f") if p]
+    else:
+        record[key] = raw
+with open(report_path, "a", encoding="utf-8") as f:
+    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+PYEOF
+}
+
 cleanup() { rm -rf "$TMPDIR"; }
 trap cleanup EXIT
 
@@ -56,6 +128,13 @@ if [ -z "$BOOKS_JSON" ]; then
 fi
 
 mkdir -p "$TMPDIR"
+
+# Truncate the per-run report — every invocation starts fresh so a
+# stale prior run can't be confused with the current one. Done AFTER
+# prerequisite checks so a hard-fail-before-the-loop preserves the
+# previous run's report rather than blanking it.
+: > "$REPORT_FILE"
+REPORT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 echo "=== Audible Backup ==="
 echo "Library: $AUDIOBOOK_DIR"
@@ -147,6 +226,10 @@ while IFS=$'\t' read -r ASIN TITLE; do
   # Download AAX/AAXC + voucher + cover
   if ! "$AUDIBLE" download --asin "$ASIN" --output-dir "$DOWNLOAD_DIR" --cover --cover-size 500 --chapter 2>&1; then
     echo "FAILED to download $ASIN (audible-cli exit non-zero)"
+    report_record \
+      "asin=$ASIN" "title=$TITLE" \
+      "stage=download" "result=failure" \
+      "reason=audible-cli exit non-zero"
     FAILED=$((FAILED + 1))
     continue
   fi
@@ -173,12 +256,14 @@ while IFS=$'\t' read -r ASIN TITLE; do
       # and fail on `touch -d "@epoch"`.
       if ! REF_TOUCH_TS="$(date -r "$BEFORE_DOWNLOAD" +%Y%m%d%H%M.%S)"; then
         echo "FAILED to classify downloaded files for $ASIN (could not format reference timestamp)"
+        report_record "asin=$ASIN" "title=$TITLE" "stage=classify" "result=failure" "reason=could not format BSD reference timestamp"
         FAILED=$((FAILED + 1))
         rm -f "$REF_TS"
         continue
       fi
       if ! touch -t "$REF_TOUCH_TS" "$REF_TS"; then
         echo "FAILED to classify downloaded files for $ASIN (could not create reference timestamp file)"
+        report_record "asin=$ASIN" "title=$TITLE" "stage=classify" "result=failure" "reason=BSD touch -t failed"
         FAILED=$((FAILED + 1))
         rm -f "$REF_TS"
         continue
@@ -190,6 +275,7 @@ while IFS=$'\t' read -r ASIN TITLE; do
       # since the deploy target is GNU coreutils.
       if ! touch -d "@$BEFORE_DOWNLOAD" "$REF_TS"; then
         echo "FAILED to classify downloaded files for $ASIN (could not create reference timestamp file)"
+        report_record "asin=$ASIN" "title=$TITLE" "stage=classify" "result=failure" "reason=GNU touch -d @epoch failed"
         FAILED=$((FAILED + 1))
         rm -f "$REF_TS"
         continue
@@ -198,6 +284,7 @@ while IFS=$'\t' read -r ASIN TITLE; do
   esac
   if ! NEW_FILES=$(find "$DOWNLOAD_DIR" -type f -newer "$REF_TS" | sort); then
     echo "FAILED to classify downloaded files for $ASIN (find/sort error)"
+    report_record "asin=$ASIN" "title=$TITLE" "stage=classify" "result=failure" "reason=find/sort error"
     FAILED=$((FAILED + 1))
     rm -f "$REF_TS"
     continue
@@ -252,10 +339,23 @@ while IFS=$'\t' read -r ASIN TITLE; do
     # because unquoted expansion word-splits and glob-expands. A
     # filename containing spaces or a wildcard char would otherwise
     # be mangled or (worse) match other paths on disk.
+    # Build the touched-files list as a JSON array via the
+    # `jsonl:`-prefixed record helper. Use US (\x1f, ASCII 31) as the
+    # delimiter — paths cannot contain control bytes, so the split is
+    # unambiguous. Avoids the literal `\n` bug a quoted "${...}\n"
+    # concatenation produces (double-quoted `\n` is two characters,
+    # not a newline; downstream JSON would carry "foo\\nbar" and
+    # confuse anyone trying to split on real newlines).
+    TOUCHED_LIST=""
     while IFS= read -r _touched; do
       [ -z "$_touched" ] && continue
       printf '    %s\n' "$_touched"
+      TOUCHED_LIST="${TOUCHED_LIST}${_touched}"$'\x1f'
     done <<< "$NEW_FILES"
+    report_record \
+      "asin=$ASIN" "title=$TITLE" "stage=classify" "result=failure" \
+      "reason=no recognizable audio artifact (aax/aaxc/mp3) in tmp_download" \
+      "touched_files=jsonl:$TOUCHED_LIST"
     FAILED=$((FAILED + 1))
     continue
   fi
@@ -269,6 +369,10 @@ while IFS=$'\t' read -r ASIN TITLE; do
       if [ -z "$VOUCHER_FILE" ]; then
         echo "FAILED: AAXC source for $ASIN requires a .voucher but none was downloaded"
         echo "  source file left in tmp_download for retry: $AUDIO_FILE"
+        report_record \
+          "asin=$ASIN" "title=$TITLE" "stage=decrypt" "result=failure" \
+          "reason=AAXC source missing .voucher" \
+          "source_file=$AUDIO_FILE"
         FAILED=$((FAILED + 1))
         continue
       fi
@@ -276,6 +380,10 @@ while IFS=$'\t' read -r ASIN TITLE; do
       if ! "$AUDIBLE" decrypt --input "$AUDIO_FILE" --voucher "$VOUCHER_FILE" --output "$OUTPUT_M4B"; then
         echo "FAILED: audible decrypt (aaxc) exit non-zero for $ASIN"
         echo "  source: $AUDIO_FILE (retained in tmp_download for retry)"
+        report_record \
+          "asin=$ASIN" "title=$TITLE" "stage=decrypt" "result=failure" \
+          "reason=audible decrypt (aaxc) exit non-zero" \
+          "source_file=$AUDIO_FILE"
         FAILED=$((FAILED + 1))
         continue
       fi
@@ -287,6 +395,10 @@ while IFS=$'\t' read -r ASIN TITLE; do
         echo "FAILED: audible decrypt (aax) exit non-zero for $ASIN"
         echo "  source: $AUDIO_FILE (retained in tmp_download for retry)"
         echo "  hint: verify ~/.audible/config.toml has activation_bytes set for the active profile"
+        report_record \
+          "asin=$ASIN" "title=$TITLE" "stage=decrypt" "result=failure" \
+          "reason=audible decrypt (aax) exit non-zero — check activation_bytes in ~/.audible/config.toml" \
+          "source_file=$AUDIO_FILE"
         FAILED=$((FAILED + 1))
         continue
       fi
@@ -299,6 +411,10 @@ while IFS=$'\t' read -r ASIN TITLE; do
       echo "Unencrypted MP3 source for $ASIN — copying as-is to $SAFE_TITLE.mp3"
       if ! cp "$AUDIO_FILE" "$OUTPUT_M4B"; then
         echo "FAILED: cp mp3 for $ASIN (destination $OUTPUT_M4B)"
+        report_record \
+          "asin=$ASIN" "title=$TITLE" "stage=copy" "result=failure" \
+          "reason=cp mp3 failed" \
+          "source_file=$AUDIO_FILE" "output=$OUTPUT_M4B"
         FAILED=$((FAILED + 1))
         continue
       fi
@@ -307,6 +423,9 @@ while IFS=$'\t' read -r ASIN TITLE; do
 
   if [ -f "$OUTPUT_M4B" ]; then
     echo "OK: $(basename "$OUTPUT_M4B")"
+    report_record \
+      "asin=$ASIN" "title=$TITLE" "stage=success" "result=success" \
+      "source_kind=$SOURCE_KIND" "output=$OUTPUT_M4B"
     DOWNLOADED=$((DOWNLOADED + 1))
 
     # Copy cover art. Preserve the original extension — some titles
@@ -361,6 +480,10 @@ while IFS=$'\t' read -r ASIN TITLE; do
   else
     echo "FAILED: decrypt/copy produced no output for $ASIN (expected $OUTPUT_M4B)"
     echo "  source retained in tmp_download for inspection: $AUDIO_FILE"
+    report_record \
+      "asin=$ASIN" "title=$TITLE" "stage=finalize" "result=failure" \
+      "reason=decrypt/copy produced no output (expected $OUTPUT_M4B)" \
+      "source_file=$AUDIO_FILE" "output=$OUTPUT_M4B"
     FAILED=$((FAILED + 1))
     # Skip the mtime-based cleanup below — the decrypt path claimed
     # success but produced no m4b, which is a weird state the operator
@@ -396,3 +519,19 @@ echo ""
 echo "=== Backup complete ==="
 echo "Downloaded: $DOWNLOADED"
 echo "Failed: $FAILED"
+
+# Final summary record. Always written, even if the loop body never
+# executed (NEW_COUNT=0 already exited above, but a future caller that
+# trips a different early-out path benefits from a deterministic
+# "summary always present" contract). Schema documented at the top of
+# this script next to REPORT_FILE. Counts use the `int:` type tag so
+# they land in the JSON as numbers (not strings) — downstream
+# consumers can `>= N` directly. `summary` is a boolean for the same
+# reason.
+report_record \
+  "summary=bool:true" \
+  "started_at=$REPORT_STARTED_AT" \
+  "ended_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  "downloaded=int:$DOWNLOADED" \
+  "failed=int:$FAILED"
+echo "Per-title report: $REPORT_FILE"
