@@ -250,17 +250,103 @@ done
 echo "  cleaned $OVERRIDE_COUNT group(s) with overrides"
 echo ""
 
-# 5. Kill ALL agent containers
-echo "5. Killing all agent containers..."
+# 5. Gracefully close agent containers (#221).
+#
+# Pre-#221 this step ran `docker kill` on every nanoclaw-* container
+# unconditionally — exit 137 across every in-flight conversation
+# turn and scheduled-task run, even when the agent was 100ms from
+# completing its reply. The rationale was "force fresh tile load
+# after rebuild", but for the typical agent that's mid-query, the
+# right behaviour is "let it finish its current turn, exit cleanly,
+# next message spawns a fresh container with new tiles".
+#
+# Pattern: write the agent-runner's `_close` IPC sentinel into each
+# agent's input dir, give them a grace window to exit naturally,
+# then force-kill any holdouts (genuinely-stuck agents in long tool
+# calls beyond the grace). User-visible: at most one stale-tile
+# turn per group per deploy (the in-flight turn), instead of every
+# in-flight turn destroyed mid-stream.
+#
+# `_close` semantics live in `container/agent-runner/src/index.ts`
+# (search `IPC_INPUT_CLOSE_SENTINEL`). The agent-runner polls every
+# IPC_POLL_MS (~0.5s), so signal-to-exit latency is dominated by
+# the current SDK turn, not the polling loop. 30s grace is generous
+# for typical turns; longer tool calls fall through to the
+# pre-#221 force-kill path.
+#
+# Mount discovery uses `docker inspect` to find the bind mount whose
+# Destination is `/workspace/ipc/input`. That destination path is a
+# constant in the agent-runner (`IPC_INPUT_DIR`), so all agents
+# share it regardless of group/session — much simpler than
+# reverse-engineering the group folder + session name from the
+# container's name suffix (which would also be ambiguous: group
+# folders containing underscores get sanitised to dashes in the
+# container name, losing the original spelling).
+echo "5. Gracefully closing agent containers..."
 # `grep` exits 1 when no agents match — the empty-string case is handled by the `-n` check below.
 AGENTS=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -v '^nanoclaw$' || true)
-if [[ -n "$AGENTS" ]]; then
-    # A container may exit between the `docker ps` above and the kill below;
-    # `docker kill` on an already-dead container is a benign race, not a failure.
-    echo "$AGENTS" | xargs docker kill 2>/dev/null || true
-    echo "  killed: $(echo "$AGENTS" | wc -l | tr -d ' ') containers"
-else
+if [[ -z "$AGENTS" ]]; then
     echo "  no agent containers running"
+else
+    AGENT_COUNT=$(echo "$AGENTS" | wc -l | tr -d ' ')
+    echo "  $AGENT_COUNT agent(s) running — sending _close sentinel"
+
+    SIGNALED_COUNT=0
+    UNRESOLVED=()
+    while IFS= read -r container; do
+        [[ -z "$container" ]] && continue
+        # Resolve the agent's IPC input dir on the host. The
+        # template extracts the Source (host path) of the mount
+        # whose Destination matches the agent-runner's constant. A
+        # blank result means either the container exited between
+        # the `ps` and this `inspect` (benign race) or it doesn't
+        # have the expected mount (shouldn't happen for
+        # nanoclaw-* but defensive).
+        IPC_INPUT_HOST=$(docker inspect "$container" \
+            --format '{{range .Mounts}}{{if eq .Destination "/workspace/ipc/input"}}{{.Source}}{{end}}{{end}}' \
+            2>/dev/null || true)
+        if [[ -n "$IPC_INPUT_HOST" && -d "$IPC_INPUT_HOST" ]]; then
+            # `touch` is the idiomatic empty-file create; the
+            # agent-runner only checks for existence, not contents.
+            touch "$IPC_INPUT_HOST/_close" 2>/dev/null && SIGNALED_COUNT=$((SIGNALED_COUNT + 1))
+        else
+            UNRESOLVED+=("$container")
+        fi
+    done <<< "$AGENTS"
+    echo "  signaled $SIGNALED_COUNT/$AGENT_COUNT with _close sentinel"
+    if (( ${#UNRESOLVED[@]} > 0 )); then
+        echo "  WARN: could not resolve IPC input dir for ${#UNRESOLVED[@]} container(s) — will force-kill after grace"
+    fi
+
+    # Poll for natural exit. 30s covers typical turn completion
+    # (SDK reply + cleanup); longer tool calls (large file ops,
+    # slow MCP calls) hit the force-kill below — same destructive
+    # behaviour as pre-#221, just narrowed to the genuinely-stuck
+    # minority instead of every running agent.
+    GRACE_SECONDS=30
+    POLL_INTERVAL=2
+    elapsed=0
+    while (( elapsed < GRACE_SECONDS )); do
+        STILL_RUNNING=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -v '^nanoclaw$' || true)
+        if [[ -z "$STILL_RUNNING" ]]; then
+            echo "  all agents exited gracefully after ${elapsed}s"
+            break
+        fi
+        sleep "$POLL_INTERVAL"
+        elapsed=$((elapsed + POLL_INTERVAL))
+    done
+
+    # Force-kill any holdouts. Pre-#221 every container was killed
+    # unconditionally; post-#221 only the genuinely-stuck minority
+    # is destroyed. A container may exit between this `docker ps`
+    # and the kill below — `docker kill` on a dead container is a
+    # benign race, not a failure.
+    HOLDOUTS=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -v '^nanoclaw$' || true)
+    if [[ -n "$HOLDOUTS" ]]; then
+        HOLDOUT_COUNT=$(echo "$HOLDOUTS" | wc -l | tr -d ' ')
+        echo "  $HOLDOUT_COUNT agent(s) didn't exit in ${GRACE_SECONDS}s — force-killing"
+        echo "$HOLDOUTS" | xargs docker kill 2>/dev/null || true
+    fi
 fi
 echo ""
 
