@@ -11,6 +11,13 @@
 #   Todo files:                     3 days
 #   Telemetry:                      7 days
 #   Group logs:                     7 days
+#
+# Path layout: per-session-slot mounts (default/, maintenance/) live under
+#   data/sessions/<group>/<slot>/.claude/...
+# A pre-parallel-sessions legacy layout placed `.claude/` directly under
+#   data/sessions/<group>/.claude/...
+# Both are still observed on production disks — the cleanup walks both
+# forms via `find -path` so legacy stragglers also get pruned.
 
 set -euo pipefail
 
@@ -66,12 +73,15 @@ is_active() {
 }
 
 # --- Prune session JSONLs and tool-results dirs ---
+#
+# Walks every `.claude/projects/-workspace-group` directory under
+# SESSIONS_DIR regardless of layout depth:
+#   legacy:    sessions/<group>/.claude/projects/-workspace-group           (depth 4)
+#   per-slot:  sessions/<group>/<slot>/.claude/projects/-workspace-group   (depth 5)
+# `-path` matches the suffix on either form. Pre-fix, the loop only saw
+# the legacy depth and silently no-op'd on every per-slot transcript.
 
-for group_dir in "$SESSIONS_DIR"/*/; do
-  [ -d "$group_dir" ] || continue
-  jsonl_dir="$group_dir/.claude/projects/-workspace-group"
-  [ -d "$jsonl_dir" ] || continue
-
+while IFS= read -r jsonl_dir; do
   for jsonl in "$jsonl_dir"/*.jsonl; do
     [ -f "$jsonl" ] || continue
     id=$(basename "$jsonl" .jsonl)
@@ -88,25 +98,23 @@ for group_dir in "$SESSIONS_DIR"/*/; do
       [ -d "$jsonl_dir/$id" ] && remove "$jsonl_dir/$id"
     fi
   done
-done
+done < <(find "$SESSIONS_DIR" -mindepth 4 -maxdepth 5 -type d \
+  -path "*/.claude/projects/-workspace-group" 2>/dev/null)
 
 # --- Prune debug logs (>3 days, skip files named after active sessions) ---
 
-for group_dir in "$SESSIONS_DIR"/*/; do
-  debug_dir="$group_dir/.claude/debug"
-  [ -d "$debug_dir" ] || continue
+while IFS= read -r debug_dir; do
   while IFS= read -r -d '' f; do
     fname=$(basename "$f" .txt)
     is_active "$fname" && continue
     remove "$f"
   done < <(find "$debug_dir" -type f -mtime +3 ! -name "latest" -print0 2>/dev/null)
-done
+done < <(find "$SESSIONS_DIR" -mindepth 3 -maxdepth 4 -type d \
+  -path "*/.claude/debug" 2>/dev/null)
 
 # --- Prune todo files (>3 days, skip files named after active sessions) ---
 
-for group_dir in "$SESSIONS_DIR"/*/; do
-  todos_dir="$group_dir/.claude/todos"
-  [ -d "$todos_dir" ] || continue
+while IFS= read -r todos_dir; do
   while IFS= read -r -d '' f; do
     fname=$(basename "$f" .json)
     # Todo filenames are like {session_id}-agent-{session_id}.json
@@ -117,13 +125,12 @@ for group_dir in "$SESSIONS_DIR"/*/; do
     done
     remove "$f"
   done < <(find "$todos_dir" -type f -mtime +3 -print0 2>/dev/null)
-done
+done < <(find "$SESSIONS_DIR" -mindepth 3 -maxdepth 4 -type d \
+  -path "*/.claude/todos" 2>/dev/null)
 
 # --- Prune telemetry (>7 days, skip files named after active sessions) ---
 
-for group_dir in "$SESSIONS_DIR"/*/; do
-  telem_dir="$group_dir/.claude/telemetry"
-  [ -d "$telem_dir" ] || continue
+while IFS= read -r telem_dir; do
   while IFS= read -r -d '' f; do
     fname=$(basename "$f")
     for aid in $ACTIVE_IDS; do
@@ -133,7 +140,8 @@ for group_dir in "$SESSIONS_DIR"/*/; do
     done
     remove "$f"
   done < <(find "$telem_dir" -type f -mtime +7 -print0 2>/dev/null)
-done
+done < <(find "$SESSIONS_DIR" -mindepth 3 -maxdepth 4 -type d \
+  -path "*/.claude/telemetry" 2>/dev/null)
 
 # --- Prune group logs (>7 days) ---
 
