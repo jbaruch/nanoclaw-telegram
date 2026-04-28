@@ -10,8 +10,8 @@ PRIVATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PUBLIC_DIR="${PUBLIC_REPO_DIR:-$HOME/Projects/nanoclaw-public}"
 
 if [ ! -d "$PUBLIC_DIR/.git" ]; then
-  echo "ERROR: Public repo not found at $PUBLIC_DIR"
-  echo "Set PUBLIC_REPO_DIR or clone jbaruch/nanoclaw-public to ~/Projects/nanoclaw-public"
+  echo "ERROR: Public repo not found at $PUBLIC_DIR" >&2
+  echo "Set PUBLIC_REPO_DIR or clone jbaruch/nanoclaw-public to ~/Projects/nanoclaw-public" >&2
   exit 1
 fi
 

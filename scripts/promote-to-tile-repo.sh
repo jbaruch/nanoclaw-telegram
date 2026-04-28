@@ -227,7 +227,7 @@ if command -v tessl >/dev/null 2>&1; then
     tessl skill review "$TILE_REPO_DIR/skills/$skill_name"
   done
 else
-  echo "WARN: tessl not found, skipping local skill review (Copilot + GHA will review)"
+  echo "WARN: tessl not found, skipping local skill review (Copilot + GHA will review)" >&2
 fi
 
 # --- Commit, push branch, open PR, request Copilot review ---

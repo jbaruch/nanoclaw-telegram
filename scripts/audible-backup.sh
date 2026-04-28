@@ -112,18 +112,18 @@ trap cleanup EXIT
 
 # --- Validate prerequisites ---
 if [ ! -x "$AUDIBLE" ]; then
-  echo "ERROR: audible-cli not found at $AUDIBLE"
-  echo "Install: python3 -m venv ~/audible-env && ~/audible-env/bin/pip install audible-cli"
+  echo "ERROR: audible-cli not found at $AUDIBLE" >&2
+  echo "Install: python3 -m venv ~/audible-env && ~/audible-env/bin/pip install audible-cli" >&2
   exit 1
 fi
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
-  echo "ERROR: ffmpeg not found on PATH"
+  echo "ERROR: ffmpeg not found on PATH" >&2
   exit 1
 fi
 
 if [ -z "$BOOKS_JSON" ]; then
-  echo "ERROR: OpenAudible inventory not found in $AUDIOBOOK_DIR (tried books.json, books (1).json)"
+  echo "ERROR: OpenAudible inventory not found in $AUDIOBOOK_DIR (tried books.json, books (1).json)" >&2
   exit 1
 fi
 
@@ -333,8 +333,8 @@ while IFS=$'\t' read -r ASIN TITLE; do
     # no recognizable audio artifact. List what DID land so the
     # operator can see the real state (empty, or an unexpected
     # extension we don't classify yet).
-    echo "FAILED: no source audio file from audible-cli for $ASIN"
-    echo "  files touched in this run:"
+    echo "FAILED: no source audio file from audible-cli for $ASIN" >&2
+    echo "  files touched in this run:" >&2
     # Iterate line-by-line — don't use `printf '%s\n' $NEW_FILES`
     # because unquoted expansion word-splits and glob-expands. A
     # filename containing spaces or a wildcard char would otherwise
@@ -349,7 +349,7 @@ while IFS=$'\t' read -r ASIN TITLE; do
     TOUCHED_LIST=""
     while IFS= read -r _touched; do
       [ -z "$_touched" ] && continue
-      printf '    %s\n' "$_touched"
+      printf '    %s\n' "$_touched" >&2
       TOUCHED_LIST="${TOUCHED_LIST}${_touched}"$'\x1f'
     done <<< "$NEW_FILES"
     report_record \
@@ -367,8 +367,8 @@ while IFS=$'\t' read -r ASIN TITLE; do
     aaxc)
       OUTPUT_M4B="$BOOKS_DIR/$SAFE_TITLE.m4b"
       if [ -z "$VOUCHER_FILE" ]; then
-        echo "FAILED: AAXC source for $ASIN requires a .voucher but none was downloaded"
-        echo "  source file left in tmp_download for retry: $AUDIO_FILE"
+        echo "FAILED: AAXC source for $ASIN requires a .voucher but none was downloaded" >&2
+        echo "  source file left in tmp_download for retry: $AUDIO_FILE" >&2
         report_record \
           "asin=$ASIN" "title=$TITLE" "stage=decrypt" "result=failure" \
           "reason=AAXC source missing .voucher" \
@@ -378,8 +378,8 @@ while IFS=$'\t' read -r ASIN TITLE; do
       fi
       echo "Decrypting AAXC (with voucher) to $SAFE_TITLE.m4b ..."
       if ! "$AUDIBLE" decrypt --input "$AUDIO_FILE" --voucher "$VOUCHER_FILE" --output "$OUTPUT_M4B"; then
-        echo "FAILED: audible decrypt (aaxc) exit non-zero for $ASIN"
-        echo "  source: $AUDIO_FILE (retained in tmp_download for retry)"
+        echo "FAILED: audible decrypt (aaxc) exit non-zero for $ASIN" >&2
+        echo "  source: $AUDIO_FILE (retained in tmp_download for retry)" >&2
         report_record \
           "asin=$ASIN" "title=$TITLE" "stage=decrypt" "result=failure" \
           "reason=audible decrypt (aaxc) exit non-zero" \
@@ -392,9 +392,9 @@ while IFS=$'\t' read -r ASIN TITLE; do
       OUTPUT_M4B="$BOOKS_DIR/$SAFE_TITLE.m4b"
       echo "Decrypting AAX (activation bytes) to $SAFE_TITLE.m4b ..."
       if ! "$AUDIBLE" decrypt --input "$AUDIO_FILE" --output "$OUTPUT_M4B"; then
-        echo "FAILED: audible decrypt (aax) exit non-zero for $ASIN"
-        echo "  source: $AUDIO_FILE (retained in tmp_download for retry)"
-        echo "  hint: verify ~/.audible/config.toml has activation_bytes set for the active profile"
+        echo "FAILED: audible decrypt (aax) exit non-zero for $ASIN" >&2
+        echo "  source: $AUDIO_FILE (retained in tmp_download for retry)" >&2
+        echo "  hint: verify ~/.audible/config.toml has activation_bytes set for the active profile" >&2
         report_record \
           "asin=$ASIN" "title=$TITLE" "stage=decrypt" "result=failure" \
           "reason=audible decrypt (aax) exit non-zero — check activation_bytes in ~/.audible/config.toml" \
@@ -410,7 +410,7 @@ while IFS=$'\t' read -r ASIN TITLE; do
       OUTPUT_M4B="$BOOKS_DIR/$SAFE_TITLE.mp3"
       echo "Unencrypted MP3 source for $ASIN — copying as-is to $SAFE_TITLE.mp3"
       if ! cp "$AUDIO_FILE" "$OUTPUT_M4B"; then
-        echo "FAILED: cp mp3 for $ASIN (destination $OUTPUT_M4B)"
+        echo "FAILED: cp mp3 for $ASIN (destination $OUTPUT_M4B)" >&2
         report_record \
           "asin=$ASIN" "title=$TITLE" "stage=copy" "result=failure" \
           "reason=cp mp3 failed" \
@@ -443,7 +443,7 @@ while IFS=$'\t' read -r ASIN TITLE; do
     if [ -n "$COVER_FILE" ] && [ -f "$COVER_FILE" ]; then
       cover_ext="${COVER_FILE##*.}"
       if ! cp "$COVER_FILE" "$ART_DIR/$SAFE_TITLE.$cover_ext"; then
-        echo "WARN: cover art copy failed for $ASIN — continuing without cover"
+        echo "WARN: cover art copy failed for $ASIN — continuing without cover" >&2
       fi
     fi
 
@@ -468,18 +468,18 @@ while IFS=$'\t' read -r ASIN TITLE; do
         # re-downloading). Acceptable edge: archive mv failures are
         # rare (mkdir AAX_DIR already succeeded; usual cause is a
         # filesystem permission flip between the two dirs).
-        echo "WARN: archive mv failed for $AUDIO_FILE — source will be swept by cleanup; m4b is already in BOOKS_DIR"
+        echo "WARN: archive mv failed for $AUDIO_FILE — source will be swept by cleanup; m4b is already in BOOKS_DIR" >&2
       fi
       # Co-locate the voucher with the AAXC archive copy.
       if [ "$SOURCE_KIND" = "aaxc" ] && [ -n "$VOUCHER_FILE" ] && [ -f "$VOUCHER_FILE" ]; then
         if ! mv "$VOUCHER_FILE" "$AAX_DIR/"; then
-          echo "WARN: voucher mv failed for $VOUCHER_FILE — continuing"
+          echo "WARN: voucher mv failed for $VOUCHER_FILE — continuing" >&2
         fi
       fi
     fi
   else
-    echo "FAILED: decrypt/copy produced no output for $ASIN (expected $OUTPUT_M4B)"
-    echo "  source retained in tmp_download for inspection: $AUDIO_FILE"
+    echo "FAILED: decrypt/copy produced no output for $ASIN (expected $OUTPUT_M4B)" >&2
+    echo "  source retained in tmp_download for inspection: $AUDIO_FILE" >&2
     report_record \
       "asin=$ASIN" "title=$TITLE" "stage=finalize" "result=failure" \
       "reason=decrypt/copy produced no output (expected $OUTPUT_M4B)" \
@@ -508,7 +508,7 @@ while IFS=$'\t' read -r ASIN TITLE; do
   # Log the failure so systematic issues (tmp_download permissions
   # flipped, disk full, mtime ref lost) surface for the operator.
   if ! find "$DOWNLOAD_DIR" -type f -newer "$REF_TS" -delete; then
-    echo "WARN: tmp_download cleanup partially failed for $ASIN — stragglers may retry next run"
+    echo "WARN: tmp_download cleanup partially failed for $ASIN — stragglers may retry next run" >&2
   fi
   rm -f "$REF_TS"
 done < "$ASIN_TSV"

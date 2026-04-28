@@ -248,8 +248,8 @@ PR_NUMBER=$(GH_TOKEN="$TOKEN" gh pr list \
 if [ -n "$PR_NUMBER" ]; then
   GH_TOKEN="$TOKEN" summon_copilot_or_warn "$TILE_OWNER" "$TILE_NAME" "$PR_NUMBER"
 else
-  echo "WARN: no open PR found for branch $BRANCH on $TILE_OWNER/$TILE_NAME — skipping Copilot re-summon."
-  echo "      If this branch was created by promote_staging, the PR may have been closed or merged."
+  echo "WARN: no open PR found for branch $BRANCH on $TILE_OWNER/$TILE_NAME — skipping Copilot re-summon." >&2
+  echo "      If this branch was created by promote_staging, the PR may have been closed or merged." >&2
 fi
 
 echo "Done! $PROMOTED pushed, $BLOCKED blocked."
