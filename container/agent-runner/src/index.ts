@@ -34,6 +34,7 @@ import {
 } from './poison-defense.js';
 import { evaluateBashCommand } from './bash-safety-net.js';
 import { detectComposioFidelity } from './composio-fidelity.js';
+import { decideGroundTruthReminder } from './ground-truth-reminder.js';
 import { detectLazyVerification } from './lazy-verification.js';
 import { rewriteMarkdownToHtml } from './markdown-to-html.js';
 import { isStaleSessionError } from './stale-session.js';
@@ -629,6 +630,47 @@ function createReactFirstHook(containerInput: ContainerInput): HookCallback {
         break;
     }
     return {};
+  };
+}
+
+/**
+ * #227 (tracks #214) — ground-truth-reminder. Inject a tight
+ * verification reminder into `additionalContext` on every interactive
+ * user turn. SOUL is re-injected via the system prompt every turn,
+ * but the verification rules load once via the tile and fade in
+ * salience over a long session — the asymmetry biases the model
+ * toward shape over truth. This hook restores parity by re-injecting
+ * ground-truth at the same per-turn cadence SOUL enjoys.
+ *
+ * Decision logic lives in `ground-truth-reminder.ts` so the unit
+ * tests can exercise skip cases (sub-agent, scheduled task, no
+ * assistantName) without spinning up the SDK.
+ */
+function createGroundTruthReminderHook(
+  containerInput: ContainerInput,
+): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const submit = input as UserPromptSubmitHookInput;
+    const result = decideGroundTruthReminder({
+      isSubagent:
+        typeof submit.agent_id === 'string' && submit.agent_id.length > 0,
+      isScheduledTask: containerInput.isScheduledTask === true,
+      prompt: typeof submit.prompt === 'string' ? submit.prompt : '',
+      assistantName: containerInput.assistantName,
+    });
+    if (!result.inject) {
+      log(
+        `UserPromptSubmit: ground-truth-reminder skipped (${result.skippedBy})`,
+      );
+      return {};
+    }
+    log('UserPromptSubmit: ground-truth-reminder injected');
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'UserPromptSubmit' as const,
+        additionalContext: result.additionalContext,
+      },
+    };
   };
 }
 
@@ -1598,6 +1640,11 @@ async function runQuery(
         // it.
         UserPromptSubmit: [
           { hooks: [createReactFirstHook(containerInput)] },
+          // #227 (tracks #214) — re-inject ground-truth reminder every
+          // turn so verification discipline rides at the same salience
+          // tier as SOUL. Skip cases (sub-agent, scheduled task, no
+          // assistantName) match react-first.
+          { hooks: [createGroundTruthReminderHook(containerInput)] },
           {
             hooks: [createReplyThreadingPromptHook(replyThreadingState)],
           },
