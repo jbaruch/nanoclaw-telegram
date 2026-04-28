@@ -2002,20 +2002,78 @@ export async function processTaskIpc(
             cwd: groupDir,
             env: traktEnv,
             timeout: 120_000,
-            maxBuffer: 1024 * 1024,
+            // 8MB. Pre-#146 ceiling was 1MB, which silently truncated
+            // realistic Trakt history payloads (~328 shows + 117 movies
+            // + 77 ratings = >1MB JSON) — execFile would error with
+            // ENOBUFS and the agent's only signal was `Command failed:
+            // python3 ...` because the empty-stderr/dropped-stdout path
+            // ate the actual cause. 8MB headroom covers the long tail
+            // (large libraries, growth over years) without blowing the
+            // IPC envelope: even at 8MB stdout, the JSON payload is
+            // truncated to head/tail slices below before being written
+            // to the result file.
+            maxBuffer: 8 * 1024 * 1024,
           },
           (error, stdout, stderr) => {
             const resultPath = scriptResultPath(sourceGroup, data);
+            // Cap each captured stream at ~64KB on the error path so
+            // the result-file JSON stays well under the IPC reader's
+            // 1MB limit (`startIpcWatcher` rejects files >1MB). 64KB
+            // is empirically enough to carry a full Python traceback
+            // plus a few hundred lines of leading context — the
+            // truncation issue the original `stderr.slice(-500)`
+            // caused was that a long traceback was clipped to its
+            // tail, hiding the most-informative top-of-stack lines.
+            const ERROR_PAYLOAD_CAP = 64 * 1024;
+            const headTail = (s: string) => {
+              if (s.length <= ERROR_PAYLOAD_CAP) return s;
+              const half = Math.floor(ERROR_PAYLOAD_CAP / 2);
+              return (
+                s.slice(0, half) +
+                `\n…[${s.length - ERROR_PAYLOAD_CAP} bytes elided]…\n` +
+                s.slice(s.length - half)
+              );
+            };
             if (error) {
+              // ExecException-typed fields the SDK populates: `code`
+              // is the exit code (or signal name on kill), `killed`
+              // is true on timeout / SIGTERM. Both are diagnostic gold
+              // the previous `error.message`-only payload was
+              // throwing away — the agent could see "Command failed"
+              // but not the exit code, so a 401 (auth expired), an
+              // ENOBUFS (stdout overflow), and a SIGTERM (timeout)
+              // all looked identical.
+              const execErr = error as NodeJS.ErrnoException & {
+                code?: string | number;
+                killed?: boolean;
+              };
               logger.error(
-                { sourceGroup, error: error.message, stderr },
+                {
+                  sourceGroup,
+                  error: error.message,
+                  exitCode: execErr.code,
+                  killed: execErr.killed,
+                  stderrLen: stderr.length,
+                  stdoutLen: stdout.length,
+                },
                 'fetch_trakt_history failed',
               );
               fs.writeFileSync(
                 resultPath,
                 JSON.stringify({
                   error: error.message,
-                  stderr: stderr.slice(-500),
+                  exit_code: execErr.code ?? null,
+                  killed: execErr.killed ?? false,
+                  // Both streams preserved (head + tail). Pre-fix the
+                  // handler dropped stdout entirely on the error
+                  // path, even though the Python script may have
+                  // printed a partial JSON envelope or progress
+                  // diagnostics there before crashing. And stderr
+                  // was tail-only (-500), hiding the top-of-stack
+                  // lines that actually identify the failure (auth,
+                  // schema, network, etc.).
+                  stdout: headTail(stdout),
+                  stderr: headTail(stderr),
                 }),
               );
             } else {
