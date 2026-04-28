@@ -131,11 +131,18 @@ EOF
       return
     fi
     cd "$installed_dir"
+    # Guard each `find` with a directory existence check. Under
+    # `set -euo pipefail` (inherited into this subshell), a missing
+    # `rules/` or `skills/` would otherwise make `find` exit non-zero
+    # and abort the whole reconcile rather than treating the missing
+    # directory as "no files to hash". Tiles often have one but not
+    # the other (e.g. nanoclaw-untrusted is rules-only).
     {
       [ -f tile.json ] && "${HASHER[@]}" tile.json
-      find rules skills -type f 2>/dev/null \
-        | sort \
-        | xargs "${HASHER[@]}" 2>/dev/null
+      {
+        if [ -d rules ]; then find rules -type f; fi
+        if [ -d skills ]; then find skills -type f; fi
+      } | sort | xargs "${HASHER[@]}" 2>/dev/null
     } | sort | "${HASHER[@]}" | awk '{print $1}'
   )
   rm -rf "$tmp"
@@ -162,9 +169,10 @@ installed_tile_hash() {
   local tile="$1"
   nas "docker exec nanoclaw sh -c 'cd \"\$1/\$2/\$3\" 2>/dev/null && {
     [ -f tile.json ] && sha256sum tile.json
-    find rules skills -type f 2>/dev/null \
-      | sort \
-      | xargs sha256sum 2>/dev/null
+    {
+      if [ -d rules ]; then find rules -type f; fi
+      if [ -d skills ]; then find skills -type f; fi
+    } | sort | xargs sha256sum 2>/dev/null
   } | sort | sha256sum | awk \"{print \\\$1}\"' _ '$INSTALL_ROOT' '$TILE_OWNER_VAL' '$tile'" 2>/dev/null
 }
 
