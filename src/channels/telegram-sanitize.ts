@@ -254,8 +254,16 @@ export function sanitizeTelegramHtml(text: string): string {
   // (`escapeCaptured`) instead of restored raw in Phase 3 — otherwise
   // Telegram rejects the unknown tag and the send falls back to plain
   // text.
+  //
+  // Tag-name char class includes `_` because Claude / agentic frameworks
+  // emit underscored tags (`<tool_use_error>`, `<delivery_id>`,
+  // `<some_field>`) constantly. HTML spec disallows `_` in tag names but
+  // Telegram still rejects them with 400 if unescaped — so they need the
+  // same protectStray treatment as any other stray. Without `_`, the
+  // regex misses them entirely; they slip through Phase 1b and reach
+  // Telegram as raw `<…>` → 400 → plain-text fallback.
   out = out.replace(
-    /<\/?[a-zA-Z][a-zA-Z0-9-]*(?:\s[^>]*)?\s*\/?>/g,
+    /<\/?[a-zA-Z][a-zA-Z0-9_-]*(?:\s[^>]*)?\s*\/?>/g,
     protectStray,
   );
 

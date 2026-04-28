@@ -292,6 +292,39 @@ describe('sanitizeTelegramHtml — HTML entity escaping', () => {
     expect(out.startsWith('&lt;analysis&gt;')).toBe(true);
     expect(out.includes('• Step 2: Skipped')).toBe(true);
   });
+
+  // --- Underscored stray tag tokens. HTML spec disallows `_` in tag
+  // names but Claude / agentic frameworks emit them constantly
+  // (`<tool_use_error>`, `<delivery_id>`, `<some_field>`) and Telegram
+  // still rejects them with 400 if unescaped. Without `_` in the
+  // Phase 1b char class, these slipped past the regex entirely and
+  // landed at Telegram raw → 400 → plain-text fallback (the user saw
+  // `<tool_use_error>...</tool_use_error>` AND raw Markdown). With `_`
+  // included, they go through the same protectStray + Phase-3 escape
+  // path as `<analysis>`.
+  it('underscored stray tag (Claude tool_use_error) is escaped, not passed through raw', () => {
+    expect(
+      sanitizeTelegramHtml(
+        '<tool_use_error>Tool ran without output or errors</tool_use_error>',
+      ),
+    ).toBe(
+      '&lt;tool_use_error&gt;Tool ran without output or errors&lt;/tool_use_error&gt;',
+    );
+  });
+
+  it('underscored JSON-dump leakage (<delivery_schedule_id>) inside a sentence is escaped', () => {
+    expect(
+      sanitizeTelegramHtml(
+        'failed on <delivery_schedule_id> field — check format',
+      ),
+    ).toBe('failed on &lt;delivery_schedule_id&gt; field — check format');
+  });
+
+  it('underscored stray tag with Markdown elsewhere: tag is escaped, Markdown is converted', () => {
+    expect(
+      sanitizeTelegramHtml('<tool_use_error>e</tool_use_error>\n**bold** here'),
+    ).toBe('&lt;tool_use_error&gt;e&lt;/tool_use_error&gt;\n<b>bold</b> here');
+  });
 });
 
 // --- Existing HTML element spans: contents must be preserved verbatim ---
