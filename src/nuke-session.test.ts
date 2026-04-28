@@ -489,38 +489,16 @@ describe('wipeSessionJsonl tool-results directory wipe', () => {
     expect(fs.readFileSync(sensitiveFile, 'utf8')).toBe('secret');
   });
 
-  it('refuses to remove when realpath of the dir escapes the slug (ancestor symlink swap)', () => {
-    // TOCTOU coverage parallel to the JSONL realpath-escape case.
-    // The slug itself contains a symlinked sub-path that points at an
-    // outside attacker-controlled tree. realpath resolves to outside;
-    // containment check rejects.
-    const outsideRoot = path.join(TEST_DATA_DIR, 'outside_root_dir');
-    const outsideDir = path.join(outsideRoot, 'sid');
-    fs.mkdirSync(outsideDir, { recursive: true });
-    const sentinel = path.join(outsideDir, 'should_survive.txt');
-    fs.writeFileSync(sentinel, 'sentinel');
-
-    const slugDir = path.join(
-      projectsDir('escape_dir_group', 'default'),
-      '-workspace-group',
-    );
-    fs.mkdirSync(slugDir, { recursive: true });
-    // The "tool-results dir" entry is itself a symlink pointing
-    // outside. A naïve recursive-remove on the symlink path with
-    // followsLinks behavior would walk into the target — the helper
-    // intercepts via the symlink branch and unlinks the link only.
-    // This test pins that BOTH the symlink branch AND the realpath
-    // branch are correct: if the symlink branch were broken and we
-    // fell into the directory branch, the realpath-containment check
-    // would still refuse.
-    fs.symlinkSync(outsideDir, path.join(slugDir, 'sid'), 'dir');
-
-    const deleted = wipeSessionJsonl('escape_dir_group', 'default', 'sid');
-
-    // Symlink unlinked (count=1) but target preserved.
-    expect(deleted).toBe(1);
-    expect(fs.existsSync(sentinel)).toBe(true);
-  });
+  // Note on coverage gap: `removeToolResultsDirInSlug`'s realpath-
+  // containment refusal path (the directory-branch check that compares
+  // the dir's realpath against the slug's realpath) is not exercised
+  // by these tests. Triggering it requires a TOCTOU race where an
+  // ancestor symlink is swapped between the outer slug lstat in
+  // `wipeSessionJsonl` and the inner realpath in
+  // `removeToolResultsDirInSlug` — not deterministically reproducible
+  // in a unit test. The JSONL helper carries an analogous gap. The
+  // realpath check remains as defense-in-depth alongside the
+  // symlink-branch and slug-lstat checks that ARE tested above.
 
   it('removes the tool-results dir across multiple project-slug subdirectories', () => {
     // Mirror of the JSONL slow-path test: an operator-renamed slug
