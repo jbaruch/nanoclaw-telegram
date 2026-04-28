@@ -1205,8 +1205,10 @@ export function buildVolumeMounts(
   // readonly without breaking all of that.
   //
   // What we CAN flip readonly is the two specific subdirs that hold
-  // installed tile content: `skills/` (per-tile SKILL.md trees) and
-  // `.tessl/` (tile.json + rules + the generated RULES.md). The
+  // installed tile content: `skills/` (per-tile SKILL.md trees, plus
+  // bundled scripts and assets) and `.tessl/` (per-tile rules
+  // markdown copied under `tiles/<owner>/<tile>/rules/` plus the
+  // aggregated RULES.md the orchestrator generates from them). The
   // orchestrator wrote both host-side at the top of this function via
   // cpSync from `tessl-workspace/.tessl/tiles/...`, so by the time
   // the agent container starts the content is already in place. Layer
@@ -1220,11 +1222,12 @@ export function buildVolumeMounts(
   // container against `/app/tessl-workspace/.tessl/tiles/...`, a
   // completely different filesystem path the agent never sees. The
   // per-spawn cpSync that copies registry tiles into
-  // `<groupSessionsDir>/skills/` and `<groupSessionsDir>/.tessl/` ran
-  // host-side BEFORE the container starts, so the readonly overlay
-  // is not in effect during that copy. The next spawn's `rmSync`
-  // (force: true) at the top of this function also bypasses any
-  // readonly perms that lingered.
+  // `<groupSessionsDir>/skills/` and `<groupSessionsDir>/.tessl/`
+  // runs host-side BEFORE the container starts, so the readonly
+  // overlay is not in effect during that copy. The next spawn's
+  // `rmSync` calls at the top of this function also run host-side
+  // (between the previous container's death and the next one's
+  // start) — no overlay in effect at rmSync time either.
   mounts.push({
     hostPath: toHostPath(skillsDst),
     containerPath: '/home/node/.claude/skills',
