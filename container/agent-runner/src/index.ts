@@ -36,6 +36,7 @@ import { evaluateBashCommand } from './bash-safety-net.js';
 import { detectComposioFidelity } from './composio-fidelity.js';
 import { detectLazyVerification } from './lazy-verification.js';
 import { rewriteMarkdownToHtml } from './markdown-to-html.js';
+import { isStaleSessionError } from './stale-session.js';
 import {
   DEFAULT_HYGIENE_WINDOW_MS,
   decideHygieneCadence,
@@ -2076,11 +2077,27 @@ async function main(): Promise<void> {
         );
       } catch (resumeErr) {
         const msg = resumeErr instanceof Error ? resumeErr.message : String(resumeErr);
-        if (sessionId && /session|conversation not found|resume/i.test(msg)) {
+        // Use the centralised predicate (#152): the previous narrow
+        // regex `/session|conversation not found|resume/i` missed the
+        // `error_during_execution` and `ENOENT.*\.jsonl` shapes that
+        // #144 broadened the orchestrator-side check to catch. Without
+        // this fix, a stale-session error THROWN out of `runQuery`
+        // (rather than reported via the result-message path) would
+        // bubble up as a generic failure instead of triggering the
+        // fresh-session retry that the throw branch is meant to enact.
+        if (sessionId && isStaleSessionError(msg)) {
           log(`Session resume failed (${msg}), retrying with fresh session`);
           sessionId = undefined;
           queryResult = await runQuery(prompt, undefined, mcpServerPath, containerInput, sdkEnv);
         } else {
+          // Drift surface for #155 lives on the orchestrator side
+          // (`src/index.ts` debug-log when sessionId+error don't match
+          // the predicate). The rethrown exception here propagates up
+          // to the orchestrator as `output.error`, where that log
+          // fires — adding a duplicate here would double-log every
+          // miss and use the agent-runner's unconditional
+          // console.error path (no level gating), making it
+          // effectively error-level instead of debug-level.
           throw resumeErr;
         }
       }
