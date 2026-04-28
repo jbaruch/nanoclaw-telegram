@@ -203,6 +203,38 @@ echo "3. Updating tiles from registry..."
 docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl update --yes --dangerously-ignore-security 2>&1' | tail -10
 echo ""
 
+# 3b. Verify no literal pins crept into tessl-workspace/tessl.json.
+#
+# Per `nanoclaw-host: tessl-version-floating` (registry 0.1.25+), every
+# `dependencies.<tile>.version` in this manifest MUST be the literal
+# string "latest" — an approved exception to `coding-policy:
+# dependency-management` for this one file. `tessl install <tile>`
+# writes a literal pin by default, so an operator hand-installing a
+# new tile (or merging a fork) can quietly reintroduce drift; this
+# check fails the deploy when that happens.
+echo "3b. Verifying tessl-workspace/tessl.json uses 'latest' for every dependency..."
+PINNED_OFFENDERS=$(python3 - <<'PY'
+import json, sys, pathlib
+manifest = pathlib.Path("tessl-workspace/tessl.json")
+data = json.loads(manifest.read_text())
+bad = [
+    name for name, dep in data.get("dependencies", {}).items()
+    if dep.get("version") != "latest"
+]
+if bad:
+    print("\n".join(bad))
+PY
+)
+if [[ -n "$PINNED_OFFENDERS" ]]; then
+    echo "ERROR: tessl-workspace/tessl.json has non-'latest' pins:" >&2
+    echo "$PINNED_OFFENDERS" | sed 's/^/  - /' >&2
+    echo "Fix: edit each entry to {\"version\": \"latest\"} and re-run deploy." >&2
+    echo "Why: nanoclaw-host: tessl-version-floating (approved exception to coding-policy: dependency-management)." >&2
+    exit 1
+fi
+echo "  ok — all dependencies float to latest"
+echo ""
+
 # 4. Clear runtime skill overrides from all groups
 # NOTE: staging/ is NOT cleared here — that's verify-tiles' job after promotion.
 echo "4. Clearing runtime skill overrides..."
