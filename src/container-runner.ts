@@ -2,7 +2,7 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, spawn } from 'child_process';
+import { ChildProcess, spawn, spawnSync } from 'child_process';
 import Database from 'better-sqlite3';
 import { randomBytes } from 'crypto';
 import fs from 'fs';
@@ -41,6 +41,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { isHandoffActive } from './handoff.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 import { readEnvFile } from './env.js';
@@ -1565,6 +1566,61 @@ export async function runContainerAgent(
   const sessionSuffix =
     sessionName === DEFAULT_SESSION_NAME ? '' : `-${sessionName}`;
   const containerName = `nanoclaw-${safeName}${sessionSuffix}-${Date.now()}`;
+
+  // #213 Phase A spawn-collision detector. After a graceful-shutdown
+  // handoff, the new orchestrator's GroupQueue starts empty — it has
+  // no in-memory record of the adopted containers. If a new message
+  // for one of those groups arrives during the handoff window, this
+  // spawn path will run alongside the still-finishing adopted
+  // container, racing on IPC and producing duplicate user-visible
+  // replies. Phase B (in-memory adoption + docker-ps polling for
+  // natural exit) closes that race; Phase A defers the work behind
+  // this detector. When a collision is observed, the WARN message
+  // names jbaruch/nanoclaw#213 directly so an operator hitting it
+  // weeks/months from now knows exactly where to look — the
+  // detector is the trigger to ship Phase B.
+  if (isHandoffActive()) {
+    const collisionPrefix = `nanoclaw-${safeName}${sessionSuffix}-`;
+    try {
+      const psResult = spawnSync(
+        'docker',
+        ['ps', '--format', '{{.Names}}', '--filter', `name=${collisionPrefix}`],
+        { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
+      );
+      const collisions = (psResult.stdout || '')
+        .split('\n')
+        .map((n) => n.trim())
+        .filter((n) => n.startsWith(collisionPrefix));
+      if (collisions.length > 0) {
+        logger.warn(
+          {
+            issue: 'jbaruch/nanoclaw#213',
+            phase: 'A',
+            newContainer: containerName,
+            collidingWith: collisions,
+            groupFolder: group.folder,
+            sessionName,
+          },
+          'Spawn collision during graceful-shutdown handoff window — ' +
+            'an adopted container from the prior orchestrator is still ' +
+            'running for this group/session. Both will respond to inbound ' +
+            'IPC, producing duplicate user-visible replies. This is the ' +
+            'Phase B race the #213 fix deferred; observed firing means it ' +
+            'is time to implement in-memory adoption (register adopted ' +
+            'containers in GroupQueue, poll docker ps for natural exit). ' +
+            'See src/handoff.ts and the comment block above this log.',
+        );
+      }
+    } catch (err) {
+      // Detector failure must NOT block the spawn. Log at debug so
+      // a transient `docker ps` error doesn't drown legitimate
+      // collision warnings; the spawn itself proceeds normally.
+      logger.debug(
+        { err, issue: 'jbaruch/nanoclaw#213' },
+        'Spawn-collision detector failed (non-fatal)',
+      );
+    }
+  }
   const { args: containerArgs, cleanup: cleanupSecretEnvFile } =
     buildContainerArgs(
       mounts,

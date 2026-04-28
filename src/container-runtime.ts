@@ -106,24 +106,46 @@ export function ensureContainerRuntimeRunning(): void {
   }
 }
 
-/** Kill orphaned NanoClaw containers from previous runs. */
-export function cleanupOrphans(): void {
+/**
+ * Kill orphaned NanoClaw containers from previous runs.
+ *
+ * `skipNames` (#213): names the caller has identified as intentional
+ * handoffs from a graceful shutdown — they're still doing useful
+ * work and should NOT be killed. Names not in the skip set are
+ * treated as genuine orphans (crashed-orchestrator leftovers) and
+ * stopped as before. An empty / undefined skip set means "no
+ * handoff, kill everything" — the pre-#213 behavior, which is the
+ * right safety default when no graceful-shutdown marker was found.
+ */
+export function cleanupOrphans(skipNames?: ReadonlySet<string>): void {
   try {
     const result = spawnSync(
       CONTAINER_RUNTIME_BIN,
       ['ps', '--format', '{{.Names}}'],
       { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
     );
-    const orphans = (result.stdout || '')
+    const allNanoclaw = (result.stdout || '')
       .split('\n')
       .map((n) => n.trim())
       .filter((n) => n.startsWith('nanoclaw-'));
+    const adopted = skipNames
+      ? allNanoclaw.filter((n) => skipNames.has(n))
+      : [];
+    const orphans = skipNames
+      ? allNanoclaw.filter((n) => !skipNames.has(n))
+      : allNanoclaw;
     for (const name of orphans) {
       try {
         stopContainer(name);
       } catch {
         /* already stopped */
       }
+    }
+    if (adopted.length > 0) {
+      logger.info(
+        { count: adopted.length, names: adopted },
+        'Adopted detached containers from graceful shutdown (not killed)',
+      );
     }
     if (orphans.length > 0) {
       logger.info(

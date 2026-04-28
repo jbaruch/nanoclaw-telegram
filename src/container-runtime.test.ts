@@ -205,4 +205,93 @@ describe('cleanupOrphans', () => {
       'Stopped orphaned containers',
     );
   });
+
+  // --- skipNames (handoff) — #213 ---
+  //
+  // The new orchestrator passes a Set of names from the prior run's
+  // graceful-shutdown marker. Containers in that set are intentional
+  // handoffs and must NOT be killed; everything else is a real
+  // crash-orphan and gets stopped as before. The pre-#213 default
+  // (no skip set) is preserved — the absent / stale / corrupt marker
+  // path must fall through to "kill all" so genuine crash recovery
+  // still works.
+
+  it('skips killing containers in the handoff skip-set, kills the rest', () => {
+    mockSpawnSync.mockReturnValueOnce({
+      stdout: 'nanoclaw-adopted-1\nnanoclaw-orphan-2\nnanoclaw-adopted-3\n',
+      stderr: '',
+      status: 0,
+    });
+    const skip = new Set(['nanoclaw-adopted-1', 'nanoclaw-adopted-3']);
+
+    cleanupOrphans(skip);
+
+    // ps + ONE stop call (only the orphan).
+    expect(mockSpawnSync).toHaveBeenCalledTimes(2);
+    expect(mockSpawnSync).toHaveBeenNthCalledWith(
+      2,
+      CONTAINER_RUNTIME_BIN,
+      ['stop', '-t', '1', 'nanoclaw-orphan-2'],
+      { stdio: 'pipe', timeout: 10_000 },
+    );
+    // Both log lines fire — adopted info + orphan info.
+    expect(logger.info).toHaveBeenCalledWith(
+      { count: 2, names: ['nanoclaw-adopted-1', 'nanoclaw-adopted-3'] },
+      'Adopted detached containers from graceful shutdown (not killed)',
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      { count: 1, names: ['nanoclaw-orphan-2'] },
+      'Stopped orphaned containers',
+    );
+  });
+
+  it('logs adopted-only when every running container is in the skip set', () => {
+    mockSpawnSync.mockReturnValueOnce({
+      stdout: 'nanoclaw-a\nnanoclaw-b\n',
+      stderr: '',
+      status: 0,
+    });
+    const skip = new Set(['nanoclaw-a', 'nanoclaw-b']);
+
+    cleanupOrphans(skip);
+
+    // ps only — nothing to stop.
+    expect(mockSpawnSync).toHaveBeenCalledTimes(1);
+    expect(logger.info).toHaveBeenCalledWith(
+      { count: 2, names: ['nanoclaw-a', 'nanoclaw-b'] },
+      'Adopted detached containers from graceful shutdown (not killed)',
+    );
+    // Critically, the "Stopped orphaned containers" line MUST NOT
+    // fire when nothing was stopped — emitting it with count: 0
+    // would muddle log analysis tooling that counts kill events.
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({}),
+      'Stopped orphaned containers',
+    );
+  });
+
+  it('falls through to pre-#213 "kill all" when skipNames is undefined', () => {
+    // No marker found → orchestrator passes `undefined` → behave
+    // exactly as before. This is the crash-recovery safety net: a
+    // SIGKILL'd or hung prior orchestrator never wrote a marker, so
+    // every nanoclaw-* container it spawned is genuinely abandoned
+    // and must be cleaned up.
+    mockSpawnSync.mockReturnValueOnce({
+      stdout: 'nanoclaw-a\nnanoclaw-b\n',
+      stderr: '',
+      status: 0,
+    });
+
+    cleanupOrphans(undefined);
+
+    expect(mockSpawnSync).toHaveBeenCalledTimes(3);
+    expect(logger.info).toHaveBeenCalledWith(
+      { count: 2, names: ['nanoclaw-a', 'nanoclaw-b'] },
+      'Stopped orphaned containers',
+    );
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({}),
+      'Adopted detached containers from graceful shutdown (not killed)',
+    );
+  });
 });

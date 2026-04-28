@@ -520,4 +520,46 @@ export class GroupQueue {
       'GroupQueue shutting down (containers detached, not killed)',
     );
   }
+
+  /**
+   * Snapshot every (groupJid, sessionName) slot that currently has
+   * an active container, with the metadata the handoff marker needs
+   * (#213). Called from the orchestrator's shutdown handler before
+   * `shutdown()` runs, so the next startup can identify which
+   * `nanoclaw-*` containers are intentional handoffs vs. genuine
+   * crash orphans.
+   *
+   * Filters on the same `process && !process.killed && containerName`
+   * triple as `shutdown()` so the two views agree on what counts as
+   * "active" — a container that the queue already considers torn
+   * down would be dangerous to add to the handoff list (the new
+   * orchestrator would skip cleaning it up even though it's
+   * actually defunct).
+   */
+  getActiveContainersForHandoff(): Array<{
+    name: string;
+    groupJid: string;
+    sessionName: string;
+    groupFolder: string | null;
+  }> {
+    const out: Array<{
+      name: string;
+      groupJid: string;
+      sessionName: string;
+      groupFolder: string | null;
+    }> = [];
+    for (const [groupJid, sessions] of this.groups.entries()) {
+      for (const [sessionName, state] of sessions.entries()) {
+        if (state.process && !state.process.killed && state.containerName) {
+          out.push({
+            name: state.containerName,
+            groupJid,
+            sessionName,
+            groupFolder: state.groupFolder,
+          });
+        }
+      }
+    }
+    return out;
+  }
 }

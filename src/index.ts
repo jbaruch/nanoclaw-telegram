@@ -38,6 +38,11 @@ import {
   PROXY_BIND_HOST,
 } from './container-runtime.js';
 import {
+  markHandoffActive,
+  readAndConsumeHandoffMarker,
+  writeHandoffMarker,
+} from './handoff.js';
+import {
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -1899,7 +1904,37 @@ function recoverPendingMessages(): void {
 
 function ensureContainerSystemRunning(): void {
   ensureContainerRuntimeRunning();
-  cleanupOrphans();
+  // #213: consult the graceful-shutdown handoff marker before killing
+  // orphans. If the prior orchestrator exited cleanly (via the
+  // SIGTERM handler below), it left a list of agent containers that
+  // were still doing useful work — `cleanupOrphans` skips those and
+  // only kills the rest. Without this, every `deploy.sh` cascades
+  // 137 across every active conversation/heartbeat container, losing
+  // the in-flight turn. A marker absent / stale / corrupt falls
+  // through to the pre-#213 "kill all nanoclaw-* containers"
+  // behaviour, which is the right default for genuine crash recovery
+  // (a SIGKILL'd or hung orchestrator never wrote a marker).
+  const handoff = readAndConsumeHandoffMarker();
+  const skipNames = handoff
+    ? new Set(handoff.containers.map((c) => c.name))
+    : undefined;
+  if (handoff) {
+    logger.info(
+      {
+        shutdownAt: handoff.shutdown_at,
+        containerCount: handoff.containers.length,
+      },
+      'Found graceful-shutdown handoff marker, adopting containers',
+    );
+    // Open the spawn-collision detection window (#213 Phase A): for
+    // the next HANDOFF_TTL_MS, the spawn path checks `docker ps`
+    // before launching a new agent and logs WARN if a same-prefix
+    // container is already running. Outside the window, the check
+    // is skipped (no adopted containers can plausibly still be
+    // alive). See `src/handoff.ts` for the rationale.
+    markHandoffActive();
+  }
+  cleanupOrphans(skipNames);
 }
 
 async function main(): Promise<void> {
@@ -1925,6 +1960,24 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    // #213: snapshot active agent containers BEFORE `queue.shutdown`
+    // clears their state, so the next startup can identify them as
+    // intentional handoffs and skip the orphan-cleanup that
+    // otherwise cascades 137 across every in-flight conversation /
+    // heartbeat. Best-effort: a write failure here just means the
+    // next startup will fall through to the pre-#213 cleanup
+    // behaviour for these names — strictly worse than the new
+    // path, but no worse than today.
+    try {
+      const active = queue.getActiveContainersForHandoff();
+      writeHandoffMarker(active);
+      logger.info(
+        { count: active.length, names: active.map((c) => c.name) },
+        'Wrote graceful-shutdown handoff marker',
+      );
+    } catch (err) {
+      logger.warn({ err }, 'Failed to write handoff marker');
+    }
     stopHubitatListener();
     proxyServer.close();
     await queue.shutdown(10000);
