@@ -272,26 +272,72 @@ describe('ensureHostLogDirs', () => {
     chownSpy.mockRestore();
   });
 
-  it('rethrows non-permission errors from chown (real-defect surfacing)', () => {
-    // Mirror of the typed-catch posture in the implementation: an
-    // unexpected errno (EIO, ENOENT, …) means something is wrong that
-    // a fail-open `catch {}` would hide. The error-handling rule says
-    // surface those, don't swallow them.
+  it('tolerates any errno from chown (best-effort across the whole errno surface)', () => {
+    // Round-2 review feedback: the previous EPERM/EACCES/EROFS
+    // allowlist was too narrow. ENOENT (the dir raced away between
+    // mkdir and chown) and EIO (disk error) are both filesystem-state
+    // failures the orchestrator can't fix at startup, so they take
+    // the fail-open path. Discrimination is now "has an errno string
+    // → swallow; otherwise → propagate".
+    hostUidRef.value = 999;
+    hostGidRef.value = 10;
+    for (const code of ['EIO', 'ENOENT', 'EPERM', 'EACCES', 'EROFS']) {
+      const chownSpy = vi.spyOn(fs, 'lchownSync').mockImplementation(() => {
+        const err = new Error(code) as NodeJS.ErrnoException;
+        err.code = code;
+        throw err;
+      });
+      let result: boolean | undefined;
+      expect(() => {
+        result = ensureHostLogDirs();
+      }).not.toThrow();
+      expect(result).toBe(true);
+      chownSpy.mockRestore();
+    }
+  });
+
+  it('rethrows non-errno errors from chown (real-defect surfacing)', () => {
+    // Programmer bugs (TypeError, ReferenceError, anything without a
+    // `.code` errno string) are NOT filesystem-state failures and
+    // should not be hidden under the fail-open umbrella per the
+    // typed-catch posture in
+    // `.tessl/tiles/jbaruch/coding-policy/rules/error-handling.md`.
     hostUidRef.value = 999;
     hostGidRef.value = 10;
     const chownSpy = vi.spyOn(fs, 'lchownSync').mockImplementation(() => {
-      const err = new Error('EIO') as NodeJS.ErrnoException;
-      err.code = 'EIO';
-      throw err;
+      throw new TypeError('uid argument must be an integer');
     });
 
-    expect(() => ensureHostLogDirs()).toThrow(/EIO/);
+    expect(() => ensureHostLogDirs()).toThrow(TypeError);
     chownSpy.mockRestore();
   });
 
-  it('rethrows non-allowlisted errors from mkdirSync (real-defect surfacing)', () => {
-    // Same posture for the mkdir catch — TypeError or any unknown
-    // errno escapes, only filesystem-state errnos set ok=false.
+  it('tolerates any errno from mkdirSync (EEXIST-as-file, ENOTDIR, etc.)', () => {
+    // Same round-2 widening for the mkdir catch. Real-world cases
+    // where the previous narrow allowlist would have crashed
+    // startup: `data/host-logs` exists as a file (EEXIST), a parent
+    // path component is a file (ENOTDIR), the parent was deleted
+    // racing with us (transient ENOENT). All filesystem state, all
+    // fail-open.
+    for (const code of ['EEXIST', 'ENOTDIR', 'ENOENT', 'EIO']) {
+      const spy = vi.spyOn(fs, 'mkdirSync').mockImplementation(() => {
+        const err = new Error(code) as NodeJS.ErrnoException;
+        err.code = code;
+        throw err;
+      });
+      let result: boolean | undefined;
+      expect(() => {
+        result = ensureHostLogDirs();
+      }).not.toThrow();
+      expect(result).toBe(false);
+      spy.mockRestore();
+    }
+  });
+
+  it('rethrows non-errno errors from mkdirSync (real-defect surfacing)', () => {
+    // TypeError / ReferenceError / any error without a `.code`
+    // errno string indicates a programmer bug — NOT a fail-open
+    // case. Same posture as the chown catch.
     const spy = vi.spyOn(fs, 'mkdirSync').mockImplementation(() => {
       throw new TypeError('bad path argument');
     });

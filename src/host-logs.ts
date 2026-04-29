@@ -105,19 +105,17 @@ export function ensureHostLogDirs(): boolean {
     try {
       fs.mkdirSync(dir, { recursive: true });
     } catch (err: unknown) {
-      // Allowlist filesystem-state errnos that legitimately mean
-      // "host can't host this directory right now" (read-only mount,
-      // out of space, permission). Only swallow those expected fs
-      // errno codes; rethrow everything else. Unexpected errors
-      // (e.g. TypeError from a malformed path) are programmer bugs
-      // and should not be hidden under the fail-open umbrella.
+      // Discriminate by `err.code`: anything with an errno string
+      // (EACCES, EROFS, ENOSPC, EPERM, EEXIST when the path exists as
+      // a file, ENOTDIR when a parent component is a file, transient
+      // ENOENT, EIO, etc.) is a filesystem-state failure — the
+      // fail-open contract holds and the caller proceeds without
+      // host-logs visibility. Only errors WITHOUT a `code` (TypeError
+      // from a malformed argument, ReferenceError, etc.) indicate a
+      // programmer bug and propagate per the typed-catch posture in
+      // `.tessl/tiles/jbaruch/coding-policy/rules/error-handling.md`.
       const code = (err as NodeJS.ErrnoException)?.code;
-      if (
-        code === 'EACCES' ||
-        code === 'EROFS' ||
-        code === 'ENOSPC' ||
-        code === 'EPERM'
-      ) {
+      if (typeof code === 'string') {
         ok = false;
         continue;
       }
@@ -143,21 +141,24 @@ export function ensureHostLogDirs(): boolean {
  * mkdir and chown; `lchownSync` operates on the link itself and
  * keeps that escalation path closed.
  *
- * Permission-class failures are tolerated because the orchestrator
- * may run without CAP_CHOWN on some bind targets (user namespaces,
- * restricted mounts). A chown that didn't take just means the
- * directory keeps orchestrator-container ownership and the host-side
- * writer hits the same "fail open with a warning" path it would have
- * hit before this fix. Anything outside the permission-class
- * allowlist (ENOENT after we just mkdir'd, EIO, etc.) is a real
- * defect and is rethrown to the caller.
+ * Filesystem failures are tolerated because the orchestrator may run
+ * without CAP_CHOWN on some bind targets (user namespaces, restricted
+ * mounts), and the dir can race away between mkdir and chown
+ * (ENOENT). A chown that didn't take just means the directory keeps
+ * orchestrator-container ownership and the host-side writer hits the
+ * same "fail open with a warning" path it would have hit before this
+ * fix. The catch discriminates by `err.code`: any errno string is a
+ * filesystem-state error and is swallowed; anything without a code
+ * (TypeError from a malformed argument, etc.) is a programmer bug
+ * and propagates.
  *
  * Negative uid/gid values are rejected at the validation gate:
- * `lchownSync(-1, -1)` throws `RangeError`/`ERR_OUT_OF_RANGE`, which
- * isn't in the permission-class allowlist below and would crash
- * startup if it reached the catch — defeating the fail-open contract.
- * Filtering to non-negative integers up front keeps a misconfigured
- * `HOST_UID=-1` from taking the orchestrator down.
+ * `lchownSync(-1, -1)` throws `RangeError` with `code: ERR_OUT_OF_RANGE`,
+ * which would technically pass the errno-string check below but
+ * indicates a real misconfiguration that we'd rather skip cleanly
+ * than swallow as a logged-elsewhere failure. Filtering to
+ * non-negative integers up front keeps a misconfigured
+ * `HOST_UID=-1` from taking the orchestrator down silently.
  */
 function chownToHostUser(dir: string): void {
   if (HOST_UID === undefined || HOST_GID === undefined) return;
@@ -168,7 +169,7 @@ function chownToHostUser(dir: string): void {
     fs.lchownSync(dir, HOST_UID, HOST_GID);
   } catch (err: unknown) {
     const code = (err as NodeJS.ErrnoException)?.code;
-    if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EROFS') throw err;
+    if (typeof code !== 'string') throw err;
   }
 }
 
