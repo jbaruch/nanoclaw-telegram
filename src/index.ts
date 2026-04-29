@@ -2536,7 +2536,23 @@ async function main(): Promise<void> {
           // restart, otherwise they keep serving requests from the
           // skills/.tessl/ snapshot they copied at spawn time until
           // their 30-min idle timeout (issue #64).
-          const closed = queue.closeAllActiveContainers();
+          //
+          // Wrapped because `closeAllActiveContainers()` rethrows
+          // unexpected (non-fs) errors by contract — without this guard,
+          // a programming bug surfacing through that path would propagate
+          // out of the `setInterval` callback as an uncaught exception
+          // and crash the orchestrator. Sessions stay cleared either way;
+          // we degrade to "containers will pick up new tiles on idle
+          // timeout" rather than taking the process down.
+          let closed = 0;
+          try {
+            closed = queue.closeAllActiveContainers();
+          } catch (closeErr) {
+            logger.error(
+              { err: closeErr, sessionsCleared: cleared },
+              'closeAllActiveContainers threw an unexpected error during periodic tessl update — sessions still cleared, but live containers will not respawn until idle timeout',
+            );
+          }
           logger.info(
             {
               sessionsCleared: cleared,

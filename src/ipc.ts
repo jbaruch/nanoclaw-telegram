@@ -3020,20 +3020,47 @@ export async function processTaskIpc(
               // fires (issue #64). The two operations are paired: clear
               // the on-disk session state AND signal the live containers
               // so neither lingers on stale state.
-              const closed = deps.closeAllActiveContainers();
+              //
+              // Guarded because `closeAllActiveContainers()` rethrows
+              // unexpected (non-fs) errors by contract. Without the
+              // guard, a programming bug would skip the result-file
+              // write below and leave the IPC requester hanging without
+              // a structured payload. On failure we still write a
+              // partial-success JSON so the caller can distinguish
+              // "containers signaled" from "sessions cleared but
+              // signaling failed."
+              let closed = 0;
+              let closeErr: unknown = null;
+              try {
+                closed = deps.closeAllActiveContainers();
+              } catch (e) {
+                closeErr = e;
+                logger.error(
+                  { err: e, sourceGroup, sessionsCleared: cleared },
+                  'closeAllActiveContainers threw an unexpected error during tessl_update — sessions still cleared, but live containers will not respawn until idle timeout',
+                );
+              }
               logger.info(
                 {
                   sourceGroup,
                   sessionsCleared: cleared,
                   containersClosed: closed,
+                  closeError: closeErr ? String(closeErr) : undefined,
                 },
                 'tessl_update found new tiles — sessions cleared and running containers signaled to restart',
               );
               fs.writeFileSync(
                 tesslResultPath,
-                JSON.stringify({
-                  stdout: `${output}\n\nSessions cleared: ${cleared}\nContainers signaled to restart: ${closed}`,
-                }),
+                JSON.stringify(
+                  closeErr
+                    ? {
+                        stdout: `${output}\n\nSessions cleared: ${cleared}\nContainers signaled to restart: ${closed}`,
+                        warning: `closeAllActiveContainers failed: ${String(closeErr)} — running containers will pick up new tiles on idle timeout (~30 min) instead of immediately`,
+                      }
+                    : {
+                        stdout: `${output}\n\nSessions cleared: ${cleared}\nContainers signaled to restart: ${closed}`,
+                      },
+                ),
               );
             } else {
               logger.info(
