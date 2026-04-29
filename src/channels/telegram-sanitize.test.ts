@@ -472,3 +472,138 @@ describe('sanitizeTelegramHtml — quote handling in content vs attributes', () 
     );
   });
 });
+
+// --- Issue #279: Phase 2a (link) output must survive Phase 2c (bold) /
+// Phase 2d (italic) / Phase 2e (heading) captures without being
+// HTML-escaped. Pre-fix, a `**[label](url)**` input produced
+// `<b>&lt;a href=...&gt;label&lt;/a&gt;</b>` because Phase 2c's capture
+// HTML-escaped the freshly-emitted `<a>` tag. Same shape for inline
+// code wrapped in bold / italic / heading. The fix wraps Phase 2a and
+// Phase 2b output in `protect()` placeholders so subsequent captures
+// see opaque NUL bytes (no `<` / `>` to escape).
+
+describe('sanitizeTelegramHtml — Phase 2 link/code output protected from later captures (#279)', () => {
+  it('**[label](url)** renders as bold link, not HTML-escaped <a> markup', () => {
+    expect(
+      sanitizeTelegramHtml(
+        '**[#271](https://github.com/jbaruch/nanoclaw/issues/271)**',
+      ),
+    ).toBe(
+      '<b><a href="https://github.com/jbaruch/nanoclaw/issues/271">#271</a></b>',
+    );
+  });
+
+  it('*[label](url)* renders as italic link', () => {
+    expect(sanitizeTelegramHtml('*[Docs](https://example.com)*')).toBe(
+      '<i><a href="https://example.com">Docs</a></i>',
+    );
+  });
+
+  it('# heading containing [label](url) renders the link inside <b>', () => {
+    expect(
+      sanitizeTelegramHtml('# See [Docs](https://example.com) for details'),
+    ).toBe('<b>See <a href="https://example.com">Docs</a> for details</b>');
+  });
+
+  it('**inline `code`** renders as bold inline-code, not HTML-escaped <code>', () => {
+    expect(sanitizeTelegramHtml('**run `npm test` now**')).toBe(
+      '<b>run <code>npm test</code> now</b>',
+    );
+  });
+
+  it('*inline `code`* renders as italic inline-code', () => {
+    expect(sanitizeTelegramHtml('*see `package.json` here*')).toBe(
+      '<i>see <code>package.json</code> here</i>',
+    );
+  });
+
+  it('# heading containing `code` renders the code inside <b>', () => {
+    expect(sanitizeTelegramHtml('# Run `npm test` to verify')).toBe(
+      '<b>Run <code>npm test</code> to verify</b>',
+    );
+  });
+
+  it('mixed bold link + bold inline code in one message', () => {
+    expect(
+      sanitizeTelegramHtml(
+        '**[ticket](https://x.test/T-1)** runs **`npm test`**',
+      ),
+    ).toBe(
+      '<b><a href="https://x.test/T-1">ticket</a></b> runs <b><code>npm test</code></b>',
+    );
+  });
+});
+
+// --- Issue #283: idempotency contract. `sanitize(sanitize(x))` must
+// equal `sanitize(x)` for every fixture, including malformed HTML
+// inputs (where the first pass normalizes and the second pass is a
+// no-op on the already-normalized output).
+
+describe('sanitizeTelegramHtml — idempotency round-trip (#283)', () => {
+  // Fixtures span every Phase: plain prose, Markdown captures, protected
+  // spans, fenced code, agent entities, stray tags (with and without
+  // underscores), Phase-2 link/code in nested captures, and broken HTML
+  // inputs that Phase 1's regexes can't match cleanly.
+  const fixtures: Array<[string, string]> = [
+    ['plain prose', 'no formatting at all here'],
+    ['bold + italic', '**bold** and *italic* in one line'],
+    ['link inside bold', '**[#271](https://example.com/issues/271)**'],
+    ['code inside italic', '*see `npm test` for details*'],
+    ['heading with link', '# See [Docs](https://example.com)'],
+    ['agent entity in bold', '**Baruch&apos;s rules**'],
+    ['stray <N> in code', 'a `<N>` b'],
+    ['underscored stray tag', '<tool_use_error>x</tool_use_error>'],
+    ['protected <code> in bold', '**pre: <code>x</code> done**'],
+    ['protected URL in bold', '**visit https://example.com now**'],
+    ['fenced code with markers', '```\n**not bold**\n__init__\n```'],
+    ['unclosed <a> tag', '<a href="https://example.com">text'],
+    ['unclosed <b> tag', '<b>partial bold'],
+    ['broken nested HTML', '<b>open <code>x</b></code>'],
+    ['mixed entity-encoded + raw', 'a &lt;tag&gt; and <real>tag</real>'],
+    ['top-level <analysis>', '<analysis>reasoning</analysis>\n_emphasis_'],
+    [
+      'long realistic message',
+      '# Status\n\n- **fix**: see [#271](https://x.test/271)\n- _note_: `npm test` passes\n\nDetails on `<tool_use_error>` shape.',
+    ],
+  ];
+
+  for (const [label, input] of fixtures) {
+    it(`is idempotent on: ${label}`, () => {
+      const once = sanitizeTelegramHtml(input);
+      const twice = sanitizeTelegramHtml(once);
+      expect(twice).toBe(once);
+    });
+  }
+});
+
+// --- Issue #281: regression coverage for the four divergence cases
+// the Python skill sanitizers used to handle separately. These all
+// pass through the host TS sanitizer correctly today; pinning them
+// here so the host stays a strict superset and the Python sanitizers
+// can be retired tile-side without behavioural loss.
+
+describe('sanitizeTelegramHtml — superset coverage for retired Python paths (#281)', () => {
+  it('underscored stray tag is escaped (Python missed `_` in tag-name char class)', () => {
+    expect(sanitizeTelegramHtml('<delivery_id>abc</delivery_id>')).toBe(
+      '&lt;delivery_id&gt;abc&lt;/delivery_id&gt;',
+    );
+  });
+
+  it('agent &apos; / &quot; entities decode in plain prose (Python had no decode pass)', () => {
+    expect(sanitizeTelegramHtml('Baruch&apos;s &quot;office&quot;')).toBe(
+      'Baruch\'s "office"',
+    );
+  });
+
+  it('protected `<code>` survives nested Markdown capture (Python re-matched inner content)', () => {
+    expect(sanitizeTelegramHtml('**pre <code>x</code> post**')).toBe(
+      '<b>pre <code>x</code> post</b>',
+    );
+  });
+
+  it('top-level stray tag is escaped, not restored raw (Python restored verbatim, broke parse)', () => {
+    expect(sanitizeTelegramHtml('<bar>content</bar>')).toBe(
+      '&lt;bar&gt;content&lt;/bar&gt;',
+    );
+  });
+});

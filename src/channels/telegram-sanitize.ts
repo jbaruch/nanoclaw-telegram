@@ -281,16 +281,27 @@ export function sanitizeTelegramHtml(text: string): string {
   // 2a. Links — url may be a placeholder from Phase 1c (protected URL),
   // or a mix of protected URL prefix + stray-tag suffix when the href
   // contains `<`/`>` that broke Phase 1c's URL regex.
+  //
+  // The emitted `<a>` tag is wrapped in a `protect()` placeholder so a
+  // later Phase 2 capture (bold / italic / heading) doesn't HTML-escape
+  // the `<` and `>` of the freshly-emitted tag. Without this,
+  // `**[#271](url)**` produced `<b>&lt;a href=...&gt;#271&lt;/a&gt;</b>`
+  // — Phase 2c's bold capture saw the raw `<a>` as content and escaped
+  // it, Telegram rendered the literal `<a href=...>` text. See
+  // jbaruch/nanoclaw#279 for the production sighting (msg 6231).
   out = out.replace(
     /\[([^\]]+)\]\(([^)]+)\)/g,
     (_m, txt: string, url: string) =>
-      `<a href="${escapeCapturedAttr(url)}">${escapeCapturedContent(txt)}</a>`,
+      protect(
+        `<a href="${escapeCapturedAttr(url)}">${escapeCapturedContent(txt)}</a>`,
+      ),
   );
 
   // 2b. Inline code — before bold/italic so backticked content isn't mangled.
-  out = out.replace(
-    /`([^`\n]+)`/g,
-    (_m, code: string) => `<code>${escapeCapturedContent(code)}</code>`,
+  // Wrapped in `protect()` for the same reason as Phase 2a: `**\`x\`**` would
+  // otherwise have the freshly-emitted `<code>` tag HTML-escaped by Phase 2c.
+  out = out.replace(/`([^`\n]+)`/g, (_m, code: string) =>
+    protect(`<code>${escapeCapturedContent(code)}</code>`),
   );
 
   // 2c. Bold: **x** or __x__
@@ -347,7 +358,22 @@ export function sanitizeTelegramHtml(text: string): string {
   // correctly. Root cause of jbaruch/nanoclaw#81's 2026-04-19
   // recurrence — heartbeat emitted Claude-reasoning wrappers
   // (`<analysis>`) at the top of its reply text.
-  out = out.replace(PH_RE, resolveFrom(placeholders));
+  // Recursive expansion: a `protect()` value may itself contain a
+  // placeholder reference (Phase 2a's link wraps a Phase 1c URL
+  // placeholder; Phase 2b's code may wrap a Phase 1a span placeholder).
+  // A single-pass `String.prototype.replace` doesn't re-scan its own
+  // output, so without recursion the inner reference leaks to the
+  // user as raw NUL bytes — see jbaruch/nanoclaw#279. Safe by
+  // construction: every emit gets index `placeholders.length` and
+  // can only reference strictly LOWER indices, so the resolution
+  // tree is finite and acyclic.
+  const expandProtect = (s: string): string =>
+    s.replace(PH_RE, (match, idx: string): string => {
+      const n = Number(idx);
+      if (n < 0 || n >= placeholders.length) return match;
+      return expandProtect(placeholders[n]);
+    });
+  out = expandProtect(out);
   out = out.replace(PH_STRAY_RE, (_m, idx: string): string => {
     const n = Number(idx);
     return n >= 0 && n < strayPlaceholders.length

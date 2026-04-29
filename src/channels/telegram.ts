@@ -72,27 +72,54 @@ async function sendTelegramMessage(
     );
     return msg.message_id;
   } catch (err) {
-    // Fallback: HTML parsing failed — send the ORIGINAL text without
-    // parse_mode. Sending `sanitized` here would render raw `<b>…</b>`
-    // tags literally to the user, which is strictly worse than the raw
-    // Markdown the agent produced.
+    // Fallback: HTML parsing failed. The user-facing send ships a
+    // marked-degraded version (raw text prefixed with a visible warning)
+    // so the user knows the formatting they're seeing is a fallback,
+    // not the agent's intent. Pre-fix, the fallback shipped the
+    // ORIGINAL `text` silently — a sanitizer bug that produced invalid
+    // HTML, 400'd, and fell back was invisible to the operator because
+    // the user just saw raw Markdown that LOOKED LIKE a hook didn't
+    // fire. See jbaruch/nanoclaw#278 (msg 6240, the audit-report
+    // message itself).
     //
-    // Logged at WARN (not debug) so production info-level logs capture
-    // this: when the fallback fires the user sees raw Markdown, which is
-    // a user-visible symptom we want visible without flipping log level.
-    // `rawPreview` identifies the actual text delivered to Telegram.
+    // The WARN log carries failure metadata only — `err`, `chatId`,
+    // and lengths. Zero user content reaches the log sink:
+    // `jbaruch/coding-policy: no-secrets` says "Never log secrets —
+    // not at any log level" and "Sanitize or redact sensitive values
+    // before they reach any logging or monitoring system." User text
+    // can carry pasted tokens, third-party API responses surfaced via
+    // tool results, or other credentials, and a 200-char slice
+    // doesn't sanitize them. Operators correlate the WARN line with
+    // a specific message via `chatId` plus the timestamp and pull
+    // the actual text from the source (chat history, DB) for repro.
+    // The 400's `err` object already carries the byte offset and
+    // expected/found tag from Telegram (e.g. "Unmatched end tag at
+    // byte offset 1049, expected </b>, found </code>") so phase
+    // diagnosis often doesn't need the input at all.
+    //
+    // For full-body in-the-moment repro, dev/CI flips
+    // `DEV_NO_HTML_FALLBACK=1` and the original 400 surfaces
+    // directly — the operator sees the actual sanitizer output via
+    // the throwing path, without touching the log sink. Production
+    // keeps the fallback for user-friendliness.
     logger.warn(
       {
         err,
         chatId,
         rawLen: text.length,
-        rawPreview: text.slice(0, 200),
-        sanitizedPreview: sanitized.slice(0, 200),
+        sanitizedLen: sanitized.length,
       },
-      '[send] HTML send failed, falling back to plain text (user will see raw Markdown)',
+      '[send] HTML send failed, falling back to plain text (user will see raw Markdown with warning prefix)',
     );
+    if (process.env.DEV_NO_HTML_FALLBACK === '1') throw err;
+    // Truncate the body so the prefix never pushes the fallback over
+    // Telegram's 4096-char message limit — a recoverable HTML-parse
+    // error becoming a "fallback also failed" lost message would be
+    // strictly worse than the original symptom.
+    const prefix = '⚠️ formatting failed; raw text below\n\n';
+    const degraded = `${prefix}${text.slice(0, MAX_LENGTH - prefix.length)}`;
     try {
-      const msg = await api.sendMessage(chatId, text, options);
+      const msg = await api.sendMessage(chatId, degraded, options);
       logger.warn(
         { chatId, messageId: msg.message_id },
         '[send] Plain-text fallback OK — DB row will still be written by the caller',
@@ -106,7 +133,7 @@ async function sendTelegramMessage(
         {
           err: fallbackErr,
           chatId,
-          rawPreview: text.slice(0, 200),
+          rawLen: text.length,
           originalHtmlErr: err,
         },
         '[send] Both HTML and plain-text sends failed — message may be lost',
@@ -117,6 +144,12 @@ async function sendTelegramMessage(
 }
 
 const MAX_LENGTH = 4096;
+// Telegram Bot API caps `sendDocument` (and other media) caption length
+// at 1024 chars. Used by `sendFile`'s degraded-fallback path to size
+// the truncation so the prefix doesn't push an otherwise-valid caption
+// over the limit and turn a recoverable HTML-parse error into a
+// "fallback also failed" lost attachment.
+const MAX_CAPTION_LENGTH = 1024;
 
 // Slack-style shortcode → Unicode mapping for the 73 Telegram-supported
 // reactions (Bot API 7.x). Covers every entry in
@@ -1448,18 +1481,41 @@ export class TelegramChannel implements Channel {
         // API traffic on transient/network failures. Let the error
         // bubble to the outer catch/logger instead.
         if (options.parse_mode !== 'HTML') throw err;
-        // Mirror sendTelegramMessage's fallback: if HTML parse fails on the
-        // caption, resend with the ORIGINAL caption and no parse_mode. Raw
-        // text is strictly better than literal `<b>…</b>` tags in the UI.
-        logger.debug(
-          { err },
-          'HTML caption parse failed, falling back to plain caption',
+        // Mirror sendTelegramMessage's fallback hardening (#278).
+        // Metadata only — no caption content reaches the log sink:
+        // captions are user input, `jbaruch/coding-policy:
+        // no-secrets` says "Never log secrets — not at any log
+        // level" and requires sanitize-or-redact, and a preview
+        // slice doesn't sanitize. Marked-degraded caption
+        // (`⚠️ formatting failed; raw caption below…`) so the user
+        // knows they're seeing a fallback rather than the agent's
+        // intended formatting; `DEV_NO_HTML_FALLBACK=1` short-
+        // circuits the fallback in dev/CI so the actual 400 surfaces
+        // directly.
+        logger.warn(
+          {
+            err,
+            jid,
+            filePath,
+            rawCaptionLen: caption?.length,
+            sanitizedCaptionLen: sanitizedCaption?.length,
+          },
+          'HTML caption parse failed, falling back to plain caption (user will see raw Markdown with warning prefix)',
         );
+        if (process.env.DEV_NO_HTML_FALLBACK === '1') throw err;
         const plainOptions: {
           caption?: string;
           reply_parameters?: { message_id: number };
         } = {};
-        if (caption) plainOptions.caption = caption;
+        if (caption) {
+          // Truncate so the prefix never pushes the caption past
+          // Telegram's 1024-char `sendDocument` caption limit. A
+          // recoverable HTML-parse error becoming a "fallback also
+          // failed" lost message would be strictly worse than the
+          // original symptom.
+          const captionPrefix = '⚠️ formatting failed; raw caption below\n\n';
+          plainOptions.caption = `${captionPrefix}${caption.slice(0, MAX_CAPTION_LENGTH - captionPrefix.length)}`;
+        }
         if (replyToMessageId && safeReplyToForChat(replyToMessageId, jid)) {
           plainOptions.reply_parameters = {
             message_id: parseInt(replyToMessageId, 10),

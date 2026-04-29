@@ -911,6 +911,136 @@ describe('TelegramChannel', () => {
       ).resolves.toBeUndefined();
     });
 
+    it('marks the plain-text fallback with a visible degraded prefix (#278)', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      // First call (HTML attempt) rejects; second call (plain fallback) resolves.
+      // The fallback caption MUST carry a user-visible warning so the
+      // user knows they're seeing a degraded rendering, not the agent's
+      // intended formatting.
+      currentBot()
+        .api.sendMessage.mockRejectedValueOnce(
+          new Error("can't parse entities"),
+        )
+        .mockResolvedValueOnce({ message_id: 9001 });
+
+      await channel.sendMessage('tg:100200300', 'feeling _great_ today');
+
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(2);
+      const fallbackArgs = currentBot().api.sendMessage.mock.calls[1];
+      expect(fallbackArgs[1]).toBe(
+        '⚠️ formatting failed; raw text below\n\nfeeling _great_ today',
+      );
+      // Fallback options must NOT include parse_mode — that's what
+      // turns raw markdown into "literal `<b>…</b>` tags rendered" if
+      // smuggled through.
+      expect(fallbackArgs[2]?.parse_mode).toBeUndefined();
+    });
+
+    it('does not attempt plain-text fallback when DEV_NO_HTML_FALLBACK=1 (#278)', async () => {
+      const prev = process.env.DEV_NO_HTML_FALLBACK;
+      process.env.DEV_NO_HTML_FALLBACK = '1';
+      try {
+        const opts = createTestOpts();
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+
+        currentBot().api.sendMessage.mockRejectedValueOnce(
+          new Error("can't parse entities"),
+        );
+
+        // Outer sendMessage swallows the throw, but the inner fallback
+        // must NOT issue a second sendMessage when the dev flag is set
+        // — the operator wants the actual 400 to surface in CI logs,
+        // not a successful degraded fallback masking the bug.
+        await channel.sendMessage('tg:100200300', 'feeling _great_ today');
+
+        expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
+      } finally {
+        if (prev === undefined) delete process.env.DEV_NO_HTML_FALLBACK;
+        else process.env.DEV_NO_HTML_FALLBACK = prev;
+      }
+    });
+
+    it('truncates the degraded-fallback body so the prefix never overflows MAX_LENGTH (#278)', async () => {
+      // Pre-fix, prepending the warning prefix to a near-MAX_LENGTH
+      // chunk could push it past Telegram's 4096-char message limit
+      // and turn a recoverable HTML-parse error into a "fallback
+      // also failed" lost message — strictly worse than the original
+      // symptom. The fallback must always come in at or below
+      // MAX_LENGTH.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      currentBot()
+        .api.sendMessage.mockRejectedValueOnce(
+          new Error("can't parse entities"),
+        )
+        .mockResolvedValueOnce({ message_id: 9100 });
+
+      // Single chunk exactly at MAX_LENGTH (4096). No paragraph or
+      // newline boundaries so splitMessage doesn't pre-chunk it
+      // smaller — the whole 4096 chars reach sendTelegramMessage as
+      // one call.
+      const huge = 'z'.repeat(4096);
+      await channel.sendMessage('tg:100200300', huge);
+
+      const fallbackText = currentBot().api.sendMessage.mock
+        .calls[1][1] as string;
+      expect(fallbackText.length).toBeLessThanOrEqual(4096);
+      expect(
+        fallbackText.startsWith('⚠️ formatting failed; raw text below\n\n'),
+      ).toBe(true);
+    });
+
+    it('keeps the fallback WARN log content-free — no user text in any field (#278)', async () => {
+      // `jbaruch/coding-policy: no-secrets` is explicit: "Never log
+      // secrets — not at any log level" and "Sanitize or redact
+      // sensitive values before they reach any logging or monitoring
+      // system." A preview slice doesn't sanitize — a token can fit
+      // in 200 chars. The fallback WARN/ERROR contexts ship metadata
+      // only (err, chatId, lengths). Operators correlate by chatId +
+      // timestamp and pull the actual text from chat history / DB
+      // for repro; the 400's err object already carries Telegram's
+      // byte-offset diagnostic. Full-body in-the-moment repro goes
+      // through DEV_NO_HTML_FALLBACK=1 instead.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      currentBot()
+        .api.sendMessage.mockRejectedValueOnce(
+          new Error("can't parse entities"),
+        )
+        .mockResolvedValueOnce({ message_id: 9101 });
+
+      const sensitive = 'token=AKIA' + 'X'.repeat(300) + ' please format this';
+      await channel.sendMessage('tg:100200300', sensitive);
+
+      const warnCalls = vi.mocked(logger.warn).mock.calls;
+      const fallbackWarn = warnCalls.find(
+        ([, msg]) =>
+          typeof msg === 'string' && msg.startsWith('[send] HTML send failed'),
+      );
+      expect(fallbackWarn).toBeDefined();
+      const ctx = fallbackWarn![0] as Record<string, unknown>;
+      // No user-content fields whatsoever — neither full bodies nor
+      // truncated previews. Only metadata.
+      expect(ctx.rawText).toBeUndefined();
+      expect(ctx.sanitizedHtml).toBeUndefined();
+      expect(ctx.rawPreview).toBeUndefined();
+      expect(ctx.sanitizedPreview).toBeUndefined();
+      expect(ctx.rawLen).toBe(sensitive.length);
+      // Defensive: serialize the entire log context and confirm the
+      // sentinel substring from the input does NOT appear anywhere
+      // — catches future drift where someone re-introduces a
+      // content field with a name we didn't think to negate above.
+      expect(JSON.stringify(ctx)).not.toContain('AKIA');
+    });
+
     it('does nothing when bot is not initialized', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
@@ -1101,13 +1231,71 @@ describe('TelegramChannel', () => {
       );
 
       expect(currentBot().api.sendDocument).toHaveBeenCalledTimes(2);
-      // Second call sends the ORIGINAL (pre-sanitize) caption with no
-      // parse_mode — so a broken HTML-encoding edge case can't block a
-      // file delivery; the worst case is literal markdown, never a
-      // dropped attachment.
+      // Second call sends the ORIGINAL (pre-sanitize) caption with a
+      // user-visible degraded-fallback prefix (#278) and no
+      // parse_mode — the user knows this is a fallback rendering, not
+      // the agent's intended formatting, and the operator's WARN log
+      // line correlates with a visible breadcrumb in the chat.
       const plainOptions = currentBot().api.sendDocument.mock.calls[1][2];
       expect(plainOptions.parse_mode).toBeUndefined();
-      expect(plainOptions.caption).toBe('feeling _great_ today');
+      expect(plainOptions.caption).toBe(
+        '⚠️ formatting failed; raw caption below\n\nfeeling _great_ today',
+      );
+    });
+
+    it('does not attempt plain-caption fallback when DEV_NO_HTML_FALLBACK=1 (#278)', async () => {
+      const prev = process.env.DEV_NO_HTML_FALLBACK;
+      process.env.DEV_NO_HTML_FALLBACK = '1';
+      try {
+        const opts = createTestOpts();
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+
+        currentBot().api.sendDocument.mockRejectedValueOnce(
+          new Error("can't parse entities"),
+        );
+
+        // The outer try/catch in sendFile still swallows so no throw at
+        // the channel boundary, but the inner fallback must NOT issue a
+        // second sendDocument when the dev flag is set.
+        await channel.sendFile(
+          'tg:100200300',
+          '/tmp/nanoclaw-test.png',
+          'feeling _great_ today',
+        );
+
+        expect(currentBot().api.sendDocument).toHaveBeenCalledTimes(1);
+      } finally {
+        if (prev === undefined) delete process.env.DEV_NO_HTML_FALLBACK;
+        else process.env.DEV_NO_HTML_FALLBACK = prev;
+      }
+    });
+
+    it('truncates the degraded caption so the prefix never overflows MAX_CAPTION_LENGTH (#278)', async () => {
+      // Telegram caps `sendDocument` captions at 1024 chars. Pre-fix,
+      // prepending the warning prefix to a near-1024 caption could
+      // push it over the cap and turn a recoverable HTML-parse error
+      // into a "fallback also failed" lost attachment.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      currentBot()
+        .api.sendDocument.mockRejectedValueOnce(
+          new Error("can't parse entities"),
+        )
+        .mockResolvedValueOnce({ message_id: 9200 });
+
+      const huge = 'q'.repeat(1024);
+      await channel.sendFile('tg:100200300', '/tmp/nanoclaw-test.png', huge);
+
+      const fallbackOpts = currentBot().api.sendDocument.mock.calls[1][2];
+      expect(fallbackOpts.caption.length).toBeLessThanOrEqual(1024);
+      expect(
+        fallbackOpts.caption.startsWith(
+          '⚠️ formatting failed; raw caption below\n\n',
+        ),
+      ).toBe(true);
     });
 
     it('does not retry sendDocument when no caption was provided', async () => {
