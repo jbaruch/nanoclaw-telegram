@@ -73,6 +73,43 @@ describe('decideReactFirst', () => {
       }),
     ).toEqual({ react: false, skippedBy: 'scheduled-task' });
   });
+
+  // #289 — addressed-ness gate. The orchestrator resolves
+  // `addressedToUs` from isMain / 1:1-DM / trigger-match /
+  // reply-to-our-bot and pipes it through ContainerInput.
+  it('skips when the orchestrator marks the inbound not-addressed', () => {
+    expect(
+      decideReactFirst({ ...baseGate, addressedToUs: false }),
+    ).toEqual({ react: false, skippedBy: 'not-addressed' });
+  });
+
+  it('reacts when the orchestrator marks the inbound addressed', () => {
+    expect(
+      decideReactFirst({ ...baseGate, addressedToUs: true }),
+    ).toEqual({ react: true });
+  });
+
+  it('treats undefined addressedToUs as "no signal" and falls through to react', () => {
+    // Legacy entry points (or paths that don't compute the flag)
+    // should not regress the historical default. Channel-routed
+    // inbounds — the path that produced the original leak — always
+    // set the flag explicitly.
+    expect(
+      decideReactFirst({ ...baseGate, addressedToUs: undefined }),
+    ).toEqual({ react: true });
+  });
+
+  it('subagent gate beats not-addressed gate', () => {
+    // Subagent skip is more semantically useful for triage than
+    // addressed-ness when both apply.
+    expect(
+      decideReactFirst({
+        ...baseGate,
+        isSubagent: true,
+        addressedToUs: false,
+      }),
+    ).toEqual({ react: false, skippedBy: 'subagent' });
+  });
 });
 
 describe('REACT_FIRST_DEFAULT_EMOJI', () => {

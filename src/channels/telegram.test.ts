@@ -1582,9 +1582,16 @@ describe('TelegramChannel', () => {
     });
   });
 
-  // --- Trigger gate (#289) ---
+  // --- Observer-bookkeeping gate (#289) ---
+  //
+  // Post-pivot architecture: telegram.ts NEVER fires 👀 itself —
+  // that lives in the agent-runner's react-first hook now (where
+  // firing the IPC IS proof of liveness; pre-firing from the host
+  // would lie during distress modes). The host-side gate ONLY
+  // governs `noteLatestUserMessage`, so the observer can correlate
+  // progress emojis to the right inbound when the agent commits.
 
-  describe('trigger gate', () => {
+  describe('observer-bookkeeping gate', () => {
     function makeRegisteredGroups(group: Record<string, unknown>) {
       return vi.fn(() => ({
         'tg:100200300': {
@@ -1597,7 +1604,7 @@ describe('TelegramChannel', () => {
       }));
     }
 
-    it('main group: 👀 fires regardless of trigger match', async () => {
+    it('main group: notes every inbound regardless of trigger match', async () => {
       const opts = createTestOpts({
         registeredGroups: makeRegisteredGroups({ isMain: true }),
       });
@@ -1609,18 +1616,19 @@ describe('TelegramChannel', () => {
 
       await triggerTextMessage(createTextCtx({ text: 'random chatter' }));
 
-      expect(reactSpy).toHaveBeenCalledWith('tg:100200300', '1', '👀');
+      // Host never fires 👀 from the message handler post-pivot —
+      // the agent-runner owns that signal.
+      expect(reactSpy).not.toHaveBeenCalled();
       expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
         'tg:100200300',
         '1',
       );
     });
 
-    it('trusted + requires_trigger: no 👀 and no observer note when trigger absent', async () => {
+    it('non-main group, trigger absent: no observer note', async () => {
       const opts = createTestOpts({
         registeredGroups: makeRegisteredGroups({
           containerConfig: { trusted: true },
-          requiresTrigger: true,
         }),
       });
       const channel = new TelegramChannel('test-token', opts);
@@ -1637,11 +1645,10 @@ describe('TelegramChannel', () => {
       expect(noteLatestUserMessageMock).not.toHaveBeenCalled();
     });
 
-    it('trusted + requires_trigger: 👀 fires when trigger word matches', async () => {
+    it('non-main group: notes when trigger word matches', async () => {
       const opts = createTestOpts({
         registeredGroups: makeRegisteredGroups({
           containerConfig: { trusted: true },
-          requiresTrigger: true,
         }),
       });
       const channel = new TelegramChannel('test-token', opts);
@@ -1654,18 +1661,17 @@ describe('TelegramChannel', () => {
         createTextCtx({ text: '@Andy what time is it?' }),
       );
 
-      expect(reactSpy).toHaveBeenCalledWith('tg:100200300', '1', '👀');
+      expect(reactSpy).not.toHaveBeenCalled();
       expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
         'tg:100200300',
         '1',
       );
     });
 
-    it('trusted + requires_trigger: 👀 fires when reply targets OUR bot', async () => {
+    it('non-main group: notes when reply targets OUR bot', async () => {
       const opts = createTestOpts({
         registeredGroups: makeRegisteredGroups({
           containerConfig: { trusted: true },
-          requiresTrigger: true,
         }),
       });
       const channel = new TelegramChannel('test-token', opts);
@@ -1689,18 +1695,17 @@ describe('TelegramChannel', () => {
       };
       await triggerTextMessage(ctx);
 
-      expect(reactSpy).toHaveBeenCalledWith('tg:100200300', '1', '👀');
+      expect(reactSpy).not.toHaveBeenCalled();
       expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
         'tg:100200300',
         '1',
       );
     });
 
-    it('trusted + requires_trigger: ignores replies to OTHER bots', async () => {
+    it('non-main group: ignores replies to OTHER bots', async () => {
       const opts = createTestOpts({
         registeredGroups: makeRegisteredGroups({
           containerConfig: { trusted: true },
-          requiresTrigger: true,
         }),
       });
       const channel = new TelegramChannel('test-token', opts);
@@ -1724,87 +1729,14 @@ describe('TelegramChannel', () => {
       };
       await triggerTextMessage(ctx);
 
-      // Orchestrator's isReplyToBot only routes for our bot — the host
-      // gate must mirror that or we leak 👀 onto cross-bot threads
-      // the orchestrator drops.
       expect(reactSpy).not.toHaveBeenCalled();
       expect(noteLatestUserMessageMock).not.toHaveBeenCalled();
     });
 
-    it('untrusted + requires_trigger: no 👀 from host even when trigger matches', async () => {
-      const opts = createTestOpts({
-        registeredGroups: makeRegisteredGroups({
-          requiresTrigger: true,
-        }),
-      });
-      const channel = new TelegramChannel('test-token', opts);
-      await channel.connect();
-      const reactSpy = vi
-        .spyOn(channel, 'sendReaction')
-        .mockResolvedValue(undefined);
-
-      await triggerTextMessage(createTextCtx({ text: '@Andy hello' }));
-
-      // Host stays out of untrusted reactions; the agent's
-      // bad-actor-disengage rule decides whether to react later.
-      expect(reactSpy).not.toHaveBeenCalled();
-      // ...but the observer still needs to know about an addressed
-      // message so progress emojis can attach if the agent engages.
-      expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
-        'tg:100200300',
-        '1',
-      );
-    });
-
-    it('trusted + requires_trigger=false (group): no 👀 on bystander chatter', async () => {
-      // Decouple regression. `requires_trigger=false` lets the agent
-      // reason about every message but the host must NOT visibly
-      // react to bystander traffic — that's the exact leak from the
-      // multi-bot test chat in the original PR.
-      const opts = createTestOpts({
-        registeredGroups: makeRegisteredGroups({
-          containerConfig: { trusted: true },
-          requiresTrigger: false,
-        }),
-      });
-      const channel = new TelegramChannel('test-token', opts);
-      await channel.connect();
-      const reactSpy = vi
-        .spyOn(channel, 'sendReaction')
-        .mockResolvedValue(undefined);
-
-      await triggerTextMessage(createTextCtx({ text: 'small talk' }));
-
-      expect(reactSpy).not.toHaveBeenCalled();
-      expect(noteLatestUserMessageMock).not.toHaveBeenCalled();
-    });
-
-    it('trusted + requires_trigger=false (group): 👀 fires when trigger matches', async () => {
-      const opts = createTestOpts({
-        registeredGroups: makeRegisteredGroups({
-          containerConfig: { trusted: true },
-          requiresTrigger: false,
-        }),
-      });
-      const channel = new TelegramChannel('test-token', opts);
-      await channel.connect();
-      const reactSpy = vi
-        .spyOn(channel, 'sendReaction')
-        .mockResolvedValue(undefined);
-
-      await triggerTextMessage(createTextCtx({ text: '@Andy do the thing' }));
-
-      expect(reactSpy).toHaveBeenCalledWith('tg:100200300', '1', '👀');
-      expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
-        'tg:100200300',
-        '1',
-      );
-    });
-
-    it('trusted + requires_trigger=false (multi-bot): bystander reply to other bot stays silent', async () => {
-      // Direct reproduction of the post-deploy report from the
-      // `Old.wtf` test chat — `requires_trigger=false`, two bots in
-      // the room, user replies to the OTHER bot.
+    it('multi-bot bystander chatter (the Old.wtf reproduction) stays silent', async () => {
+      // `requires_trigger=false` does NOT short-circuit the gate —
+      // the host should not seed observer state for messages the
+      // agent-runner will (correctly) decline to react to.
       const opts = createTestOpts({
         registeredGroups: makeRegisteredGroups({
           containerConfig: { trusted: true },
@@ -1836,12 +1768,9 @@ describe('TelegramChannel', () => {
       expect(noteLatestUserMessageMock).not.toHaveBeenCalled();
     });
 
-    it('private chat (1:1 DM, trusted): 👀 fires without trigger — every message is for us', async () => {
+    it('private chat (1:1 DM): notes every inbound', async () => {
       const opts = createTestOpts({
-        registeredGroups: makeRegisteredGroups({
-          containerConfig: { trusted: true },
-          requiresTrigger: false,
-        }),
+        registeredGroups: makeRegisteredGroups({}),
       });
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
@@ -1853,34 +1782,6 @@ describe('TelegramChannel', () => {
         createTextCtx({ text: 'hey', chatType: 'private' }),
       );
 
-      expect(reactSpy).toHaveBeenCalledWith('tg:100200300', '1', '👀');
-      expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
-        'tg:100200300',
-        '1',
-      );
-    });
-
-    it('private chat (1:1 DM, untrusted): observer notes but no host 👀', async () => {
-      // Untrusted DM is unusual but supported. The chat-type
-      // short-circuit makes triggerHit true (every solo inbound is
-      // for us), so the observer can attach progress emojis if the
-      // agent engages. The 👀 ack still requires main/trusted, so
-      // host stays silent and the agent decides.
-      const opts = createTestOpts({
-        registeredGroups: makeRegisteredGroups({
-          requiresTrigger: false,
-        }),
-      });
-      const channel = new TelegramChannel('test-token', opts);
-      await channel.connect();
-      const reactSpy = vi
-        .spyOn(channel, 'sendReaction')
-        .mockResolvedValue(undefined);
-
-      await triggerTextMessage(
-        createTextCtx({ text: 'hello?', chatType: 'private' }),
-      );
-
       expect(reactSpy).not.toHaveBeenCalled();
       expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
         'tg:100200300',
@@ -1888,12 +1789,9 @@ describe('TelegramChannel', () => {
       );
     });
 
-    // Voice messages exercise the same gate after transcription. With
-    // no transcription mock the `transcribeVoice` path throws and
-    // `content` resolves to '[Voice message - transcription failed]',
-    // which deliberately fails the trigger pattern — that's the
-    // "transcript didn't address us" signal we want to gate on.
-    it('voice — main group: 👀 fires regardless of transcript', async () => {
+    // Voice mirrors text — gate runs after transcription so the
+    // trigger pattern can test against the resolved transcript.
+    it('voice — main group: notes regardless of transcript', async () => {
       const opts = createTestOpts({
         registeredGroups: makeRegisteredGroups({ isMain: true }),
       });
@@ -1908,40 +1806,14 @@ describe('TelegramChannel', () => {
       });
       await triggerMediaMessage('message:voice', ctx);
 
-      expect(reactSpy).toHaveBeenCalledWith('tg:100200300', '1', '👀');
+      expect(reactSpy).not.toHaveBeenCalled();
       expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
         'tg:100200300',
         '1',
       );
     });
 
-    it('voice — trusted + requires_trigger: no 👀 when transcript lacks trigger', async () => {
-      const opts = createTestOpts({
-        registeredGroups: makeRegisteredGroups({
-          containerConfig: { trusted: true },
-          requiresTrigger: true,
-        }),
-      });
-      const channel = new TelegramChannel('test-token', opts);
-      await channel.connect();
-      const reactSpy = vi
-        .spyOn(channel, 'sendReaction')
-        .mockResolvedValue(undefined);
-
-      const ctx = createMediaCtx({
-        extra: { voice: { file_id: 'v1' } },
-      });
-      await triggerMediaMessage('message:voice', ctx);
-
-      expect(reactSpy).not.toHaveBeenCalled();
-      expect(noteLatestUserMessageMock).not.toHaveBeenCalled();
-    });
-
-    it('voice — trusted + requires_trigger=false (group): no 👀 when transcript is silent on us', async () => {
-      // Same decouple as the text path — `requires_trigger=false`
-      // does NOT short-circuit the host gate. Transcription fails in
-      // tests, so the resolved content holds no trigger and no reply
-      // signal; gate stays silent.
+    it('voice — non-main, transcript silent on us: no observer note', async () => {
       const opts = createTestOpts({
         registeredGroups: makeRegisteredGroups({
           containerConfig: { trusted: true },
@@ -1963,12 +1835,9 @@ describe('TelegramChannel', () => {
       expect(noteLatestUserMessageMock).not.toHaveBeenCalled();
     });
 
-    it('voice — private chat: 👀 fires without trigger', async () => {
+    it('voice — private chat: notes regardless of transcript', async () => {
       const opts = createTestOpts({
-        registeredGroups: makeRegisteredGroups({
-          containerConfig: { trusted: true },
-          requiresTrigger: false,
-        }),
+        registeredGroups: makeRegisteredGroups({}),
       });
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
@@ -1982,18 +1851,16 @@ describe('TelegramChannel', () => {
       });
       await triggerMediaMessage('message:voice', ctx);
 
-      expect(reactSpy).toHaveBeenCalledWith('tg:100200300', '1', '👀');
+      expect(reactSpy).not.toHaveBeenCalled();
       expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
         'tg:100200300',
         '1',
       );
     });
 
-    it('voice — untrusted + requires_trigger: no 👀 from host even when trigger would match', async () => {
+    it('voice — reply-to-our-bot satisfies the gate even on a failed transcript', async () => {
       const opts = createTestOpts({
-        registeredGroups: makeRegisteredGroups({
-          requiresTrigger: true,
-        }),
+        registeredGroups: makeRegisteredGroups({}),
       });
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
@@ -2001,15 +1868,15 @@ describe('TelegramChannel', () => {
         .spyOn(channel, 'sendReaction')
         .mockResolvedValue(undefined);
 
-      // Reply-to-our-bot satisfies triggerHit even on a failed
-      // transcript, so we exercise the untrusted leak surface
-      // without depending on a transcription mock.
+      // Reply-to-our-bot is a triggerHit signal independent of the
+      // transcript, exercising the gate without depending on a
+      // transcription mock.
       const ctx = createMediaCtx({
         extra: {
           voice: { file_id: 'v1' },
           reply_to_message: {
             message_id: 42,
-            date: Math.floor(Date.now() / 1000),
+            date: 1735689600,
             chat: { id: 100200300, type: 'group' },
             from: {
               id: 12345,
@@ -2025,8 +1892,6 @@ describe('TelegramChannel', () => {
       await triggerMediaMessage('message:voice', ctx);
 
       expect(reactSpy).not.toHaveBeenCalled();
-      // ...but the observer still needs to know about an addressed
-      // message so progress emojis can attach if the agent engages.
       expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
         'tg:100200300',
         '1',

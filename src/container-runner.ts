@@ -418,6 +418,16 @@ export interface ContainerInput {
   script?: string;
   replyToMessageId?: string;
   /**
+   * Whether the inbound batch is "addressed to us" — drives the
+   * agent-runner's react-first 👀 gate (#289). Resolved by the
+   * orchestrator (see `isAddressedToUs` in `src/index.ts`) from
+   * isMain / 1:1-DM / trigger-match / reply-to-our-bot, independent
+   * of `requires_trigger`. Omitted for non-channel paths (scheduled
+   * tasks, scripts) — agent-runner treats `undefined` as "no
+   * addressed-ness signal" and falls back to its existing skips.
+   */
+  addressedToUs?: boolean;
+  /**
    * Provenance of a scheduled task (undefined for non-scheduled runs).
    * Drives whether the agent-runner wraps the prompt in `<untrusted-input>`.
    * Only `'untrusted_agent'` triggers the wrap; owner/main/trusted bypass

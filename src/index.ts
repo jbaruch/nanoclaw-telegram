@@ -51,6 +51,7 @@ import {
   deleteSession,
   deleteSessionName,
   getAllTasks,
+  getChatByJid,
   getLastBotMessageTimestamp,
   getMessageById,
   getMessagesSince,
@@ -113,6 +114,37 @@ function isReplyToBot(msg: NewMessage): boolean {
     if (original?.is_from_me) return true;
   }
   return false;
+}
+
+/**
+ * Decide whether an inbound batch is "addressed to us" — drives the
+ * agent-runner's react-first 👀 gate (#289). Independent of
+ * `requires_trigger`, which governs whether the agent ANSWERS
+ * deterministically vs. reasons about every inbound. The 👀 ack is
+ * about whether the message was directed at us at all.
+ *
+ * Resolves true iff:
+ *  - the chat is the main control group, OR
+ *  - the chat is a 1:1 DM (`chats.is_group=0`) — every solo inbound is
+ *    implicitly for us, OR
+ *  - at least one message in the batch matches the trigger pattern, OR
+ *  - at least one message replies to OUR bot (per `isReplyToBot`).
+ *
+ * Note: `requires_trigger=false` on a multi-bot group (e.g. `Old.wtf`)
+ * does NOT short-circuit — that was the original bug.
+ */
+function isAddressedToUs(
+  group: RegisteredGroup,
+  chatJid: string,
+  messages: NewMessage[],
+): boolean {
+  if (group.isMain === true) return true;
+  const chat = getChatByJid(chatJid);
+  if (chat && chat.is_group === 0) return true;
+  const triggerPattern = getTriggerPattern(group.trigger);
+  return messages.some(
+    (m) => triggerPattern.test(m.content.trim()) || isReplyToBot(m),
+  );
 }
 
 let lastTimestamp = '';
@@ -1211,7 +1243,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       setTyping: (typing) =>
         channel.setTyping?.(chatJid, typing) ?? Promise.resolve(),
       runAgent: (prompt, onOutput) =>
-        runAgent(group, prompt, chatJid, onOutput),
+        // Session commands (`/compact`, etc.) are explicit
+        // user-invoked operations — always addressed to us.
+        runAgent(group, prompt, chatJid, onOutput, undefined, true),
       closeStdin: () => queue.closeStdin(chatJid),
       advanceCursor: (ts) => {
         lastAgentTimestamp[chatJid] = ts;
@@ -1357,6 +1391,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       }
     },
     pendingReplyTo[chatJid],
+    isAddressedToUs(group, chatJid, missedMessages),
   );
 
   await channel.setTyping?.(chatJid, false);
@@ -1418,6 +1453,7 @@ async function runAgent(
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
   replyToMessageId?: string,
+  addressedToUs?: boolean,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
   // User-facing path always uses the `default` slot's session chain.
@@ -1564,6 +1600,11 @@ async function runAgent(
         // `default`. `src/task-scheduler.ts` is the sole writer of
         // `'maintenance'` — maintenance-AyeAye never reaches this code path.
         sessionName: DEFAULT_SESSION_NAME,
+        // Drives the agent-runner's react-first 👀 gate. See
+        // `isAddressedToUs` in this file for the resolution rules.
+        // `requires_trigger` is intentionally NOT consulted — it
+        // governs answering mode, not addressed-ness.
+        addressedToUs,
       },
       (proc, containerName) =>
         queue.registerProcess(
