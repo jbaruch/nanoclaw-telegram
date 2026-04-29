@@ -271,6 +271,32 @@ describe('createFilteredDb (untrusted DB isolation)', () => {
     }
   });
 
+  // Issue #287 follow-up — operators upgrading from a pre-fix version
+  // can have stale `-wal`/`-shm` sidecars on disk from when the snapshot
+  // ran in WAL mode. The next `createFilteredDb` call must wipe those
+  // sidecars too, not just the main DB file. A partial state (main DB
+  // gone, sidecars present) is the exact scenario SQLite refuses to
+  // open with `unable to open database file`.
+  it('createFilteredDb removes leftover -wal/-shm sidecars from a pre-fix snapshot', () => {
+    seedMessagesDb();
+    // First call to create the filtered dir + main DB.
+    const filtered = createFilteredDb('chatA@g.us', 'folder-a');
+    expect(filtered).not.toBe(null);
+    // Plant fake sidecars as if a pre-fix WAL-mode snapshot had run.
+    const walPath = `${filtered}-wal`;
+    const shmPath = `${filtered}-shm`;
+    fs.writeFileSync(walPath, 'stale-wal');
+    fs.writeFileSync(shmPath, 'stale-shm');
+    expect(fs.existsSync(walPath)).toBe(true);
+    expect(fs.existsSync(shmPath)).toBe(true);
+
+    // Re-run — the stale-copy cleanup must take both sidecars with it.
+    const refresh = createFilteredDb('chatA@g.us', 'folder-a');
+    expect(refresh).toBe(filtered);
+    expect(fs.existsSync(walPath)).toBe(false);
+    expect(fs.existsSync(shmPath)).toBe(false);
+  });
+
   // Issue #287 — filtered DB must use a rollback journal, not WAL.
   // Untrusted containers receive this DB on a read-only mount (`fakeowner
   // ro`); a WAL-mode DB cannot be opened even for reads on a RO mount

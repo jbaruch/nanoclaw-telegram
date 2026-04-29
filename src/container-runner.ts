@@ -299,9 +299,18 @@ export function createFilteredDb(
   fs.mkdirSync(filteredDir, { recursive: true });
   const filteredPath = path.join(filteredDir, 'messages.db');
 
-  // Remove stale copy from previous run
-  if (fs.existsSync(filteredPath)) {
-    fs.unlinkSync(filteredPath);
+  // Remove stale copy from previous run, including any `-wal`/`-shm`
+  // sidecars left behind by a pre-#287 version that ran before the
+  // `journal_mode = DELETE` pragma below was in place. Without this,
+  // operators upgrading on top of an existing data dir keep the old
+  // WAL artefacts indefinitely — both as wasted disk and as the same
+  // RO-mount-can't-open failure the pragma is supposed to eliminate.
+  // Sidecars are unlinked unconditionally (independent of whether the
+  // main file existed) because a partial wipe — main DB removed but
+  // sidecars left — is the exact state SQLite refuses to open.
+  for (const suffix of ['', '-wal', '-shm']) {
+    const p = `${filteredPath}${suffix}`;
+    if (fs.existsSync(p)) fs.unlinkSync(p);
   }
 
   // Use ATTACH to copy schema-agnostically — picks up new columns automatically
