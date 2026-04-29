@@ -88,12 +88,26 @@ async function sendTelegramMessage(
   options: {
     message_thread_id?: number;
     reply_parameters?: { message_id: number };
+    // When `true`, `text` is already sanitized HTML — skip the
+    // sanitize pass. Set by callers (`TelegramChannel.sendMessage`,
+    // `sendPoolMessage`) that sanitize ONCE before splitting into
+    // chunks (#282): pre-fix, splitMessage ran on raw markdown and
+    // could cut mid-construct (`[label](https://...)` split between
+    // `]` and `(`), leaving the sanitizer with a half-construct in
+    // chunk 1 and a dangling fragment in chunk 2. Sanitizing first
+    // produces explicit HTML tag boundaries that splitMessage can
+    // detect cleanly, but only if we don't double-sanitize each
+    // chunk here — `sanitize(sanitize(x))` is idempotent for valid
+    // HTML but a second pass on a chunk that ends mid-tag (e.g.
+    // hard-cut last-resort fallback) would re-process the orphan
+    // and amplify the corruption.
+    preSanitized?: boolean;
   } = {},
 ): Promise<number | undefined> {
   // Idempotent Markdown→HTML pass — agents sometimes produce `**bold**` or
   // `[text](url)` despite being told to use HTML. Well-formed HTML passes
   // through unchanged; URLs/emails/existing tags are protected.
-  const sanitized = sanitizeTelegramHtml(text);
+  const sanitized = options.preSanitized ? text : sanitizeTelegramHtml(text);
   const rawChanged = sanitized !== text;
   logger.debug(
     {
@@ -107,9 +121,12 @@ async function sendTelegramMessage(
     },
     '[send] sendTelegramMessage entered',
   );
+  // Strip the local `preSanitized` flag from the API payload — it's
+  // an internal sanitize-once marker, not a Telegram Bot API field.
+  const { preSanitized: _preSanitized, ...apiOptions } = options;
   try {
     const msg = await api.sendMessage(chatId, sanitized, {
-      ...options,
+      ...apiOptions,
       parse_mode: 'HTML',
     });
     logger.debug(
@@ -155,17 +172,30 @@ async function sendTelegramMessage(
         rawLen: text.length,
         sanitizedLen: sanitized.length,
       },
-      '[send] HTML send failed, falling back to plain text (user will see raw Markdown with warning prefix)',
+      '[send] HTML send failed, falling back to plain text (user will see tag-stripped plain text with warning prefix)',
     );
     if (process.env.DEV_NO_HTML_FALLBACK === '1') throw err;
-    // Truncate the body so the prefix never pushes the fallback over
-    // Telegram's 4096-char message limit — a recoverable HTML-parse
-    // error becoming a "fallback also failed" lost message would be
-    // strictly worse than the original symptom.
+    // Strip HTML tags + decode entities before shipping as plain
+    // text. After the sanitize-then-split reorder (#282), `text` is
+    // already-sanitized HTML when `preSanitized` is true; shipping
+    // it verbatim in the fallback would render `<i>great</i>` as
+    // literal-tag text to the user. `htmlToPlainText` recovers a
+    // readable rendering. For pre-sanitized callers this loses
+    // formatting (the user sees "great" instead of "_great_"), but
+    // the alternative — readable raw markdown — is no longer
+    // reachable from a per-chunk caller after the reorder. The
+    // visible `⚠️ formatting failed` prefix tells the user they're
+    // seeing a degraded view either way.
+    //
+    // Truncate the body so the prefix never pushes the fallback
+    // over Telegram's 4096-char message limit — a recoverable
+    // HTML-parse error becoming a "fallback also failed" lost
+    // message would be strictly worse than the original symptom.
     const prefix = '⚠️ formatting failed; raw text below\n\n';
-    const degraded = `${prefix}${text.slice(0, MAX_LENGTH - prefix.length)}`;
+    const plain = htmlToPlainText(text);
+    const degraded = `${prefix}${plain.slice(0, MAX_LENGTH - prefix.length)}`;
     try {
-      const msg = await api.sendMessage(chatId, degraded, options);
+      const msg = await api.sendMessage(chatId, degraded, apiOptions);
       logger.warn(
         { chatId, messageId: msg.message_id },
         '[send] Plain-text fallback OK — DB row will still be written by the caller',
@@ -187,6 +217,41 @@ async function sendTelegramMessage(
       throw fallbackErr;
     }
   }
+}
+
+/**
+ * Strip Telegram HTML tags and decode the entities Telegram uses to
+ * encode special characters in content. Used by `sendTelegramMessage`'s
+ * fallback path to recover a readable plain-text rendering when the
+ * HTML send 400s and `text` is already sanitized HTML (post-#282
+ * sanitize-then-split). `sendFile`'s caption fallback does NOT use
+ * this — its `caption` parameter is the original raw markdown the
+ * caller passed in, which is already readable as plain text.
+ *
+ * Pre-sanitized HTML may contain only the Telegram-allowed tags
+ * (`<b>`, `<i>`, `<u>`, `<s>`, `<code>`, `<pre>`, `<blockquote>`,
+ * `<a>`, `<tg-spoiler>`); stray tags are HTML-escaped at sanitize
+ * time so they're not real tags here.
+ *
+ * Link URLs are preserved in the fallback as `label (url)` so the
+ * user can still reach them — Copilot review on PR #308 caught that
+ * a naive tag-strip drops `<a href="…">` entirely and leaves only
+ * the label, removing important information at exactly the moment
+ * the user most needs it (formatting failed, but at least the URL
+ * should survive). The `<a>`-specific replace runs BEFORE the
+ * generic tag strip so the href is captured before tags are
+ * removed; remaining replacements are order-independent on this
+ * domain.
+ */
+function htmlToPlainText(s: string): string {
+  return s
+    .replace(/<a\s+href="([^"]*)"[^>]*>([^<]*)<\/a>/g, '$2 ($1)')
+    .replace(/<\/?[a-zA-Z][^>]*>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
 }
 
 const MAX_LENGTH = 4096;
@@ -480,8 +545,109 @@ const TELEGRAM_ALLOWED_REACTIONS = new Set([
 ]);
 
 /**
- * Split text into chunks that respect content boundaries.
- * Priority: code block boundaries > double newline (paragraph) > single newline > space > hard cut.
+ * Build a "safe to split before this index" map for HTML-aware
+ * chunking. Position `i` is safe iff splitting `text` at `i`
+ * produces two halves that are each well-formed Telegram HTML —
+ * specifically, neither half is inside a `<...>` tag and the
+ * paired-tag depth at `i` is zero (no opening `<b>` orphaned in
+ * the left half without its closing `</b>`, and vice versa).
+ *
+ * Self-closing tags (`<br/>`) and Phase 1c-protected URLs (which
+ * appear as bare strings, not tags) don't change depth. Stray
+ * tags from the agent are HTML-escaped by the sanitizer before
+ * they reach here, so any real `<` in the input is the start of
+ * a paired or self-closing Telegram-allowed tag.
+ *
+ * Position 0 is safe (start of string); position `text.length` is
+ * safe iff depth ended at zero (well-formed input).
+ */
+function buildSafeSplitMap(text: string): boolean[] {
+  const safe = new Array(text.length + 1).fill(false);
+  safe[0] = true;
+  let depth = 0;
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === '<') {
+      const closeIdx = text.indexOf('>', i + 1);
+      if (closeIdx === -1) {
+        // Unterminated `<` — treat the rest of the string as
+        // unsafe to split inside. Should never happen on
+        // sanitized input but we degrade gracefully.
+        return safe;
+      }
+      const tag = text.slice(i, closeIdx + 1);
+      const isClosing = tag.startsWith('</');
+      const isSelfClosing = tag.endsWith('/>');
+      if (isClosing) depth = Math.max(0, depth - 1);
+      else if (!isSelfClosing) depth++;
+      i = closeIdx + 1;
+      if (depth === 0) safe[i] = true;
+    } else {
+      i++;
+      if (depth === 0) safe[i] = true;
+    }
+  }
+  return safe;
+}
+
+/**
+ * Walk back through `text` to find the latest occurrence of `needle`
+ * whose end-position (`idx + needle.length`) is `<= at` AND marked
+ * safe in `safe`. Returns the safe end-position, or -1 if no safe
+ * match exists.
+ *
+ * Searches from `at - needle.length` so the returned end-position
+ * never exceeds `at`. Pre-fix the function searched from `at`
+ * directly, which let `lastIndexOf('\n', MAX_LENGTH)` return a
+ * needle starting at index MAX_LENGTH — the resulting end-position
+ * MAX_LENGTH + 1 was beyond the caller's intended budget and
+ * produced an oversized chunk (Copilot review on PR #308).
+ */
+function lastSafeIndexOf(
+  text: string,
+  needle: string,
+  at: number,
+  safe: boolean[],
+): number {
+  let from = at - needle.length;
+  while (from >= 0) {
+    const idx = text.lastIndexOf(needle, from);
+    if (idx === -1) return -1;
+    const end = idx + needle.length;
+    if (safe[end]) return end;
+    from = idx - 1;
+  }
+  return -1;
+}
+
+/**
+ * Split text into chunks that respect both content boundaries and
+ * HTML structure. Input is expected to be sanitized HTML (callers
+ * `TelegramChannel.sendMessage` and `sendPoolMessage` run
+ * `sanitizeTelegramHtml` first, #282), but the function tolerates
+ * raw text — `buildSafeSplitMap` returns "safe everywhere" for
+ * input without `<...>` tokens.
+ *
+ * Priority within safe positions (#286):
+ *   1. Code block boundary (`\n```\n` in raw markdown — relic of
+ *      pre-sanitize input — OR `</pre>` followed by `\n` in
+ *      sanitized HTML).
+ *   2. Paragraph boundary (`\n\n`).
+ *   3. Single newline.
+ *   4. Space.
+ *   5. Latest safe position ≤ MAX_LENGTH.
+ *   6. Hard cut at MAX_LENGTH (last resort — only fires when even
+ *      no safe position exists, e.g. a single `<pre>...</pre>`
+ *      block longer than MAX_LENGTH; produces a chunk with an
+ *      orphan tag and the fallback path will land it).
+ *
+ * Pre-fix the priority logic enforced a 30%-of-MAX_LENGTH minimum
+ * on paragraph/newline/space boundaries, which meant a clean
+ * `\n\n` at byte 1100 of a 4096-char chunk fell through to a
+ * mid-sentence space cut or hard cut at 4096. Threshold lowered to
+ * 5% (paragraphs/newlines) and 30% (spaces — unchanged because a
+ * mid-paragraph space cut at byte 50 still looks worse than at
+ * 1500 for prose continuity).
  */
 export function splitMessage(text: string): string[] {
   if (text.length <= MAX_LENGTH) return [text];
@@ -490,46 +656,65 @@ export function splitMessage(text: string): string[] {
   let remaining = text;
 
   while (remaining.length > MAX_LENGTH) {
+    const safe = buildSafeSplitMap(remaining);
     let splitAt = -1;
 
-    // 1. Try to split at a code block boundary (``` on its own line)
+    // 1. Code-block boundary (raw markdown fence on its own line).
     const codeBlockPattern = /\n```\n/g;
     let match;
     while ((match = codeBlockPattern.exec(remaining)) !== null) {
       const pos = match.index + match[0].length;
-      if (pos <= MAX_LENGTH && pos > splitAt) {
-        splitAt = pos;
+      if (pos <= MAX_LENGTH && pos > splitAt && safe[pos]) splitAt = pos;
+    }
+    // 1b. Sanitized-HTML fenced-code boundary: `</pre>` followed
+    // by a newline (the sanitizer replaces ```...``` with
+    // `<pre>escaped</pre>`).
+    if (splitAt === -1) {
+      const preEndPattern = /<\/pre>\n?/g;
+      while ((match = preEndPattern.exec(remaining)) !== null) {
+        const pos = match.index + match[0].length;
+        if (pos <= MAX_LENGTH && pos > splitAt && safe[pos]) splitAt = pos;
       }
     }
 
-    // 2. Try to split at a paragraph boundary (double newline)
+    // 2. Paragraph boundary (double newline) — 5% minimum.
     if (splitAt === -1) {
-      const lastParagraph = remaining.lastIndexOf('\n\n', MAX_LENGTH);
-      if (lastParagraph > MAX_LENGTH * 0.3) {
-        splitAt = lastParagraph + 2;
+      const pos = lastSafeIndexOf(remaining, '\n\n', MAX_LENGTH, safe);
+      if (pos > MAX_LENGTH * 0.05) splitAt = pos;
+    }
+
+    // 3. Single newline — 5% minimum.
+    if (splitAt === -1) {
+      const pos = lastSafeIndexOf(remaining, '\n', MAX_LENGTH, safe);
+      if (pos > MAX_LENGTH * 0.05) splitAt = pos;
+    }
+
+    // 4. Space — 30% minimum (mid-paragraph cut at byte 50 looks
+    // worse than at 1500 for prose continuity).
+    if (splitAt === -1) {
+      const pos = lastSafeIndexOf(remaining, ' ', MAX_LENGTH, safe);
+      if (pos > MAX_LENGTH * 0.3) splitAt = pos;
+    }
+
+    // 5. Latest safe position ≤ MAX_LENGTH (no content-boundary
+    // marker matched, but the structural-safety map still has a
+    // depth-0, not-inside-tag position we can use).
+    if (splitAt === -1) {
+      for (let i = MAX_LENGTH; i > 0; i--) {
+        if (safe[i]) {
+          splitAt = i;
+          break;
+        }
       }
     }
 
-    // 3. Try to split at a single newline
-    if (splitAt === -1) {
-      const lastNewline = remaining.lastIndexOf('\n', MAX_LENGTH);
-      if (lastNewline > MAX_LENGTH * 0.3) {
-        splitAt = lastNewline + 1;
-      }
-    }
-
-    // 4. Try to split at a space
-    if (splitAt === -1) {
-      const lastSpace = remaining.lastIndexOf(' ', MAX_LENGTH);
-      if (lastSpace > MAX_LENGTH * 0.3) {
-        splitAt = lastSpace + 1;
-      }
-    }
-
-    // 5. Hard cut (last resort)
-    if (splitAt === -1) {
-      splitAt = MAX_LENGTH;
-    }
+    // 6. Hard cut at MAX_LENGTH — last resort. Only fires when no
+    // safe position exists ≤ MAX_LENGTH (e.g. a single
+    // `<pre>...</pre>` block larger than the limit). The chunk
+    // will have an orphan tag and trigger the sanitizer fallback,
+    // which is strictly less bad than a "fallback also failed"
+    // lost message.
+    if (splitAt === -1 || splitAt === 0) splitAt = MAX_LENGTH;
 
     chunks.push(remaining.slice(0, splitAt));
     remaining = remaining.slice(splitAt);
@@ -832,7 +1017,12 @@ export async function sendPoolMessage(
   const api = poolApis[idx];
   try {
     const numericId = chatId.replace(/^tg:/, '');
-    const chunks = splitMessage(text);
+    // Sanitize-once before split (#282) — see TelegramChannel.sendMessage
+    // for the rationale. Pool sends use the same shape so a long pool
+    // message with markdown markers crossing the chunk boundary doesn't
+    // half-render either side.
+    const sanitized = sanitizeTelegramHtml(text);
+    const chunks = splitMessage(sanitized);
     logger.debug(
       { chatId, sender, poolIndex: idx, chunkCount: chunks.length },
       '[send] sendPoolMessage: sending chunks',
@@ -844,7 +1034,9 @@ export async function sendPoolMessage(
     // one ID is enough to trace the send).
     let lastMsgId: number | undefined;
     for (let i = 0; i < chunks.length; i++) {
-      lastMsgId = await sendTelegramMessage(api, numericId, chunks[i]);
+      lastMsgId = await sendTelegramMessage(api, numericId, chunks[i], {
+        preSanitized: true,
+      });
       logger.debug(
         { chatId, sender, poolIndex: idx, chunkIndex: i },
         '[send] sendPoolMessage: chunk sent',
@@ -1483,15 +1675,30 @@ export class TelegramChannel implements Channel {
         };
       }
 
-      // Split respecting content boundaries (code blocks, paragraphs, etc.)
-      const chunks = splitMessage(text);
+      // Sanitize ONCE on the whole message, then split (#282).
+      // Pre-fix order was split-then-sanitize, which let splitMessage
+      // cut mid-construct (e.g. between `]` and `(` of a markdown
+      // link, mid-word inside `**bold**`, mid-fence inside ``` ```
+      // ```) and handed each chunk to the sanitizer as half a
+      // construct — neither half matched the sanitizer's regex, so
+      // the user saw raw markdown markers across chunks. Sanitizing
+      // first produces explicit `<a>...</a>`, `<b>...</b>`,
+      // `<pre>...</pre>` tag boundaries that the HTML-aware
+      // splitMessage refuses to cut inside (#286). Each chunk goes
+      // to `sendTelegramMessage` with `preSanitized: true` so the
+      // sanitizer doesn't run again on already-sanitized content.
+      const sanitized = sanitizeTelegramHtml(text);
+      const chunks = splitMessage(sanitized);
       logger.debug(
         { jid, chunkCount: chunks.length },
         '[send] TelegramChannel.sendMessage: sending chunks',
       );
       let lastMsgId: number | undefined;
       for (let i = 0; i < chunks.length; i++) {
-        const chunkOptions = i === 0 ? options : {};
+        const chunkOptions =
+          i === 0
+            ? { ...options, preSanitized: true as const }
+            : { preSanitized: true as const };
         lastMsgId = await sendTelegramMessage(
           this.bot.api,
           numericId,

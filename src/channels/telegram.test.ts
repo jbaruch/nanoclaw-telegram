@@ -104,7 +104,11 @@ vi.mock('grammy', () => ({
   },
 }));
 
-import { TelegramChannel, TelegramChannelOpts } from './telegram.js';
+import {
+  TelegramChannel,
+  TelegramChannelOpts,
+  splitMessage,
+} from './telegram.js';
 import { logger } from '../logger.js';
 import { _initTestDatabase, storeChatMetadata, storeMessage } from '../db.js';
 
@@ -926,7 +930,35 @@ describe('TelegramChannel', () => {
       ).resolves.toBeUndefined();
     });
 
-    it('marks the plain-text fallback with a visible degraded prefix (#278)', async () => {
+    it('preserves link URLs in the degraded fallback so users can still reach them (PR #308 review)', async () => {
+      // After #282 the fallback's `text` is sanitized HTML; a naive
+      // tag-strip would drop `<a href="…">` entirely and leave only
+      // the link label. `htmlToPlainText` converts `<a href="url">
+      // label</a>` to `label (url)` so the URL survives the
+      // formatting failure — exactly the moment the user most needs
+      // it. Copilot caught the gap on PR #308.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      currentBot()
+        .api.sendMessage.mockRejectedValueOnce(
+          new Error("can't parse entities"),
+        )
+        .mockResolvedValueOnce({ message_id: 9300 });
+
+      await channel.sendMessage(
+        'tg:100200300',
+        'see [Docs](https://example.com/p) for details',
+      );
+
+      const fallbackArgs = currentBot().api.sendMessage.mock.calls[1];
+      expect(fallbackArgs[1]).toBe(
+        '⚠️ formatting failed; raw text below\n\nsee Docs (https://example.com/p) for details',
+      );
+    });
+
+    it('marks the plain-text fallback with a visible degraded prefix (#278, #282)', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
@@ -935,6 +967,16 @@ describe('TelegramChannel', () => {
       // The fallback caption MUST carry a user-visible warning so the
       // user knows they're seeing a degraded rendering, not the agent's
       // intended formatting.
+      //
+      // After #282 (sanitize-then-split), the channel sanitizes the
+      // whole message ONCE before chunking, so by the time the
+      // fallback fires the input to `sendTelegramMessage` is already
+      // HTML (`feeling <i>great</i> today`). The fallback's
+      // `htmlToPlainText` strips tags + decodes entities so the user
+      // sees readable plain text rather than literal-tag rendering
+      // (`feeling great today` instead of `feeling <i>great</i>
+      // today`). Italic markup is lost in the fallback rendering;
+      // the visible warning prefix tells the user formatting failed.
       currentBot()
         .api.sendMessage.mockRejectedValueOnce(
           new Error("can't parse entities"),
@@ -946,12 +988,16 @@ describe('TelegramChannel', () => {
       expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(2);
       const fallbackArgs = currentBot().api.sendMessage.mock.calls[1];
       expect(fallbackArgs[1]).toBe(
-        '⚠️ formatting failed; raw text below\n\nfeeling _great_ today',
+        '⚠️ formatting failed; raw text below\n\nfeeling great today',
       );
       // Fallback options must NOT include parse_mode — that's what
       // turns raw markdown into "literal `<b>…</b>` tags rendered" if
       // smuggled through.
       expect(fallbackArgs[2]?.parse_mode).toBeUndefined();
+      // Fallback options must NOT include the internal preSanitized
+      // marker either — it's a host-side flag, not a Telegram API
+      // field, and the fallback is plain text anyway.
+      expect(fallbackArgs[2]?.preSanitized).toBeUndefined();
     });
 
     it('does not attempt plain-text fallback when DEV_NO_HTML_FALLBACK=1 (#278)', async () => {
@@ -1986,5 +2032,178 @@ describe('TelegramChannel', () => {
         '1',
       );
     });
+  });
+});
+
+// --- splitMessage HTML-aware boundaries (#286) + sanitize-then-split (#282) ---
+//
+// `splitMessage` runs on already-sanitized HTML now (callers
+// `TelegramChannel.sendMessage` + `sendPoolMessage` sanitize once
+// before chunking, see #282). The function must produce chunks that
+// each parse as valid Telegram HTML — never cut inside `<...>`,
+// never orphan an opening tag from its closing.
+
+describe('splitMessage — HTML-aware boundaries (#286)', () => {
+  const MAX_LENGTH = 4096;
+
+  it('returns input unchanged when below MAX_LENGTH', () => {
+    const text = 'short message';
+    expect(splitMessage(text)).toEqual([text]);
+  });
+
+  it('never cuts inside an HTML tag — bold span at boundary kept intact', () => {
+    // Bold span fits well within one chunk (body = 2000 chars).
+    // Trailing prose pushes total past MAX_LENGTH to force a split.
+    // The split MUST land at a depth-0 boundary, never inside the
+    // `<b>...</b>` body and never between `<b>` and `</b>`.
+    const text = `aa <b>${'x'.repeat(2000)}</b> bb ${'.'.repeat(3000)}`;
+    const chunks = splitMessage(text);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) {
+      // Tag balance: opens == closes in each chunk.
+      const opens = (c.match(/<b>/g) || []).length;
+      const closes = (c.match(/<\/b>/g) || []).length;
+      expect(opens).toBe(closes);
+      // No chunk ends inside a tag (last `<` after last `>` would
+      // mean an unterminated tag).
+      const lastLt = c.lastIndexOf('<');
+      const lastGt = c.lastIndexOf('>');
+      expect(lastLt).toBeLessThanOrEqual(lastGt);
+    }
+  });
+
+  it('never cuts inside a link tag — long href near boundary', () => {
+    // The `<a href="...">` opening tag itself is long. A naive
+    // boundary check that only forbade splits between `<` and `>`
+    // would still allow a split between the opening `<a ...>` and
+    // its closing `</a>`. HTML-aware must reject both.
+    const head = 'a'.repeat(4000);
+    const longUrl = 'https://example.com/' + 'p'.repeat(80);
+    const text = `${head} <a href="${longUrl}">label</a> tail`;
+    const chunks = splitMessage(text);
+    // No chunk may contain an unbalanced `<a` / `</a>`.
+    for (const c of chunks) {
+      const opens = (c.match(/<a\s/g) || []).length;
+      const closes = (c.match(/<\/a>/g) || []).length;
+      expect(opens).toBe(closes);
+      // No chunk ends inside a tag (i.e. last `<` after last `>`
+      // would mean unterminated tag).
+      const lastLt = c.lastIndexOf('<');
+      const lastGt = c.lastIndexOf('>');
+      expect(lastLt).toBeLessThanOrEqual(lastGt);
+    }
+  });
+
+  it('prefers `</pre>` boundary for long fenced-code', () => {
+    // After sanitize, fenced-code becomes `<pre>...</pre>`. The
+    // `</pre>` boundary is a Phase-1a-equivalent safe split point.
+    const codeBody = 'c'.repeat(2000);
+    const after = ' after the code\n' + 't'.repeat(2200);
+    const text = `<pre>${codeBody}</pre>${after}`;
+    const chunks = splitMessage(text);
+    // First chunk should end at `</pre>` (or `</pre>\n`), not
+    // mid-content of the trailing prose.
+    expect(chunks[0].endsWith('</pre>')).toBe(true);
+  });
+
+  it('lowers paragraph threshold so a clean `\\n\\n` at byte 1100 is preferred over hard cut (#286)', () => {
+    // Pre-fix the 30%-of-MAX_LENGTH minimum (1228) rejected a
+    // paragraph break at byte 1100 and fell through to a space or
+    // hard cut. New 5% threshold (204) accepts it.
+    const head = 'p'.repeat(1099) + '\n\n';
+    const tail = 'q'.repeat(MAX_LENGTH);
+    const text = head + tail;
+    const chunks = splitMessage(text);
+    // Chunk 1 ends right after the `\n\n` (byte 1101 — `\n\n` at
+    // 1099-1100, end-position 1101).
+    expect(chunks[0].length).toBe(1101);
+    expect(chunks[0].endsWith('\n\n')).toBe(true);
+  });
+
+  it('lastSafeIndexOf never returns end > MAX_LENGTH (PR #308 review)', () => {
+    // Regression: pre-fix `lastIndexOf('\n', MAX_LENGTH)` could find
+    // a `\n` starting at byte MAX_LENGTH and return end-position
+    // MAX_LENGTH + 1, producing a chunk of MAX_LENGTH + 1 chars —
+    // over Telegram's limit. The fix searches from
+    // `at - needle.length`, so end is bounded by `at`.
+    const head = 'a'.repeat(MAX_LENGTH); // bytes 0..MAX_LENGTH-1
+    const text = head + '\n' + 'b'.repeat(2000); // `\n` at byte MAX_LENGTH
+    const chunks = splitMessage(text);
+    // No chunk may exceed MAX_LENGTH.
+    for (const c of chunks) {
+      expect(c.length).toBeLessThanOrEqual(MAX_LENGTH);
+    }
+  });
+
+  it('hard-cuts as last resort when the entire input is one unsplittable HTML span', () => {
+    // A single `<pre>...</pre>` block longer than MAX_LENGTH has
+    // no depth-0 split position. The function falls back to a hard
+    // cut at MAX_LENGTH; the resulting chunk's HTML is technically
+    // broken, and the sanitizer's plain-text fallback handles it.
+    const text = `<pre>${'z'.repeat(MAX_LENGTH * 2)}</pre>`;
+    const chunks = splitMessage(text);
+    expect(chunks.length).toBeGreaterThan(1);
+    // First chunk size respects MAX_LENGTH even when no safe
+    // position exists.
+    expect(chunks[0].length).toBeLessThanOrEqual(MAX_LENGTH);
+  });
+});
+
+describe('TelegramChannel.sendMessage — sanitize-then-split contract (#282)', () => {
+  it('sanitizes ONCE before splitting — chunks are HTML, not raw markdown', async () => {
+    const opts = createTestOpts();
+    const channel = new TelegramChannel('test-token', opts);
+    await channel.connect();
+
+    // Below MAX_LENGTH so it produces one chunk; the assertion is
+    // that the chunk delivered to the API is sanitized HTML.
+    await channel.sendMessage(
+      'tg:100200300',
+      'see [Docs](https://example.com) with **bold** here',
+    );
+
+    const sentArgs = currentBot().api.sendMessage.mock.calls[0];
+    expect(sentArgs[1]).toBe(
+      'see <a href="https://example.com">Docs</a> with <b>bold</b> here',
+    );
+    // parse_mode is HTML on the first attempt (no fallback fired).
+    expect(sentArgs[2]?.parse_mode).toBe('HTML');
+    // The internal preSanitized marker MUST NOT be smuggled into
+    // the API options object — Telegram would reject unknown
+    // fields strictly, and this is host-side bookkeeping.
+    expect(sentArgs[2]?.preSanitized).toBeUndefined();
+  });
+
+  it('long markdown link split across chunks renders as a single link in chunk 2 (no half-construct)', async () => {
+    // Pre-fix (split-then-sanitize), splitting between `]` and `(`
+    // of a markdown link left chunk 1 ending with `]` and chunk 2
+    // starting with `(https://…)` — neither half matched the
+    // sanitizer's link regex. Post-fix, sanitize runs on the whole
+    // input first, the link becomes `<a href="…">…</a>`, and
+    // splitMessage's HTML-awareness keeps the tag intact in one
+    // chunk.
+    const opts = createTestOpts();
+    const channel = new TelegramChannel('test-token', opts);
+    await channel.connect();
+
+    const head = 'h'.repeat(4080);
+    const text = `${head} [click](https://example.com/p) tail`;
+    await channel.sendMessage('tg:100200300', text);
+
+    const calls = currentBot().api.sendMessage.mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    // Whichever chunk contains the link must contain the WHOLE
+    // `<a>` tag, not a fragment.
+    const allChunks = calls.map((c: any[]) => c[1] as string).join(' ');
+    expect(
+      allChunks.includes('<a href="https://example.com/p">click</a>'),
+    ).toBe(true);
+    // Defensive: no chunk has an unterminated `<a` opening.
+    for (const c of calls) {
+      const chunk = c[1] as string;
+      const opens = (chunk.match(/<a\s/g) || []).length;
+      const closes = (chunk.match(/<\/a>/g) || []).length;
+      expect(opens).toBe(closes);
+    }
   });
 });
