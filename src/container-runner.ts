@@ -305,12 +305,14 @@ export function createFilteredDb(
   // operators upgrading on top of an existing data dir keep the old
   // WAL artefacts indefinitely — both as wasted disk and as the same
   // RO-mount-can't-open failure the pragma is supposed to eliminate.
-  // Sidecars are unlinked unconditionally (independent of whether the
+  // Sidecars are removed unconditionally (independent of whether the
   // main file existed) because a partial wipe — main DB removed but
   // sidecars left — is the exact state SQLite refuses to open.
+  // `rmSync({ force: true })` so concurrent refreshes (default +
+  // maintenance session for the same untrusted group) tolerate
+  // another caller having already removed one or more of these paths.
   for (const suffix of ['', '-wal', '-shm']) {
-    const p = `${filteredPath}${suffix}`;
-    if (fs.existsSync(p)) fs.unlinkSync(p);
+    fs.rmSync(`${filteredPath}${suffix}`, { force: true });
   }
 
   // Use ATTACH to copy schema-agnostically — picks up new columns automatically

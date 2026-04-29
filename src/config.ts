@@ -121,35 +121,6 @@ export const MAX_MESSAGES_PER_PROMPT = Math.max(
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,
 );
 export const IPC_POLL_INTERVAL = 1000;
-// Grace period applied by the orchestrator's per-write IPC-input sweep
-// (`sweepStaleInputs`) when called from the message loop. Files in
-// `data/ipc/<group>/input-default/` are eligible for unlink only when
-// they are older than this many milliseconds. The window must be
-// comfortably larger than the agent-runner's drain cycle (one
-// `IPC_POLL_INTERVAL` tick + one prompt round-trip) so the sweep never
-// races a live container that is about to read a just-written file.
-// 60s is conservative — the agent's drain typically lands within
-// hundreds of milliseconds. Tunable via env for ops override; see #287.
-//
-// `parseInt(...) || 60000` would coerce a deliberate `0` env value to
-// the default (0 is falsy). Tests and dev runs legitimately want
-// `IPC_INPUT_SWEEP_GRACE_MS=0` to make the per-write sweep aggressive,
-// so the parse uses an explicit NaN check: only undefined / unparseable
-// strings fall back, `0` is preserved.
-//
-// Negative env values clamp to 0 — a negative grace would mean "sweep
-// files written in the future", which is meaningless on this clock.
-//
-// Exported for tests so the env=0 / NaN / negative branches can be
-// pinned without re-evaluating the whole config module (which leaks
-// `process.on(...)` listeners — see `config.test.ts` for the rationale).
-export function parseGraceMs(raw: string | undefined): number {
-  const parsed = parseInt(raw ?? '60000', 10);
-  return Math.max(0, Number.isNaN(parsed) ? 60000 : parsed);
-}
-export const IPC_INPUT_SWEEP_GRACE_MS = parseGraceMs(
-  process.env.IPC_INPUT_SWEEP_GRACE_MS,
-);
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 
 // Kill-auto-compaction master flag (issue #104, design at

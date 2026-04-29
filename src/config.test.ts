@@ -22,7 +22,7 @@ import {
   afterAll,
 } from 'vitest';
 
-import { parseGraceMs, parseHostId } from './config.js';
+import { parseHostId } from './config.js';
 
 const ORIGINAL_HOST_UID = process.env.HOST_UID;
 const ORIGINAL_HOST_GID = process.env.HOST_GID;
@@ -152,39 +152,5 @@ describe('parseHostId', () => {
     const joined = stderrWrites.join('');
     expect(joined).toContain('HOST_UID="foo"');
     expect(joined).toContain('HOST_GID="-5"');
-  });
-});
-
-// Issue #287 — IPC_INPUT_SWEEP_GRACE_MS parse contract.
-// The naive `parseInt(...) || 60000` form silently swallows a deliberate
-// `0` env value because `0` is falsy. Tests and dev runs do legitimately
-// want `IPC_INPUT_SWEEP_GRACE_MS=0` (aggressive per-write sweep), so the
-// parse must distinguish "value preserved" from "fall back to default".
-describe('parseGraceMs', () => {
-  it('uses the 60000ms default when env is unset (undefined)', () => {
-    expect(parseGraceMs(undefined)).toBe(60000);
-  });
-
-  it('preserves explicit 0 instead of treating it as falsy', () => {
-    expect(parseGraceMs('0')).toBe(0);
-  });
-
-  it('preserves any positive integer string', () => {
-    expect(parseGraceMs('1')).toBe(1);
-    expect(parseGraceMs('120000')).toBe(120000);
-  });
-
-  it('clamps negative values to 0 (a negative grace is meaningless)', () => {
-    expect(parseGraceMs('-1000')).toBe(0);
-  });
-
-  it('falls back to default when the env value is non-numeric', () => {
-    expect(parseGraceMs('not-a-number')).toBe(60000);
-  });
-
-  it('falls back to default when the env value is empty string', () => {
-    // `parseInt("", 10)` is NaN — the NaN guard must catch it the same
-    // way `undefined` is caught.
-    expect(parseGraceMs('')).toBe(60000);
   });
 });
