@@ -14,7 +14,12 @@ import {
 // Same TEST_DATA_DIR isolation pattern as ipc-auth.test.ts: host-logs
 // derives every path from `DATA_DIR`. Mock the export so tests don't
 // touch the developer's real `data/host-logs/` tree.
-const { TEST_DATA_DIR } = vi.hoisted(() => {
+//
+// HOST_UID/HOST_GID are exposed as getters so the chown-on-mkdir tests
+// can flip them per-case without re-importing the module. The refs are
+// captured in `vi.hoisted` because `vi.mock` is hoisted above the
+// `import` of host-logs and can't reach module-scope `let` bindings.
+const { TEST_DATA_DIR, hostUidRef, hostGidRef } = vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const osMod = require('os') as typeof import('os');
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -24,6 +29,8 @@ const { TEST_DATA_DIR } = vi.hoisted(() => {
       osMod.tmpdir(),
       `nanoclaw-host-logs-test-${process.pid}`,
     ),
+    hostUidRef: { value: undefined as number | undefined },
+    hostGidRef: { value: undefined as number | undefined },
   };
 });
 vi.mock('./config.js', async () => {
@@ -32,6 +39,12 @@ vi.mock('./config.js', async () => {
   return {
     ...actual,
     DATA_DIR: TEST_DATA_DIR,
+    get HOST_UID() {
+      return hostUidRef.value;
+    },
+    get HOST_GID() {
+      return hostGidRef.value;
+    },
   };
 });
 
@@ -53,6 +66,11 @@ beforeEach(() => {
   if (fs.existsSync(hostLogsDir())) {
     fs.rmSync(hostLogsDir(), { recursive: true, force: true });
   }
+  // Default: no HOST_UID/HOST_GID — same posture as a Mac-host run,
+  // where the orchestrator process already owns the files it creates
+  // and chown is a no-op. The chown-specific tests opt into values.
+  hostUidRef.value = undefined;
+  hostGidRef.value = undefined;
 });
 
 afterEach(() => {
@@ -131,18 +149,199 @@ describe('ensureHostLogDirs', () => {
     expect(ensureHostLogDirs()).toBe(true);
   });
 
-  it('returns false when mkdirSync fails — never throws', () => {
+  it('returns false on allowlisted filesystem-state errors — never throws', () => {
     // Simulate a hostile filesystem (read-only mount, EACCES, etc.).
     // The orchestrator startup code path needs ensureHostLogDirs to
-    // be best-effort: a failing dir-create must not crash spawn,
-    // because aborting container creation on a logging-side failure
-    // would mean no agent runs at all rather than just no host-logs
-    // visibility — a strict downgrade of behaviour.
+    // be best-effort on filesystem-state failures: a failing dir-create
+    // must not crash spawn, because aborting container creation on a
+    // logging-side failure would mean no agent runs at all rather than
+    // just no host-logs visibility — a strict downgrade of behaviour.
     const spy = vi.spyOn(fs, 'mkdirSync').mockImplementation(() => {
-      throw new Error('EROFS');
+      const err = new Error('EROFS') as NodeJS.ErrnoException;
+      err.code = 'EROFS';
+      throw err;
     });
+    let result: boolean | undefined;
+    expect(() => {
+      result = ensureHostLogDirs();
+    }).not.toThrow();
+    expect(result).toBe(false);
+    spy.mockRestore();
+  });
+
+  // --- chown to HOST_UID/HOST_GID (issue #254) ---
+  //
+  // The orchestrator container runs as root in DooD; without a chown
+  // after mkdir, every directory under `data/host-logs/` inherits
+  // root:root and the host-side `scripts/deploy.sh` (running as the
+  // host user) gets EACCES when it tries to append the kill-window
+  // marker that `data/host-logs/deploy-kills.log` requires for #249's
+  // 137-cascade suppression. Chowning to HOST_UID:HOST_GID at create
+  // time keeps the bind mount writable from both sides.
+
+  it('chowns each created dir to HOST_UID/HOST_GID when both are set', () => {
+    hostUidRef.value = 999;
+    hostGidRef.value = 10;
+    const chownSpy = vi
+      .spyOn(fs, 'lchownSync')
+      .mockImplementation(() => undefined);
+
+    ensureHostLogDirs();
+
+    // Three dirs: root, containers/, state/. Each gets one chown call.
+    const chownedPaths = chownSpy.mock.calls.map((c) => c[0]);
+    expect(chownedPaths).toEqual([
+      hostLogsDir(),
+      hostLogsContainersDir(),
+      hostLogsStateDir(),
+    ]);
+    for (const call of chownSpy.mock.calls) {
+      expect(call[1]).toBe(999);
+      expect(call[2]).toBe(10);
+    }
+    chownSpy.mockRestore();
+  });
+
+  it('skips chown when HOST_UID/HOST_GID are unset (Mac host, not DooD)', () => {
+    hostUidRef.value = undefined;
+    hostGidRef.value = undefined;
+    const chownSpy = vi
+      .spyOn(fs, 'lchownSync')
+      .mockImplementation(() => undefined);
+
+    ensureHostLogDirs();
+
+    expect(chownSpy).not.toHaveBeenCalled();
+    chownSpy.mockRestore();
+  });
+
+  it('skips chown when HOST_UID or HOST_GID is negative (misconfig — fail-open, not crash)', () => {
+    // `lchownSync(-1, -1)` throws RangeError/ERR_OUT_OF_RANGE — that
+    // isn't in the permission-class allowlist, so it would propagate
+    // and take orchestrator startup down. The fail-open contract for
+    // a misconfigured `HOST_UID=-1` is "skip the chown silently",
+    // matching the missing-env case. Validate at the gate.
+    hostUidRef.value = -1;
+    hostGidRef.value = 10;
+    const chownSpy = vi
+      .spyOn(fs, 'lchownSync')
+      .mockImplementation(() => undefined);
+
     expect(() => ensureHostLogDirs()).not.toThrow();
-    expect(ensureHostLogDirs()).toBe(false);
+    expect(chownSpy).not.toHaveBeenCalled();
+    chownSpy.mockRestore();
+  });
+
+  it('skips chown when HOST_UID is 0 (matches the in-container-root pattern)', () => {
+    // container-runner.ts skips chowns when uid is 0 because chowning
+    // to root is a no-op anyway and avoids surfacing EPERM noise on
+    // unprivileged orchestrator invocations. Mirror that here so the
+    // two code paths agree on the meaning of "uid 0 means skip".
+    hostUidRef.value = 0;
+    hostGidRef.value = 0;
+    const chownSpy = vi
+      .spyOn(fs, 'lchownSync')
+      .mockImplementation(() => undefined);
+
+    ensureHostLogDirs();
+
+    expect(chownSpy).not.toHaveBeenCalled();
+    chownSpy.mockRestore();
+  });
+
+  it('tolerates chown failures — never throws, still returns true', () => {
+    // The orchestrator may run without CAP_CHOWN on some mounts (e.g.,
+    // user namespaces, restricted bind targets). A failing chown
+    // shouldn't unwind directory creation: the dir exists, the host
+    // writer just can't append to it, which is exactly the
+    // pre-existing fail-open behaviour the issue calls out.
+    hostUidRef.value = 999;
+    hostGidRef.value = 10;
+    const chownSpy = vi.spyOn(fs, 'lchownSync').mockImplementation(() => {
+      const err = new Error('EPERM') as NodeJS.ErrnoException;
+      err.code = 'EPERM';
+      throw err;
+    });
+
+    let result: boolean | undefined;
+    expect(() => {
+      result = ensureHostLogDirs();
+    }).not.toThrow();
+    expect(result).toBe(true);
+    expect(fs.existsSync(hostLogsDir())).toBe(true);
+    chownSpy.mockRestore();
+  });
+
+  it('tolerates any errno from chown (best-effort across the whole errno surface)', () => {
+    // Round-2 review feedback: the previous EPERM/EACCES/EROFS
+    // allowlist was too narrow. ENOENT (the dir raced away between
+    // mkdir and chown) and EIO (disk error) are both filesystem-state
+    // failures the orchestrator can't fix at startup, so they take
+    // the fail-open path. Discrimination is now "has an errno string
+    // → swallow; otherwise → propagate".
+    hostUidRef.value = 999;
+    hostGidRef.value = 10;
+    for (const code of ['EIO', 'ENOENT', 'EPERM', 'EACCES', 'EROFS']) {
+      const chownSpy = vi.spyOn(fs, 'lchownSync').mockImplementation(() => {
+        const err = new Error(code) as NodeJS.ErrnoException;
+        err.code = code;
+        throw err;
+      });
+      let result: boolean | undefined;
+      expect(() => {
+        result = ensureHostLogDirs();
+      }).not.toThrow();
+      expect(result).toBe(true);
+      chownSpy.mockRestore();
+    }
+  });
+
+  it('rethrows non-errno errors from chown (real-defect surfacing)', () => {
+    // Programmer bugs (TypeError, ReferenceError, anything without a
+    // `.code` errno string) are NOT filesystem-state failures and
+    // should not be hidden under the fail-open umbrella — they need
+    // to surface so real defects are caught, not swallowed.
+    hostUidRef.value = 999;
+    hostGidRef.value = 10;
+    const chownSpy = vi.spyOn(fs, 'lchownSync').mockImplementation(() => {
+      throw new TypeError('uid argument must be an integer');
+    });
+
+    expect(() => ensureHostLogDirs()).toThrow(TypeError);
+    chownSpy.mockRestore();
+  });
+
+  it('tolerates any errno from mkdirSync (EEXIST-as-file, ENOTDIR, etc.)', () => {
+    // Same round-2 widening for the mkdir catch. Real-world cases
+    // where the previous narrow allowlist would have crashed
+    // startup: `data/host-logs` exists as a file (EEXIST), a parent
+    // path component is a file (ENOTDIR), the parent was deleted
+    // racing with us (transient ENOENT). All filesystem state, all
+    // fail-open.
+    for (const code of ['EEXIST', 'ENOTDIR', 'ENOENT', 'EIO']) {
+      const spy = vi.spyOn(fs, 'mkdirSync').mockImplementation(() => {
+        const err = new Error(code) as NodeJS.ErrnoException;
+        err.code = code;
+        throw err;
+      });
+      let result: boolean | undefined;
+      expect(() => {
+        result = ensureHostLogDirs();
+      }).not.toThrow();
+      expect(result).toBe(false);
+      spy.mockRestore();
+    }
+  });
+
+  it('rethrows non-errno errors from mkdirSync (real-defect surfacing)', () => {
+    // TypeError / ReferenceError / any error without a `.code`
+    // errno string indicates a programmer bug — NOT a fail-open
+    // case. Same posture as the chown catch.
+    const spy = vi.spyOn(fs, 'mkdirSync').mockImplementation(() => {
+      throw new TypeError('bad path argument');
+    });
+
+    expect(() => ensureHostLogDirs()).toThrow(TypeError);
     spy.mockRestore();
   });
 });

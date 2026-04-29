@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { DATA_DIR } from './config.js';
+import { DATA_DIR, HOST_GID, HOST_UID } from './config.js';
 
 /**
  * Host log artifacts the admin tile reads via `/workspace/host-logs/`
@@ -85,23 +85,92 @@ export function ensureHostLogDirs(): boolean {
   // anyway, but we should still keep the partial-success state if it
   // helps later callers — e.g. the logger sink only needs the root
   // dir, not containers/ or state/).
+  //
+  // After each successful mkdirSync, chown the directory to
+  // HOST_UID/HOST_GID so host-side writers (`scripts/deploy.sh`
+  // appending to `data/host-logs/deploy-kills.log`, log rotation,
+  // operator inspection) can write into a tree the orchestrator
+  // container's root user may have created. The chown runs whether
+  // the dir was newly created or already existed (mkdirSync recursive
+  // is a no-op on existing dirs) — that's intentional, it repairs
+  // pre-existing root:root state from before this fix landed. Without
+  // the chown the bind-mount surfaces root:root to the host
+  // filesystem, and the host user gets EACCES — see #254.
   let ok = true;
-  try {
-    fs.mkdirSync(hostLogsDir(), { recursive: true });
-  } catch {
-    ok = false;
-  }
-  try {
-    fs.mkdirSync(hostLogsContainersDir(), { recursive: true });
-  } catch {
-    ok = false;
-  }
-  try {
-    fs.mkdirSync(hostLogsStateDir(), { recursive: true });
-  } catch {
-    ok = false;
+  for (const dir of [
+    hostLogsDir(),
+    hostLogsContainersDir(),
+    hostLogsStateDir(),
+  ]) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch (err: unknown) {
+      // Discriminate by `err.code`: anything with an errno string
+      // (EACCES, EROFS, ENOSPC, EPERM, EEXIST when the path exists as
+      // a file, ENOTDIR when a parent component is a file, transient
+      // ENOENT, EIO, etc.) is a filesystem-state failure — the
+      // fail-open contract holds and the caller proceeds without
+      // host-logs visibility. Only errors WITHOUT a `code` (TypeError
+      // from a malformed argument, ReferenceError, etc.) indicate a
+      // programmer bug and propagate, so unexpected exceptions are
+      // never silently swallowed.
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (typeof code === 'string') {
+        ok = false;
+        continue;
+      }
+      throw err;
+    }
+    chownToHostUser(dir);
   }
   return ok;
+}
+
+/**
+ * Best-effort chown to the host operator's uid/gid. Skipped when
+ * HOST_UID/HOST_GID aren't set (running directly on the host, not
+ * docker-out-of-docker — the orchestrator already owns the file it
+ * just created) or when HOST_UID is 0 (matches the chown-skip pattern
+ * elsewhere — `container-runner.ts` filtered-DB / state-dir paths —
+ * for the case where the in-container user is already root).
+ *
+ * Uses `lchownSync`, not `chownSync`, to match the symlink-safety
+ * posture of `chownRecursive` in `container-runner.ts`. A container
+ * with write access to a bind-mounted parent could theoretically
+ * replace `data/host-logs/` with a symlink to `/etc/passwd` between
+ * mkdir and chown; `lchownSync` operates on the link itself and
+ * keeps that escalation path closed.
+ *
+ * Filesystem failures are tolerated because the orchestrator may run
+ * without CAP_CHOWN on some bind targets (user namespaces, restricted
+ * mounts), and the dir can race away between mkdir and chown
+ * (ENOENT). A chown that didn't take just means the directory keeps
+ * orchestrator-container ownership and the host-side writer hits the
+ * same "fail open with a warning" path it would have hit before this
+ * fix. The catch discriminates by `err.code`: any errno string is a
+ * filesystem-state error and is swallowed; anything without a code
+ * (TypeError from a malformed argument, etc.) is a programmer bug
+ * and propagates.
+ *
+ * Negative uid/gid values are rejected at the validation gate:
+ * `lchownSync(-1, -1)` throws `RangeError` with `code: ERR_OUT_OF_RANGE`,
+ * which would technically pass the errno-string check below but
+ * indicates a real misconfiguration that we'd rather skip cleanly
+ * than swallow as a logged-elsewhere failure. Filtering to
+ * non-negative integers up front keeps a misconfigured
+ * `HOST_UID=-1` from taking the orchestrator down silently.
+ */
+function chownToHostUser(dir: string): void {
+  if (HOST_UID === undefined || HOST_GID === undefined) return;
+  if (!Number.isInteger(HOST_UID) || !Number.isInteger(HOST_GID)) return;
+  if (HOST_UID < 0 || HOST_GID < 0) return;
+  if (HOST_UID === 0) return;
+  try {
+    fs.lchownSync(dir, HOST_UID, HOST_GID);
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (typeof code !== 'string') throw err;
+  }
 }
 
 /**
