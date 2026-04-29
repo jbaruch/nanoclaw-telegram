@@ -430,11 +430,12 @@ else
         # any genuine OOM 137 that lands inside that fictitious window.
         KILLED=$(printf '%s\n' "${HOLDOUTS[@]}" | xargs docker kill 2>/dev/null || true)
         if [[ -n "$KILLED" && -n "$DEPLOY_KILLS_LOG" ]]; then
-            # printf emits a literal tab via $'\t' — the heartbeat
-            # parser splits on tab, and busybox/ash `echo` would
-            # reinterpret the escape if anyone ports the deploy off
-            # the GNU bash on the Synology NAS. Same python3 dance
-            # as DEPLOY_KILL_START so the timestamps stay in lockstep.
+            # printf emits a literal tab via the `\t` in the format
+            # string — the heartbeat parser splits on tab, and
+            # busybox/ash `echo` would reinterpret the escape if
+            # anyone ports the deploy off the GNU bash on the
+            # Synology NAS. Same python3 dance as DEPLOY_KILL_START
+            # so the timestamps stay in lockstep.
             DEPLOY_KILL_END=$(python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))")
             if ! printf '%s\t%s\n' "$DEPLOY_KILL_START" "$DEPLOY_KILL_END" >> "$DEPLOY_KILLS_LOG"; then
                 echo "WARNING: failed to append window pair to $DEPLOY_KILLS_LOG — heartbeat 137 suppression will fail open for this deploy" >&2
