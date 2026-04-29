@@ -270,6 +270,58 @@ describe('createFilteredDb (untrusted DB isolation)', () => {
       db.close();
     }
   });
+
+  // Issue #287 follow-up — operators upgrading from a pre-fix version
+  // can have stale `-wal`/`-shm` sidecars on disk from when the snapshot
+  // ran in WAL mode. The next `createFilteredDb` call must wipe those
+  // sidecars too, not just the main DB file. A partial state (main DB
+  // gone, sidecars present) is the exact scenario SQLite refuses to
+  // open with `unable to open database file`.
+  it('createFilteredDb removes leftover -wal/-shm sidecars from a pre-fix snapshot', () => {
+    seedMessagesDb();
+    // First call to create the filtered dir + main DB.
+    const filtered = createFilteredDb('chatA@g.us', 'folder-a');
+    expect(filtered).not.toBe(null);
+    // Plant fake sidecars as if a pre-fix WAL-mode snapshot had run.
+    const walPath = `${filtered}-wal`;
+    const shmPath = `${filtered}-shm`;
+    fs.writeFileSync(walPath, 'stale-wal');
+    fs.writeFileSync(shmPath, 'stale-shm');
+    expect(fs.existsSync(walPath)).toBe(true);
+    expect(fs.existsSync(shmPath)).toBe(true);
+
+    // Re-run — the stale-copy cleanup must take both sidecars with it.
+    const refresh = createFilteredDb('chatA@g.us', 'folder-a');
+    expect(refresh).toBe(filtered);
+    expect(fs.existsSync(walPath)).toBe(false);
+    expect(fs.existsSync(shmPath)).toBe(false);
+  });
+
+  // Issue #287 — filtered DB must use a rollback journal, not WAL.
+  // Untrusted containers receive this DB on a read-only mount (`fakeowner
+  // ro`); a WAL-mode DB cannot be opened even for reads on a RO mount
+  // because SQLite needs to write `-wal`/`-shm` sidecars. Forcing
+  // `journal_mode = DELETE` makes the file self-contained so every
+  // reader's default open succeeds. A regression here surfaces inside
+  // untrusted containers as `OperationalError: unable to open database
+  // file` from any default-mode reader (Python `sqlite3.connect(path)`,
+  // node `new Database(path)`).
+  it('filtered DB is created with journal_mode = DELETE (not WAL) — #287', () => {
+    seedMessagesDb();
+    const filtered = createFilteredDb('chatA@g.us', 'folder-a');
+    expect(filtered).not.toBe(null);
+    const db = new Database(filtered!, { readonly: true });
+    try {
+      const mode = db.pragma('journal_mode', { simple: true });
+      expect(mode).toBe('delete');
+    } finally {
+      db.close();
+    }
+    // No `-wal`/`-shm` sidecars should be present after creation. Their
+    // existence is the visible symptom of WAL mode.
+    expect(fs.existsSync(`${filtered}-wal`)).toBe(false);
+    expect(fs.existsSync(`${filtered}-shm`)).toBe(false);
+  });
 });
 
 // -----------------------------------------------------------------------------
@@ -1029,5 +1081,98 @@ describe('buildVolumeMounts — shared-memory mount', () => {
       );
       expect(fs.existsSync(sharedMemoryDir)).toBe(false);
     });
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Issue #287 / #288 review — pre-spawn IPC sweep is handoff-aware.
+//
+// `buildVolumeMounts` calls `sweepStaleInputs(sessionInputDir, 0)` to wipe
+// leftover IPC inputs from previous container lifecycles before a fresh
+// spawn. That is correct OUTSIDE a graceful-shutdown handoff window, but
+// during one an adopted-but-still-running container from the previous
+// orchestrator may share this session's input dir with the fresh spawn —
+// and a `graceMs = 0` sweep would unlink files the adopted container
+// hasn't drained yet. The pre-spawn sweep must therefore skip while
+// `isHandoffActive()` is true.
+// -----------------------------------------------------------------------------
+import { _resetHandoffWindowForTests, markHandoffActive } from './handoff.js';
+
+describe('buildVolumeMounts — pre-spawn IPC sweep skips during handoff (#288)', () => {
+  beforeEach(() => {
+    seedMessagesDb();
+    _resetHandoffWindowForTests();
+  });
+
+  function makeUntrustedGroup(): RegisteredGroup {
+    return {
+      name: 'Untrusted',
+      folder: 'sweep-handoff-test',
+      trigger: '@U',
+      added_at: new Date().toISOString(),
+      containerConfig: { trusted: false },
+    };
+  }
+
+  function seedSessionInputDir(): {
+    inputDir: string;
+    plantedFile: string;
+  } {
+    // buildVolumeMounts calls fs.mkdirSync(sessionInputDir, { recursive: true })
+    // so the planted file must be written AFTER buildVolumeMounts ensures
+    // the dir exists — but the sweep happens INSIDE buildVolumeMounts.
+    // Pre-create the dir + file here so the sweep sees it on first call.
+    const inputDir = path.join(
+      DATA_DIR,
+      'ipc',
+      'sweep-handoff-test',
+      'input-default',
+    );
+    fs.mkdirSync(inputDir, { recursive: true });
+    fs.mkdirSync(path.join(GROUPS_DIR, 'sweep-handoff-test'), {
+      recursive: true,
+    });
+    const planted = path.join(
+      inputDir,
+      `${Date.now() - 999_999_999}-aaaa.json`,
+    );
+    fs.writeFileSync(planted, '{"type":"message","text":"unread"}');
+    return { inputDir, plantedFile: planted };
+  }
+
+  it('sweeps stale IPC inputs by default (no handoff active)', () => {
+    const { plantedFile } = seedSessionInputDir();
+    expect(fs.existsSync(plantedFile)).toBe(true);
+
+    buildVolumeMounts(makeUntrustedGroup(), false, 'sweep-default@g.us');
+
+    expect(fs.existsSync(plantedFile)).toBe(false);
+  });
+
+  it('does NOT sweep IPC inputs while a handoff window is active', () => {
+    const { plantedFile } = seedSessionInputDir();
+    markHandoffActive();
+    expect(fs.existsSync(plantedFile)).toBe(true);
+
+    buildVolumeMounts(makeUntrustedGroup(), false, 'sweep-handoff@g.us');
+
+    // Adopted container may not have drained this file yet — sweep must
+    // leave it in place so the adopted container's next IPC poll can
+    // still see it.
+    expect(fs.existsSync(plantedFile)).toBe(true);
+  });
+
+  it('resumes sweeping once the handoff window expires', () => {
+    const { plantedFile } = seedSessionInputDir();
+    markHandoffActive();
+    // Force the window to be over by resetting in-process state — the
+    // public API doesn't expose "set window in the past", but reset is
+    // the documented test hook and represents the same logical state
+    // (no active handoff).
+    _resetHandoffWindowForTests();
+
+    buildVolumeMounts(makeUntrustedGroup(), false, 'sweep-post-handoff@g.us');
+
+    expect(fs.existsSync(plantedFile)).toBe(false);
   });
 });

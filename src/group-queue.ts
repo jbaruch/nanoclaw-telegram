@@ -7,6 +7,7 @@ import {
   DEFAULT_SESSION_NAME,
   sessionInputDirName,
 } from './container-runner.js';
+import { isExpectedFsError } from './fs-errors.js';
 import { logger } from './logger.js';
 
 // Re-export so callers that already imported it from group-queue keep working.
@@ -32,28 +33,6 @@ interface QueuedTask {
 
 const MAX_RETRIES = 5;
 const BASE_RETRY_MS = 5000;
-
-/**
- * Filesystem error codes we expect on best-effort writes to per-group input
- * dirs and tolerate by logging + continuing. Anything outside this set
- * (TypeError, ReferenceError, unrelated programming bugs) propagates so it
- * surfaces instead of being silently swallowed.
- */
-const EXPECTED_FS_ERROR_CODES = new Set([
-  'EACCES',
-  'EPERM',
-  'ENOSPC',
-  'EROFS',
-  'ENOENT',
-  'EISDIR',
-  'EBUSY',
-]);
-
-function isExpectedFsError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const code = (err as NodeJS.ErrnoException).code;
-  return typeof code === 'string' && EXPECTED_FS_ERROR_CODES.has(code);
-}
 
 interface GroupState {
   groupJid: string;
