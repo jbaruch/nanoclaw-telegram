@@ -1117,10 +1117,12 @@ describe('GroupQueue', () => {
     const writeFileSync = vi.mocked(fs.default.writeFileSync);
     writeFileSync.mockClear();
     // First call (bad-folder OR good-folder, depending on Map iteration
-    // order) throws; subsequent calls succeed. The implementation must
-    // catch the throw and keep iterating.
+    // order) throws an expected fs error; subsequent calls succeed. The
+    // implementation must catch the throw and keep iterating.
     writeFileSync.mockImplementationOnce(() => {
-      throw new Error('EACCES: permission denied');
+      const err = new Error('permission denied') as NodeJS.ErrnoException;
+      err.code = 'EACCES';
+      throw err;
     });
 
     const signaled = queue.closeAllActiveContainers();
@@ -1128,6 +1130,44 @@ describe('GroupQueue', () => {
     // One write threw, one succeeded — signaled count reflects only the
     // success.
     expect(signaled).toBe(1);
+
+    releases.forEach((r) => r());
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('closeAllActiveContainers propagates unexpected (non-fs) errors', async () => {
+    // The error-handling rule forbids bare catch-alls — a TypeError or
+    // other programming bug from inside the loop must not be swallowed
+    // alongside expected fs errors. If it were, a regression in a helper
+    // (e.g. sessionInputDirName throws on a malformed sessionName) would
+    // be silently logged forever.
+    const fs = await import('fs');
+    const releases: Array<() => void> = [];
+
+    queue.enqueueTask(
+      'group@g.us',
+      'task',
+      DEFAULT_SESSION_NAME,
+      vi.fn(async () => {
+        await new Promise<void>((r) => releases.push(r));
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(
+      'group@g.us',
+      DEFAULT_SESSION_NAME,
+      {} as unknown as import('child_process').ChildProcess,
+      'container',
+      'folder',
+    );
+
+    const writeFileSync = vi.mocked(fs.default.writeFileSync);
+    writeFileSync.mockClear();
+    writeFileSync.mockImplementationOnce(() => {
+      throw new TypeError('not a function');
+    });
+
+    expect(() => queue.closeAllActiveContainers()).toThrow(TypeError);
 
     releases.forEach((r) => r());
     await vi.advanceTimersByTimeAsync(10);

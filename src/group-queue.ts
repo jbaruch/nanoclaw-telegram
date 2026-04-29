@@ -33,6 +33,28 @@ interface QueuedTask {
 const MAX_RETRIES = 5;
 const BASE_RETRY_MS = 5000;
 
+/**
+ * Filesystem error codes we expect on best-effort writes to per-group input
+ * dirs and tolerate by logging + continuing. Anything outside this set
+ * (TypeError, ReferenceError, unrelated programming bugs) propagates so it
+ * surfaces instead of being silently swallowed.
+ */
+const EXPECTED_FS_ERROR_CODES = new Set([
+  'EACCES',
+  'EPERM',
+  'ENOSPC',
+  'EROFS',
+  'ENOENT',
+  'EISDIR',
+  'EBUSY',
+]);
+
+function isExpectedFsError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const code = (err as NodeJS.ErrnoException).code;
+  return typeof code === 'string' && EXPECTED_FS_ERROR_CODES.has(code);
+}
+
 interface GroupState {
   groupJid: string;
   sessionName: string;
@@ -352,6 +374,7 @@ export class GroupQueue {
       fs.mkdirSync(inputDir, { recursive: true });
       fs.writeFileSync(path.join(inputDir, '_close'), '');
     } catch (err) {
+      if (!isExpectedFsError(err)) throw err;
       logger.warn(
         { err, groupJid, sessionName },
         'closeStdin failed — stale container may linger until idle timeout',
@@ -394,6 +417,7 @@ export class GroupQueue {
           fs.writeFileSync(path.join(inputDir, '_close'), '');
           signaled++;
         } catch (err) {
+          if (!isExpectedFsError(err)) throw err;
           logger.warn(
             { err, groupJid, sessionName },
             'closeAllActiveContainers: per-slot close failed — slot may run on stale tile content until idle timeout',
