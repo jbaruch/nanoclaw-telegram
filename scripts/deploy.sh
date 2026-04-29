@@ -434,12 +434,13 @@ else
         echo "  ${#HOLDOUTS[@]} agent(s) from the original set didn't exit in ${GRACE_SECONDS}s — force-killing"
         # Capture stdout — `docker kill` echoes the names of containers
         # it actually killed. A holdout that exited gracefully in the
-        # race window between the `docker ps` above and this kill prints
-        # to stderr and isn't in stdout, so we never log a window for a
-        # deploy that didn't actually produce a 137. Without this, the
-        # marker would sometimes claim a kill happened in a 30 s window
-        # where every agent had already exited cleanly — false-suppress
-        # any genuine OOM 137 that lands inside that fictitious window.
+        # race window between the `docker ps` above and this kill would
+        # write to stderr (which we suppress with `2>/dev/null`) and
+        # isn't in stdout, so we never log a window for a deploy that
+        # didn't actually produce a 137. Without this, the marker would
+        # sometimes claim a kill happened in a 30 s window where every
+        # agent had already exited cleanly — false-suppress any genuine
+        # OOM 137 that lands inside that fictitious window.
         KILLED=$(printf '%s\n' "${HOLDOUTS[@]}" | xargs docker kill 2>/dev/null || true)
         if [[ -n "$KILLED" && -n "$DEPLOY_KILLS_LOG" && -n "$DEPLOY_KILL_START" ]]; then
             # printf emits a literal tab via the `\t` in the format
