@@ -86,13 +86,16 @@ export function ensureHostLogDirs(): boolean {
   // helps later callers — e.g. the logger sink only needs the root
   // dir, not containers/ or state/).
   //
-  // Each freshly-created directory is chowned to HOST_UID/HOST_GID so
-  // host-side writers (`scripts/deploy.sh` appending to
-  // `data/host-logs/deploy-kills.log`, log rotation, operator
-  // inspection) can write into a tree the orchestrator container's
-  // root user just created. Without the chown the orchestrator's
-  // mkdirSync inherits root:root, the bind-mount surfaces that to the
-  // host filesystem, and the host user gets EACCES — see #254.
+  // After each successful mkdirSync, chown the directory to
+  // HOST_UID/HOST_GID so host-side writers (`scripts/deploy.sh`
+  // appending to `data/host-logs/deploy-kills.log`, log rotation,
+  // operator inspection) can write into a tree the orchestrator
+  // container's root user may have created. The chown runs whether
+  // the dir was newly created or already existed (mkdirSync recursive
+  // is a no-op on existing dirs) — that's intentional, it repairs
+  // pre-existing root:root state from before this fix landed. Without
+  // the chown the bind-mount surfaces root:root to the host
+  // filesystem, and the host user gets EACCES — see #254.
   let ok = true;
   for (const dir of [
     hostLogsDir(),
@@ -104,10 +107,10 @@ export function ensureHostLogDirs(): boolean {
     } catch (err: unknown) {
       // Allowlist filesystem-state errnos that legitimately mean
       // "host can't host this directory right now" (read-only mount,
-      // out of space, permission). Anything else (e.g. TypeError
-      // from a malformed path) is a programmer bug that should
-      // surface, not get swallowed under the fail-open umbrella —
-      // see `rules/error-handling.md`.
+      // out of space, permission). Only swallow those expected fs
+      // errno codes; rethrow everything else. Unexpected errors
+      // (e.g. TypeError from a malformed path) are programmer bugs
+      // and should not be hidden under the fail-open umbrella.
       const code = (err as NodeJS.ErrnoException)?.code;
       if (
         code === 'EACCES' ||
@@ -147,11 +150,19 @@ export function ensureHostLogDirs(): boolean {
  * writer hits the same "fail open with a warning" path it would have
  * hit before this fix. Anything outside the permission-class
  * allowlist (ENOENT after we just mkdir'd, EIO, etc.) is a real
- * defect and propagates per `rules/error-handling.md`.
+ * defect and is rethrown to the caller.
+ *
+ * Negative uid/gid values are rejected at the validation gate:
+ * `lchownSync(-1, -1)` throws `RangeError`/`ERR_OUT_OF_RANGE`, which
+ * isn't in the permission-class allowlist below and would crash
+ * startup if it reached the catch — defeating the fail-open contract.
+ * Filtering to non-negative integers up front keeps a misconfigured
+ * `HOST_UID=-1` from taking the orchestrator down.
  */
 function chownToHostUser(dir: string): void {
   if (HOST_UID === undefined || HOST_GID === undefined) return;
   if (!Number.isInteger(HOST_UID) || !Number.isInteger(HOST_GID)) return;
+  if (HOST_UID < 0 || HOST_GID < 0) return;
   if (HOST_UID === 0) return;
   try {
     fs.lchownSync(dir, HOST_UID, HOST_GID);

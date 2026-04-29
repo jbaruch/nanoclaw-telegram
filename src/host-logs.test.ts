@@ -215,6 +215,23 @@ describe('ensureHostLogDirs', () => {
     chownSpy.mockRestore();
   });
 
+  it('skips chown when HOST_UID or HOST_GID is negative (misconfig — fail-open, not crash)', () => {
+    // `lchownSync(-1, -1)` throws RangeError/ERR_OUT_OF_RANGE — that
+    // isn't in the permission-class allowlist, so it would propagate
+    // and take orchestrator startup down. The fail-open contract for
+    // a misconfigured `HOST_UID=-1` is "skip the chown silently",
+    // matching the missing-env case. Validate at the gate.
+    hostUidRef.value = -1;
+    hostGidRef.value = 10;
+    const chownSpy = vi
+      .spyOn(fs, 'lchownSync')
+      .mockImplementation(() => undefined);
+
+    expect(() => ensureHostLogDirs()).not.toThrow();
+    expect(chownSpy).not.toHaveBeenCalled();
+    chownSpy.mockRestore();
+  });
+
   it('skips chown when HOST_UID is 0 (matches the in-container-root pattern)', () => {
     // container-runner.ts skips chowns when uid is 0 because chowning
     // to root is a no-op anyway and avoids surfacing EPERM noise on
