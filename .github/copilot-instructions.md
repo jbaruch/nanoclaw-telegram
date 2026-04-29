@@ -105,12 +105,12 @@ Tests live in `src/**/*.test.ts` (also `setup/`, `container/agent-runner/src/`, 
 ## Key Conventions
 
 ### TypeScript
-- ES module project (`"type": "module"` in package.json); always use `.js` extensions in imports even for `.ts` source files (NodeNext resolution).
+- ES module project (`"type": "module"` in package.json); import paths must use `.js` extensions even when the actual source file is `.ts` — e.g., `import { foo } from './bar.js'` where `bar.ts` is the real file. This is required by NodeNext module resolution.
 - Strict mode. No `any` (warning). No catch-all catches (custom ESLint rule `no-catch-all/no-catch-all`).
 - All types in `src/types.ts`; extend there rather than inventing local interfaces.
 
 ### Configuration
-All runtime config is in `src/config.ts`. Non-secret values come from `.env` via `readEnvFile`. **Secrets are never read in `config.ts`** — they are loaded only by `credential-proxy.ts`.
+All runtime config is in `src/config.ts`. It reads only **non-secret** values from `.env` via `readEnvFile` (assistant name, paths, timeouts, feature flags). API keys and auth tokens are **not** read here — they are loaded exclusively by `credential-proxy.ts` and injected at request time, so they are never exposed inside containers.
 
 ### Database
 `src/db.ts` wraps `better-sqlite3` (synchronous). All schema migrations are in `src/state-migrations/` and applied via `applyStateMigrations()` using SQLite `PRAGMA user_version`. Add a new numbered migration file; register it in `src/state-migrations/index.ts`.
