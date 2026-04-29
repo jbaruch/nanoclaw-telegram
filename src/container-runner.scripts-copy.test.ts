@@ -5,6 +5,32 @@ import * as os from 'os';
 import * as path from 'path';
 import { copyTileScriptsToFlatDir } from './container-runner.js';
 
+function mkfifoAvailable(): boolean {
+  // Probe by actually creating a FIFO in tmpdir — also exercises the
+  // filesystem's FIFO support, not just the binary's presence. If
+  // either is missing the test is irrelevant on this platform.
+  // Cleanup is best-effort in `finally` so the gate result reflects
+  // whether the probe succeeded, not whether we managed to remove it.
+  const probe = path.join(
+    os.tmpdir(),
+    `mkfifo-probe-${process.pid}-${Date.now()}`,
+  );
+  let available = false;
+  try {
+    execFileSync('mkfifo', [probe], { stdio: 'ignore' });
+    available = true;
+  } catch {
+    available = false;
+  } finally {
+    try {
+      fs.rmSync(probe, { force: true });
+    } catch {
+      // Best-effort cleanup only.
+    }
+  }
+  return available;
+}
+
 // Standalone test file — no `vi.mock('fs')`. The companion
 // container-runner.test.ts mocks fs globally for security-critical
 // mount-construction assertions; here we need real fs to exercise the
@@ -81,16 +107,19 @@ describe('copyTileScriptsToFlatDir', () => {
     );
   });
 
-  it('skips a FIFO entry (allowlist guard)', () => {
+  it.skipIf(!mkfifoAvailable())('skips a FIFO entry (allowlist guard)', () => {
     // Anything that isn't a regular file or symlink would crash
     // `fs.cpSync` with EINVAL and reintroduce the spawn-time crash
     // class the original `__pycache__/` bug was in. FIFO is the
-    // cheapest non-{file,symlink,dir} kind to create cross-platform.
+    // cheapest non-{file,symlink,dir} kind to create on POSIX;
+    // gated on `mkfifoAvailable()` so a minimal env (no mkfifo
+    // binary, FIFO-incapable fs) skips this case rather than fails.
     fs.writeFileSync(path.join(srcDir, 'normal.py'), 'normal');
     const fifoPath = path.join(srcDir, 'channel.fifo');
     // Node's fs has no mkfifo binding; shell out to the POSIX tool.
-    // Available on macOS and every CI Linux distro this repo targets.
-    execFileSync('mkfifo', [fifoPath]);
+    // `stdio: 'ignore'` matches the probe call so a chatty mkfifo
+    // implementation can't pollute the test output.
+    execFileSync('mkfifo', [fifoPath], { stdio: 'ignore' });
 
     expect(() => copyTileScriptsToFlatDir(srcDir, dstDir)).not.toThrow();
 
