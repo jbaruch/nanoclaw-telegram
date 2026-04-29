@@ -101,9 +101,24 @@ export function ensureHostLogDirs(): boolean {
   ]) {
     try {
       fs.mkdirSync(dir, { recursive: true });
-    } catch {
-      ok = false;
-      continue;
+    } catch (err: unknown) {
+      // Allowlist filesystem-state errnos that legitimately mean
+      // "host can't host this directory right now" (read-only mount,
+      // out of space, permission). Anything else (e.g. TypeError
+      // from a malformed path) is a programmer bug that should
+      // surface, not get swallowed under the fail-open umbrella —
+      // see `rules/error-handling.md`.
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (
+        code === 'EACCES' ||
+        code === 'EROFS' ||
+        code === 'ENOSPC' ||
+        code === 'EPERM'
+      ) {
+        ok = false;
+        continue;
+      }
+      throw err;
     }
     chownToHostUser(dir);
   }
@@ -118,21 +133,31 @@ export function ensureHostLogDirs(): boolean {
  * elsewhere — `container-runner.ts` filtered-DB / state-dir paths —
  * for the case where the in-container user is already root).
  *
- * Failure is swallowed — same posture as the surrounding mkdirSync
- * calls. A chown that didn't take just means the directory keeps
- * orchestrator-container ownership; the host-side writer hits the
- * same "fail open with a warning" path it would have hit before this
- * fix. Throwing here would crash startup over a host-visibility
- * concern, which would be a strict regression.
+ * Uses `lchownSync`, not `chownSync`, to match the symlink-safety
+ * posture of `chownRecursive` in `container-runner.ts`. A container
+ * with write access to a bind-mounted parent could theoretically
+ * replace `data/host-logs/` with a symlink to `/etc/passwd` between
+ * mkdir and chown; `lchownSync` operates on the link itself and
+ * keeps that escalation path closed.
+ *
+ * Permission-class failures are tolerated because the orchestrator
+ * may run without CAP_CHOWN on some bind targets (user namespaces,
+ * restricted mounts). A chown that didn't take just means the
+ * directory keeps orchestrator-container ownership and the host-side
+ * writer hits the same "fail open with a warning" path it would have
+ * hit before this fix. Anything outside the permission-class
+ * allowlist (ENOENT after we just mkdir'd, EIO, etc.) is a real
+ * defect and propagates per `rules/error-handling.md`.
  */
 function chownToHostUser(dir: string): void {
   if (HOST_UID === undefined || HOST_GID === undefined) return;
   if (!Number.isInteger(HOST_UID) || !Number.isInteger(HOST_GID)) return;
   if (HOST_UID === 0) return;
   try {
-    fs.chownSync(dir, HOST_UID, HOST_GID);
-  } catch {
-    // Best-effort — see comment above.
+    fs.lchownSync(dir, HOST_UID, HOST_GID);
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EROFS') throw err;
   }
 }
 

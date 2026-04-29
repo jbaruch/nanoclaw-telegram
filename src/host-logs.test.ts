@@ -149,18 +149,23 @@ describe('ensureHostLogDirs', () => {
     expect(ensureHostLogDirs()).toBe(true);
   });
 
-  it('returns false when mkdirSync fails — never throws', () => {
+  it('returns false on allowlisted filesystem-state errors — never throws', () => {
     // Simulate a hostile filesystem (read-only mount, EACCES, etc.).
     // The orchestrator startup code path needs ensureHostLogDirs to
-    // be best-effort: a failing dir-create must not crash spawn,
-    // because aborting container creation on a logging-side failure
-    // would mean no agent runs at all rather than just no host-logs
-    // visibility — a strict downgrade of behaviour.
+    // be best-effort on filesystem-state failures: a failing dir-create
+    // must not crash spawn, because aborting container creation on a
+    // logging-side failure would mean no agent runs at all rather than
+    // just no host-logs visibility — a strict downgrade of behaviour.
     const spy = vi.spyOn(fs, 'mkdirSync').mockImplementation(() => {
-      throw new Error('EROFS');
+      const err = new Error('EROFS') as NodeJS.ErrnoException;
+      err.code = 'EROFS';
+      throw err;
     });
-    expect(() => ensureHostLogDirs()).not.toThrow();
-    expect(ensureHostLogDirs()).toBe(false);
+    let result: boolean | undefined;
+    expect(() => {
+      result = ensureHostLogDirs();
+    }).not.toThrow();
+    expect(result).toBe(false);
     spy.mockRestore();
   });
 
@@ -178,7 +183,7 @@ describe('ensureHostLogDirs', () => {
     hostUidRef.value = 999;
     hostGidRef.value = 10;
     const chownSpy = vi
-      .spyOn(fs, 'chownSync')
+      .spyOn(fs, 'lchownSync')
       .mockImplementation(() => undefined);
 
     ensureHostLogDirs();
@@ -201,7 +206,7 @@ describe('ensureHostLogDirs', () => {
     hostUidRef.value = undefined;
     hostGidRef.value = undefined;
     const chownSpy = vi
-      .spyOn(fs, 'chownSync')
+      .spyOn(fs, 'lchownSync')
       .mockImplementation(() => undefined);
 
     ensureHostLogDirs();
@@ -218,7 +223,7 @@ describe('ensureHostLogDirs', () => {
     hostUidRef.value = 0;
     hostGidRef.value = 0;
     const chownSpy = vi
-      .spyOn(fs, 'chownSync')
+      .spyOn(fs, 'lchownSync')
       .mockImplementation(() => undefined);
 
     ensureHostLogDirs();
@@ -235,16 +240,47 @@ describe('ensureHostLogDirs', () => {
     // pre-existing fail-open behaviour the issue calls out.
     hostUidRef.value = 999;
     hostGidRef.value = 10;
-    const chownSpy = vi.spyOn(fs, 'chownSync').mockImplementation(() => {
+    const chownSpy = vi.spyOn(fs, 'lchownSync').mockImplementation(() => {
       const err = new Error('EPERM') as NodeJS.ErrnoException;
       err.code = 'EPERM';
       throw err;
     });
 
-    expect(() => ensureHostLogDirs()).not.toThrow();
-    expect(ensureHostLogDirs()).toBe(true);
+    let result: boolean | undefined;
+    expect(() => {
+      result = ensureHostLogDirs();
+    }).not.toThrow();
+    expect(result).toBe(true);
     expect(fs.existsSync(hostLogsDir())).toBe(true);
     chownSpy.mockRestore();
+  });
+
+  it('rethrows non-permission errors from chown (real-defect surfacing)', () => {
+    // Mirror of the typed-catch posture in the implementation: an
+    // unexpected errno (EIO, ENOENT, …) means something is wrong that
+    // a fail-open `catch {}` would hide. The error-handling rule says
+    // surface those, don't swallow them.
+    hostUidRef.value = 999;
+    hostGidRef.value = 10;
+    const chownSpy = vi.spyOn(fs, 'lchownSync').mockImplementation(() => {
+      const err = new Error('EIO') as NodeJS.ErrnoException;
+      err.code = 'EIO';
+      throw err;
+    });
+
+    expect(() => ensureHostLogDirs()).toThrow(/EIO/);
+    chownSpy.mockRestore();
+  });
+
+  it('rethrows non-allowlisted errors from mkdirSync (real-defect surfacing)', () => {
+    // Same posture for the mkdir catch — TypeError or any unknown
+    // errno escapes, only filesystem-state errnos set ok=false.
+    const spy = vi.spyOn(fs, 'mkdirSync').mockImplementation(() => {
+      throw new TypeError('bad path argument');
+    });
+
+    expect(() => ensureHostLogDirs()).toThrow(TypeError);
+    spy.mockRestore();
   });
 });
 
