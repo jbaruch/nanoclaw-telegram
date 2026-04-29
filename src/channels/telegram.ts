@@ -35,31 +35,40 @@ export interface TelegramChannelOpts {
 }
 
 /**
- * Trigger gate (#289) — keeps host-side reactions in sync with the
- * orchestrator's routing rules. Returns:
- *  - `recordObserver`: whether `noteLatestUserMessage` should run (drives
- *    progress-emoji attachment; off for non-addressed messages).
+ * Trigger gate (#289) — decides whether a host-side reaction is
+ * appropriate for an inbound message. Returns:
+ *  - `recordObserver`: whether `noteLatestUserMessage` should run
+ *    (drives progress-emoji attachment; off for non-addressed messages).
  *  - `emitReaction`: whether the host should send 👀 immediately. Reserved
  *    for trust contexts (main / `containerConfig.trusted`); untrusted
  *    contexts let the agent's bad-actor-disengage rule decide.
  *
- * `replyToOurBot` is intentionally narrower than `reply_to_message.from.is_bot`:
- * the orchestrator's `isReplyToBot` only routes when the reply target is
- * specifically our bot, so a broader host gate would emit 👀 on cross-bot
- * threads the orchestrator drops — exactly the leak this PR fixes.
+ * The gate is intentionally **decoupled** from `requires_trigger`. That
+ * flag governs whether the agent ANSWERS deterministically (only on
+ * @-mention / reply-to-bot, no reasoning) vs. reasoning about every
+ * inbound. The 👀 ack is a separate concern: it visibly marks "we read
+ * this", and that should only fire on messages addressed to us — even
+ * in `requires_trigger=false` group chats, where the agent reasons
+ * about every message but should not light up reactions on bystander
+ * traffic between other participants or other bots.
+ *
+ * "Addressed to us" resolves as: main group, 1:1 DM, explicit trigger
+ * match, or reply to our bot. `replyToOurBot` is narrower than
+ * `reply_to_message.from.is_bot` for that same reason — replies to
+ * other bots in a multi-bot group are not for us.
  */
 export function evaluateTriggerGate(
   group: RegisteredGroup,
   content: string,
-  replyToOurBot: boolean,
+  options: { replyToOurBot: boolean; isPrivateChat: boolean },
 ): { recordObserver: boolean; emitReaction: boolean } {
   const isMain = group.isMain ?? false;
   const isTrusted = !!group.containerConfig?.trusted;
-  const requiresTrigger = !isMain && group.requiresTrigger !== false;
   const triggerHit =
-    !requiresTrigger ||
+    isMain ||
+    options.isPrivateChat ||
     getTriggerPattern(group.trigger).test(content.trim()) ||
-    replyToOurBot;
+    options.replyToOurBot;
   return {
     recordObserver: triggerHit,
     emitReaction: (isMain || isTrusted) && triggerHit,
@@ -1095,10 +1104,10 @@ export class TelegramChannel implements Channel {
         'Telegram message stored',
       );
 
-      // Trigger gate (#289). `default-silence.md` requires zero output
-      // for messages that aren't addressed to us; the gate enforces
-      // that for both the observer's progress-reaction wiring and the
-      // host-side 👀 acknowledgement.
+      // Trigger gate (#289). The 👀 ack is decoupled from
+      // `requires_trigger`: even in chats where the agent reasons
+      // about every inbound, the host should not visibly react to
+      // bystander traffic.
       const replyFrom = ctx.message.reply_to_message?.from;
       const replyToOurBot =
         !!replyFrom?.is_bot &&
@@ -1106,7 +1115,10 @@ export class TelegramChannel implements Channel {
       const { recordObserver, emitReaction } = evaluateTriggerGate(
         group,
         content,
-        replyToOurBot,
+        {
+          replyToOurBot,
+          isPrivateChat: ctx.chat.type === 'private',
+        },
       );
 
       if (recordObserver) {
@@ -1259,7 +1271,10 @@ export class TelegramChannel implements Channel {
       const { recordObserver, emitReaction } = evaluateTriggerGate(
         group,
         content,
-        replyToOurBot,
+        {
+          replyToOurBot,
+          isPrivateChat: ctx.chat.type === 'private',
+        },
       );
 
       if (recordObserver) {
