@@ -263,7 +263,7 @@ describe('applyStateMigrations', () => {
     }
   });
 
-  it('rejects empty name or sql', () => {
+  it('rejects empty or whitespace-only name and sql', () => {
     const database = new Database(':memory:');
     try {
       expect(() =>
@@ -271,6 +271,17 @@ describe('applyStateMigrations', () => {
           {
             version: 1,
             name: '',
+            sql: 'CREATE TABLE foo (id TEXT);',
+          },
+        ]),
+      ).toThrow(/name must be a non-empty string/);
+      // Whitespace-only name defeats the purpose of a human-readable
+      // label — validator must trim before checking length.
+      expect(() =>
+        applyStateMigrations(database, [
+          {
+            version: 1,
+            name: '   \n\t  ',
             sql: 'CREATE TABLE foo (id TEXT);',
           },
         ]),

@@ -110,7 +110,7 @@ function validateMigrationRegistry(
           `src/state-migrations/README.md.`,
       );
     }
-    if (typeof m.name !== 'string' || m.name.length === 0) {
+    if (typeof m.name !== 'string' || m.name.trim().length === 0) {
       throw new Error(
         `state-migrations[${i}]: name must be a non-empty string`,
       );
