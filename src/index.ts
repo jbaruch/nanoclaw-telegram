@@ -2548,6 +2548,16 @@ async function main(): Promise<void> {
           try {
             closed = queue.closeAllActiveContainers();
           } catch (closeErr) {
+            // Narrow to Error instances (the only thing realistic
+            // production code throws). Non-Error throws (a bare string,
+            // `null`, etc.) are themselves a programming bug and
+            // propagate as uncaught exceptions per error-handling.md
+            // ("let unexpected propagate"). This catch is the
+            // outer-boundary guard for an async callback — without it,
+            // an Error from the close path would terminate the
+            // orchestrator process; with it, sessions stay cleared and
+            // we degrade to "containers refresh on idle timeout."
+            if (!(closeErr instanceof Error)) throw closeErr;
             logger.error(
               { err: closeErr, sessionsCleared: cleared },
               'closeAllActiveContainers threw an unexpected error during periodic tessl update — sessions still cleared, but live containers will not respawn until idle timeout',

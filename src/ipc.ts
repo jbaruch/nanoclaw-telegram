@@ -3030,10 +3030,16 @@ export async function processTaskIpc(
               // "containers signaled" from "sessions cleared but
               // signaling failed."
               let closed = 0;
-              let closeErr: unknown = null;
+              let closeErr: Error | null = null;
               try {
                 closed = deps.closeAllActiveContainers();
               } catch (e) {
+                // See src/index.ts periodic update for the rationale —
+                // outer-boundary guard around an async-callback
+                // boundary. Narrow to Error so non-Error throws (a
+                // programming bug throwing a non-Error value)
+                // propagate per error-handling.md.
+                if (!(e instanceof Error)) throw e;
                 closeErr = e;
                 logger.error(
                   { err: e, sourceGroup, sessionsCleared: cleared },
