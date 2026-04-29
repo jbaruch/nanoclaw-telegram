@@ -4,7 +4,12 @@ import path from 'path';
 import { Api, Bot, InputFile } from 'grammy';
 import OpenAI from 'openai';
 
-import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
+import {
+  ASSISTANT_NAME,
+  GROUPS_DIR,
+  TRIGGER_PATTERN,
+  getTriggerPattern,
+} from '../config.js';
 import {
   getLatestMessage,
   getMessageById,
@@ -27,6 +32,38 @@ export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+}
+
+/**
+ * Trigger gate (#289) — keeps host-side reactions in sync with the
+ * orchestrator's routing rules. Returns:
+ *  - `recordObserver`: whether `noteLatestUserMessage` should run (drives
+ *    progress-emoji attachment; off for non-addressed messages).
+ *  - `emitReaction`: whether the host should send 👀 immediately. Reserved
+ *    for trust contexts (main / `containerConfig.trusted`); untrusted
+ *    contexts let the agent's bad-actor-disengage rule decide.
+ *
+ * `replyToOurBot` is intentionally narrower than `reply_to_message.from.is_bot`:
+ * the orchestrator's `isReplyToBot` only routes when the reply target is
+ * specifically our bot, so a broader host gate would emit 👀 on cross-bot
+ * threads the orchestrator drops — exactly the leak this PR fixes.
+ */
+export function evaluateTriggerGate(
+  group: RegisteredGroup,
+  content: string,
+  replyToOurBot: boolean,
+): { recordObserver: boolean; emitReaction: boolean } {
+  const isMain = group.isMain ?? false;
+  const isTrusted = !!group.containerConfig?.trusted;
+  const requiresTrigger = !isMain && group.requiresTrigger !== false;
+  const triggerHit =
+    !requiresTrigger ||
+    getTriggerPattern(group.trigger).test(content.trim()) ||
+    replyToOurBot;
+  return {
+    recordObserver: triggerHit,
+    emitReaction: (isMain || isTrusted) && triggerHit,
+  };
 }
 
 /**
@@ -1058,13 +1095,28 @@ export class TelegramChannel implements Channel {
         'Telegram message stored',
       );
 
-      // Tell the observer which message ID is "live" in this chat so
-      // later observer/agent stages can update its reaction emoji as
-      // processing progresses (🤔 → ⚡ → ✍ → 🤝). This call only
-      // records the latest inbound message ID and seeds the dedupe
-      // map with 👀 — it does NOT send the 👀 reaction itself.
-      // No-op when OBSERVER_CHAT_JID isn't set.
-      noteLatestUserMessage(chatJid, msgId);
+      // Trigger gate (#289). `default-silence.md` requires zero output
+      // for messages that aren't addressed to us; the gate enforces
+      // that for both the observer's progress-reaction wiring and the
+      // host-side 👀 acknowledgement.
+      const replyFrom = ctx.message.reply_to_message?.from;
+      const replyToOurBot =
+        !!replyFrom?.is_bot &&
+        replyFrom?.username?.toLowerCase() === ctx.me?.username?.toLowerCase();
+      const { recordObserver, emitReaction } = evaluateTriggerGate(
+        group,
+        content,
+        replyToOurBot,
+      );
+
+      if (recordObserver) {
+        noteLatestUserMessage(chatJid, msgId);
+      }
+      if (emitReaction) {
+        this.sendReaction(chatJid, msgId, '👀').catch(() => {
+          /* already logged inside sendReaction */
+        });
+      }
     });
 
     // Handle non-text messages with placeholders so the agent knows something was sent
@@ -1154,6 +1206,7 @@ export class TelegramChannel implements Channel {
 
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName = buildSenderName(ctx.from);
+      const msgId = ctx.message.message_id.toString();
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
       this.opts.onChatMetadata(
@@ -1186,7 +1239,7 @@ export class TelegramChannel implements Channel {
       }
 
       this.opts.onMessage(chatJid, {
-        id: ctx.message.message_id.toString(),
+        id: msgId,
         chat_jid: chatJid,
         sender: ctx.from?.id?.toString() || '',
         sender_name: senderName,
@@ -1194,6 +1247,29 @@ export class TelegramChannel implements Channel {
         timestamp,
         is_from_me: false,
       });
+
+      // Trigger gate (#289). For voice the trigger pattern can only
+      // run against the resolved transcript, so this fires after
+      // transcription completes — a few seconds slower than the text
+      // handler but with the same leak protection.
+      const replyFrom = ctx.message.reply_to_message?.from;
+      const replyToOurBot =
+        !!replyFrom?.is_bot &&
+        replyFrom?.username?.toLowerCase() === ctx.me?.username?.toLowerCase();
+      const { recordObserver, emitReaction } = evaluateTriggerGate(
+        group,
+        content,
+        replyToOurBot,
+      );
+
+      if (recordObserver) {
+        noteLatestUserMessage(chatJid, msgId);
+      }
+      if (emitReaction) {
+        this.sendReaction(chatJid, msgId, '👀').catch(() => {
+          /* already logged inside sendReaction */
+        });
+      }
     });
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
     this.bot.on('message:document', async (ctx) => {
