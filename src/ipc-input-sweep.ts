@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
+import { isExpectedFsError } from './fs-errors.js';
 import { logger } from './logger.js';
 
 /**
@@ -19,28 +20,6 @@ import { logger } from './logger.js';
 const SWEEPABLE_FILENAME_RE = /^(\d+)-[A-Za-z0-9]+\.json$/;
 
 /**
- * Expected filesystem errnos for a best-effort IPC sweep — every other
- * code is a real bug (TypeError, programming error, hardware failure)
- * and must propagate so it surfaces instead of being silently absorbed.
- * Mirrors the policy in `src/group-queue.ts` (`EXPECTED_FS_ERROR_CODES`).
- */
-const EXPECTED_FS_ERROR_CODES = new Set([
-  'EACCES',
-  'EPERM',
-  'ENOSPC',
-  'EROFS',
-  'ENOENT',
-  'EISDIR',
-  'EBUSY',
-]);
-
-function isExpectedFsError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const code = (err as NodeJS.ErrnoException).code;
-  return typeof code === 'string' && EXPECTED_FS_ERROR_CODES.has(code);
-}
-
-/**
  * Sweep stale `${ts}-${rand}.json` IPC inputs from a session input dir.
  *
  * Why this exists — see issue #287. Untrusted containers mount
@@ -55,9 +34,13 @@ function isExpectedFsError(err: unknown): boolean {
  * fails for an unrelated reason, the host will still GC.
  *
  * `graceMs` keeps the sweep from racing the agent's drain on currently-
- * active containers — only files older than `graceMs` are eligible. Use
- * `0` for pre-spawn sweeps (no live agent to race) and a positive value
- * for the per-write sweep called from the message loop.
+ * active containers — only files older than `graceMs` are eligible. The
+ * sole caller today is the pre-spawn site in `buildVolumeMounts`, which
+ * passes `0` (no live agent to race). The parameter remains exposed
+ * because any future caller that wants to GC during a container's
+ * lifetime needs it; an earlier draft of #287 included a per-write
+ * sweep with a 60s grace, dropped after Copilot review surfaced the
+ * race against long-running queries that don't drain mid-flight.
  *
  * Returns the number of files unlinked. Errors during readdir are logged
  * and the function returns `0` rather than throwing — sweep failure must
