@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { DATA_DIR } from './config.js';
+import { DATA_DIR, HOST_GID, HOST_UID } from './config.js';
 
 /**
  * Host log artifacts the admin tile reads via `/workspace/host-logs/`
@@ -85,23 +85,55 @@ export function ensureHostLogDirs(): boolean {
   // anyway, but we should still keep the partial-success state if it
   // helps later callers — e.g. the logger sink only needs the root
   // dir, not containers/ or state/).
+  //
+  // Each freshly-created directory is chowned to HOST_UID/HOST_GID so
+  // host-side writers (`scripts/deploy.sh` appending to
+  // `data/host-logs/deploy-kills.log`, log rotation, operator
+  // inspection) can write into a tree the orchestrator container's
+  // root user just created. Without the chown the orchestrator's
+  // mkdirSync inherits root:root, the bind-mount surfaces that to the
+  // host filesystem, and the host user gets EACCES — see #254.
   let ok = true;
-  try {
-    fs.mkdirSync(hostLogsDir(), { recursive: true });
-  } catch {
-    ok = false;
-  }
-  try {
-    fs.mkdirSync(hostLogsContainersDir(), { recursive: true });
-  } catch {
-    ok = false;
-  }
-  try {
-    fs.mkdirSync(hostLogsStateDir(), { recursive: true });
-  } catch {
-    ok = false;
+  for (const dir of [
+    hostLogsDir(),
+    hostLogsContainersDir(),
+    hostLogsStateDir(),
+  ]) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch {
+      ok = false;
+      continue;
+    }
+    chownToHostUser(dir);
   }
   return ok;
+}
+
+/**
+ * Best-effort chown to the host operator's uid/gid. Skipped when
+ * HOST_UID/HOST_GID aren't set (running directly on the host, not
+ * docker-out-of-docker — the orchestrator already owns the file it
+ * just created) or when HOST_UID is 0 (matches the chown-skip pattern
+ * elsewhere — `container-runner.ts` filtered-DB / state-dir paths —
+ * for the case where the in-container user is already root).
+ *
+ * Failure is swallowed — same posture as the surrounding mkdirSync
+ * calls. A chown that didn't take just means the directory keeps
+ * orchestrator-container ownership; the host-side writer hits the
+ * same "fail open with a warning" path it would have hit before this
+ * fix. Throwing here would crash startup over a host-visibility
+ * concern, which would be a strict regression.
+ */
+function chownToHostUser(dir: string): void {
+  if (HOST_UID === undefined || HOST_GID === undefined) return;
+  if (!Number.isInteger(HOST_UID) || !Number.isInteger(HOST_GID)) return;
+  if (HOST_UID === 0) return;
+  try {
+    fs.chownSync(dir, HOST_UID, HOST_GID);
+  } catch {
+    // Best-effort — see comment above.
+  }
 }
 
 /**
