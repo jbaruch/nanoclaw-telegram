@@ -1083,3 +1083,96 @@ describe('buildVolumeMounts — shared-memory mount', () => {
     });
   });
 });
+
+// -----------------------------------------------------------------------------
+// Issue #287 / #288 review — pre-spawn IPC sweep is handoff-aware.
+//
+// `buildVolumeMounts` calls `sweepStaleInputs(sessionInputDir, 0)` to wipe
+// leftover IPC inputs from previous container lifecycles before a fresh
+// spawn. That is correct OUTSIDE a graceful-shutdown handoff window, but
+// during one an adopted-but-still-running container from the previous
+// orchestrator may share this session's input dir with the fresh spawn —
+// and a `graceMs = 0` sweep would unlink files the adopted container
+// hasn't drained yet. The pre-spawn sweep must therefore skip while
+// `isHandoffActive()` is true.
+// -----------------------------------------------------------------------------
+import { _resetHandoffWindowForTests, markHandoffActive } from './handoff.js';
+
+describe('buildVolumeMounts — pre-spawn IPC sweep skips during handoff (#288)', () => {
+  beforeEach(() => {
+    seedMessagesDb();
+    _resetHandoffWindowForTests();
+  });
+
+  function makeUntrustedGroup(): RegisteredGroup {
+    return {
+      name: 'Untrusted',
+      folder: 'sweep-handoff-test',
+      trigger: '@U',
+      added_at: new Date().toISOString(),
+      containerConfig: { trusted: false },
+    };
+  }
+
+  function seedSessionInputDir(): {
+    inputDir: string;
+    plantedFile: string;
+  } {
+    // buildVolumeMounts calls fs.mkdirSync(sessionInputDir, { recursive: true })
+    // so the planted file must be written AFTER buildVolumeMounts ensures
+    // the dir exists — but the sweep happens INSIDE buildVolumeMounts.
+    // Pre-create the dir + file here so the sweep sees it on first call.
+    const inputDir = path.join(
+      DATA_DIR,
+      'ipc',
+      'sweep-handoff-test',
+      'input-default',
+    );
+    fs.mkdirSync(inputDir, { recursive: true });
+    fs.mkdirSync(path.join(GROUPS_DIR, 'sweep-handoff-test'), {
+      recursive: true,
+    });
+    const planted = path.join(
+      inputDir,
+      `${Date.now() - 999_999_999}-aaaa.json`,
+    );
+    fs.writeFileSync(planted, '{"type":"message","text":"unread"}');
+    return { inputDir, plantedFile: planted };
+  }
+
+  it('sweeps stale IPC inputs by default (no handoff active)', () => {
+    const { plantedFile } = seedSessionInputDir();
+    expect(fs.existsSync(plantedFile)).toBe(true);
+
+    buildVolumeMounts(makeUntrustedGroup(), false, 'sweep-default@g.us');
+
+    expect(fs.existsSync(plantedFile)).toBe(false);
+  });
+
+  it('does NOT sweep IPC inputs while a handoff window is active', () => {
+    const { plantedFile } = seedSessionInputDir();
+    markHandoffActive();
+    expect(fs.existsSync(plantedFile)).toBe(true);
+
+    buildVolumeMounts(makeUntrustedGroup(), false, 'sweep-handoff@g.us');
+
+    // Adopted container may not have drained this file yet — sweep must
+    // leave it in place so the adopted container's next IPC poll can
+    // still see it.
+    expect(fs.existsSync(plantedFile)).toBe(true);
+  });
+
+  it('resumes sweeping once the handoff window expires', () => {
+    const { plantedFile } = seedSessionInputDir();
+    markHandoffActive();
+    // Force the window to be over by resetting in-process state — the
+    // public API doesn't expose "set window in the past", but reset is
+    // the documented test hook and represents the same logical state
+    // (no active handoff).
+    _resetHandoffWindowForTests();
+
+    buildVolumeMounts(makeUntrustedGroup(), false, 'sweep-post-handoff@g.us');
+
+    expect(fs.existsSync(plantedFile)).toBe(false);
+  });
+});

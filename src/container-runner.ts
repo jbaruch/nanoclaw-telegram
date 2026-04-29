@@ -1518,9 +1518,21 @@ export function buildVolumeMounts(
   // crashed) and the fresh spawn will rebuild its initial-prompt context
   // from the messages.db cursor. Without this, untrusted spawns inherit
   // the entire backlog as their first prompt and cross the auto-compact
-  // threshold mid-query (issue #287). `graceMs = 0` is safe here — the
-  // previous container is gone and the new one isn't drained from yet.
-  sweepStaleInputs(sessionInputDir, 0);
+  // threshold mid-query (issue #287). `graceMs = 0` is normally safe here
+  // — the previous container is gone and the new one isn't drained from
+  // yet.
+  //
+  // EXCEPT during a graceful-shutdown handoff window: an adopted-but-
+  // still-running container from the previous orchestrator may share
+  // this session's input dir with the fresh spawn we're about to start,
+  // and a graceMs=0 sweep would unlink files the adopted container
+  // hasn't drained yet (#288 review). Skip the sweep while
+  // `isHandoffActive()` is true — the within-handoff backlog is bounded
+  // by the HANDOFF_TTL_MS window (5 min), and the next spawn after the
+  // window expires will GC normally.
+  if (!isHandoffActive()) {
+    sweepStaleInputs(sessionInputDir, 0);
+  }
 
   if (isTrustedIpc) {
     fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
