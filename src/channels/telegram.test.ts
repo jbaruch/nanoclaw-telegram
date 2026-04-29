@@ -1631,7 +1631,7 @@ describe('TelegramChannel', () => {
       const ctx = createTextCtx({ text: 'sounds good' });
       (ctx.message as Record<string, unknown>).reply_to_message = {
         message_id: 42,
-        date: Math.floor(Date.now() / 1000),
+        date: 1735689600,
         chat: { id: 100200300, type: 'group' },
         from: {
           id: 12345,
@@ -1666,7 +1666,7 @@ describe('TelegramChannel', () => {
       const ctx = createTextCtx({ text: 'thanks' });
       (ctx.message as Record<string, unknown>).reply_to_message = {
         message_id: 99,
-        date: Math.floor(Date.now() / 1000),
+        date: 1735689600,
         chat: { id: 100200300, type: 'group' },
         from: {
           id: 67890,
@@ -1774,7 +1774,7 @@ describe('TelegramChannel', () => {
       const ctx = createTextCtx({ text: 'thanks' });
       (ctx.message as Record<string, unknown>).reply_to_message = {
         message_id: 99,
-        date: Math.floor(Date.now() / 1000),
+        date: 1735689600,
         chat: { id: 100200300, type: 'group' },
         from: {
           id: 67890,
@@ -1790,7 +1790,7 @@ describe('TelegramChannel', () => {
       expect(noteLatestUserMessageMock).not.toHaveBeenCalled();
     });
 
-    it('private chat (1:1 DM): 👀 fires without trigger — every message is for us', async () => {
+    it('private chat (1:1 DM, trusted): 👀 fires without trigger — every message is for us', async () => {
       const opts = createTestOpts({
         registeredGroups: makeRegisteredGroups({
           containerConfig: { trusted: true },
@@ -1808,6 +1808,34 @@ describe('TelegramChannel', () => {
       );
 
       expect(reactSpy).toHaveBeenCalledWith('tg:100200300', '1', '👀');
+      expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
+        'tg:100200300',
+        '1',
+      );
+    });
+
+    it('private chat (1:1 DM, untrusted): observer notes but no host 👀', async () => {
+      // Untrusted DM is unusual but supported. The chat-type
+      // short-circuit makes triggerHit true (every solo inbound is
+      // for us), so the observer can attach progress emojis if the
+      // agent engages. The 👀 ack still requires main/trusted, so
+      // host stays silent and the agent decides.
+      const opts = createTestOpts({
+        registeredGroups: makeRegisteredGroups({
+          requiresTrigger: false,
+        }),
+      });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      const reactSpy = vi
+        .spyOn(channel, 'sendReaction')
+        .mockResolvedValue(undefined);
+
+      await triggerTextMessage(
+        createTextCtx({ text: 'hello?', chatType: 'private' }),
+      );
+
+      expect(reactSpy).not.toHaveBeenCalled();
       expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
         'tg:100200300',
         '1',
