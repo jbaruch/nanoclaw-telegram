@@ -4,7 +4,12 @@ import path from 'path';
 import { Api, Bot, InputFile } from 'grammy';
 import OpenAI from 'openai';
 
-import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
+import {
+  ASSISTANT_NAME,
+  GROUPS_DIR,
+  TRIGGER_PATTERN,
+  getTriggerPattern,
+} from '../config.js';
 import {
   getLatestMessage,
   getMessageById,
@@ -1025,13 +1030,36 @@ export class TelegramChannel implements Channel {
         'Telegram message stored',
       );
 
-      // Tell the observer which message ID is "live" in this chat so
-      // later observer/agent stages can update its reaction emoji as
-      // processing progresses (🤔 → ⚡ → ✍ → 🤝). This call only
-      // records the latest inbound message ID and seeds the dedupe
-      // map with 👀 — it does NOT send the 👀 reaction itself.
-      // No-op when OBSERVER_CHAT_JID isn't set.
-      noteLatestUserMessage(chatJid, msgId);
+      // Trigger gate (#289): only record the latest user message and
+      // emit the 👀 acknowledgement when the message is actually
+      // addressed to us. `requires_trigger=true` non-main groups must
+      // not light up reactions on conversation that wasn't directed
+      // at the bot — `default-silence.md` calls for zero output in
+      // that case.
+      const isMain = group.isMain ?? false;
+      const isTrusted = !!group.containerConfig?.trusted;
+      const requiresTrigger = !isMain && group.requiresTrigger !== false;
+      const triggerHit =
+        !requiresTrigger ||
+        getTriggerPattern(group.trigger).test(content.trim()) ||
+        !!ctx.message.reply_to_message?.from?.is_bot;
+
+      // Always record the latest user message so the observer can
+      // attach progress reactions (🤔 → ⚡ → ✍) when the agent
+      // engages. Host-local map, no Telegram API call.
+      if (triggerHit) {
+        noteLatestUserMessage(chatJid, msgId);
+      }
+
+      // 👀 IS a leak surface — gate it. Only auto-react in trust
+      // contexts where engagement is already guaranteed (main OR
+      // trusted, AND triggerHit). Untrusted contexts let the agent's
+      // bad-actor-disengage rule decide.
+      if ((isMain || isTrusted) && triggerHit) {
+        this.sendReaction(chatJid, msgId, '👀').catch(() => {
+          /* already logged inside sendReaction */
+        });
+      }
     });
 
     // Handle non-text messages with placeholders so the agent knows something was sent
@@ -1121,6 +1149,7 @@ export class TelegramChannel implements Channel {
 
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName = buildSenderName(ctx.from);
+      const msgId = ctx.message.message_id.toString();
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
       this.opts.onChatMetadata(
@@ -1153,7 +1182,7 @@ export class TelegramChannel implements Channel {
       }
 
       this.opts.onMessage(chatJid, {
-        id: ctx.message.message_id.toString(),
+        id: msgId,
         chat_jid: chatJid,
         sender: ctx.from?.id?.toString() || '',
         sender_name: senderName,
@@ -1161,6 +1190,27 @@ export class TelegramChannel implements Channel {
         timestamp,
         is_from_me: false,
       });
+
+      // Trigger gate (#289). For voice the trigger pattern can only
+      // run against the resolved transcript, so this fires after
+      // transcription completes — a few seconds slower than the text
+      // handler but with the same leak protection.
+      const isMain = group.isMain ?? false;
+      const isTrusted = !!group.containerConfig?.trusted;
+      const requiresTrigger = !isMain && group.requiresTrigger !== false;
+      const triggerHit =
+        !requiresTrigger ||
+        getTriggerPattern(group.trigger).test(content.trim()) ||
+        !!ctx.message.reply_to_message?.from?.is_bot;
+
+      if (triggerHit) {
+        noteLatestUserMessage(chatJid, msgId);
+      }
+      if ((isMain || isTrusted) && triggerHit) {
+        this.sendReaction(chatJid, msgId, '👀').catch(() => {
+          /* already logged inside sendReaction */
+        });
+      }
     });
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
     this.bot.on('message:document', async (ctx) => {

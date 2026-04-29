@@ -11,7 +11,22 @@ vi.mock('../env.js', () => ({ readEnvFile: vi.fn(() => ({})) }));
 // Mock config
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
-  TRIGGER_PATTERN: /^@Andy\b/i,
+  TRIGGER_PATTERN: /(?:^|\s)@Andy\b/i,
+  // Mirror the real builder's word-boundary semantics so trigger-gate
+  // tests exercise the same shape the orchestrator does.
+  getTriggerPattern: (trigger?: string) => {
+    const t = (trigger?.trim() || '@Andy').replace(
+      /[.*+?^${}()|[\]\\]/g,
+      '\\$&',
+    );
+    return new RegExp(`(?:^|\\s)${t}\\b`, 'i');
+  },
+}));
+
+// Mock observer
+const noteLatestUserMessageMock = vi.hoisted(() => vi.fn());
+vi.mock('../observer.js', () => ({
+  noteLatestUserMessage: noteLatestUserMessageMock,
 }));
 
 // Mock logger
@@ -1330,6 +1345,163 @@ describe('TelegramChannel', () => {
     it('has name "telegram"', () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       expect(channel.name).toBe('telegram');
+    });
+  });
+
+  // --- Trigger gate (#289) ---
+
+  describe('trigger gate', () => {
+    function makeRegisteredGroups(group: Record<string, unknown>) {
+      return vi.fn(() => ({
+        'tg:100200300': {
+          name: 'Test Group',
+          folder: 'test-group',
+          trigger: '@Andy',
+          added_at: '2024-01-01T00:00:00.000Z',
+          ...group,
+        },
+      }));
+    }
+
+    it('main group: 👀 fires regardless of trigger match', async () => {
+      const opts = createTestOpts({
+        registeredGroups: makeRegisteredGroups({ isMain: true }),
+      });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      const reactSpy = vi
+        .spyOn(channel, 'sendReaction')
+        .mockResolvedValue(undefined);
+
+      await triggerTextMessage(createTextCtx({ text: 'random chatter' }));
+
+      expect(reactSpy).toHaveBeenCalledWith('tg:100200300', '1', '👀');
+      expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
+        'tg:100200300',
+        '1',
+      );
+    });
+
+    it('trusted + requires_trigger: no 👀 and no observer note when trigger absent', async () => {
+      const opts = createTestOpts({
+        registeredGroups: makeRegisteredGroups({
+          containerConfig: { trusted: true },
+          requiresTrigger: true,
+        }),
+      });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      const reactSpy = vi
+        .spyOn(channel, 'sendReaction')
+        .mockResolvedValue(undefined);
+
+      await triggerTextMessage(
+        createTextCtx({ text: 'just chatting, no mention' }),
+      );
+
+      expect(reactSpy).not.toHaveBeenCalled();
+      expect(noteLatestUserMessageMock).not.toHaveBeenCalled();
+    });
+
+    it('trusted + requires_trigger: 👀 fires when trigger word matches', async () => {
+      const opts = createTestOpts({
+        registeredGroups: makeRegisteredGroups({
+          containerConfig: { trusted: true },
+          requiresTrigger: true,
+        }),
+      });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      const reactSpy = vi
+        .spyOn(channel, 'sendReaction')
+        .mockResolvedValue(undefined);
+
+      await triggerTextMessage(
+        createTextCtx({ text: '@Andy what time is it?' }),
+      );
+
+      expect(reactSpy).toHaveBeenCalledWith('tg:100200300', '1', '👀');
+      expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
+        'tg:100200300',
+        '1',
+      );
+    });
+
+    it('trusted + requires_trigger: 👀 fires when message replies to a bot', async () => {
+      const opts = createTestOpts({
+        registeredGroups: makeRegisteredGroups({
+          containerConfig: { trusted: true },
+          requiresTrigger: true,
+        }),
+      });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      const reactSpy = vi
+        .spyOn(channel, 'sendReaction')
+        .mockResolvedValue(undefined);
+
+      const ctx = createTextCtx({ text: 'sounds good' });
+      (ctx.message as Record<string, unknown>).reply_to_message = {
+        message_id: 42,
+        date: Math.floor(Date.now() / 1000),
+        chat: { id: 100200300, type: 'group' },
+        from: { id: 12345, is_bot: true, first_name: 'Andy' },
+        text: 'previous bot reply',
+      };
+      await triggerTextMessage(ctx);
+
+      expect(reactSpy).toHaveBeenCalledWith('tg:100200300', '1', '👀');
+      expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
+        'tg:100200300',
+        '1',
+      );
+    });
+
+    it('untrusted + requires_trigger: no 👀 from host even when trigger matches', async () => {
+      const opts = createTestOpts({
+        registeredGroups: makeRegisteredGroups({
+          requiresTrigger: true,
+        }),
+      });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      const reactSpy = vi
+        .spyOn(channel, 'sendReaction')
+        .mockResolvedValue(undefined);
+
+      await triggerTextMessage(createTextCtx({ text: '@Andy hello' }));
+
+      // Host stays out of untrusted reactions; the agent's
+      // bad-actor-disengage rule decides whether to react later.
+      expect(reactSpy).not.toHaveBeenCalled();
+      // ...but the observer still needs to know about an addressed
+      // message so progress emojis can attach if the agent engages.
+      expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
+        'tg:100200300',
+        '1',
+      );
+    });
+
+    it('trusted + requires_trigger=false: 👀 fires for any message', async () => {
+      const opts = createTestOpts({
+        registeredGroups: makeRegisteredGroups({
+          containerConfig: { trusted: true },
+          requiresTrigger: false,
+        }),
+      });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      const reactSpy = vi
+        .spyOn(channel, 'sendReaction')
+        .mockResolvedValue(undefined);
+
+      await triggerTextMessage(createTextCtx({ text: 'small talk' }));
+
+      expect(reactSpy).toHaveBeenCalledWith('tg:100200300', '1', '👀');
+      expect(noteLatestUserMessageMock).toHaveBeenCalledWith(
+        'tg:100200300',
+        '1',
+      );
     });
   });
 });
