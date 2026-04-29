@@ -6,7 +6,12 @@ startup via `applyStateMigrations` in `src/db.ts`.
 
 Tracked via SQLite's built-in `PRAGMA user_version`. Each migration
 bumps `user_version` to its own number on success, inside the same
-transaction as its DDL/DML — partial application is impossible.
+transaction as its DDL/DML — each individual migration is atomic.
+A multi-migration upgrade is *not* one big transaction: if migration
+N fails, earlier migrations stay applied and the next startup
+re-runs only the pending tail (the version gate skips already-
+applied entries). Per-migration atomicity matches the standard
+discipline used by Alembic, Flyway, and Rails migrations.
 
 ## Adding a new migration
 

@@ -34,8 +34,13 @@ export interface StateMigration {
  * Reads `PRAGMA user_version` (SQLite's app-defined schema-version
  * counter), applies every registered migration whose `version` is
  * greater than the current value, and bumps `user_version` to the
- * applied migration's number inside the same transaction as its DDL
- * — so a partial application is impossible.
+ * applied migration's number inside the same transaction as that
+ * migration's DDL/DML. This guarantees each individual migration is
+ * atomic: the database cannot report "version N applied" with only
+ * part of migration N physically present. If multiple pending
+ * migrations exist, earlier migrations remain applied if a later
+ * migration fails — the next startup re-runs only the pending tail
+ * (the version gate skips already-applied entries).
  *
  * Throws if `user_version` is HIGHER than the highest version this
  * build knows about. That state means the database was migrated by a
