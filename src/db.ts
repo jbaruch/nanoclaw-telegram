@@ -5,6 +5,7 @@ import path from 'path';
 import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+import { STATE_MIGRATIONS } from './state-migrations/index.js';
 import {
   ContainerConfig,
   NewMessage,
@@ -14,6 +15,111 @@ import {
 } from './types.js';
 
 let db: Database.Database;
+
+/**
+ * One versioned state-table migration (epic #293). Tracked via SQLite's
+ * built-in `PRAGMA user_version`. See `src/state-migrations/README.md`
+ * for the convention; the registry lives in
+ * `src/state-migrations/index.ts`.
+ */
+export interface StateMigration {
+  version: number;
+  name: string;
+  sql: string;
+}
+
+/**
+ * Apply registered state-table migrations to a database, in order.
+ *
+ * Reads `PRAGMA user_version` (SQLite's app-defined schema-version
+ * counter), applies every registered migration whose `version` is
+ * greater than the current value, and bumps `user_version` to the
+ * applied migration's number inside the same transaction as that
+ * migration's DDL/DML. This guarantees each individual migration is
+ * atomic: the database cannot report "version N applied" with only
+ * part of migration N physically present. If multiple pending
+ * migrations exist, earlier migrations remain applied if a later
+ * migration fails — the next startup re-runs only the pending tail
+ * (the version gate skips already-applied entries).
+ *
+ * Throws if `user_version` is HIGHER than the highest version this
+ * build knows about. That state means the database was migrated by a
+ * newer container and the operator has rolled back to an older one;
+ * silently running against the future schema would corrupt state.
+ *
+ * The `migrations` parameter is injectable so tests can drive the
+ * loader with a fixture array instead of the production registry.
+ */
+export function applyStateMigrations(
+  database: Database.Database,
+  migrations: readonly StateMigration[],
+): void {
+  validateMigrationRegistry(migrations);
+
+  const currentVersion = Number(
+    database.pragma('user_version', { simple: true }),
+  );
+  const highestKnown =
+    migrations.length > 0 ? migrations[migrations.length - 1].version : 0;
+
+  if (currentVersion > highestKnown) {
+    throw new Error(
+      `Database state schema is at user_version=${currentVersion}, but ` +
+        `this build only knows migrations up to version=${highestKnown}. ` +
+        `Refusing to start: this state means a newer container migrated ` +
+        `the database and the operator has rolled back to an older one. ` +
+        `Either run a build that includes migration ${currentVersion}, or ` +
+        `restore the database from before the upgrade.`,
+    );
+  }
+
+  for (const migration of migrations) {
+    if (migration.version <= currentVersion) continue;
+    // Wrap the DDL/DML and the user_version bump in a single
+    // transaction so a SQL error rolls both back together — the
+    // database can never end up reporting "version N applied" with
+    // only half of N's changes physically present.
+    const apply = database.transaction(() => {
+      database.exec(migration.sql);
+      database.pragma(`user_version = ${migration.version}`);
+    });
+    apply();
+    logger.info(
+      { version: migration.version, name: migration.name },
+      'state-migration: applied',
+    );
+  }
+}
+
+function validateMigrationRegistry(
+  migrations: readonly StateMigration[],
+): void {
+  for (let i = 0; i < migrations.length; i++) {
+    const m = migrations[i];
+    if (!Number.isInteger(m.version) || m.version <= 0) {
+      throw new Error(
+        `state-migrations[${i}]: version must be a positive integer, got ${m.version}`,
+      );
+    }
+    const expectedVersion = i + 1;
+    if (m.version !== expectedVersion) {
+      throw new Error(
+        `state-migrations[${i}]: expected version=${expectedVersion} ` +
+          `(contiguous from 1), got version=${m.version}. ` +
+          `Migrations must be contiguous and sorted ascending — see ` +
+          `src/state-migrations/README.md.`,
+      );
+    }
+    if (typeof m.name !== 'string' || m.name.trim().length === 0) {
+      throw new Error(
+        `state-migrations[${i}]: name must be a non-empty string`,
+      );
+    }
+    if (typeof m.sql !== 'string' || m.sql.trim().length === 0) {
+      throw new Error(`state-migrations[${i}]: sql must be a non-empty string`);
+    }
+  }
+}
 
 function createSchema(database: Database.Database): void {
   database.exec(`
@@ -367,6 +473,12 @@ export function initDatabase(): void {
   db.pragma('busy_timeout = 5000');
   createSchema(db);
 
+  // Apply versioned state-table migrations (epic #293). Runs AFTER
+  // createSchema so the baseline tables exist, and BEFORE
+  // migrateJsonState so any JSON-data backfill targets a table that
+  // a registered migration has already created.
+  applyStateMigrations(db, STATE_MIGRATIONS);
+
   // Migrate from JSON files if they exist
   migrateJsonState();
 }
@@ -375,6 +487,7 @@ export function initDatabase(): void {
 export function _initTestDatabase(): void {
   db = new Database(':memory:');
   createSchema(db);
+  applyStateMigrations(db, STATE_MIGRATIONS);
 }
 
 /** @internal - for tests only. */
