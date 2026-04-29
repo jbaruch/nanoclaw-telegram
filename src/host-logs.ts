@@ -112,8 +112,8 @@ export function ensureHostLogDirs(): boolean {
       // fail-open contract holds and the caller proceeds without
       // host-logs visibility. Only errors WITHOUT a `code` (TypeError
       // from a malformed argument, ReferenceError, etc.) indicate a
-      // programmer bug and propagate per the typed-catch posture in
-      // `.tessl/tiles/jbaruch/coding-policy/rules/error-handling.md`.
+      // programmer bug and propagate, so unexpected exceptions are
+      // never silently swallowed.
       const code = (err as NodeJS.ErrnoException)?.code;
       if (typeof code === 'string') {
         ok = false;

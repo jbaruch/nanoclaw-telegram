@@ -299,9 +299,8 @@ describe('ensureHostLogDirs', () => {
   it('rethrows non-errno errors from chown (real-defect surfacing)', () => {
     // Programmer bugs (TypeError, ReferenceError, anything without a
     // `.code` errno string) are NOT filesystem-state failures and
-    // should not be hidden under the fail-open umbrella per the
-    // typed-catch posture in
-    // `.tessl/tiles/jbaruch/coding-policy/rules/error-handling.md`.
+    // should not be hidden under the fail-open umbrella — they need
+    // to surface so real defects are caught, not swallowed.
     hostUidRef.value = 999;
     hostGidRef.value = 10;
     const chownSpy = vi.spyOn(fs, 'lchownSync').mockImplementation(() => {
