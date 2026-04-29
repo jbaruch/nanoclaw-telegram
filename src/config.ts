@@ -111,6 +111,30 @@ export const MODEL_CONTEXT_WINDOW = parseInt(
   10,
 );
 
+// SDK auto-compact working window in tokens (issue #252). Forwarded to
+// the agent-runner as `CLAUDE_CODE_AUTO_COMPACT_WINDOW` so the SDK's
+// `Jn()` resolver clamps `min(model_default, this)` and uses it as the
+// working window for both auto-compaction (when ENABLE_THRESHOLD_NUKE=0)
+// and the blocking-limit check (always — `DISABLE_COMPACT=1` only
+// suppresses `isAboveAutoCompactThreshold`, not `isAtBlockingLimit`).
+//
+// Default 800,000 leaves headroom on the 1M Opus window and lets the
+// observe-only telemetry from #104 see realistic warn (700k) crossings
+// before the SDK compacts. The previous upstream hardcode of 165,000
+// (qwibitai/nanoclaw `f77f9ce`) capped real-world heartbeat cycles at
+// ~16% of the paid-for context window and suppressed every #104
+// threshold telemetry signal — see #252.
+//
+// IMPORTANT: when ENABLE_THRESHOLD_NUKE=1, the orchestrator does NOT
+// forward this value (see container-runner.ts). Letting the SDK fall
+// back to the model default keeps the blocking-limit (~window − 30k)
+// well above the orchestrator's 800k nuke threshold; clamping it would
+// drop blocking-limit below the nuke and wedge sends mid-handshake.
+export const AGENT_AUTO_COMPACT_WINDOW = parseInt(
+  process.env.AGENT_AUTO_COMPACT_WINDOW || '800000',
+  10,
+);
+
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
