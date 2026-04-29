@@ -35,6 +35,38 @@ export interface TelegramChannelOpts {
 }
 
 /**
+ * Trigger gate (#289) — keeps host-side reactions in sync with the
+ * orchestrator's routing rules. Returns:
+ *  - `recordObserver`: whether `noteLatestUserMessage` should run (drives
+ *    progress-emoji attachment; off for non-addressed messages).
+ *  - `emitReaction`: whether the host should send 👀 immediately. Reserved
+ *    for trust contexts (main / `containerConfig.trusted`); untrusted
+ *    contexts let the agent's bad-actor-disengage rule decide.
+ *
+ * `replyToOurBot` is intentionally narrower than `reply_to_message.from.is_bot`:
+ * the orchestrator's `isReplyToBot` only routes when the reply target is
+ * specifically our bot, so a broader host gate would emit 👀 on cross-bot
+ * threads the orchestrator drops — exactly the leak this PR fixes.
+ */
+export function evaluateTriggerGate(
+  group: RegisteredGroup,
+  content: string,
+  replyToOurBot: boolean,
+): { recordObserver: boolean; emitReaction: boolean } {
+  const isMain = group.isMain ?? false;
+  const isTrusted = !!group.containerConfig?.trusted;
+  const requiresTrigger = !isMain && group.requiresTrigger !== false;
+  const triggerHit =
+    !requiresTrigger ||
+    getTriggerPattern(group.trigger).test(content.trim()) ||
+    replyToOurBot;
+  return {
+    recordObserver: triggerHit,
+    emitReaction: (isMain || isTrusted) && triggerHit,
+  };
+}
+
+/**
  * Send a message with Telegram HTML parse mode, falling back to plain text.
  * Supports: <b>bold</b>, <i>italic</i>, <s>strikethrough</s>, <u>underline</u>,
  * <code>inline code</code>, <pre>code blocks</pre>, <blockquote>quotes</blockquote>,
@@ -1030,32 +1062,24 @@ export class TelegramChannel implements Channel {
         'Telegram message stored',
       );
 
-      // Trigger gate (#289): only record the latest user message and
-      // emit the 👀 acknowledgement when the message is actually
-      // addressed to us. `requires_trigger=true` non-main groups must
-      // not light up reactions on conversation that wasn't directed
-      // at the bot — `default-silence.md` calls for zero output in
-      // that case.
-      const isMain = group.isMain ?? false;
-      const isTrusted = !!group.containerConfig?.trusted;
-      const requiresTrigger = !isMain && group.requiresTrigger !== false;
-      const triggerHit =
-        !requiresTrigger ||
-        getTriggerPattern(group.trigger).test(content.trim()) ||
-        !!ctx.message.reply_to_message?.from?.is_bot;
+      // Trigger gate (#289). `default-silence.md` requires zero output
+      // for messages that aren't addressed to us; the gate enforces
+      // that for both the observer's progress-reaction wiring and the
+      // host-side 👀 acknowledgement.
+      const replyFrom = ctx.message.reply_to_message?.from;
+      const replyToOurBot =
+        !!replyFrom?.is_bot &&
+        replyFrom?.username?.toLowerCase() === ctx.me?.username?.toLowerCase();
+      const { recordObserver, emitReaction } = evaluateTriggerGate(
+        group,
+        content,
+        replyToOurBot,
+      );
 
-      // Always record the latest user message so the observer can
-      // attach progress reactions (🤔 → ⚡ → ✍) when the agent
-      // engages. Host-local map, no Telegram API call.
-      if (triggerHit) {
+      if (recordObserver) {
         noteLatestUserMessage(chatJid, msgId);
       }
-
-      // 👀 IS a leak surface — gate it. Only auto-react in trust
-      // contexts where engagement is already guaranteed (main OR
-      // trusted, AND triggerHit). Untrusted contexts let the agent's
-      // bad-actor-disengage rule decide.
-      if ((isMain || isTrusted) && triggerHit) {
+      if (emitReaction) {
         this.sendReaction(chatJid, msgId, '👀').catch(() => {
           /* already logged inside sendReaction */
         });
@@ -1195,18 +1219,20 @@ export class TelegramChannel implements Channel {
       // run against the resolved transcript, so this fires after
       // transcription completes — a few seconds slower than the text
       // handler but with the same leak protection.
-      const isMain = group.isMain ?? false;
-      const isTrusted = !!group.containerConfig?.trusted;
-      const requiresTrigger = !isMain && group.requiresTrigger !== false;
-      const triggerHit =
-        !requiresTrigger ||
-        getTriggerPattern(group.trigger).test(content.trim()) ||
-        !!ctx.message.reply_to_message?.from?.is_bot;
+      const replyFrom = ctx.message.reply_to_message?.from;
+      const replyToOurBot =
+        !!replyFrom?.is_bot &&
+        replyFrom?.username?.toLowerCase() === ctx.me?.username?.toLowerCase();
+      const { recordObserver, emitReaction } = evaluateTriggerGate(
+        group,
+        content,
+        replyToOurBot,
+      );
 
-      if (triggerHit) {
+      if (recordObserver) {
         noteLatestUserMessage(chatJid, msgId);
       }
-      if ((isMain || isTrusted) && triggerHit) {
+      if (emitReaction) {
         this.sendReaction(chatJid, msgId, '👀').catch(() => {
           /* already logged inside sendReaction */
         });
