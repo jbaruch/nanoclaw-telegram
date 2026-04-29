@@ -311,7 +311,7 @@ echo "5. Gracefully closing agent containers..."
 # but observable, vs. a wedged deploy.
 DEPLOY_KILLS_LOG="data/host-logs/deploy-kills.log"
 DEPLOY_KILLS_DIR="$(dirname "$DEPLOY_KILLS_LOG")"
-if ! mkdir -p "$DEPLOY_KILLS_DIR" 2>&1; then
+if ! mkdir -p "$DEPLOY_KILLS_DIR"; then
     echo "WARNING: cannot create $DEPLOY_KILLS_DIR — heartbeat 137 suppression will fail open" >&2
     DEPLOY_KILLS_LOG=""
 fi
