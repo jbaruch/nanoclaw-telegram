@@ -315,7 +315,19 @@ if ! mkdir -p "$DEPLOY_KILLS_DIR"; then
     echo "WARNING: cannot create $DEPLOY_KILLS_DIR — heartbeat 137 suppression will fail open" >&2
     DEPLOY_KILLS_LOG=""
 fi
-DEPLOY_KILL_START=$(python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))")
+# Marker timestamp capture must be fail-open to match the
+# best-effort contract documented above and `coding-policy:
+# error-handling`'s "try alternatives before failing" rule. Under
+# `set -euo pipefail`, a missing python3 (or a broken inline
+# script) would otherwise abort the deploy mid-flight — exactly
+# what the WARNING-and-degrade path for the marker is meant to
+# avoid. Clearing both vars on failure also makes the later append
+# block silently skip (it gates on `-n "$DEPLOY_KILLS_LOG"`).
+if ! DEPLOY_KILL_START=$(python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))"); then
+    echo "WARNING: python3 timestamp capture failed — heartbeat 137 suppression will fail open" >&2
+    DEPLOY_KILL_START=""
+    DEPLOY_KILLS_LOG=""
+fi
 # `grep` exits 1 when no agents match — the empty-string case is
 # handled by the `[[ -z ... ]]` check on the next line.
 AGENTS=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -v '^nanoclaw$' || true)
@@ -429,16 +441,19 @@ else
         # where every agent had already exited cleanly — false-suppress
         # any genuine OOM 137 that lands inside that fictitious window.
         KILLED=$(printf '%s\n' "${HOLDOUTS[@]}" | xargs docker kill 2>/dev/null || true)
-        if [[ -n "$KILLED" && -n "$DEPLOY_KILLS_LOG" ]]; then
+        if [[ -n "$KILLED" && -n "$DEPLOY_KILLS_LOG" && -n "$DEPLOY_KILL_START" ]]; then
             # printf emits a literal tab via the `\t` in the format
             # string — the heartbeat parser splits on tab, and
             # busybox/ash `echo` would reinterpret the escape if
             # anyone ports the deploy off the GNU bash on the
-            # Synology NAS. Same python3 dance as DEPLOY_KILL_START
-            # so the timestamps stay in lockstep.
-            DEPLOY_KILL_END=$(python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))")
-            if ! printf '%s\t%s\n' "$DEPLOY_KILL_START" "$DEPLOY_KILL_END" >> "$DEPLOY_KILLS_LOG"; then
-                echo "WARNING: failed to append window pair to $DEPLOY_KILLS_LOG — heartbeat 137 suppression will fail open for this deploy" >&2
+            # Synology NAS. Same fail-open dance as DEPLOY_KILL_START
+            # so a busted python3 doesn't take the deploy down.
+            if DEPLOY_KILL_END=$(python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))"); then
+                if ! printf '%s\t%s\n' "$DEPLOY_KILL_START" "$DEPLOY_KILL_END" >> "$DEPLOY_KILLS_LOG"; then
+                    echo "WARNING: failed to append window pair to $DEPLOY_KILLS_LOG — heartbeat 137 suppression will fail open for this deploy" >&2
+                fi
+            else
+                echo "WARNING: python3 timestamp capture failed for window end — skipping marker write for this deploy" >&2
             fi
         fi
     fi
