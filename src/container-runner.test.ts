@@ -9,6 +9,7 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
 // Mock config
 vi.mock('./config.js', () => ({
+  AGENT_AUTO_COMPACT_WINDOW: 800000,
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
@@ -706,6 +707,57 @@ describe('continuation env vars (self-resuming cycles)', () => {
     expect(
       args.some((a) => a.startsWith('NANOCLAW_CONTINUATION_CYCLE_ID=')),
     ).toBe(false);
+  });
+});
+
+// ----------------------------------------------------------------------
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW forwarding (#252) — flag-OFF path.
+//
+// File-level mock pins ENABLE_THRESHOLD_NUKE=false, so this describe
+// covers the legacy / observe-only regime where the orchestrator
+// forwards the configured window to the SDK and DISABLE_COMPACT is NOT
+// injected. The flag-ON path lives in container-runner.auto-compact.test.ts
+// because flipping the mock mid-file requires resetModules + dynamic
+// import, which isn't a pattern this suite uses.
+// ----------------------------------------------------------------------
+
+describe('CLAUDE_CODE_AUTO_COMPACT_WINDOW forwarding (flag off)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('forwards CLAUDE_CODE_AUTO_COMPACT_WINDOW with the configured default', async () => {
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    // The mock above sets AGENT_AUTO_COMPACT_WINDOW=800000. If this
+    // assertion ever drifts, every container would silently regress to
+    // whatever the previous default was — including the 165k upstream
+    // hardcode that motivated #252 in the first place.
+    expect(args).toContain('CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000');
+  });
+
+  it('does not inject DISABLE_COMPACT when the master flag is off', async () => {
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    // DISABLE_COMPACT and the SDK auto-compact window are mutually
+    // exclusive (see container-runner.ts gating). If both ever leak
+    // into the same container, the SDK's blocking-limit math drops
+    // below the orchestrator's nuke threshold (#252 analysis).
+    expect(args.some((a) => a.startsWith('DISABLE_COMPACT='))).toBe(false);
   });
 });
 

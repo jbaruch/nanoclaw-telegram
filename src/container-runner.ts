@@ -11,6 +11,7 @@ import path from 'path';
 
 import {
   CONTAINER_IMAGE,
+  AGENT_AUTO_COMPACT_WINDOW,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
@@ -1699,6 +1700,21 @@ function buildContainerArgs(
   // long sessions with no overflow safety net.
   if (ENABLE_THRESHOLD_NUKE) {
     args.push('-e', 'DISABLE_COMPACT=1');
+    // Deliberately NOT forwarding CLAUDE_CODE_AUTO_COMPACT_WINDOW here
+    // (issue #252). DISABLE_COMPACT=1 only suppresses the SDK's
+    // `isAboveAutoCompactThreshold` flag — `Jn()` still reads the env
+    // var unconditionally and feeds it into the `isAtBlockingLimit`
+    // check (`window − reserved_for_output − e_7`, ~window − 30k).
+    // Clamping the working window at or near the orchestrator's 800k
+    // nuke threshold drops blocking-limit below the nuke and wedges
+    // the request whose response would have triggered the handshake.
+    // Letting the SDK fall back to the model context window (1M for
+    // opus[1m]) keeps blocking-limit ~970k, well clear of the nuke.
+  } else {
+    args.push(
+      '-e',
+      `CLAUDE_CODE_AUTO_COMPACT_WINDOW=${AGENT_AUTO_COMPACT_WINDOW}`,
+    );
   }
 
   // Pass chat JID so container scripts know which group they're in

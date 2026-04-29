@@ -2277,10 +2277,15 @@ async function main(): Promise<void> {
 
   // Credentials are injected by the host's credential proxy via ANTHROPIC_BASE_URL.
   // No real secrets exist in the container environment.
-  const sdkEnv: Record<string, string | undefined> = {
-    ...process.env,
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '165000',
-  };
+  //
+  // CLAUDE_CODE_AUTO_COMPACT_WINDOW is forwarded by the orchestrator
+  // (`src/container-runner.ts`) — and only when ENABLE_THRESHOLD_NUKE is
+  // off. We deliberately do NOT default it here: a hardcoded fallback
+  // would silently mask a missing forward and reintroduce #252 (SDK
+  // blocking-limit dropping below the orchestrator's 800k nuke threshold
+  // when the kill-auto-compaction master flag is on). Whatever the
+  // orchestrator placed in process.env passes through `...process.env`.
+  const sdkEnv: Record<string, string | undefined> = { ...process.env };
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');

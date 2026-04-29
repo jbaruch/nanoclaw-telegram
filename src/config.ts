@@ -111,6 +111,49 @@ export const MODEL_CONTEXT_WINDOW = parseInt(
   10,
 );
 
+// SDK auto-compact working window in tokens (issue #252). Forwarded to
+// the agent-runner as `CLAUDE_CODE_AUTO_COMPACT_WINDOW` so the SDK's
+// `Jn()` resolver clamps `min(model_default, this)` and uses it as the
+// working window for both auto-compaction (when ENABLE_THRESHOLD_NUKE=0)
+// and the blocking-limit check (always — `DISABLE_COMPACT=1` only
+// suppresses `isAboveAutoCompactThreshold`, not `isAtBlockingLimit`).
+//
+// Default 800,000 leaves headroom on the 1M Opus window and lets the
+// observe-only telemetry from #104 see realistic warn (700k) crossings
+// before the SDK compacts. The previous upstream hardcode of 165,000
+// (qwibitai/nanoclaw `f77f9ce`) capped real-world heartbeat cycles at
+// ~16% of the paid-for context window and suppressed every #104
+// threshold telemetry signal — see #252.
+//
+// IMPORTANT: when ENABLE_THRESHOLD_NUKE=1, the orchestrator does NOT
+// forward this value (see container-runner.ts). Letting the SDK fall
+// back to the model default keeps the blocking-limit (~window − 30k)
+// well above the orchestrator's 800k nuke threshold; clamping it would
+// drop blocking-limit below the nuke and wedge sends mid-handshake.
+//
+// Validation: a non-numeric / non-positive value would forward as
+// `NaN`, which the SDK's `Lp()` validator rejects and silently falls
+// back to model default — so the blast radius is limited, but a
+// stderr warning surfaces operator typos at startup rather than at
+// first `query()` deep in runtime. Same shape as `resolveAgentModel`
+// in container-runner.ts (logger.warn there; stderr here because
+// config.ts is below logger.ts in the import graph and a logger
+// import would close a circular dep through host-logs.ts).
+const DEFAULT_AGENT_AUTO_COMPACT_WINDOW = 800_000;
+function resolveAgentAutoCompactWindow(): number {
+  const raw = process.env.AGENT_AUTO_COMPACT_WINDOW;
+  if (!raw) return DEFAULT_AGENT_AUTO_COMPACT_WINDOW;
+  const parsed = parseInt(raw, 10);
+  if (Number.isFinite(parsed) && Number.isInteger(parsed) && parsed > 0) {
+    return parsed;
+  }
+  process.stderr.write(
+    `[config] AGENT_AUTO_COMPACT_WINDOW="${raw}" is not a positive integer — falling back to default ${DEFAULT_AGENT_AUTO_COMPACT_WINDOW}.\n`,
+  );
+  return DEFAULT_AGENT_AUTO_COMPACT_WINDOW;
+}
+export const AGENT_AUTO_COMPACT_WINDOW = resolveAgentAutoCompactWindow();
+
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
