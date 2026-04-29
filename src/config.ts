@@ -121,6 +121,19 @@ export const MAX_MESSAGES_PER_PROMPT = Math.max(
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,
 );
 export const IPC_POLL_INTERVAL = 1000;
+// Grace period applied by the orchestrator's per-write IPC-input sweep
+// (`sweepStaleInputs`) when called from the message loop. Files in
+// `data/ipc/<group>/input-default/` are eligible for unlink only when
+// they are older than this many milliseconds. The window must be
+// comfortably larger than the agent-runner's drain cycle (one
+// `IPC_POLL_INTERVAL` tick + one prompt round-trip) so the sweep never
+// races a live container that is about to read a just-written file.
+// 60s is conservative — the agent's drain typically lands within
+// hundreds of milliseconds. Tunable via env for ops override; see #287.
+export const IPC_INPUT_SWEEP_GRACE_MS = Math.max(
+  0,
+  parseInt(process.env.IPC_INPUT_SWEEP_GRACE_MS || '60000', 10) || 60000,
+);
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 
 // Kill-auto-compaction master flag (issue #104, design at

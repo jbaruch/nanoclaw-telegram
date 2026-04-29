@@ -37,6 +37,7 @@ import { evaluateBashCommand } from './bash-safety-net.js';
 import { detectComposioFidelity } from './composio-fidelity.js';
 import { decideGroundTruthReminder } from './ground-truth-reminder.js';
 import { detectLazyVerification } from './lazy-verification.js';
+import { createReadonlyWarner } from './ipc-readonly-warn.js';
 import { rewriteMarkdownToHtml } from './markdown-to-html.js';
 import { isStaleSessionError } from './stale-session.js';
 import {
@@ -1259,6 +1260,13 @@ function shouldClose(): boolean {
  */
 const REPLY_TO_FILE = path.join(IPC_INPUT_DIR, '_reply_to');
 const consumedInputFiles = new Set<string>();
+// EROFS/EACCES on the input dir means the IPC mount is read-only — by
+// design, for untrusted containers (issue #287). The agent itself can
+// never recover from this; the host-side sweep is responsible. But
+// silently swallowing the error for two days is what hid the original
+// backlog bug — surface the FIRST occurrence loudly so the next
+// regression of this class is visible at a glance in container logs.
+const readonlyWarner = createReadonlyWarner(log);
 
 function drainIpcInput(): string[] {
   try {
@@ -1284,6 +1292,7 @@ function drainIpcInput(): string[] {
           fs.unlinkSync(filePath);
         } catch (e: any) {
           if (e.code !== 'EROFS' && e.code !== 'EACCES') throw e;
+          readonlyWarner.warn(e.code, file);
         }
         if (data.type === 'message' && data.text) {
           messages.push(data.text);
@@ -1301,6 +1310,9 @@ function drainIpcInput(): string[] {
         } catch (e: any) {
           if (e.code !== 'EROFS' && e.code !== 'EACCES' && e.code !== 'ENOENT')
             throw e;
+          if (e.code === 'EROFS' || e.code === 'EACCES') {
+            readonlyWarner.warn(e.code, file);
+          }
         }
       }
     }

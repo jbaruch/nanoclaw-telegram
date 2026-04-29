@@ -270,6 +270,32 @@ describe('createFilteredDb (untrusted DB isolation)', () => {
       db.close();
     }
   });
+
+  // Issue #287 — filtered DB must use a rollback journal, not WAL.
+  // Untrusted containers receive this DB on a read-only mount (`fakeowner
+  // ro`); a WAL-mode DB cannot be opened even for reads on a RO mount
+  // because SQLite needs to write `-wal`/`-shm` sidecars. Forcing
+  // `journal_mode = DELETE` makes the file self-contained so every
+  // reader's default open succeeds. A regression here surfaces inside
+  // untrusted containers as `OperationalError: unable to open database
+  // file` from any default-mode reader (Python `sqlite3.connect(path)`,
+  // node `new Database(path)`).
+  it('filtered DB is created with journal_mode = DELETE (not WAL) — #287', () => {
+    seedMessagesDb();
+    const filtered = createFilteredDb('chatA@g.us', 'folder-a');
+    expect(filtered).not.toBe(null);
+    const db = new Database(filtered!, { readonly: true });
+    try {
+      const mode = db.pragma('journal_mode', { simple: true });
+      expect(mode).toBe('delete');
+    } finally {
+      db.close();
+    }
+    // No `-wal`/`-shm` sidecars should be present after creation. Their
+    // existence is the visible symptom of WAL mode.
+    expect(fs.existsSync(`${filtered}-wal`)).toBe(false);
+    expect(fs.existsSync(`${filtered}-shm`)).toBe(false);
+  });
 });
 
 // -----------------------------------------------------------------------------

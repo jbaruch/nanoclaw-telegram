@@ -12,6 +12,7 @@ import {
   HOST_GID,
   HOST_UID,
   IDLE_TIMEOUT,
+  IPC_INPUT_SWEEP_GRACE_MS,
   MAX_MESSAGES_PER_PROMPT,
   MODEL_CONTEXT_WINDOW,
   POLL_INTERVAL,
@@ -29,6 +30,7 @@ import {
 import {
   ContainerOutput,
   runContainerAgent,
+  sessionInputDirName,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
@@ -73,7 +75,8 @@ import {
   GroupQueue,
   MAINTENANCE_SESSION_NAME,
 } from './group-queue.js';
-import { resolveGroupFolderPath } from './group-folder.js';
+import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
+import { sweepStaleInputs } from './ipc-input-sweep.js';
 import { initBotPool } from './channels/telegram.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
@@ -1862,6 +1865,21 @@ async function startMessageLoop(): Promise<void> {
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
+            // Sweep stale IPC inputs after a confirmed cursor advance.
+            // The agent-runner unlinks files it drains, but the unlink is
+            // a no-op (`EROFS`) on the read-only mount used for untrusted
+            // containers — without this host-side sweep the dir grows
+            // unbounded across the lifetime of a group and the next fresh
+            // spawn re-drains the entire backlog. The grace window keeps
+            // the sweep from racing a live agent's drain on the file we
+            // just wrote. See issue #287.
+            sweepStaleInputs(
+              path.join(
+                resolveGroupIpcPath(group.folder),
+                sessionInputDirName(DEFAULT_SESSION_NAME),
+              ),
+              IPC_INPUT_SWEEP_GRACE_MS,
+            );
             // Show typing indicator while the container processes the piped message
             channel
               .setTyping?.(chatJid, true)
