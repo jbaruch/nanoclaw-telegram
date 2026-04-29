@@ -288,17 +288,34 @@ echo "5. Gracefully closing agent containers..."
 # actually issues a force-kill appends one TSV line to
 # data/host-logs/deploy-kills.log:
 #     <start_iso>\t<end_iso>
-# heartbeat-checks.py reads this (mounted into agent containers at
-# /workspace/host-logs/deploy-kills.log:ro) and drops 137
-# task_run_logs rows whose run_at falls inside any window. Genuine
-# OOM 137s outside every window keep flowing through to
-# system_health.issues. Capture the start NOW so the window covers
-# the full _close → 30 s grace → force-kill arc; the end is written
-# only when force-kills actually happened (graceful-only deploys
-# don't produce 137s, no need to log empty windows).
+# heartbeat-checks.py reads this from `/workspace/host-logs/` —
+# which is mounted read-only **only into the main/admin
+# container** per the `isMain` block in
+# `src/container-runner.ts::buildVolumeMounts` (host-logs are
+# inherently cross-chat and must not leak to trusted/untrusted
+# tiles), and that's exactly where the admin-tile heartbeat skill
+# runs. Trusted/untrusted agents see no `/workspace/host-logs`
+# and never run the suppression code path.
+# Use python3 for the millisecond-precision UTC timestamp because
+# `date -u '+%Y-%m-%dT%H:%M:%S.%3NZ'` requires GNU `%3N`; on a
+# BSD/busybox `date` (likely if anyone ports the deploy off the
+# Synology NAS) the literal `%3N` would propagate and the
+# heartbeat consumer's `datetime.fromisoformat` would silently
+# drop the row instead of suppressing it.
+# Generation is best-effort with a stderr warning rather than
+# `set -e`-fatal: the marker is auxiliary alert-suppression
+# plumbing, NOT a deploy precondition. If host-logs is unwritable
+# we want the deploy to keep going (rejecting writes loudly
+# enough that the operator notices) and the heartbeat to fail
+# open back to surfacing 137s — strictly worse than suppression
+# but observable, vs. a wedged deploy.
 DEPLOY_KILLS_LOG="data/host-logs/deploy-kills.log"
-mkdir -p "$(dirname "$DEPLOY_KILLS_LOG")"
-DEPLOY_KILL_START=$(date -u '+%Y-%m-%dT%H:%M:%S.%3NZ')
+DEPLOY_KILLS_DIR="$(dirname "$DEPLOY_KILLS_LOG")"
+if ! mkdir -p "$DEPLOY_KILLS_DIR" 2>&1; then
+    echo "WARNING: cannot create $DEPLOY_KILLS_DIR — heartbeat 137 suppression will fail open" >&2
+    DEPLOY_KILLS_LOG=""
+fi
+DEPLOY_KILL_START=$(python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))")
 # `grep` exits 1 when no agents match — the empty-string case is
 # handled by the `[[ -z ... ]]` check on the next line.
 AGENTS=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -v '^nanoclaw$' || true)
@@ -403,13 +420,26 @@ else
     done <<< "$currently_running"
     if (( ${#HOLDOUTS[@]} > 0 )); then
         echo "  ${#HOLDOUTS[@]} agent(s) from the original set didn't exit in ${GRACE_SECONDS}s — force-killing"
-        printf '%s\n' "${HOLDOUTS[@]}" | xargs docker kill 2>/dev/null || true
-        # Close the window only if we actually issued kills. Use
-        # printf (not echo) so embedded backslashes never get
-        # reinterpreted on busybox/ash echo variants — the heartbeat
-        # parser splits on a literal TAB, which we emit as $'\t'.
-        DEPLOY_KILL_END=$(date -u '+%Y-%m-%dT%H:%M:%S.%3NZ')
-        printf '%s\t%s\n' "$DEPLOY_KILL_START" "$DEPLOY_KILL_END" >> "$DEPLOY_KILLS_LOG"
+        # Capture stdout — `docker kill` echoes the names of containers
+        # it actually killed. A holdout that exited gracefully in the
+        # race window between the `docker ps` above and this kill prints
+        # to stderr and isn't in stdout, so we never log a window for a
+        # deploy that didn't actually produce a 137. Without this, the
+        # marker would sometimes claim a kill happened in a 30 s window
+        # where every agent had already exited cleanly — false-suppress
+        # any genuine OOM 137 that lands inside that fictitious window.
+        KILLED=$(printf '%s\n' "${HOLDOUTS[@]}" | xargs docker kill 2>/dev/null || true)
+        if [[ -n "$KILLED" && -n "$DEPLOY_KILLS_LOG" ]]; then
+            # printf emits a literal tab via $'\t' — the heartbeat
+            # parser splits on tab, and busybox/ash `echo` would
+            # reinterpret the escape if anyone ports the deploy off
+            # the GNU bash on the Synology NAS. Same python3 dance
+            # as DEPLOY_KILL_START so the timestamps stay in lockstep.
+            DEPLOY_KILL_END=$(python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))")
+            if ! printf '%s\t%s\n' "$DEPLOY_KILL_START" "$DEPLOY_KILL_END" >> "$DEPLOY_KILLS_LOG"; then
+                echo "WARNING: failed to append window pair to $DEPLOY_KILLS_LOG — heartbeat 137 suppression will fail open for this deploy" >&2
+            fi
+        fi
     fi
 fi
 echo ""
