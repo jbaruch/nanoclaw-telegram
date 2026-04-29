@@ -359,6 +359,51 @@ export class GroupQueue {
     }
   }
 
+  /**
+   * Signal every currently-active container across all groups and sessions
+   * to wind down. Used post-tessl-update so running containers respawn and
+   * pick up the new tile content on their next message instead of running
+   * on the old skills/.tessl/ snapshot until idle timeout (issue #64).
+   *
+   * Returns the number of `_close` sentinels written (one per active
+   * `(group, session)` slot). A slot that's `not-spawned`, `crashed`,
+   * `cooling-down`, or otherwise non-active is skipped — there's no
+   * container there to signal, and writing `_close` to a stale input dir
+   * would just create an orphan sentinel that the next spawn has to clean
+   * up (`container-runner.ts:1444` already handles that on spawn, but the
+   * cheaper path is to not write the file in the first place).
+   *
+   * Per-slot failures are logged and counted as not-signaled — we keep
+   * iterating instead of bailing out on the first error so a single
+   * permission glitch on one group's input dir can't strand every other
+   * group on stale tile content.
+   */
+  closeAllActiveContainers(): number {
+    let signaled = 0;
+    for (const [groupJid, sessions] of this.groups.entries()) {
+      for (const [sessionName, state] of sessions.entries()) {
+        if (!state.active || !state.groupFolder) continue;
+        try {
+          const inputDir = path.join(
+            DATA_DIR,
+            'ipc',
+            state.groupFolder,
+            sessionInputDirName(sessionName),
+          );
+          fs.mkdirSync(inputDir, { recursive: true });
+          fs.writeFileSync(path.join(inputDir, '_close'), '');
+          signaled++;
+        } catch (err) {
+          logger.warn(
+            { err, groupJid, sessionName },
+            'closeAllActiveContainers: per-slot close failed — slot may run on stale tile content until idle timeout',
+          );
+        }
+      }
+    }
+    return signaled;
+  }
+
   private async runForGroup(
     groupJid: string,
     reason: 'messages' | 'drain',

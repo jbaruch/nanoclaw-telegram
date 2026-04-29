@@ -2448,6 +2448,7 @@ async function main(): Promise<void> {
         );
       }
     },
+    closeAllActiveContainers: () => queue.closeAllActiveContainers(),
   });
   startSessionCleanup();
   queue.setProcessMessagesFn(processGroupMessages);
@@ -2529,9 +2530,20 @@ async function main(): Promise<void> {
           logger.warn({ error: err.message }, 'Periodic tessl update failed');
         } else if (stdout.includes('Updated')) {
           const cleared = deleteAllSessions();
+          // Companion to the on-demand `tessl_update` IPC handler in
+          // `ipc.ts`: any path that pulls new tile content into the
+          // registry must also signal currently-running containers to
+          // restart, otherwise they keep serving requests from the
+          // skills/.tessl/ snapshot they copied at spawn time until
+          // their 30-min idle timeout (issue #64).
+          const closed = queue.closeAllActiveContainers();
           logger.info(
-            { sessionsCleared: cleared, output: stdout.trim().slice(-200) },
-            'Periodic tessl update found new tiles — sessions cleared',
+            {
+              sessionsCleared: cleared,
+              containersClosed: closed,
+              output: stdout.trim().slice(-200),
+            },
+            'Periodic tessl update found new tiles — sessions cleared and running containers signaled to restart',
           );
         }
       },

@@ -158,6 +158,7 @@ beforeEach(() => {
       _folder: string,
       _session: 'default' | 'maintenance' | 'all',
     ) => {},
+    closeAllActiveContainers: () => 0,
   };
 });
 

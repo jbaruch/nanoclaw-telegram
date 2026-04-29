@@ -189,6 +189,7 @@ beforeEach(() => {
     writeGroupsSnapshot: () => {},
     onTasksChanged: () => {},
     nukeSession: () => {},
+    closeAllActiveContainers: () => 0,
   };
 });
 

@@ -149,6 +149,7 @@ beforeEach(() => {
       if (nukeShouldThrow) throw nukeShouldThrow;
       nukeCalls.push({ folder, session });
     },
+    closeAllActiveContainers: () => 0,
     getContainerStatus: (jid, sessionName) => {
       const key = `${jid}::${sessionName}`;
       return statusOverrides.get(key) ?? 'not-spawned';

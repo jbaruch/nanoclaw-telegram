@@ -98,6 +98,22 @@ export interface IpcDeps {
     options?: { skipReentry?: boolean },
   ) => void;
   /**
+   * Signal every currently-active container across all groups and sessions
+   * to wind down (write `_close` sentinels). Called by the `tessl_update`
+   * IPC handler after the registry pulls in new tile content so running
+   * containers respawn and pick up the fresh tiles on the next inbound
+   * message — without this, a long-lived container keeps the old skills/
+   * snapshot it copied at spawn time until its 30-min idle timeout.
+   *
+   * Implemented in `GroupQueue.closeAllActiveContainers()`. The dep is
+   * injected (not imported directly) for the same reason `nukeSession`
+   * is: ipc.ts mustn't reach into the orchestrator's queue singleton, and
+   * tests need to substitute a stub.
+   *
+   * Returns the number of containers signaled.
+   */
+  closeAllActiveContainers: () => number;
+  /**
    * Read the derived container status for a given (jid, sessionName)
    * slot. Used by `chat_status` to surface running/idle/cooling-down/
    * crashed/not-spawned without exposing the queue's internal state map.
@@ -2995,14 +3011,28 @@ export async function processTaskIpc(
             // the string check instead of an unconditional clear.
             if (/\bUpdated\b/.test(output)) {
               const cleared = deleteAllSessions();
+              // Close every currently-running container so it respawns on
+              // the next inbound message with the freshly-installed tile
+              // content. `deleteAllSessions()` only resets the SDK
+              // session-id mapping — without this companion call, a
+              // container that's mid-idle-loop right now keeps its old
+              // skills/.tessl/ snapshot until its 30-min idle timeout
+              // fires (issue #64). The two operations are paired: clear
+              // the on-disk session state AND signal the live containers
+              // so neither lingers on stale state.
+              const closed = deps.closeAllActiveContainers();
               logger.info(
-                { sourceGroup, sessionsCleared: cleared },
-                'tessl_update found new tiles — sessions cleared',
+                {
+                  sourceGroup,
+                  sessionsCleared: cleared,
+                  containersClosed: closed,
+                },
+                'tessl_update found new tiles — sessions cleared and running containers signaled to restart',
               );
               fs.writeFileSync(
                 tesslResultPath,
                 JSON.stringify({
-                  stdout: `${output}\n\nSessions cleared: ${cleared}`,
+                  stdout: `${output}\n\nSessions cleared: ${cleared}\nContainers signaled to restart: ${closed}`,
                 }),
               );
             } else {
