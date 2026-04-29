@@ -283,6 +283,22 @@ echo ""
 # folders containing underscores get sanitised to dashes in the
 # container name, losing the original spelling).
 echo "5. Gracefully closing agent containers..."
+# Window-pair marker for the heartbeat skill's 137-cascade
+# suppression (jbaruch/nanoclaw#249). Each step-5 invocation that
+# actually issues a force-kill appends one TSV line to
+# data/host-logs/deploy-kills.log:
+#     <start_iso>\t<end_iso>
+# heartbeat-checks.py reads this (mounted into agent containers at
+# /workspace/host-logs/deploy-kills.log:ro) and drops 137
+# task_run_logs rows whose run_at falls inside any window. Genuine
+# OOM 137s outside every window keep flowing through to
+# system_health.issues. Capture the start NOW so the window covers
+# the full _close → 30 s grace → force-kill arc; the end is written
+# only when force-kills actually happened (graceful-only deploys
+# don't produce 137s, no need to log empty windows).
+DEPLOY_KILLS_LOG="data/host-logs/deploy-kills.log"
+mkdir -p "$(dirname "$DEPLOY_KILLS_LOG")"
+DEPLOY_KILL_START=$(date -u '+%Y-%m-%dT%H:%M:%S.%3NZ')
 # `grep` exits 1 when no agents match — the empty-string case is
 # handled by the `[[ -z ... ]]` check on the next line.
 AGENTS=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -v '^nanoclaw$' || true)
@@ -388,6 +404,12 @@ else
     if (( ${#HOLDOUTS[@]} > 0 )); then
         echo "  ${#HOLDOUTS[@]} agent(s) from the original set didn't exit in ${GRACE_SECONDS}s — force-killing"
         printf '%s\n' "${HOLDOUTS[@]}" | xargs docker kill 2>/dev/null || true
+        # Close the window only if we actually issued kills. Use
+        # printf (not echo) so embedded backslashes never get
+        # reinterpreted on busybox/ash echo variants — the heartbeat
+        # parser splits on a literal TAB, which we emit as $'\t'.
+        DEPLOY_KILL_END=$(date -u '+%Y-%m-%dT%H:%M:%S.%3NZ')
+        printf '%s\t%s\n' "$DEPLOY_KILL_START" "$DEPLOY_KILL_END" >> "$DEPLOY_KILLS_LOG"
     fi
 fi
 echo ""
