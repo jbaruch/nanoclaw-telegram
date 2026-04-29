@@ -283,6 +283,51 @@ echo ""
 # folders containing underscores get sanitised to dashes in the
 # container name, losing the original spelling).
 echo "5. Gracefully closing agent containers..."
+# Window-pair marker for the heartbeat skill's 137-cascade
+# suppression (jbaruch/nanoclaw#249). Each step-5 invocation that
+# actually issues a force-kill appends one TSV line to
+# data/host-logs/deploy-kills.log:
+#     <start_iso>\t<end_iso>
+# heartbeat-checks.py reads this from `/workspace/host-logs/` —
+# which is mounted read-only **only into the main/admin
+# container** per the `isMain` block in
+# `src/container-runner.ts::buildVolumeMounts` (host-logs are
+# inherently cross-chat and must not leak to trusted/untrusted
+# tiles), and that's exactly where the admin-tile heartbeat skill
+# runs. Trusted/untrusted agents see no `/workspace/host-logs`
+# and never run the suppression code path.
+# Use python3 for the millisecond-precision UTC timestamp because
+# `date -u '+%Y-%m-%dT%H:%M:%S.%3NZ'` requires GNU `%3N`; on a
+# BSD/busybox `date` (likely if anyone ports the deploy off the
+# Synology NAS) the literal `%3N` would propagate and the
+# heartbeat consumer's `datetime.fromisoformat` would silently
+# drop the row instead of suppressing it.
+# Generation is best-effort with a stderr warning rather than
+# `set -e`-fatal: the marker is auxiliary alert-suppression
+# plumbing, NOT a deploy precondition. If host-logs is unwritable
+# we want the deploy to keep going (rejecting writes loudly
+# enough that the operator notices) and the heartbeat to fail
+# open back to surfacing 137s — strictly worse than suppression
+# but observable, vs. a wedged deploy.
+DEPLOY_KILLS_LOG="data/host-logs/deploy-kills.log"
+DEPLOY_KILLS_DIR="$(dirname "$DEPLOY_KILLS_LOG")"
+if ! mkdir -p "$DEPLOY_KILLS_DIR"; then
+    echo "WARNING: cannot create $DEPLOY_KILLS_DIR — heartbeat 137 suppression will fail open" >&2
+    DEPLOY_KILLS_LOG=""
+fi
+# Marker timestamp capture must be fail-open to match the
+# best-effort contract documented above and `coding-policy:
+# error-handling`'s "try alternatives before failing" rule. Under
+# `set -euo pipefail`, a missing python3 (or a broken inline
+# script) would otherwise abort the deploy mid-flight — exactly
+# what the WARNING-and-degrade path for the marker is meant to
+# avoid. Clearing both vars on failure also makes the later append
+# block silently skip (it gates on `-n "$DEPLOY_KILLS_LOG"`).
+if ! DEPLOY_KILL_START=$(python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))"); then
+    echo "WARNING: python3 timestamp capture failed — heartbeat 137 suppression will fail open" >&2
+    DEPLOY_KILL_START=""
+    DEPLOY_KILLS_LOG=""
+fi
 # `grep` exits 1 when no agents match — the empty-string case is
 # handled by the `[[ -z ... ]]` check on the next line.
 AGENTS=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -v '^nanoclaw$' || true)
@@ -387,7 +432,31 @@ else
     done <<< "$currently_running"
     if (( ${#HOLDOUTS[@]} > 0 )); then
         echo "  ${#HOLDOUTS[@]} agent(s) from the original set didn't exit in ${GRACE_SECONDS}s — force-killing"
-        printf '%s\n' "${HOLDOUTS[@]}" | xargs docker kill 2>/dev/null || true
+        # Capture stdout — `docker kill` echoes the names of containers
+        # it actually killed. A holdout that exited gracefully in the
+        # race window between the `docker ps` above and this kill would
+        # write to stderr (which we suppress with `2>/dev/null`) and
+        # isn't in stdout, so we never log a window for a deploy that
+        # didn't actually produce a 137. Without this, the marker would
+        # sometimes claim a kill happened in a 30 s window where every
+        # agent had already exited cleanly — false-suppress any genuine
+        # OOM 137 that lands inside that fictitious window.
+        KILLED=$(printf '%s\n' "${HOLDOUTS[@]}" | xargs docker kill 2>/dev/null || true)
+        if [[ -n "$KILLED" && -n "$DEPLOY_KILLS_LOG" && -n "$DEPLOY_KILL_START" ]]; then
+            # printf emits a literal tab via the `\t` in the format
+            # string — the heartbeat parser splits on tab, and
+            # busybox/ash `echo` would reinterpret the escape if
+            # anyone ports the deploy off the GNU bash on the
+            # Synology NAS. Same fail-open dance as DEPLOY_KILL_START
+            # so a busted python3 doesn't take the deploy down.
+            if DEPLOY_KILL_END=$(python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))"); then
+                if ! printf '%s\t%s\n' "$DEPLOY_KILL_START" "$DEPLOY_KILL_END" >> "$DEPLOY_KILLS_LOG"; then
+                    echo "WARNING: failed to append window pair to $DEPLOY_KILLS_LOG — heartbeat 137 suppression will fail open for this deploy" >&2
+                fi
+            else
+                echo "WARNING: python3 timestamp capture failed for window end — skipping marker write for this deploy" >&2
+            fi
+        fi
     fi
 fi
 echo ""
