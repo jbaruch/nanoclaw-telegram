@@ -131,7 +131,11 @@ const testGroup: RegisteredGroup = {
   name: 'Test Group',
   folder: 'test-group',
   trigger: '@Andy',
-  added_at: new Date().toISOString(),
+  // Fixed literal — `added_at` is not asserted against, but
+  // `jbaruch/coding-policy: testing-standards` forbids self-generated
+  // test data even in unused fields so a future assertion can't
+  // accidentally introduce flakiness.
+  added_at: '2026-01-01T00:00:00.000Z',
 };
 
 const testInput = {
