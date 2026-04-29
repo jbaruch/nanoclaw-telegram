@@ -273,4 +273,24 @@ describe('runReactFirstHook', () => {
     expect(payloads[0].sessionName).toBe('maintenance');
     expect(payloads[0].groupFolder).toBe('another-group');
   });
+
+  // #289 follow-up — pin the IPC reaction to the triggering message
+  // so a slow spawn + a newer inbound between routing and hook fire
+  // can't race the host's `reactToLatestMessage` fallback into
+  // marking the wrong message.
+  it('stamps the triggering messageId on the payload when supplied', () => {
+    const { writer, payloads } = makeRecordingWriter();
+    runReactFirstHook(
+      { ...baseHookInput, messageId: 'msg_42' },
+      writer,
+      fixedNow,
+    );
+    expect(payloads[0].messageId).toBe('msg_42');
+  });
+
+  it('omits messageId on the payload when not supplied (legacy / scheduled paths)', () => {
+    const { writer, payloads } = makeRecordingWriter();
+    runReactFirstHook(baseHookInput, writer, fixedNow);
+    expect(payloads[0]).not.toHaveProperty('messageId');
+  });
 });

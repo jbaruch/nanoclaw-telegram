@@ -637,6 +637,10 @@ function createReactFirstHook(containerInput: ContainerInput): HookCallback {
         // so an accidentally-empty `sessionName` doesn't get stamped
         // onto the IPC payload.
         sessionName: containerInput.sessionName || 'default',
+        // The triggering inbound message ID — host reacts to THIS
+        // specific message rather than the chat's latest, which could
+        // have moved on between routing and hook fire.
+        messageId: containerInput.replyToMessageId,
       },
       writeReactToMessageIpc,
     );

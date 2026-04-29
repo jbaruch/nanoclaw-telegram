@@ -168,6 +168,20 @@ export interface ReactFirstHookInput extends ReactFirstGateInput {
    * an empty value never reaches the IPC layer.
    */
   sessionName: string;
+  /**
+   * The triggering inbound message ID — caller passes
+   * `containerInput.replyToMessageId` (which is itself
+   * `missedMessages[last].id` from the orchestrator). The hook
+   * stamps this on the IPC payload so the host reacts to the
+   * triggering message specifically, NOT whatever message happens
+   * to be latest by the time the container spawns and the hook
+   * fires. Without this, a slow spawn + a newer inbound landing in
+   * the same chat causes the host's `reactToLatestMessage` fallback
+   * to react to the new message and leave the trigger unmarked.
+   * Optional — non-channel paths (scheduled tasks, scripts) have
+   * no triggering inbound and the existing skip gates catch those.
+   */
+  messageId?: string;
 }
 
 /**
@@ -253,6 +267,7 @@ export function runReactFirstHook(
     sessionName: input.sessionName,
     emoji: REACT_FIRST_DEFAULT_EMOJI,
     timestamp: now().toISOString(),
+    ...(input.messageId ? { messageId: input.messageId } : {}),
   };
   try {
     ipcWriter(payload);
