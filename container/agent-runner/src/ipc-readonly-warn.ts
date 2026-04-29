@@ -15,9 +15,12 @@
  * cadence (which fires every `IPC_POLL_INTERVAL` ms for the entire
  * lifetime of the container).
  *
- * State is module-scoped: one process, one warning per (errno, log-fn)
- * pair. The factory shape is for testability — production code creates
- * one warner at module load and uses it everywhere.
+ * State is instance-scoped: each call to `createReadonlyWarner` gets
+ * its own `Set<errno>` via closure, so each warner emits at most one
+ * warning per code. Production code creates a single warner at module
+ * load and uses it everywhere — that's where the "one warning per
+ * process" guarantee actually comes from. Tests create fresh warners
+ * to verify per-instance suppression independent of any other test.
  */
 export type LogFn = (line: string) => void;
 

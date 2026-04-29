@@ -1871,10 +1871,21 @@ async function startMessageLoop(): Promise<void> {
             // unlink them before the agent ever sees them, dropping
             // messages while `lastAgentTimestamp` has already advanced.
             // The pre-spawn sweep in `buildVolumeMounts` handles the
-            // actual #287 symptom (cross-lifetime backlog accumulation —
-            // the 1604-file pile). Within-lifetime accumulation is
-            // bounded by message rate × IDLE_TIMEOUT and gets cleared
-            // on the next respawn.
+            // actual #287 symptom — the cross-lifetime backlog (the
+            // 1604-file pile that accumulated across many respawns).
+            // Within-lifetime accumulation on an untrusted RO mount is
+            // NOT zero — the agent can't unlink consumed files, so the
+            // dir grows for as long as the container stays up. For a
+            // continuously-busy group that keeps the idle timer reset,
+            // that lifetime can be days. If `drainIpcInput`'s
+            // `readdirSync(...).filter(...).sort()` cost ever shows up
+            // in profiles, the right next step is an explicit ack
+            // channel (agent writes consumed filenames to the writable
+            // `messages/` mount, host sweeps acked files) — see #287
+            // follow-up. The pre-spawn sweep keeps the upper bound
+            // tied to "longest container lifetime" rather than
+            // "lifetime of the install", which is the change that
+            // actually unblocks untrusted containers today.
             // Show typing indicator while the container processes the piped message
             channel
               .setTyping?.(chatJid, true)
