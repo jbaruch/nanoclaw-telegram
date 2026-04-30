@@ -13,15 +13,22 @@ import type { StateMigration } from '../db.js';
  * reviewer flagged that as a literal rule violation on the
  * brief-cleanup tile-side PR (jbaruch/nanoclaw-admin#116) and held
  * the line through multiple decline cycles. Restoring the column
- * is the simplest path to compliance — and harmless since the
- * column always equals the migration that wrote the row, which is
- * exactly the "audit trail per row" the rule asks for.
+ * is the simplest path to compliance.
  *
- * Defaults to 1 — every row inserted before this migration ran was
- * written under state-002's shape, which is v1 of the email_feedback
- * record contract. Future shape changes bump the default in a
- * follow-up state-NNN migration AND update writers to stamp the new
- * value explicitly.
+ * The column carries a per-row stamp the writer chooses deliberately
+ * at INSERT time — it does NOT auto-increment with later migrations.
+ * Today every writer stamps `1`; a future shape change adds a new
+ * state-NNN migration AND updates the writer to stamp the new
+ * value, so the column accurately records "which record contract
+ * this row was written under" regardless of what migrations have
+ * run since.
+ *
+ * DEFAULT 1 covers two cases: legacy rows that pre-dated this
+ * migration (backfilled by ALTER TABLE … DEFAULT) and any future
+ * writer that forgets to stamp explicitly (caught by the
+ * `test_writer_stamps_schema_version_explicitly` regression in the
+ * tile, but the DDL default keeps the column NOT NULL even on the
+ * forget path).
  */
 export const STATE_003_EMAIL_FEEDBACK_SCHEMA_VERSION: StateMigration = {
   version: 3,
