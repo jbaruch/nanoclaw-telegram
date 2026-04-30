@@ -1,0 +1,52 @@
+import { describe, it, expect } from 'vitest';
+import { formatSource, wrapUntrustedInput } from './untrusted-input-sources.js';
+
+describe('formatSource', () => {
+  it('joins prefix and value with a colon', () => {
+    expect(formatSource('web', 'https://example.com/page')).toBe(
+      'web:https://example.com/page',
+    );
+    expect(formatSource('gmail', 'msg_id=18f2a3b4c5d6e7f8')).toBe(
+      'gmail:msg_id=18f2a3b4c5d6e7f8',
+    );
+    expect(formatSource('untrusted-container', 'news-group')).toBe(
+      'untrusted-container:news-group',
+    );
+  });
+
+  it('returns the raw value untouched (escaping is the wrapper\'s job)', () => {
+    expect(formatSource('web', 'a"b')).toBe('web:a"b');
+  });
+});
+
+describe('wrapUntrustedInput', () => {
+  it('produces an <untrusted-input> envelope with typed source', () => {
+    expect(wrapUntrustedInput('hello', 'web', 'https://example.com')).toBe(
+      '<untrusted-input source="web:https://example.com">\nhello\n</untrusted-input>',
+    );
+  });
+
+  it('escapes embedded double quotes in the source value', () => {
+    expect(wrapUntrustedInput('x', 'web', 'a"b')).toBe(
+      '<untrusted-input source="web:a&quot;b">\nx\n</untrusted-input>',
+    );
+  });
+
+  it('collapses newlines inside the source value to a space', () => {
+    expect(wrapUntrustedInput('x', 'file', '/a/b\n/c')).toBe(
+      '<untrusted-input source="file:/a/b /c">\nx\n</untrusted-input>',
+    );
+  });
+
+  it('preserves newlines inside the wrapped content body', () => {
+    expect(wrapUntrustedInput('a\nb\nc', 'web', 'u')).toBe(
+      '<untrusted-input source="web:u">\na\nb\nc\n</untrusted-input>',
+    );
+  });
+
+  it('matches the existing #29 prompt-wrap shape after retrofit', () => {
+    expect(wrapUntrustedInput('the prompt', 'untrusted-container', 'news-group')).toBe(
+      '<untrusted-input source="untrusted-container:news-group">\nthe prompt\n</untrusted-input>',
+    );
+  });
+});
