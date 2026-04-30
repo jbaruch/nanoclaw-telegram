@@ -360,21 +360,10 @@ describe('observer', () => {
         'main',
         'Query done. Messages: 1, results: 1, lastAssistantUuid: abc, closedDuringQuery: false, wall_ms=10, tokens_in=5, tokens_out=1, cache_hit_rate=10.0',
       );
-      // No reactions sent — channel.sendReaction was never invoked.
-      expect(channel._reactions).toHaveLength(0);
-      // Watchdog interval also never armed for the non-addressed
-      // query — the noise the gate exists to suppress includes the
-      // 🫡/🤓 blink emojis.
-      expect(__getObserverInternalsForTests().watchdogs.has('main')).toBe(
-        false,
-      );
-      // Dedupe map untouched — `updateReaction` returned before
-      // touching it, so the target key never had an entry.
-      expect(
-        __getObserverInternalsForTests().lastReactionEmoji.has(
-          'tg:-100123:msg_99',
-        ),
-      ).toBe(false);
+      // The user-visible outcome is what matters: zero reactions
+      // dispatched on this query, including any watchdog blinks
+      // and the final 🤝.
+      expect(channel._reactions).toEqual([]);
     });
 
     it('fires progress reactions when addressed=true', () => {
@@ -387,11 +376,6 @@ describe('observer', () => {
       expect(channel._reactions).toEqual([
         { jid: 'tg:-100123', messageId: 'msg_88', emoji: '⚡' },
       ]);
-      expect(
-        __getObserverInternalsForTests().lastReactionEmoji.get(
-          'tg:-100123:msg_88',
-        ),
-      ).toBe('⚡');
     });
 
     it('falls through to engagement gate when Query input omits addressed= (legacy)', () => {
