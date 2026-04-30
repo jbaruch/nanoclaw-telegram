@@ -622,6 +622,16 @@ function writeReactToMessageIpc(payload: ReactToMessageIpcPayload): void {
 function createReactFirstHook(containerInput: ContainerInput): HookCallback {
   return async (input, _toolUseId, _context) => {
     const submit = input as UserPromptSubmitHookInput;
+    // Per-pipe values win over spawn-time — a freshly-piped
+    // `@AyeAye` reply on a container originally spawned for
+    // bystander traffic should flip the gate AND retarget the
+    // reaction at the new piped message. Each falls back to its
+    // spawn-time value when no pipe has updated it yet (first
+    // prompt of the spawn).
+    const effectiveAddressedToUs =
+      latestPipedAddressedToUs ?? containerInput.addressedToUs;
+    const effectiveMessageId =
+      latestPipedReplyTo ?? containerInput.replyToMessageId;
     const result = runReactFirstHook(
       {
         isScheduledTask: containerInput.isScheduledTask === true,
@@ -629,7 +639,7 @@ function createReactFirstHook(containerInput: ContainerInput): HookCallback {
           typeof submit.agent_id === 'string' && submit.agent_id.length > 0,
         prompt: typeof submit.prompt === 'string' ? submit.prompt : '',
         assistantName: containerInput.assistantName,
-        addressedToUs: containerInput.addressedToUs,
+        addressedToUs: effectiveAddressedToUs,
         chatJid: containerInput.chatJid,
         groupFolder: containerInput.groupFolder,
         // Match the falsy-empty-string fallback used elsewhere
@@ -640,7 +650,7 @@ function createReactFirstHook(containerInput: ContainerInput): HookCallback {
         // The triggering inbound message ID — host reacts to THIS
         // specific message rather than the chat's latest, which could
         // have moved on between routing and hook fire.
-        messageId: containerInput.replyToMessageId,
+        messageId: effectiveMessageId,
       },
       writeReactToMessageIpc,
     );
@@ -1275,6 +1285,28 @@ function shouldClose(): boolean {
  */
 const REPLY_TO_FILE = path.join(IPC_INPUT_DIR, '_reply_to');
 const consumedInputFiles = new Set<string>();
+
+/**
+ * Latest per-pipe `addressedToUs` flag, updated by `drainIpcInput`
+ * each time the host writes a new IPC message into the input dir.
+ * The react-first hook reads this at fire time so a freshly-piped
+ * inbound that addresses us flips a previously-spawned-for-bystander
+ * container into "👀 fires." `undefined` means "no signal seen yet"
+ * — the hook then falls back to `containerInput.addressedToUs` (the
+ * spawn-time value).
+ */
+let latestPipedAddressedToUs: boolean | undefined;
+
+/**
+ * Latest per-pipe `replyToMessageId` — the ID of the most recent
+ * inbound piped to this container. The react-first hook stamps this
+ * on the IPC payload so the host reacts to the PIPED trigger, not
+ * the spawn-time one. Without this, a piped `@AyeAye` reply would
+ * still fire 👀 (the addressed-ness gate flips correctly per the
+ * fix above), but the reaction would land on the spawn-time message
+ * rather than the new addressed pipe.
+ */
+let latestPipedReplyTo: string | undefined;
 // EROFS/EACCES on the input dir means the IPC mount is read-only — by
 // design, for untrusted containers (issue #287). The agent itself can
 // never recover from this; the host-side sweep is responsible. But
@@ -1319,6 +1351,18 @@ function drainIpcInput(): string[] {
           messages.push(data.text);
           if (data.replyToMessageId) {
             latestReplyTo = data.replyToMessageId;
+            latestPipedReplyTo = data.replyToMessageId;
+          }
+          // Per-pipe addressed-ness for the react-first hook.
+          // Latest-wins is fine for the failure mode this fixes
+          // (an `@AyeAye` reply piped into a bystander-spawned
+          // container): the addressed pipe sets the flag true and
+          // the next UserPromptSubmit reads true. A subsequent
+          // non-addressed pipe would flip back to false; that's
+          // also correct — the agent can still reason about the
+          // message via observer's commit-gated emojis.
+          if (typeof data.addressedToUs === 'boolean') {
+            latestPipedAddressedToUs = data.addressedToUs;
           }
         }
       } catch (err) {
