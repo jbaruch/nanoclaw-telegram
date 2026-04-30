@@ -60,6 +60,7 @@ import {
 } from './silent-turn-audit.js';
 import { buildSubagentRuleFilePaths } from './subagent-prompt.js';
 import { wrapUntrustedInput } from './untrusted-input-sources.js';
+import { wrapMcpToolResult } from './untrusted-input-wrap.js';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -419,6 +420,39 @@ function createMcpToolResultSanitizerHook(): HookCallback {
       hookSpecificOutput: {
         hookEventName: 'PostToolUse' as const,
         updatedMCPToolOutput: sanitized,
+      },
+    };
+  };
+}
+
+/**
+ * #321 PR 2 — Wrap MCP read-tool results in `<untrusted-input
+ * source="...">` so #322's walk-back can dispatch on source kind.
+ *
+ * Scope: same MCP-tools-only constraint as the sanitizer (#117) — the
+ * SDK's `updatedMCPToolOutput` is the only documented mutation surface
+ * for tool results, and it is MCP-scoped. Built-in tools get the sidecar
+ * `additionalContext` sentinel from PR 4 instead.
+ *
+ * Order in the PostToolUse chain: sanitizer (#117) → fidelity (#140) →
+ * this wrap. Sanitizer normalises bytes first so the wrap is applied to
+ * the model-visible final form; fidelity inspects raw text before the
+ * envelope is added so it doesn't mistake wrap tags for fabricated IDs.
+ */
+function createUntrustedInputWrapHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const post = input as PostToolUseHookInput;
+    if (!post.tool_name?.startsWith('mcp__')) return {};
+    const { wrapped, mutated } = wrapMcpToolResult(
+      post.tool_name,
+      post.tool_response,
+    );
+    if (!mutated) return {};
+    log(`untrusted_input_wrap tool=${post.tool_name}`);
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PostToolUse' as const,
+        updatedMCPToolOutput: wrapped,
       },
     };
   };
@@ -1945,15 +1979,20 @@ async function runQuery(
         // tool result. Matcher restricts to MCP because that's the
         // only tool family `updatedMCPToolOutput` can mutate.
         // #140 — flag fabricated-ID signatures (sequential email_01..,
-        // pr1_notif, promo_001) in MCP tool returns. Both run on the
-        // same matcher; SDK invokes them in registration order so the
-        // sanitizer normalises bytes first, then fidelity inspects.
+        // pr1_notif, promo_001) in MCP tool returns.
+        // #321 PR 2 — wrap MCP read-tool results (Composio gmail/
+        // calendar/slack/github reads) in `<untrusted-input source>` so
+        // #322's walk-back has a single in-band signal to grep for.
+        // SDK invokes hooks in registration order: sanitizer normalises
+        // bytes first, fidelity inspects raw text before the envelope
+        // is added, wrap runs last and only mutates the final form.
         PostToolUse: [
           {
             matcher: 'mcp__.*',
             hooks: [
               createMcpToolResultSanitizerHook(),
               createComposioFidelityHook(),
+              createUntrustedInputWrapHook(),
             ],
           },
         ],
