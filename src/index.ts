@@ -1889,7 +1889,20 @@ async function startMessageLoop(): Promise<void> {
           const formatted = formatMessages(messagesToSend, TIMEZONE);
 
           const lastMsgId = messagesToSend[messagesToSend.length - 1]?.id;
-          if (queue.sendMessage(chatJid, formatted, lastMsgId)) {
+          // Per-pipe addressed-ness for the agent-runner's react-first
+          // hook. Without this, a piped batch into a container that
+          // was originally spawned for non-addressed traffic inherits
+          // the stale spawn-time flag — a fresh `@AyeAye` reply
+          // landing on an already-running container would otherwise
+          // never get a 👀.
+          const pipedAddressedToUs = isAddressedToUs(
+            group,
+            chatJid,
+            messagesToSend,
+          );
+          if (
+            queue.sendMessage(chatJid, formatted, lastMsgId, pipedAddressedToUs)
+          ) {
             // Update shared reply-to so the output callback quotes this message
             pendingReplyTo[chatJid] = lastMsgId;
             logger.debug(

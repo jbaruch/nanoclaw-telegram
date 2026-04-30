@@ -294,6 +294,7 @@ export class GroupQueue {
     groupJid: string,
     text: string,
     replyToMessageId?: string,
+    addressedToUs?: boolean,
   ): boolean {
     const state = this.getGroup(groupJid, DEFAULT_SESSION_NAME);
     if (!state.active || !state.groupFolder || state.isTaskContainer)
@@ -315,8 +316,15 @@ export class GroupQueue {
       const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
       const filepath = path.join(inputDir, filename);
       const tempPath = `${filepath}.tmp`;
-      const data: Record<string, string> = { type: 'message', text };
+      const data: Record<string, string | boolean> = { type: 'message', text };
       if (replyToMessageId) data.replyToMessageId = replyToMessageId;
+      // #289 follow-up — per-pipe addressed-ness so the agent-runner's
+      // react-first hook fires 👀 on a new addressed inbound piped to
+      // a container that was originally spawned for a non-addressed
+      // message. Without this, the hook reads the stale spawn-time
+      // `containerInput.addressedToUs` and skips.
+      if (typeof addressedToUs === 'boolean')
+        data.addressedToUs = addressedToUs;
       fs.writeFileSync(tempPath, JSON.stringify(data));
       fs.renameSync(tempPath, filepath);
       return true;

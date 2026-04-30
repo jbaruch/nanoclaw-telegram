@@ -408,6 +408,86 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10);
   });
 
+  // --- Per-pipe addressed-ness (#289 follow-up) ---
+
+  it('sendMessage stamps `addressedToUs` on the IPC payload when supplied', async () => {
+    const fs = await import('fs');
+    const writeFileSync = vi.mocked(fs.default.writeFileSync);
+
+    const processMessages = vi.fn(async () => {
+      await new Promise(() => {
+        /* never resolve — keep container "active" */
+      });
+      return true;
+    });
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(
+      'group1@g.us',
+      DEFAULT_SESSION_NAME,
+      {} as unknown as import('child_process').ChildProcess,
+      'container-1',
+      'test-group',
+    );
+
+    writeFileSync.mockClear();
+
+    const written = queue.sendMessage('group1@g.us', 'hello', 'msg_42', true);
+
+    expect(written).toBe(true);
+    // Find the message-payload write (filename is `<ts>-<rand>.json`,
+    // not the `_close` sentinel).
+    const messagePayload = writeFileSync.mock.calls.find(
+      (c) =>
+        typeof c[0] === 'string' &&
+        !c[0].endsWith('_close') &&
+        c[0].endsWith('.json.tmp'),
+    );
+    expect(messagePayload).toBeDefined();
+    const payload = JSON.parse(messagePayload![1] as string);
+    expect(payload).toEqual({
+      type: 'message',
+      text: 'hello',
+      replyToMessageId: 'msg_42',
+      addressedToUs: true,
+    });
+  });
+
+  it('sendMessage omits `addressedToUs` when not supplied (legacy callers)', async () => {
+    const fs = await import('fs');
+    const writeFileSync = vi.mocked(fs.default.writeFileSync);
+
+    const processMessages = vi.fn(async () => {
+      await new Promise(() => {
+        /* never resolve */
+      });
+      return true;
+    });
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group2@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(
+      'group2@g.us',
+      DEFAULT_SESSION_NAME,
+      {} as unknown as import('child_process').ChildProcess,
+      'container-2',
+      'test-group',
+    );
+
+    writeFileSync.mockClear();
+    queue.sendMessage('group2@g.us', 'plain');
+
+    const messagePayload = writeFileSync.mock.calls.find(
+      (c) =>
+        typeof c[0] === 'string' &&
+        !c[0].endsWith('_close') &&
+        c[0].endsWith('.json.tmp'),
+    );
+    const payload = JSON.parse(messagePayload![1] as string);
+    expect(payload).not.toHaveProperty('addressedToUs');
+  });
+
   // --- Parallel sessions per group (maintenance vs default) ---
 
   it('two tasks on the same group with different sessionName run concurrently', async () => {
