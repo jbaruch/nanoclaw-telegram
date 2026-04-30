@@ -606,6 +606,24 @@ export function getAllChats(): ChatInfo[] {
 }
 
 /**
+ * Look up a single chat row by JID. Returns null when no row exists
+ * (the channel layer hasn't seen any inbound from that chat yet).
+ *
+ * Used by the orchestrator's react-first gate (#289) to distinguish
+ * 1:1 DMs (`is_group=0`) from group chats (`is_group=1`) without
+ * leaning on `requires_trigger` as a proxy — those two flags governed
+ * different concerns and the conflation was the original bug.
+ */
+export function getChatByJid(jid: string): ChatInfo | null {
+  const row = db
+    .prepare(
+      `SELECT jid, name, last_message_time, channel, is_group FROM chats WHERE jid = ?`,
+    )
+    .get(jid) as ChatInfo | undefined;
+  return row ?? null;
+}
+
+/**
  * Get timestamp of last group metadata sync.
  */
 export function getLastGroupSync(): string | null {

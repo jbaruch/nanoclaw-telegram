@@ -95,6 +95,16 @@ interface ContainerInput {
    * before spawn; this value flows through to the MCP env at runtime.
    */
   sessionName?: string;
+  /**
+   * Whether the inbound batch is "addressed to us" — drives the
+   * `react-first` 👀 gate (#289). Resolved orchestrator-side from
+   * isMain / 1:1-DM / trigger-match / reply-to-our-bot, independent
+   * of `requires_trigger`. `undefined` means "no signal" — for
+   * non-channel paths (scheduled tasks, scripts) this is expected
+   * and the existing skips (subagent / scheduled-task / etc.)
+   * still gate the hook.
+   */
+  addressedToUs?: boolean;
 }
 
 interface ContainerOutput {
@@ -619,6 +629,7 @@ function createReactFirstHook(containerInput: ContainerInput): HookCallback {
           typeof submit.agent_id === 'string' && submit.agent_id.length > 0,
         prompt: typeof submit.prompt === 'string' ? submit.prompt : '',
         assistantName: containerInput.assistantName,
+        addressedToUs: containerInput.addressedToUs,
         chatJid: containerInput.chatJid,
         groupFolder: containerInput.groupFolder,
         // Match the falsy-empty-string fallback used elsewhere
@@ -626,6 +637,10 @@ function createReactFirstHook(containerInput: ContainerInput): HookCallback {
         // so an accidentally-empty `sessionName` doesn't get stamped
         // onto the IPC payload.
         sessionName: containerInput.sessionName || 'default',
+        // The triggering inbound message ID — host reacts to THIS
+        // specific message rather than the chat's latest, which could
+        // have moved on between routing and hook fire.
+        messageId: containerInput.replyToMessageId,
       },
       writeReactToMessageIpc,
     );

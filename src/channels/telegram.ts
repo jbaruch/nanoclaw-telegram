@@ -35,44 +35,34 @@ export interface TelegramChannelOpts {
 }
 
 /**
- * Trigger gate (#289) — decides whether a host-side reaction is
- * appropriate for an inbound message. Returns:
- *  - `recordObserver`: whether `noteLatestUserMessage` should run
- *    (drives progress-emoji attachment; off for non-addressed messages).
- *  - `emitReaction`: whether the host should send 👀 immediately. Reserved
- *    for trust contexts (main / `containerConfig.trusted`); untrusted
- *    contexts let the agent's bad-actor-disengage rule decide.
+ * Observer-bookkeeping gate (#289) — decides whether
+ * `noteLatestUserMessage` should fire so the observer can attach
+ * progress reactions (🤔 / ⚡ / ✍) when the agent commits.
  *
- * The gate is intentionally **decoupled** from `requires_trigger`. That
- * flag governs whether the agent ANSWERS deterministically (only on
- * @-mention / reply-to-bot, no reasoning) vs. reasoning about every
- * inbound. The 👀 ack is a separate concern: it visibly marks "we read
- * this", and that should only fire on messages addressed to us — even
- * in `requires_trigger=false` group chats, where the agent reasons
- * about every message but should not light up reactions on bystander
- * traffic between other participants or other bots.
+ * The host-side 👀 emit was removed deliberately: that's a "channel
+ * received" claim and lies during distress modes (stuck container,
+ * wedged IPC). The 👀 now originates from the agent-runner's
+ * `react-first` hook, which only fires when the container is
+ * actually alive and processing — see `decideReactFirst` and the
+ * orchestrator-side `isAddressedToUs` helper that gates it.
  *
- * "Addressed to us" resolves as: main group, 1:1 DM, explicit trigger
- * match, or reply to our bot. `replyToOurBot` is narrower than
- * `reply_to_message.from.is_bot` for that same reason — replies to
- * other bots in a multi-bot group are not for us.
+ * The "addressed-ness" criteria here mirror the orchestrator's
+ * `isAddressedToUs` so the observer doesn't seed dedupe state for
+ * bystander chatter the agent-runner will (correctly) decline to
+ * react to. Independent of `requires_trigger`.
  */
 export function evaluateTriggerGate(
   group: RegisteredGroup,
   content: string,
   options: { replyToOurBot: boolean; isPrivateChat: boolean },
-): { recordObserver: boolean; emitReaction: boolean } {
+): { recordObserver: boolean } {
   const isMain = group.isMain ?? false;
-  const isTrusted = !!group.containerConfig?.trusted;
   const triggerHit =
     isMain ||
     options.isPrivateChat ||
     getTriggerPattern(group.trigger).test(content.trim()) ||
     options.replyToOurBot;
-  return {
-    recordObserver: triggerHit,
-    emitReaction: (isMain || isTrusted) && triggerHit,
-  };
+  return { recordObserver: triggerHit };
 }
 
 /**
@@ -1296,30 +1286,22 @@ export class TelegramChannel implements Channel {
         'Telegram message stored',
       );
 
-      // Trigger gate (#289). The 👀 ack is decoupled from
-      // `requires_trigger`: even in chats where the agent reasons
-      // about every inbound, the host should not visibly react to
-      // bystander traffic.
+      // Observer-bookkeeping gate (#289). The 👀 ack itself comes
+      // from the agent-runner's react-first hook (where firing IS
+      // proof of liveness); here we only seed `noteLatestUserMessage`
+      // so the observer's progress emojis can attach to the right
+      // message if/when the agent commits.
       const replyFrom = ctx.message.reply_to_message?.from;
       const replyToOurBot =
         !!replyFrom?.is_bot &&
         replyFrom?.username?.toLowerCase() === ctx.me?.username?.toLowerCase();
-      const { recordObserver, emitReaction } = evaluateTriggerGate(
-        group,
-        content,
-        {
-          replyToOurBot,
-          isPrivateChat: ctx.chat.type === 'private',
-        },
-      );
+      const { recordObserver } = evaluateTriggerGate(group, content, {
+        replyToOurBot,
+        isPrivateChat: ctx.chat.type === 'private',
+      });
 
       if (recordObserver) {
         noteLatestUserMessage(chatJid, msgId);
-      }
-      if (emitReaction) {
-        this.sendReaction(chatJid, msgId, '👀').catch(() => {
-          /* already logged inside sendReaction */
-        });
       }
     });
 
@@ -1452,30 +1434,23 @@ export class TelegramChannel implements Channel {
         is_from_me: false,
       });
 
-      // Trigger gate (#289). For voice the trigger pattern can only
-      // run against the resolved transcript, so this fires after
-      // transcription completes — a few seconds slower than the text
-      // handler but with the same leak protection.
+      // Observer-bookkeeping gate (#289). For voice the trigger
+      // pattern can only run against the resolved transcript, so
+      // this fires after transcription completes. The 👀 ack itself
+      // is fired by the agent-runner's react-first hook once the
+      // container is alive and processing — see
+      // `decideReactFirst` in container/agent-runner/src/react-first.ts.
       const replyFrom = ctx.message.reply_to_message?.from;
       const replyToOurBot =
         !!replyFrom?.is_bot &&
         replyFrom?.username?.toLowerCase() === ctx.me?.username?.toLowerCase();
-      const { recordObserver, emitReaction } = evaluateTriggerGate(
-        group,
-        content,
-        {
-          replyToOurBot,
-          isPrivateChat: ctx.chat.type === 'private',
-        },
-      );
+      const { recordObserver } = evaluateTriggerGate(group, content, {
+        replyToOurBot,
+        isPrivateChat: ctx.chat.type === 'private',
+      });
 
       if (recordObserver) {
         noteLatestUserMessage(chatJid, msgId);
-      }
-      if (emitReaction) {
-        this.sendReaction(chatJid, msgId, '👀').catch(() => {
-          /* already logged inside sendReaction */
-        });
       }
     });
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));

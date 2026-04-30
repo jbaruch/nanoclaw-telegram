@@ -9,6 +9,7 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getBotMessageByTelegramId,
+  getChatByJid,
   getLastBotMessageTimestamp,
   getMessagesSince,
   getNewMessages,
@@ -1055,5 +1056,51 @@ describe('messageExistsInDifferentChat', () => {
       timestamp: '2026-04-28T00:00:00.000Z',
     });
     expect(messageExistsInDifferentChat('shared', 'tg:-1005555')).toBe(true);
+  });
+});
+
+// --- getChatByJid (#289 — addressed-ness gate dependency) ---
+
+describe('getChatByJid', () => {
+  it('returns null for an unknown JID', () => {
+    expect(getChatByJid('tg:-9999999999')).toBeNull();
+  });
+
+  it('returns the row after storeChatMetadata with isGroup=true', () => {
+    storeChatMetadata(
+      'tg:-1003869886477',
+      '2026-04-29T20:00:00.000Z',
+      'Old.wtf',
+      'telegram',
+      true,
+    );
+    const row = getChatByJid('tg:-1003869886477');
+    expect(row).not.toBeNull();
+    expect(row?.jid).toBe('tg:-1003869886477');
+    expect(row?.is_group).toBe(1);
+    expect(row?.channel).toBe('telegram');
+  });
+
+  it('returns the row with is_group=0 for a 1:1 DM', () => {
+    storeChatMetadata(
+      'tg:42',
+      '2026-04-29T20:00:00.000Z',
+      'Solo Alice',
+      'telegram',
+      false,
+    );
+    const row = getChatByJid('tg:42');
+    expect(row?.is_group).toBe(0);
+  });
+
+  it('returns the row with is_group=null when isGroup was omitted at store-time', () => {
+    // The migration default for pre-existing rows is 0, but a fresh
+    // insert that doesn't pass isGroup leaves the column at NULL.
+    // The addressed-ness gate treats `is_group !== 0` as "not 1:1",
+    // so NULL must NOT short-circuit the gate to "addressed."
+    storeChatMetadata('tg:7', '2026-04-29T20:00:00.000Z');
+    const row = getChatByJid('tg:7');
+    expect(row).not.toBeNull();
+    expect(row?.is_group).toBeNull();
   });
 });

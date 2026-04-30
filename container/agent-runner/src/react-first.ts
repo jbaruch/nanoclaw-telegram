@@ -48,6 +48,19 @@ export interface ReactFirstGateInput {
    * PreCompact hook already gates on this same field.
    */
   assistantName?: string;
+  /**
+   * Whether the inbound batch is "addressed to us" (#289). Resolved
+   * orchestrator-side from isMain / 1:1-DM / trigger-match /
+   * reply-to-our-bot, independent of `requires_trigger`. The hook
+   * skips when this is explicitly `false` so the bot doesn't 👀-react
+   * to bystander chatter in `requires_trigger=false` rooms (multi-bot
+   * groups where the agent reasons about every inbound but should
+   * not visibly mark non-addressed traffic). `undefined` is treated
+   * as "no signal" — the earlier scheduled-task / subagent / no-name
+   * skips still gate non-channel paths, and channel-routed inbounds
+   * always get an explicit boolean from the orchestrator.
+   */
+  addressedToUs?: boolean;
 }
 
 /**
@@ -63,7 +76,8 @@ export type ReactFirstDecision =
         | 'scheduled-task'
         | 'subagent'
         | 'no-assistant-name'
-        | 'scheduled-task-prompt-wrap';
+        | 'scheduled-task-prompt-wrap'
+        | 'not-addressed';
     };
 
 /**
@@ -97,6 +111,15 @@ export function decideReactFirst(input: ReactFirstGateInput): ReactFirstDecision
   }
   if (!input.assistantName || input.assistantName.length === 0) {
     return { react: false, skippedBy: 'no-assistant-name' };
+  }
+  // #289 — addressed-ness gate. Skip ONLY on explicit `false`;
+  // `undefined` means "no signal from orchestrator" (e.g. legacy
+  // entry points that don't set the field) and falls through to the
+  // historical default of "react." Channel-routed inbounds — the
+  // path that produced the original leak — always set this
+  // explicitly, so the implicit fallthrough never fires for them.
+  if (input.addressedToUs === false) {
+    return { react: false, skippedBy: 'not-addressed' };
   }
   return { react: true };
 }
@@ -145,6 +168,20 @@ export interface ReactFirstHookInput extends ReactFirstGateInput {
    * an empty value never reaches the IPC layer.
    */
   sessionName: string;
+  /**
+   * The triggering inbound message ID — caller passes
+   * `containerInput.replyToMessageId` (which is itself
+   * `missedMessages[last].id` from the orchestrator). The hook
+   * stamps this on the IPC payload so the host reacts to the
+   * triggering message specifically, NOT whatever message happens
+   * to be latest by the time the container spawns and the hook
+   * fires. Without this, a slow spawn + a newer inbound landing in
+   * the same chat causes the host's `reactToLatestMessage` fallback
+   * to react to the new message and leave the trigger unmarked.
+   * Optional — non-channel paths (scheduled tasks, scripts) have
+   * no triggering inbound and the existing skip gates catch those.
+   */
+  messageId?: string;
 }
 
 /**
@@ -160,7 +197,8 @@ export type ReactFirstHookResult =
         | 'scheduled-task'
         | 'subagent'
         | 'no-assistant-name'
-        | 'scheduled-task-prompt-wrap';
+        | 'scheduled-task-prompt-wrap'
+        | 'not-addressed';
     }
   | { kind: 'ipc-failed'; emoji: string; code: string; message: string };
 
@@ -217,6 +255,7 @@ export function runReactFirstHook(
     isSubagent: input.isSubagent,
     prompt: input.prompt,
     assistantName: input.assistantName,
+    addressedToUs: input.addressedToUs,
   });
   if (!decision.react) {
     return { kind: 'skipped', skipReason: decision.skippedBy };
@@ -228,6 +267,7 @@ export function runReactFirstHook(
     sessionName: input.sessionName,
     emoji: REACT_FIRST_DEFAULT_EMOJI,
     timestamp: now().toISOString(),
+    ...(input.messageId ? { messageId: input.messageId } : {}),
   };
   try {
     ipcWriter(payload);

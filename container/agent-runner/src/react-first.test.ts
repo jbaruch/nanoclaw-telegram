@@ -73,6 +73,43 @@ describe('decideReactFirst', () => {
       }),
     ).toEqual({ react: false, skippedBy: 'scheduled-task' });
   });
+
+  // #289 — addressed-ness gate. The orchestrator resolves
+  // `addressedToUs` from isMain / 1:1-DM / trigger-match /
+  // reply-to-our-bot and pipes it through ContainerInput.
+  it('skips when the orchestrator marks the inbound not-addressed', () => {
+    expect(
+      decideReactFirst({ ...baseGate, addressedToUs: false }),
+    ).toEqual({ react: false, skippedBy: 'not-addressed' });
+  });
+
+  it('reacts when the orchestrator marks the inbound addressed', () => {
+    expect(
+      decideReactFirst({ ...baseGate, addressedToUs: true }),
+    ).toEqual({ react: true });
+  });
+
+  it('treats undefined addressedToUs as "no signal" and falls through to react', () => {
+    // Legacy entry points (or paths that don't compute the flag)
+    // should not regress the historical default. Channel-routed
+    // inbounds — the path that produced the original leak — always
+    // set the flag explicitly.
+    expect(
+      decideReactFirst({ ...baseGate, addressedToUs: undefined }),
+    ).toEqual({ react: true });
+  });
+
+  it('subagent gate beats not-addressed gate', () => {
+    // Subagent skip is more semantically useful for triage than
+    // addressed-ness when both apply.
+    expect(
+      decideReactFirst({
+        ...baseGate,
+        isSubagent: true,
+        addressedToUs: false,
+      }),
+    ).toEqual({ react: false, skippedBy: 'subagent' });
+  });
 });
 
 describe('REACT_FIRST_DEFAULT_EMOJI', () => {
@@ -235,5 +272,25 @@ describe('runReactFirstHook', () => {
     expect(payloads[0].chatJid).toBe('other@s.whatsapp.net');
     expect(payloads[0].sessionName).toBe('maintenance');
     expect(payloads[0].groupFolder).toBe('another-group');
+  });
+
+  // #289 follow-up — pin the IPC reaction to the triggering message
+  // so a slow spawn + a newer inbound between routing and hook fire
+  // can't race the host's `reactToLatestMessage` fallback into
+  // marking the wrong message.
+  it('stamps the triggering messageId on the payload when supplied', () => {
+    const { writer, payloads } = makeRecordingWriter();
+    runReactFirstHook(
+      { ...baseHookInput, messageId: 'msg_42' },
+      writer,
+      fixedNow,
+    );
+    expect(payloads[0].messageId).toBe('msg_42');
+  });
+
+  it('omits messageId on the payload when not supplied (legacy / scheduled paths)', () => {
+    const { writer, payloads } = makeRecordingWriter();
+    runReactFirstHook(baseHookInput, writer, fixedNow);
+    expect(payloads[0]).not.toHaveProperty('messageId');
   });
 });
