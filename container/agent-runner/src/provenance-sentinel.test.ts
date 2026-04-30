@@ -100,10 +100,40 @@ describe('inferSentinelSource — Read', () => {
     ).toBeNull();
   });
 
-  it('returns null for relative paths', () => {
+  it('returns null for non-escaping relative paths', () => {
     expect(inferSentinelSource('Read', { file_path: 'notes.md' })).toBeNull();
     expect(
       inferSentinelSource('Read', { file_path: './sub/foo.txt' }),
+    ).toBeNull();
+  });
+
+  it('emits resolved file: source for relative paths that escape the workspace', () => {
+    expect(
+      inferSentinelSource('Read', { file_path: '../../etc/passwd' }),
+    ).toEqual({ prefix: 'file', value: '/etc/passwd' });
+    expect(
+      inferSentinelSource('Read', { file_path: '../../../tmp/scratch.txt' }),
+    ).toEqual({ prefix: 'file', value: '/tmp/scratch.txt' });
+  });
+
+  it('emits normalized file: source for absolute paths containing ..', () => {
+    expect(
+      inferSentinelSource('Read', {
+        file_path: '/workspace/group/../../etc/passwd',
+      }),
+    ).toEqual({ prefix: 'file', value: '/etc/passwd' });
+    expect(
+      inferSentinelSource('Read', {
+        file_path: '/workspace/group/../secret/x',
+      }),
+    ).toEqual({ prefix: 'file', value: '/workspace/secret/x' });
+  });
+
+  it('does not double-emit for traversal that resolves back inside a mount', () => {
+    expect(
+      inferSentinelSource('Read', {
+        file_path: '/workspace/group/sub/../notes.md',
+      }),
     ).toBeNull();
   });
 

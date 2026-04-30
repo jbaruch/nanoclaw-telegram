@@ -2042,7 +2042,11 @@ async function runQuery(
             ],
           },
           {
-            matcher: 'WebFetch|Read|Bash',
+            // Anchored alternation — `WebFetch|Read|Bash` (unanchored)
+            // would also match e.g. a third-party tool literally named
+            // `MyBash` or `ReadMore`. Match only the exact built-in
+            // tool names.
+            matcher: '^(WebFetch|Read|Bash)$',
             hooks: [createProvenanceSentinelHook()],
           },
         ],

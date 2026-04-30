@@ -80,8 +80,14 @@ export function inferSentinelSource(
   if (toolName === 'Read') {
     const filePath = (toolInput as { file_path?: unknown }).file_path;
     if (typeof filePath !== 'string' || filePath.length === 0) return null;
-    if (!isExternalPath(filePath)) return null;
-    return { prefix: 'file', value: filePath };
+    const classified = classifyReadPath(filePath);
+    if (!classified.isExternal) return null;
+    // Emit the resolved/normalized absolute path so the marker is
+    // unambiguous — `../../etc/passwd` becomes `file:/etc/passwd` and
+    // `/workspace/group/../secret/x` becomes `file:/workspace/secret/x`.
+    // The walk-back never has to re-resolve to know what was actually
+    // read.
+    return { prefix: 'file', value: classified.resolved };
   }
 
   if (toolName === 'Bash') {
@@ -116,12 +122,25 @@ export function inferSentinelSource(
  * because the prefix list does not contain them.
  */
 export function isExternalPath(filePath: string): boolean {
+  return classifyReadPath(filePath).isExternal;
+}
+
+/**
+ * Resolve + classify a `Read` target. Returns both the normalized
+ * absolute path (used as the sentinel `value`) and the internal/external
+ * verdict in one pass — callers shouldn't double-resolve.
+ */
+export function classifyReadPath(filePath: string): {
+  resolved: string;
+  isExternal: boolean;
+} {
   const resolved = path.posix.isAbsolute(filePath)
     ? path.posix.normalize(filePath)
     : path.posix.resolve(CONTAINER_CWD, filePath);
-  return !WORKSPACE_INTERNAL_PREFIXES.some(
+  const isExternal = !WORKSPACE_INTERNAL_PREFIXES.some(
     (p) => resolved === p.replace(/\/$/, '') || resolved.startsWith(p),
   );
+  return { resolved, isExternal };
 }
 
 function isAgentBrowserCommand(command: string): boolean {
