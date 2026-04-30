@@ -1981,16 +1981,23 @@ function migrateOrdersDbJsonFiles(): void {
 
     const counts = importFile();
 
-    // The rename is metadata cleanup, not data integrity — the import
-    // already committed. A rename failure (cross-device EXDEV, EACCES,
-    // etc.) must NOT block startup; logging at warn lets the operator
-    // see the situation without losing the orchestrator. The next
-    // restart will re-import (idempotent via ON CONFLICT) and try the
-    // rename again. Filtering on ENOENT mirrors the pattern already
-    // used for the readdirSync above — non-existent source means
-    // someone else already moved/removed it.
+    // Rename is metadata cleanup; the data import already committed.
+    // Per `coding-policy: error-handling`, only one specific errno is
+    // recoverable here: `ENOENT` means the source disappeared between
+    // the import and the rename (concurrent migration run, manual
+    // file move) — that's an idempotent no-op since the data is
+    // already in SQL. Every other errno (`EACCES`, `EPERM`, `EXDEV`,
+    // `ENOSPC`, etc.) indicates a real environment problem the
+    // operator must fix before startup proceeds; rethrowing those
+    // surfaces the issue immediately rather than letting the
+    // orchestrator come up with stale JSON files lying around.
     try {
       fs.renameSync(filePath, `${filePath}.migrated-${stamp}`);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      // Source file already gone — log + continue without the
+      // info-level "renamed" message since no rename actually
+      // happened.
       logger.info(
         {
           folder,
@@ -1998,23 +2005,18 @@ function migrateOrdersDbJsonFiles(): void {
           skipped: counts.skippedRows,
           total: parsed.orders.length,
         },
-        'orders-db.json migration: imported and source renamed',
+        'orders-db.json migration: imported; source already absent at rename time',
       );
-    } catch (err) {
-      if (!(err instanceof Error)) throw err;
-      const errno = (err as NodeJS.ErrnoException).code;
-      if (errno === 'ENOENT') continue;
-      logger.warn(
-        {
-          folder,
-          errno,
-          errName: err.name,
-          inserted: counts.insertedRows,
-          skipped: counts.skippedRows,
-          total: parsed.orders.length,
-        },
-        'orders-db.json migration: imported but rename failed; file left in place for retry',
-      );
+      continue;
     }
+    logger.info(
+      {
+        folder,
+        inserted: counts.insertedRows,
+        skipped: counts.skippedRows,
+        total: parsed.orders.length,
+      },
+      'orders-db.json migration: imported and source renamed',
+    );
   }
 }
