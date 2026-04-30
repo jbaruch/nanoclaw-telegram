@@ -59,6 +59,7 @@ import {
   decideSilentTurnAudit,
 } from './silent-turn-audit.js';
 import { buildSubagentRuleFilePaths } from './subagent-prompt.js';
+import { wrapUntrustedInput } from './untrusted-input-sources.js';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -2590,7 +2591,11 @@ async function main(): Promise<void> {
     containerInput.createdByRole !== undefined &&
     containerInput.createdByRole !== 'untrusted_agent';
   if (isUntrustedContainer && !isOrchestratorTrustedTask) {
-    prompt = `<untrusted-input source="${containerInput.groupFolder}">\n${prompt}\n</untrusted-input>`;
+    prompt = wrapUntrustedInput(
+      prompt,
+      'untrusted-container',
+      containerInput.groupFolder,
+    );
   }
 
   // Query loop: run query → wait for IPC message → run new query → repeat.
