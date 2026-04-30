@@ -688,8 +688,9 @@ describe('buildVolumeMounts — untrusted group isolation', () => {
     // untrusted agent corrupt its own filtered view. Read-only on
     // untrusted is the safety side of the asymmetric trust boundary
     // introduced for epic #293 (trusted/main get rw, untrusted stays
-    // ro). See the parallel "rw for trusted/main" test in the
-    // shared-memory describe block for the rw side.
+    // ro). The rw side is covered by the dedicated
+    // `buildVolumeMounts — /workspace/store mount rw/ro by trust`
+    // describe block at the bottom of this file.
     const originalCwd = process.cwd();
     process.chdir(PROJECT_DIR);
     try {

@@ -890,11 +890,13 @@ export function buildVolumeMounts(
   // Untrusted: filtered copy (own chat only), READ-ONLY so an untrusted
   //   agent cannot mutate cross-group state via writes against the
   //   filtered DB.
-  // The orchestrator opens messages.db in WAL mode (see src/db.ts), and
-  // SQLite's WAL is process-level: as long as the agent's sqlite3 process
-  // has rw on the same `store/` dir (so the .wal and .shm sidecars are
-  // writable), concurrent writes from orchestrator + agent are safe. The
-  // dir mount above gives access to all three files together.
+  // The orchestrator opens messages.db in WAL mode (see src/db.ts).
+  // WAL coordinates concurrent writers via filesystem locks on
+  // messages.db plus its `.wal` and `.shm` sidecars — both processes
+  // need rw on all three files in the same directory. Mounting the
+  // `store/` dir (rather than the file alone) gives the agent access
+  // to the sidecars too. The orchestrator's `busy_timeout = 5000`
+  // pragma plus per-script transactions keep contention bounded.
   if (isMain || group.containerConfig?.trusted) {
     const storeDir = path.join(process.cwd(), 'store');
     if (fs.existsSync(storeDir)) {
