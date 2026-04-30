@@ -19,10 +19,12 @@ import path from 'path';
 import { execFile } from 'child_process';
 import {
   query,
+  getSessionMessages,
   HookCallback,
   PostToolUseHookInput,
   PreCompactHookInput,
   PreToolUseHookInput,
+  SessionMessage,
   SessionStartHookInput,
   StopHookInput,
   UserPromptSubmitHookInput,
@@ -65,6 +67,10 @@ import {
   formatSentinel,
   inferSentinelSource,
 } from './provenance-sentinel.js';
+import {
+  decideCapabilityAcl,
+  WalkBackMessage,
+} from './capability-acl.js';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -495,6 +501,134 @@ function createProvenanceSentinelHook(): HookCallback {
       hookSpecificOutput: {
         hookEventName: 'PostToolUse' as const,
         additionalContext: marker,
+      },
+    };
+  };
+}
+
+/**
+ * Convert an SDK `SessionMessage` to the `WalkBackMessage` shape the
+ * `capability-acl` walk-back operates on.
+ *
+ * Two transforms collapse here:
+ *   1. The SDK message's content array (text, tool_use, tool_result,
+ *      thinking, etc.) is flattened to a single concatenated string —
+ *      both Encoding A wraps and Encoding B sentinels live in plain
+ *      text fragments, so the walk-back is format-agnostic.
+ *   2. A user-role message is classified as `isToolResult` if EVERY
+ *      content block is a `tool_result` block. Mixed content (rare —
+ *      models occasionally emit text alongside a tool_result) counts
+ *      as a real user turn / boundary; better to over-include a
+ *      boundary than to silently consume a real user message.
+ */
+function sessionMessageToWalkBack(m: SessionMessage): WalkBackMessage | null {
+  const role = m.type;
+  if (role !== 'user' && role !== 'assistant' && role !== 'system') {
+    return null;
+  }
+  const inner = (m as { message?: unknown }).message;
+  if (!inner || typeof inner !== 'object') {
+    return { role, text: '' };
+  }
+  const content = (inner as { content?: unknown }).content;
+  if (typeof content === 'string') {
+    return { role, text: content };
+  }
+  if (!Array.isArray(content)) {
+    return { role, text: '' };
+  }
+  let text = '';
+  let allToolResult = content.length > 0;
+  for (const block of content) {
+    if (!block || typeof block !== 'object') {
+      allToolResult = false;
+      continue;
+    }
+    const t = (block as { type?: unknown }).type;
+    if (t !== 'tool_result') allToolResult = false;
+    // Pull text fields out of any block shape we've seen (text /
+    // tool_use input / tool_result content / thinking). The walk-back
+    // greps for marker patterns; concatenating with '\n' keeps line-
+    // anchored regexes correct.
+    const blockText = extractBlockText(block);
+    if (blockText) text += (text ? '\n' : '') + blockText;
+  }
+  return {
+    role,
+    isToolResult: role === 'user' && allToolResult,
+    text,
+  };
+}
+
+function extractBlockText(block: unknown): string {
+  if (!block || typeof block !== 'object') return '';
+  const t = (block as { type?: unknown }).type;
+  if (t === 'text' || t === 'thinking') {
+    const s = (block as { text?: unknown }).text;
+    return typeof s === 'string' ? s : '';
+  }
+  if (t === 'tool_result') {
+    const c = (block as { content?: unknown }).content;
+    if (typeof c === 'string') return c;
+    if (Array.isArray(c)) {
+      return c
+        .map((b) => extractBlockText(b))
+        .filter(Boolean)
+        .join('\n');
+    }
+    return '';
+  }
+  if (t === 'tool_use') {
+    // Tool_use inputs CAN carry strings the model is about to send
+    // (e.g. send_message text). Including them in the walk-back text
+    // would conflate planned-output with received-input — skip.
+    return '';
+  }
+  return '';
+}
+
+/**
+ * #322 — Capability ACL per data source. Walks back from the current
+ * tool call through the session transcript, finds every untrusted-
+ * provenance marker (Encoding A or B from #321) in the span between
+ * the call and the most recent operator user-turn boundary, and denies
+ * the call if its sink is not in the intersection of allowed-sinks for
+ * every source seen.
+ *
+ * Fail-open: if transcript reading throws, log a WARN and ALLOW. The
+ * failure mode is "we couldn't determine provenance" — denying every
+ * tool call until the transcript is readable would brick the harness
+ * on transient I/O issues. Real injection attempts produce stable
+ * markers in the transcript, so a transient miss does not unlock a
+ * persistent attack vector.
+ */
+function createCapabilityAclHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const pre = input as PreToolUseHookInput;
+    let messages: WalkBackMessage[] = [];
+    try {
+      const session = await getSessionMessages(pre.session_id);
+      messages = session
+        .map(sessionMessageToWalkBack)
+        .filter((m): m is WalkBackMessage => m !== null);
+    } catch (err) {
+      log(
+        `capability_acl: transcript read failed, allowing tool=${pre.tool_name} reason=${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return {};
+    }
+    const decision = decideCapabilityAcl(pre.tool_name, messages);
+    if (decision.kind === 'allow') return {};
+    log(
+      `capability_acl: DENY tool=${pre.tool_name} prefixes=[${decision.prefixes.join(',')}]`,
+    );
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: 'deny' as const,
+        permissionDecisionReason: decision.reason,
       },
     };
   };
@@ -2015,6 +2149,19 @@ async function runQuery(
           {
             matcher: 'mcp__nanoclaw__(react_to_message|send_message)',
             hooks: [createSilentTurnTrackingHook(silentTurnState)],
+          },
+          // #322 — capability ACL. Walks the transcript back to the
+          // most recent operator user-turn boundary, collects every
+          // untrusted-provenance marker (Encoding A wrap or Encoding B
+          // sentinel from #321) in the span, and denies the call if
+          // its sink isn't in the intersection of allowed-sinks for
+          // every source seen. Operator-originated chains (no markers
+          // in span) bypass — preserves the trusted-tier capability
+          // principle from #318. Matches every tool because the gate
+          // is sink-agnostic; the ACL itself decides what's allowed.
+          {
+            matcher: '.*',
+            hooks: [createCapabilityAclHook()],
           },
         ],
         // #117 — strip invisible-Unicode + cap byte size on every MCP
