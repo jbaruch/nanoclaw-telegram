@@ -9,6 +9,7 @@ import { STATE_006_TRUSTED_SESSION_STATE } from './state-006-trusted-session-sta
 import { STATE_007_MORNING_BRIEF_PENDING } from './state-007-morning-brief-pending.js';
 import { STATE_008_CALENDAR_STATE } from './state-008-calendar-state.js';
 import { STATE_009_PHASE_COMPLETIONS } from './state-009-phase-completions.js';
+import { STATE_010_TZ_STATE } from './state-010-tz-state.js';
 
 /**
  * Registered state-table migrations, applied in order at orchestrator
@@ -30,4 +31,5 @@ export const STATE_MIGRATIONS: readonly StateMigration[] = [
   STATE_007_MORNING_BRIEF_PENDING,
   STATE_008_CALENDAR_STATE,
   STATE_009_PHASE_COMPLETIONS,
+  STATE_010_TZ_STATE,
 ];
