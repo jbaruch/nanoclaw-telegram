@@ -25,6 +25,8 @@ vi.mock('./config.js', () => ({
   MODEL_CONTEXT_WINDOW: 1000000,
   TILE_OWNER: 'test',
   TIMEZONE: 'America/Los_Angeles',
+  MAINTENANCE_RULE_BLOCKLIST: new Set<string>(),
+  MAINTENANCE_SKILL_BLOCKLIST: new Set<string>(),
 }));
 
 // Mock better-sqlite3 (used by createFilteredDb)

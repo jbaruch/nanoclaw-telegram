@@ -15,6 +15,7 @@ vi.mock('./container-runner.js', () => ({
   runContainerAgent: mockRunContainerAgent,
   writeTasksSnapshot: vi.fn(),
   DEFAULT_SESSION_NAME: 'default',
+  MAINTENANCE_SESSION_NAME: 'maintenance',
 }));
 
 import {
