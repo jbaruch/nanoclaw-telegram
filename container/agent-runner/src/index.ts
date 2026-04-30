@@ -61,6 +61,10 @@ import {
 import { buildSubagentRuleFilePaths } from './subagent-prompt.js';
 import { wrapUntrustedInput } from './untrusted-input-sources.js';
 import { wrapMcpToolResult } from './untrusted-input-wrap.js';
+import {
+  formatSentinel,
+  inferSentinelSource,
+} from './provenance-sentinel.js';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -453,6 +457,44 @@ function createUntrustedInputWrapHook(): HookCallback {
       hookSpecificOutput: {
         hookEventName: 'PostToolUse' as const,
         updatedMCPToolOutput: wrapped,
+      },
+    };
+  };
+}
+
+/**
+ * #321 PR 4 — Encoding B sidecar provenance sentinel for built-in
+ * tools (`WebFetch`, `Read` on external paths, `Bash` invocations of
+ * `agent-browser`). The SDK exposes no `tool_response` mutation
+ * surface for built-in tools, so the literal `<untrusted-input>` wrap
+ * (#321 PR 2 / Encoding A) is impossible here. Instead we emit a
+ * machine-parseable marker line via `additionalContext` — #322's
+ * walk-back recognises both encodings as equally authoritative.
+ *
+ * The hook delegates the decide-and-format logic to
+ * `provenance-sentinel.ts`; this wrapper only adapts the SDK callback
+ * shape and emits the marker when the source-inference yields a non-
+ * null result.
+ */
+function createProvenanceSentinelHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const post = input as PostToolUseHookInput;
+    const source = inferSentinelSource(post.tool_name, post.tool_input);
+    if (!source) return {};
+    const marker = formatSentinel(source, post.tool_use_id);
+    // Log the prefix only — `source.value` carries the raw URL / file
+    // path / agent-browser target, which can include signed-URL tokens,
+    // sensitive mount paths, or other material that the no-secrets rule
+    // forbids in any log level. The marker itself (delivered via
+    // additionalContext to the model) carries the full value; logs stay
+    // metadata-only.
+    log(
+      `provenance_sentinel tool=${post.tool_name} source_prefix=${source.prefix}`,
+    );
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PostToolUse' as const,
+        additionalContext: marker,
       },
     };
   };
@@ -1986,6 +2028,10 @@ async function runQuery(
         // SDK invokes hooks in registration order: sanitizer normalises
         // bytes first, fidelity inspects raw text before the envelope
         // is added, wrap runs last and only mutates the final form.
+        // #321 PR 4 — sidecar provenance sentinel for built-in tools
+        // (WebFetch / Read external / Bash agent-browser). Separate
+        // matcher because `WebFetch | Read | Bash` is the built-in
+        // family and shares no other PostToolUse hooks.
         PostToolUse: [
           {
             matcher: 'mcp__.*',
@@ -1994,6 +2040,14 @@ async function runQuery(
               createComposioFidelityHook(),
               createUntrustedInputWrapHook(),
             ],
+          },
+          {
+            // Anchored alternation — `WebFetch|Read|Bash` (unanchored)
+            // would also match e.g. a third-party tool literally named
+            // `MyBash` or `ReadMore`. Match only the exact built-in
+            // tool names.
+            matcher: '^(WebFetch|Read|Bash)$',
+            hooks: [createProvenanceSentinelHook()],
           },
         ],
       },
