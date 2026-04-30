@@ -1885,11 +1885,14 @@ function migrateOrdersDbJsonFiles(): void {
       .filter((entry) => isValidGroupFolder(entry.name))
       .map((entry) => entry.name)
       // Sort so "first writer wins" with ON CONFLICT DO NOTHING below
-      // is deterministic across filesystems. readdirSync order is
-      // implementation-defined (ext4 hash order, APFS insertion order,
-      // etc.), and the orchestrator should produce the same imported
-      // row set regardless of where it runs.
-      .sort((a, b) => a.localeCompare(b));
+      // is deterministic across filesystems AND across locales.
+      // readdirSync order is implementation-defined (ext4 hash order,
+      // APFS insertion order, etc.) and `localeCompare` would add a
+      // second axis of nondeterminism (Turkish dotted-i, German
+      // ß-vs-ss, ICU version skew). Plain code-point comparison via
+      // </> on string operands is locale-free and stable across Node
+      // versions.
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw err;
@@ -1971,10 +1974,11 @@ function migrateOrdersDbJsonFiles(): void {
     // and the operator must triage before continuing. The schema
     // version gate in applyStateMigrations is independent of this;
     // the schema is already at v1, this is data backfill only.
+    const orders = parsed.orders;
     const importFile = db.transaction(() => {
       let insertedRows = 0;
       let skippedRows = 0;
-      for (const order of parsed.orders!) {
+      for (const order of orders) {
         const result = insertOrder.run(
           order.id,
           order.source,
@@ -2026,7 +2030,7 @@ function migrateOrdersDbJsonFiles(): void {
           folder,
           inserted: counts.insertedRows,
           skipped: counts.skippedRows,
-          total: parsed.orders.length,
+          total: orders.length,
         },
         'orders-db.json migration: imported; source already absent at rename time',
       );
@@ -2037,7 +2041,7 @@ function migrateOrdersDbJsonFiles(): void {
         folder,
         inserted: counts.insertedRows,
         skipped: counts.skippedRows,
-        total: parsed.orders.length,
+        total: orders.length,
       },
       'orders-db.json migration: imported and source renamed',
     );
