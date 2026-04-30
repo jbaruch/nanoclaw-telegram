@@ -1,6 +1,7 @@
 import type { StateMigration } from '../db.js';
 
 import { STATE_001_ORDERS } from './state-001-orders.js';
+import { STATE_002_EMAIL_FEEDBACK } from './state-002-email-feedback.js';
 
 /**
  * Registered state-table migrations, applied in order at orchestrator
@@ -12,4 +13,7 @@ import { STATE_001_ORDERS } from './state-001-orders.js';
  *   - `name` is a non-empty human-readable label
  *   - `sql` is a non-empty SQL string (DDL/DML)
  */
-export const STATE_MIGRATIONS: readonly StateMigration[] = [STATE_001_ORDERS];
+export const STATE_MIGRATIONS: readonly StateMigration[] = [
+  STATE_001_ORDERS,
+  STATE_002_EMAIL_FEEDBACK,
+];
