@@ -482,8 +482,14 @@ function createProvenanceSentinelHook(): HookCallback {
     const source = inferSentinelSource(post.tool_name, post.tool_input);
     if (!source) return {};
     const marker = formatSentinel(source, post.tool_use_id);
+    // Log the prefix only — `source.value` carries the raw URL / file
+    // path / agent-browser target, which can include signed-URL tokens,
+    // sensitive mount paths, or other material that the no-secrets rule
+    // forbids in any log level. The marker itself (delivered via
+    // additionalContext to the model) carries the full value; logs stay
+    // metadata-only.
     log(
-      `provenance_sentinel tool=${post.tool_name} source=${source.prefix}:${source.value}`,
+      `provenance_sentinel tool=${post.tool_name} source_prefix=${source.prefix}`,
     );
     return {
       hookSpecificOutput: {

@@ -30,10 +30,34 @@ describe('isExternalPath', () => {
     expect(isExternalPath('/workspace/')).toBe(true);
   });
 
-  it('treats relative paths as internal (cwd-relative inside workspace)', () => {
+  it('treats the bare mount root as internal (e.g., /workspace/group)', () => {
+    expect(isExternalPath('/workspace/group')).toBe(false);
+    expect(isExternalPath('/workspace/trusted')).toBe(false);
+  });
+
+  it('treats cwd-relative paths inside the workspace as internal', () => {
     expect(isExternalPath('notes.md')).toBe(false);
     expect(isExternalPath('./CLAUDE.md')).toBe(false);
-    expect(isExternalPath('../sibling/foo')).toBe(false);
+    expect(isExternalPath('subdir/foo.md')).toBe(false);
+  });
+
+  it('treats relative traversal paths that escape the workspace as external', () => {
+    // cwd is /workspace/group. `../sibling/foo` lands at
+    // /workspace/sibling/foo — outside every standard mount.
+    expect(isExternalPath('../sibling/foo')).toBe(true);
+    expect(isExternalPath('../../etc/passwd')).toBe(true);
+    expect(isExternalPath('../../../tmp/scratch.txt')).toBe(true);
+  });
+
+  it('treats absolute-path traversal that escapes the workspace as external', () => {
+    expect(isExternalPath('/workspace/group/../secret/foo')).toBe(true);
+    expect(isExternalPath('/workspace/group/../../etc/passwd')).toBe(true);
+    expect(isExternalPath('/workspace/trusted/../../etc/shadow')).toBe(true);
+  });
+
+  it('treats traversal that lands back inside a mount as internal', () => {
+    // /workspace/group/sub/../notes.md → /workspace/group/notes.md
+    expect(isExternalPath('/workspace/group/sub/../notes.md')).toBe(false);
   });
 });
 

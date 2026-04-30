@@ -28,7 +28,20 @@
  * the existing trust-tier check, just without per-host source granularity.
  */
 
-import { SourcePrefix, formatSource } from './untrusted-input-sources.js';
+import path from 'path';
+import {
+  SourcePrefix,
+  escapeAttr,
+  formatSource,
+} from './untrusted-input-sources.js';
+
+/**
+ * Container cwd at runtime, used to resolve relative `Read` paths
+ * before classifying them. Set in `index.ts` via the SDK `cwd` option;
+ * mirrored here so `isExternalPath` can do its check without an SDK
+ * dependency.
+ */
+const CONTAINER_CWD = '/workspace/group';
 
 export const SENTINEL_PREFIX = 'PROVENANCE_MARKER:';
 
@@ -84,15 +97,31 @@ export function inferSentinelSource(
 }
 
 /**
- * `Read` on absolute paths under any of the standard workspace mounts
- * is internal-trusted. Anything else absolute (`/etc/...`, `/mnt/...`,
- * `/home/...`, `/var/...`, `/tmp/...`) is external. Relative paths are
- * cwd-relative and the container's cwd is `/workspace/group` per
- * `index.ts`, so they resolve internal — return false.
+ * Decide whether a `Read` target is external (i.e. outside every
+ * standard workspace mount).
+ *
+ * Resolves and normalizes the path BEFORE prefix-checking so a poisoned
+ * model can't slip past via traversal:
+ *   - Relative input → resolved against the container cwd
+ *     (`/workspace/group`), so `notes.md` → `/workspace/group/notes.md`
+ *     (internal) but `../../etc/passwd` → `/etc/passwd` (external).
+ *   - Absolute input → normalized so `/workspace/group/../secret/x`
+ *     collapses to `/workspace/secret/x` (external) instead of being
+ *     mis-classified by a naive `startsWith('/workspace/group/')` check.
+ *
+ * Internal mount roots are matched WITHOUT the trailing `/` so that the
+ * mount root itself (e.g. `/workspace/group`) is also classified as
+ * internal — `startsWith('/workspace/group/')` would have rejected the
+ * bare root. Sibling paths like `/workspace/secret` are still external
+ * because the prefix list does not contain them.
  */
 export function isExternalPath(filePath: string): boolean {
-  if (!filePath.startsWith('/')) return false;
-  return !WORKSPACE_INTERNAL_PREFIXES.some((p) => filePath.startsWith(p));
+  const resolved = path.posix.isAbsolute(filePath)
+    ? path.posix.normalize(filePath)
+    : path.posix.resolve(CONTAINER_CWD, filePath);
+  return !WORKSPACE_INTERNAL_PREFIXES.some(
+    (p) => resolved === p.replace(/\/$/, '') || resolved.startsWith(p),
+  );
 }
 
 function isAgentBrowserCommand(command: string): boolean {
@@ -128,11 +157,3 @@ export function formatSentinel(source: SentinelSource, toolUseId: string): strin
   return `${SENTINEL_PREFIX} source="${sourceStr}" tool_use_id="${idStr}"`;
 }
 
-function escapeAttr(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/[\r\n]+/g, ' ');
-}
