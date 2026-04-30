@@ -349,4 +349,140 @@ describe('orders-db.json → SQLite migration (#294)', () => {
       }
     });
   });
+
+  // #347 regression: production NAS hit a SqliteError NOT NULL constraint
+  // when one of 120 orders in `orders-db.json` lacked `last_updated`. The
+  // crash propagated out of the migration's transaction and put the
+  // orchestrator into a restart loop. Migration must default missing
+  // `last_updated` to `order_date` (then current ISO) so a single
+  // malformed entry never wedges startup again.
+  it('defaults missing last_updated to order_date so the NOT NULL constraint passes (#347)', async () => {
+    await runWithTempDir(async (tempDir) => {
+      writeOrdersFile(tempDir, 'telegram_swarm', {
+        orders: [
+          {
+            id: 'amazon-2026-04-01-with-lu',
+            source: 'amazon',
+            status: 'shipped',
+            description: 'With last_updated',
+            order_date: '2026-04-01',
+            email_message_id: 'msg-with-lu',
+            last_updated: '2026-04-02T00:00:00.000Z',
+          },
+          {
+            // The exact failure shape: no `last_updated` key at all.
+            id: 'other-2026-04-23-no-lu',
+            source: 'other',
+            status: 'pending',
+            description: 'Without last_updated',
+            order_date: '2026-04-23',
+            email_message_id: 'msg-no-lu',
+          },
+        ],
+      });
+
+      vi.resetModules();
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      // Must not throw — pre-fix this raised SqliteError.
+      expect(() => initDatabase()).not.toThrow();
+      try {
+        const db = new Database(path.join(tempDir, 'store', 'messages.db'));
+        try {
+          const rows = db
+            .prepare('SELECT id, last_updated FROM orders ORDER BY id')
+            .all() as Array<{ id: string; last_updated: string }>;
+          expect(rows).toHaveLength(2);
+          // Entry that supplied last_updated keeps it verbatim.
+          const withLu = rows.find((r) => r.id === 'amazon-2026-04-01-with-lu');
+          expect(withLu?.last_updated).toBe('2026-04-02T00:00:00.000Z');
+          // Entry without last_updated falls back to order_date.
+          const noLu = rows.find((r) => r.id === 'other-2026-04-23-no-lu');
+          expect(noLu?.last_updated).toBe('2026-04-23');
+        } finally {
+          db.close();
+        }
+      } finally {
+        _closeDatabase();
+      }
+    });
+  });
+
+  it('treats empty-string last_updated as missing and falls back to order_date (#347)', async () => {
+    // Copilot review of PR #350 caught that `??` alone would let
+    // `last_updated: ""` through (it's defined and non-null) — the row
+    // would land with `last_updated = ""`, satisfying NOT NULL but
+    // semantically empty. The fix uses a `firstNonEmpty` helper that
+    // also rejects `""`. This test pins that behaviour.
+    await runWithTempDir(async (tempDir) => {
+      writeOrdersFile(tempDir, 'telegram_swarm', {
+        orders: [
+          {
+            id: 'other-2026-04-23-empty-lu',
+            source: 'other',
+            status: 'pending',
+            description: 'Empty last_updated, valid order_date',
+            order_date: '2026-04-23',
+            email_message_id: 'msg-empty-lu',
+            last_updated: '',
+          },
+        ],
+      });
+
+      vi.resetModules();
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      expect(() => initDatabase()).not.toThrow();
+      try {
+        const db = new Database(path.join(tempDir, 'store', 'messages.db'));
+        try {
+          const row = db
+            .prepare('SELECT last_updated FROM orders WHERE id = ?')
+            .get('other-2026-04-23-empty-lu') as { last_updated: string };
+          // Pins the contract: empty-string last_updated falls back to
+          // order_date, NOT carried through verbatim.
+          expect(row.last_updated).toBe('2026-04-23');
+        } finally {
+          db.close();
+        }
+      } finally {
+        _closeDatabase();
+      }
+    });
+  });
+});
+
+// Direct unit test of the helper exposed for #347. Avoids the
+// migration-level setup just to exercise the pure fallback chain.
+describe('firstNonEmpty (#347 helper)', () => {
+  it('returns the first non-empty string', async () => {
+    const { firstNonEmpty } = await import('./db.js');
+    expect(firstNonEmpty(['a', 'b'])).toBe('a');
+    expect(firstNonEmpty([null, 'b'])).toBe('b');
+    expect(firstNonEmpty([undefined, 'b'])).toBe('b');
+    expect(firstNonEmpty(['', 'b'])).toBe('b');
+    expect(firstNonEmpty([null, undefined, '', 'c'])).toBe('c');
+  });
+
+  it('falls through to a fresh ISO timestamp when every candidate is missing', async () => {
+    const { firstNonEmpty } = await import('./db.js');
+    const before = Date.now();
+    const result = firstNonEmpty([null, undefined, '']);
+    const after = Date.now();
+    // Always a non-empty string, never one of the inputs.
+    expect(typeof result).toBe('string');
+    expect(result.length).toBeGreaterThan(0);
+    // Parses as ISO 8601 timestamp within the call window. Width
+    // accommodates clock-resolution rounding on the boundary.
+    const ts = Date.parse(result);
+    expect(Number.isFinite(ts)).toBe(true);
+    expect(ts).toBeGreaterThanOrEqual(before - 1);
+    expect(ts).toBeLessThanOrEqual(after + 1);
+  });
+
+  it('handles an empty candidate list — returns a fresh ISO timestamp', async () => {
+    const { firstNonEmpty } = await import('./db.js');
+    const result = firstNonEmpty([]);
+    expect(typeof result).toBe('string');
+    expect(result.length).toBeGreaterThan(0);
+    expect(Number.isFinite(Date.parse(result))).toBe(true);
+  });
 });

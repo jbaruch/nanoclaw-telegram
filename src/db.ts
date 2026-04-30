@@ -1866,13 +1866,43 @@ interface OrdersDbJsonRecord {
   to_address?: string | null;
   flagged?: boolean;
   flag_reason?: string | null;
-  last_updated: string;
+  // Optional in the source JSON — `check-orders` skill runs don't
+  // always populate it. The migration defaults missing values to
+  // `order_date` (then current ISO) before the NOT NULL insert (#347).
+  last_updated?: string;
 }
 
 interface OrdersDbJsonShape {
   orders?: OrdersDbJsonRecord[];
   last_checked?: string;
   last_updated?: string;
+}
+
+/**
+ * Return the first candidate that is a non-empty string. Treats null,
+ * undefined, and `""` all as "missing" — `??` alone would let `""`
+ * through (it's defined and non-null), which satisfies SQLite's NOT
+ * NULL constraint but leaves a semantically empty value downstream.
+ *
+ * Falls through to a fresh ISO timestamp when every candidate is
+ * missing — guarantees the return value is always a non-empty string,
+ * so callers can pass it directly to a NOT NULL `TEXT` column without
+ * an extra check.
+ *
+ * Exported for the dedicated unit test in
+ * `orders-json-migration.test.ts`; not part of the public API.
+ *
+ * @internal exported only for tests (see jbaruch/nanoclaw#347).
+ */
+export function firstNonEmpty(
+  candidates: ReadonlyArray<string | null | undefined>,
+): string {
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.length > 0) {
+      return candidate;
+    }
+  }
+  return new Date().toISOString();
 }
 
 function migrateOrdersDbJsonFiles(): void {
@@ -1979,6 +2009,33 @@ function migrateOrdersDbJsonFiles(): void {
       let insertedRows = 0;
       let skippedRows = 0;
       for (const order of orders) {
+        // #347: `orders.last_updated` is `TEXT NOT NULL` but the source
+        // JSON (produced incrementally by `check-orders` skill runs) does
+        // not always populate it — observed on production 2026-04-30
+        // where one entry of 120 had no `last_updated`, taking down the
+        // orchestrator on next boot via the SqliteError NOT NULL
+        // constraint propagating out of the transaction. Default to
+        // `order_date` (the next-best upper bound: we knew about this
+        // order at least by then) and finally to a fresh ISO timestamp.
+        //
+        // Treat null, undefined, AND empty-string as "missing" — `??`
+        // alone would let `last_updated: ""` through, satisfying NOT
+        // NULL but leaving a semantically empty timestamp downstream
+        // (PR #350 review: copilot caught this on the original `??`
+        // chain). The helper falls through to the next candidate the
+        // same way for any of those three shapes and always returns a
+        // non-empty string.
+        //
+        // Other NOT NULL columns (id, source, status, description,
+        // order_date, email_message_id) intentionally have no default —
+        // their absence indicates a corrupt source row that should
+        // surface as an error rather than be silently masked with a
+        // synthesized value, since downstream `check-orders` semantics
+        // depend on those fields meaning what the source said.
+        const lastUpdated = firstNonEmpty([
+          order.last_updated,
+          order.order_date,
+        ]);
         const result = insertOrder.run(
           order.id,
           order.source,
@@ -1992,7 +2049,7 @@ function migrateOrdersDbJsonFiles(): void {
           order.to_address ?? null,
           order.flagged ? 1 : 0,
           order.flag_reason ?? null,
-          order.last_updated,
+          lastUpdated,
         );
         if (result.changes > 0) insertedRows++;
         else skippedRows++;
