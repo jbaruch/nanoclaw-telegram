@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
-import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
+import { ASSISTANT_NAME, DATA_DIR, GROUPS_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { STATE_MIGRATIONS } from './state-migrations/index.js';
@@ -1842,5 +1842,208 @@ function migrateJsonState(): void {
         );
       }
     }
+  }
+
+  // Migrate per-group orders-db.json files (#294). Unlike the helpers
+  // above (DATA_DIR-rooted), this scans every `groups/<name>/` folder
+  // for an `orders-db.json` because the file historically lived in the
+  // admin group's working dir. Idempotent: a successful migration
+  // renames the source to `orders-db.json.migrated-YYYY-MM-DD`, so a
+  // re-run of `initDatabase` is a no-op once the file is gone.
+  migrateOrdersDbJsonFiles();
+}
+
+interface OrdersDbJsonRecord {
+  id: string;
+  source: string;
+  status: string;
+  amount?: number | null;
+  currency?: string | null;
+  description: string;
+  order_date: string;
+  expected_delivery?: string | null;
+  email_message_id: string;
+  to_address?: string | null;
+  flagged?: boolean;
+  flag_reason?: string | null;
+  last_updated: string;
+}
+
+interface OrdersDbJsonShape {
+  orders?: OrdersDbJsonRecord[];
+  last_checked?: string;
+  last_updated?: string;
+}
+
+function migrateOrdersDbJsonFiles(): void {
+  if (!fs.existsSync(GROUPS_DIR)) return;
+  let groupFolders: string[];
+  try {
+    groupFolders = fs
+      .readdirSync(GROUPS_DIR, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .filter((entry) => isValidGroupFolder(entry.name))
+      .map((entry) => entry.name)
+      // Sort so "first writer wins" with ON CONFLICT DO NOTHING below
+      // is deterministic across filesystems AND across locales.
+      // readdirSync order is implementation-defined (ext4 hash order,
+      // APFS insertion order, etc.) and `localeCompare` would add a
+      // second axis of nondeterminism (Turkish dotted-i, German
+      // ß-vs-ss, ICU version skew). Plain code-point comparison via
+      // </> on string operands is locale-free and stable across Node
+      // versions.
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
+
+  // Bare `ON CONFLICT DO NOTHING` — handles BOTH the
+  // `email_message_id UNIQUE` constraint and the PK `id`. The latter
+  // *can* collide in practice: `id` is
+  // `{source}-{order_date}-SHA1(description)[:8]`, so two distinct
+  // emails with the same source + order_date + description (e.g., a
+  // resent confirmation, or two amazon orders for the same item on
+  // the same day) produce identical ids despite different
+  // email_message_id values. For one-shot data backfill we want
+  // idempotency, not strict validation: first row in (sorted by
+  // folder above for determinism) wins, every other duplicate is
+  // silently skipped. The downstream `check-orders` skill enforces
+  // its own merge semantics on subsequent writes.
+  const insertOrder = db.prepare(
+    `INSERT INTO orders (
+       id, source, status, amount, currency, description, order_date,
+       expected_delivery, email_message_id, to_address, flagged,
+       flag_reason, last_updated
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT DO NOTHING`,
+  );
+  const upsertMetadata = db.prepare(
+    `INSERT INTO orders_metadata (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  );
+
+  const stamp = new Date().toISOString().slice(0, 10);
+
+  for (const folder of groupFolders) {
+    const filePath = path.join(GROUPS_DIR, folder, 'orders-db.json');
+    if (!fs.existsSync(filePath)) continue;
+
+    let parsed: OrdersDbJsonShape;
+    try {
+      parsed = JSON.parse(
+        fs.readFileSync(filePath, 'utf-8'),
+      ) as OrdersDbJsonShape;
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        logger.warn(
+          { folder, errName: err.name },
+          'orders-db.json migration: invalid JSON, skipping (file left in place)',
+        );
+        continue;
+      }
+      // TOCTOU race: the existsSync check above is best-effort, not
+      // authoritative — between that check and readFileSync the file
+      // can be removed by a concurrent migration run, manual cleanup,
+      // or filesystem reorg. Treat ENOENT here the same as ENOENT at
+      // rename time: idempotent no-op, log at info, continue. Every
+      // other errno propagates per `coding-policy: error-handling`.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        logger.info(
+          { folder, filePath },
+          'orders-db.json migration: file disappeared between existsSync and readFileSync, skipping',
+        );
+        continue;
+      }
+      throw err;
+    }
+    if (!Array.isArray(parsed.orders)) {
+      logger.warn(
+        { folder },
+        'orders-db.json migration: missing "orders" array, skipping',
+      );
+      continue;
+    }
+
+    // Wrap the per-file work in a single transaction so a partial
+    // crash mid-import (process kill, IO error on metadata write)
+    // can't leave the table in a half-migrated state. Failures here
+    // propagate — per `coding-policy: error-handling`, an unexpected
+    // exception during a structured INSERT means the data shape
+    // doesn't match the schema (a real bug or malformed source file)
+    // and the operator must triage before continuing. The schema
+    // version gate in applyStateMigrations is independent of this;
+    // the schema is already at v1, this is data backfill only.
+    const orders = parsed.orders;
+    const importFile = db.transaction(() => {
+      let insertedRows = 0;
+      let skippedRows = 0;
+      for (const order of orders) {
+        const result = insertOrder.run(
+          order.id,
+          order.source,
+          order.status,
+          order.amount ?? null,
+          order.currency ?? null,
+          order.description,
+          order.order_date,
+          order.expected_delivery ?? null,
+          order.email_message_id,
+          order.to_address ?? null,
+          order.flagged ? 1 : 0,
+          order.flag_reason ?? null,
+          order.last_updated,
+        );
+        if (result.changes > 0) insertedRows++;
+        else skippedRows++;
+      }
+      if (parsed.last_checked) {
+        upsertMetadata.run('last_checked', parsed.last_checked);
+      }
+      if (parsed.last_updated) {
+        upsertMetadata.run('last_updated', parsed.last_updated);
+      }
+      return { insertedRows, skippedRows };
+    });
+
+    const counts = importFile();
+
+    // Rename is metadata cleanup; the data import already committed.
+    // Per `coding-policy: error-handling`, only one specific errno is
+    // recoverable here: `ENOENT` means the source disappeared between
+    // the import and the rename (concurrent migration run, manual
+    // file move) — that's an idempotent no-op since the data is
+    // already in SQL. Every other errno (`EACCES`, `EPERM`, `EXDEV`,
+    // `ENOSPC`, etc.) indicates a real environment problem the
+    // operator must fix before startup proceeds; rethrowing those
+    // surfaces the issue immediately rather than letting the
+    // orchestrator come up with stale JSON files lying around.
+    try {
+      fs.renameSync(filePath, `${filePath}.migrated-${stamp}`);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      // Source file already gone — log + continue without the
+      // info-level "renamed" message since no rename actually
+      // happened.
+      logger.info(
+        {
+          folder,
+          inserted: counts.insertedRows,
+          skipped: counts.skippedRows,
+          total: orders.length,
+        },
+        'orders-db.json migration: imported; source already absent at rename time',
+      );
+      continue;
+    }
+    logger.info(
+      {
+        folder,
+        inserted: counts.insertedRows,
+        skipped: counts.skippedRows,
+        total: orders.length,
+      },
+      'orders-db.json migration: imported and source renamed',
+    );
   }
 }
