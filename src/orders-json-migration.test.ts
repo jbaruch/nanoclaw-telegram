@@ -195,6 +195,59 @@ describe('orders-db.json → SQLite migration (#294)', () => {
     });
   });
 
+  it('skips reserved/non-group directories (e.g. global) via isValidGroupFolder', async () => {
+    await runWithTempDir(async (tempDir) => {
+      // `global` is a reserved folder per src/group-folder.ts —
+      // dropping a stray orders-db.json there must not be migrated
+      // (the migration would otherwise treat it as a group's data and
+      // silently merge unrelated rows). Mirrors the filter the rest
+      // of the orchestrator's group-path handling already uses.
+      writeOrdersFile(tempDir, 'global', {
+        orders: [
+          {
+            id: 'amazon-2026-04-01-glb',
+            source: 'amazon',
+            status: 'shipped',
+            description: 'should-be-skipped',
+            order_date: '2026-04-01',
+            email_message_id: 'msg-glb',
+            last_updated: '2026-04-02T00:00:00.000Z',
+          },
+        ],
+      });
+      // Plus a real group's file to confirm the filter is selective,
+      // not a blanket skip.
+      writeOrdersFile(tempDir, 'telegram_main', {
+        orders: [
+          {
+            id: 'amazon-2026-04-01-real',
+            source: 'amazon',
+            status: 'shipped',
+            description: 'real-order',
+            order_date: '2026-04-01',
+            email_message_id: 'msg-real',
+            last_updated: '2026-04-02T00:00:00.000Z',
+          },
+        ],
+      });
+
+      vi.resetModules();
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      initDatabase();
+
+      const db = new Database(path.join(tempDir, 'store', 'messages.db'));
+      try {
+        const ids = db
+          .prepare('SELECT id FROM orders ORDER BY id')
+          .all() as Array<{ id: string }>;
+        expect(ids.map((r) => r.id)).toEqual(['amazon-2026-04-01-real']);
+      } finally {
+        db.close();
+      }
+      _closeDatabase();
+    });
+  });
+
   it('skips a malformed JSON file without aborting the pass', async () => {
     await runWithTempDir(async (tempDir) => {
       // Mix one valid and one malformed file. Malformed must NOT

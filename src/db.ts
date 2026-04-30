@@ -1882,18 +1882,23 @@ function migrateOrdersDbJsonFiles(): void {
     groupFolders = fs
       .readdirSync(GROUPS_DIR, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
+      .filter((entry) => isValidGroupFolder(entry.name))
       .map((entry) => entry.name);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw err;
   }
 
-  // ON CONFLICT(email_message_id) DO NOTHING — first writer wins.
-  // Re-running the migration after a partial success is a no-op for
-  // already-imported rows, and the rename-to-`.migrated-<date>` step
-  // means a successful run won't be re-attempted at all. The PK `id`
-  // collision is implicitly covered: the email_message_id UNIQUE
-  // index fires first.
+  // ON CONFLICT(email_message_id) DO NOTHING — first writer wins for
+  // duplicate email_message_id values. Re-running the migration after
+  // a partial success is a no-op for already-imported rows, and the
+  // rename-to-`.migrated-<date>` step means a successful run won't be
+  // re-attempted at all. A duplicate PK `id` with a *different*
+  // email_message_id is not handled by this clause and would still
+  // raise — but `id` is `{source}-{order_date}-SHA1(description)[:8]`,
+  // so two rows with the same id necessarily came from the same email
+  // and thus the same email_message_id; that path is unreachable in
+  // practice.
   const insertOrder = db.prepare(
     `INSERT INTO orders (
        id, source, status, amount, currency, description, order_date,
@@ -1936,9 +1941,13 @@ function migrateOrdersDbJsonFiles(): void {
 
     // Wrap the per-file work in a single transaction so a partial
     // crash mid-import (process kill, IO error on metadata write)
-    // can't leave the table in a half-migrated state. The version
-    // gate in applyStateMigrations is independent of this — the
-    // schema is already at v1; this is data backfill.
+    // can't leave the table in a half-migrated state. Failures here
+    // propagate — per `coding-policy: error-handling`, an unexpected
+    // exception during a structured INSERT means the data shape
+    // doesn't match the schema (a real bug or malformed source file)
+    // and the operator must triage before continuing. The schema
+    // version gate in applyStateMigrations is independent of this;
+    // the schema is already at v1, this is data backfill only.
     const importFile = db.transaction(() => {
       let insertedRows = 0;
       let skippedRows = 0;
@@ -1970,26 +1979,42 @@ function migrateOrdersDbJsonFiles(): void {
       return { insertedRows, skippedRows };
     });
 
-    let counts: { insertedRows: number; skippedRows: number };
-    try {
-      counts = importFile();
-    } catch (err) {
-      logger.error(
-        { folder, err },
-        'orders-db.json migration: transaction failed; file left in place for retry',
-      );
-      continue;
-    }
+    const counts = importFile();
 
-    fs.renameSync(filePath, `${filePath}.migrated-${stamp}`);
-    logger.info(
-      {
-        folder,
-        inserted: counts.insertedRows,
-        skipped: counts.skippedRows,
-        total: parsed.orders.length,
-      },
-      'orders-db.json migration: imported and source renamed',
-    );
+    // The rename is metadata cleanup, not data integrity — the import
+    // already committed. A rename failure (cross-device EXDEV, EACCES,
+    // etc.) must NOT block startup; logging at warn lets the operator
+    // see the situation without losing the orchestrator. The next
+    // restart will re-import (idempotent via ON CONFLICT) and try the
+    // rename again. Filtering on ENOENT mirrors the pattern already
+    // used for the readdirSync above — non-existent source means
+    // someone else already moved/removed it.
+    try {
+      fs.renameSync(filePath, `${filePath}.migrated-${stamp}`);
+      logger.info(
+        {
+          folder,
+          inserted: counts.insertedRows,
+          skipped: counts.skippedRows,
+          total: parsed.orders.length,
+        },
+        'orders-db.json migration: imported and source renamed',
+      );
+    } catch (err) {
+      if (!(err instanceof Error)) throw err;
+      const errno = (err as NodeJS.ErrnoException).code;
+      if (errno === 'ENOENT') continue;
+      logger.warn(
+        {
+          folder,
+          errno,
+          errName: err.name,
+          inserted: counts.insertedRows,
+          skipped: counts.skippedRows,
+          total: parsed.orders.length,
+        },
+        'orders-db.json migration: imported but rename failed; file left in place for retry',
+      );
+    }
   }
 }
