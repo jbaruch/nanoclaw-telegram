@@ -1924,12 +1924,27 @@ function migrateOrdersDbJsonFiles(): void {
         fs.readFileSync(filePath, 'utf-8'),
       ) as OrdersDbJsonShape;
     } catch (err) {
-      if (!(err instanceof SyntaxError)) throw err;
-      logger.warn(
-        { folder, errName: err.name },
-        'orders-db.json migration: invalid JSON, skipping (file left in place)',
-      );
-      continue;
+      if (err instanceof SyntaxError) {
+        logger.warn(
+          { folder, errName: err.name },
+          'orders-db.json migration: invalid JSON, skipping (file left in place)',
+        );
+        continue;
+      }
+      // TOCTOU race: the existsSync check above is best-effort, not
+      // authoritative — between that check and readFileSync the file
+      // can be removed by a concurrent migration run, manual cleanup,
+      // or filesystem reorg. Treat ENOENT here the same as ENOENT at
+      // rename time: idempotent no-op, log at info, continue. Every
+      // other errno propagates per `coding-policy: error-handling`.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        logger.info(
+          { folder, filePath },
+          'orders-db.json migration: file disappeared between existsSync and readFileSync, skipping',
+        );
+        continue;
+      }
+      throw err;
     }
     if (!Array.isArray(parsed.orders)) {
       logger.warn(
