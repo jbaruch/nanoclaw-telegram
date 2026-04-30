@@ -127,14 +127,15 @@ describe('state-004-scheduled-reminders', () => {
     }
   });
 
-  it('nightly purge with strftime-now matches utc_time format correctly', () => {
-    // The migration's docstring tells consumers to use
-    // `strftime('%Y-%m-%dT%H:%M:%SZ', 'now')` for the purge
-    // comparison rather than `CURRENT_TIMESTAMP` because the
-    // utc_time column stores the JSON-era ISO-8601 + `T` + `Z`
-    // shape and SQLite's CURRENT_TIMESTAMP is `YYYY-MM-DD HH:MM:SS`
-    // (no T, no Z). Lock that contract in: a row in the past gets
-    // deleted, a row in the future is preserved.
+  it('nightly purge with strftime-%f-now handles both second- and millisecond-precision utc_time', () => {
+    // Writers vary in precision: JSON-era + `mcp__nanoclaw__schedule_task`
+    // emit second precision; JS callers using Date#toISOString() emit
+    // millisecond precision. The migration docstring tells consumers
+    // to use `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` (fractional
+    // seconds) so the lex compare works against either shape.
+    //
+    // Past + far-future rows in BOTH precisions; only the two future
+    // rows must survive.
     const database = new Database(':memory:');
     try {
       applyStateMigrations(database, ALL_MIGRATIONS);
@@ -143,20 +144,31 @@ describe('state-004-scheduled-reminders', () => {
            (event_id, title, utc_time, reminder_offset_min, task_id)
          VALUES (?, ?, ?, ?, ?)`,
       );
-      insert.run('past', 'Past', '2020-01-01T00:00:00Z', 15, 'task-past');
-      insert.run('future', 'Future', '2099-01-01T00:00:00Z', 15, 'task-future');
+      insert.run('past-sec', 'Past S', '2020-01-01T00:00:00Z', 15, 'task');
+      insert.run('past-ms', 'Past M', '2020-01-01T00:00:00.000Z', 15, 'task');
+      insert.run('future-sec', 'Future S', '2099-01-01T00:00:00Z', 15, 'task');
+      insert.run(
+        'future-ms',
+        'Future M',
+        '2099-01-01T00:00:00.000Z',
+        15,
+        'task',
+      );
 
       database
         .prepare(
           `DELETE FROM scheduled_reminders
-             WHERE utc_time < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')`,
+             WHERE utc_time < strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
         )
         .run();
 
       const survivors = database
         .prepare('SELECT event_id FROM scheduled_reminders ORDER BY event_id')
         .all() as Array<{ event_id: string }>;
-      expect(survivors.map((r) => r.event_id)).toEqual(['future']);
+      expect(survivors.map((r) => r.event_id)).toEqual([
+        'future-ms',
+        'future-sec',
+      ]);
     } finally {
       database.close();
     }
