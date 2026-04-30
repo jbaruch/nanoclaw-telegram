@@ -204,6 +204,52 @@ describe('orders-db.json → SQLite migration (#294)', () => {
     });
   });
 
+  it('handles PK id collisions via bare ON CONFLICT DO NOTHING (deterministic by folder sort)', async () => {
+    // Two distinct emails with the same source + order_date + description
+    // (e.g. a resent confirmation) produce the same `id` — the hash is
+    // SHA1(description)[:8] so collisions are possible even with different
+    // email_message_id values. For one-shot migration we want the bare
+    // ON CONFLICT DO NOTHING to absorb both constraints; the deterministic
+    // winner is the alphabetically-first group folder (per the .sort()
+    // applied before iteration).
+    await runWithTempDir(async (tempDir) => {
+      const sharedShape = {
+        id: 'amazon-2026-04-01-aaaaaaaa',
+        source: 'amazon',
+        status: 'shipped',
+        description: 'Same product description',
+        order_date: '2026-04-01',
+        last_updated: '2026-04-02T00:00:00.000Z',
+      };
+      writeOrdersFile(tempDir, 'b-second-folder', {
+        orders: [{ ...sharedShape, email_message_id: 'msg-from-second' }],
+      });
+      writeOrdersFile(tempDir, 'a-first-folder', {
+        orders: [{ ...sharedShape, email_message_id: 'msg-from-first' }],
+      });
+
+      vi.resetModules();
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      initDatabase();
+      try {
+        const db = new Database(path.join(tempDir, 'store', 'messages.db'));
+        try {
+          const rows = db
+            .prepare('SELECT id, email_message_id FROM orders')
+            .all() as Array<{ id: string; email_message_id: string }>;
+          expect(rows).toHaveLength(1);
+          // Alphabetical sort puts a-first-folder ahead of b-second-folder,
+          // so its email_message_id is the one that survives.
+          expect(rows[0].email_message_id).toBe('msg-from-first');
+        } finally {
+          db.close();
+        }
+      } finally {
+        _closeDatabase();
+      }
+    });
+  });
+
   it('skips reserved/non-group directories (e.g. global) via isValidGroupFolder', async () => {
     await runWithTempDir(async (tempDir) => {
       // `global` is a reserved folder per src/group-folder.ts —

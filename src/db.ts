@@ -1883,29 +1883,37 @@ function migrateOrdersDbJsonFiles(): void {
       .readdirSync(GROUPS_DIR, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .filter((entry) => isValidGroupFolder(entry.name))
-      .map((entry) => entry.name);
+      .map((entry) => entry.name)
+      // Sort so "first writer wins" with ON CONFLICT DO NOTHING below
+      // is deterministic across filesystems. readdirSync order is
+      // implementation-defined (ext4 hash order, APFS insertion order,
+      // etc.), and the orchestrator should produce the same imported
+      // row set regardless of where it runs.
+      .sort((a, b) => a.localeCompare(b));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw err;
   }
 
-  // ON CONFLICT(email_message_id) DO NOTHING — first writer wins for
-  // duplicate email_message_id values. Re-running the migration after
-  // a partial success is a no-op for already-imported rows, and the
-  // rename-to-`.migrated-<date>` step means a successful run won't be
-  // re-attempted at all. A duplicate PK `id` with a *different*
-  // email_message_id is not handled by this clause and would still
-  // raise — but `id` is `{source}-{order_date}-SHA1(description)[:8]`,
-  // so two rows with the same id necessarily came from the same email
-  // and thus the same email_message_id; that path is unreachable in
-  // practice.
+  // Bare `ON CONFLICT DO NOTHING` — handles BOTH the
+  // `email_message_id UNIQUE` constraint and the PK `id`. The latter
+  // *can* collide in practice: `id` is
+  // `{source}-{order_date}-SHA1(description)[:8]`, so two distinct
+  // emails with the same source + order_date + description (e.g., a
+  // resent confirmation, or two amazon orders for the same item on
+  // the same day) produce identical ids despite different
+  // email_message_id values. For one-shot data backfill we want
+  // idempotency, not strict validation: first row in (sorted by
+  // folder above for determinism) wins, every other duplicate is
+  // silently skipped. The downstream `check-orders` skill enforces
+  // its own merge semantics on subsequent writes.
   const insertOrder = db.prepare(
     `INSERT INTO orders (
        id, source, status, amount, currency, description, order_date,
        expected_delivery, email_message_id, to_address, flagged,
        flag_reason, last_updated
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(email_message_id) DO NOTHING`,
+     ON CONFLICT DO NOTHING`,
   );
   const upsertMetadata = db.prepare(
     `INSERT INTO orders_metadata (key, value) VALUES (?, ?)
