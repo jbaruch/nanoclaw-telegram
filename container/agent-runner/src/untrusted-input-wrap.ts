@@ -122,7 +122,11 @@ export function wrapMcpToolResult(
     mutated = true;
     return {
       ...(block as object),
-      text: wrapUntrustedInput(original, source.prefix, source.value),
+      text: wrapUntrustedInput(
+        neutralizeWrapTokens(original),
+        source.prefix,
+        source.value,
+      ),
     };
   });
 
@@ -134,4 +138,20 @@ export function wrapMcpToolResult(
       : { ...(response as object), content: newContent },
     mutated: true,
   };
+}
+
+/**
+ * Neutralize literal `<untrusted-input ...>` and `</untrusted-input>`
+ * sequences inside the text we are about to wrap. A read tool's output
+ * (email body, Slack message, GitHub issue) can contain those tokens
+ * verbatim — adversarial or otherwise — and a naive wrap would let them
+ * spoof a nested envelope or close the outer one early, breaking #322's
+ * walk-back parser.
+ *
+ * We only escape the leading `<` of each opening / closing token. The
+ * model still sees recognizable text ("&lt;untrusted-input>"), but the
+ * walk-back regex (which keys off `<untrusted-input` literal) skips it.
+ */
+function neutralizeWrapTokens(text: string): string {
+  return text.replace(/<(\/?untrusted-input)\b/gi, '&lt;$1');
 }
