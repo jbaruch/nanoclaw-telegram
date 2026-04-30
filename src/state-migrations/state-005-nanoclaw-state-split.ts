@@ -12,9 +12,11 @@ import type { StateMigration } from '../db.js';
  *   - `email_seen_ids` — append-mostly dedup set, owned by
  *                      tessl__check-email. Replaces the seen_email_ids
  *                      array that #273 Step 16 was patching around
- *                      with a "consolidate two files" dance — both
- *                      writers target this table now and trim-to-N
- *                      becomes a windowed DELETE.
+ *                      with a "consolidate two files" dance — once
+ *                      the tile-side consumer migration lands (a
+ *                      follow-up PR), both writers will target this
+ *                      table and trim-to-N will collapse to a
+ *                      windowed DELETE. This PR only adds the schema.
  *   - `resumable_cycles` — owned by tessl__resumable-cycle, read
  *                      by nightly / weekly / morning-brief.
  *
@@ -49,9 +51,13 @@ import type { StateMigration } from '../db.js';
  *     stateful-artifacts` (the rule the gh-aw reviewer enforces
  *     literally — see #295's two-PR restoration cycle).
  *
- * The consolidate-email-dedup.py two-file dance retires entirely:
- * both writers target `email_seen_ids` directly, no more
- * "merge nanoclaw-state's seen_ids into session-state" indirection.
+ * Once the tile-side consumer migration lands (a follow-up PR
+ * through the staging→promote pipeline), the
+ * consolidate-email-dedup.py two-file dance retires entirely:
+ * both writers will target `email_seen_ids` directly, no more
+ * "merge nanoclaw-state's seen_ids into session-state"
+ * indirection. This PR only adds the schema; the cutover happens
+ * in the tile-side rewrite.
  */
 export const STATE_005_NANOCLAW_STATE_SPLIT: StateMigration = {
   version: 5,
