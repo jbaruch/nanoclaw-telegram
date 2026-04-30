@@ -35,6 +35,33 @@ Underlying these: **two state-handling code paths in parallel**
 (compaction-summarize vs. nuke-and-resume). Twice the failure
 surface, twice the rules the agent has to know.
 
+## Cache architecture (what this proposal does NOT fix)
+
+Costs in this proposal are framed in terms of session-level context
+growth, not container lifecycle. The Anthropic prompt cache lives at
+the **API level**, not the container level, with a **5-minute TTL
+keyed on time between API calls**. Container persistence buys zero
+cache benefit on its own — only call cadence does. Two consequences:
+
+- "Keep containers warm to save tokens" is **not** a fix. A long-lived
+  container whose calls are >5 min apart pays the same `cache_create`
+  cost as a freshly-spawned one.
+- Two cost shapes exist independently and need different levers:
+  - **Fresh-session-per-fire shape** (recurring tasks spawning a new
+    `session_id` each tick) — every fire pays a full system-prompt
+    `cache_create`. Mitigated by reusing `session_id` across fires
+    and slimming per-task-class system prompts. Out of scope here;
+    tracked separately.
+  - **Long-session-accumulating-prefix shape** (this proposal) — one
+    `session_id` reused across many turns, prefix grows, every turn
+    re-loads it via `cache_read`. Mitigated by checkpoint+nuke at a
+    trigger. In scope.
+
+Trigger axis selection (Phase 5) must therefore consider metrics
+beyond a single token-percent threshold — long-session prefixes can
+dominate cost while staying well below the context window. Cumulative
+`cache_read` and idle-time triggers are tracked as Phase 5 candidates.
+
 ## Scope
 
 This proposal applies to **the `default` session slot of every
