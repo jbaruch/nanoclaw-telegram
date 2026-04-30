@@ -40,9 +40,12 @@ describe('state-006-trusted-session-state', () => {
     // The orchestrator's src/db.ts already declares a `sessions`
     // table for SDK session-id tracking per (group_folder,
     // session_name). The trusted-memory split was originally
-    // proposed as `sessions` too, which would have silently
-    // overridden the orchestrator's. The `trusted_` prefix is the
-    // namespace boundary — verify both tables can coexist.
+    // proposed as `sessions` too, which would have errored loudly
+    // at migration apply time ("table sessions already exists" —
+    // SQLite's CREATE TABLE without IF NOT EXISTS fails on
+    // duplicate names) and broken every orchestrator startup
+    // post-deploy. The `trusted_` prefix is the namespace boundary
+    // — verify both tables can coexist with no collision.
     const database = new Database(':memory:');
     try {
       // Orchestrator-style sessions DDL (matches src/db.ts shape).

@@ -9,10 +9,15 @@ import type { StateMigration } from '../db.js';
  * but the orchestrator's `src/db.ts` already declares a `sessions`
  * table for SDK session-id tracking per `(group_folder, session_name)`
  * — completely different semantic from the trusted-memory skill's
- * per-named-session metadata. Prefixed both new tables with
- * `trusted_` to make the namespace boundary explicit and avoid
- * the silent override SQLite would otherwise allow if the names
- * collided in someone's local DB.
+ * per-named-session metadata. A bare `CREATE TABLE sessions` here
+ * would fail loudly at migration apply time with "table sessions
+ * already exists" (the orchestrator's `createSchema` runs first
+ * and uses `CREATE TABLE IF NOT EXISTS`, so the row is already in
+ * sqlite_master by the time this migration runs). That's a hard
+ * startup failure rather than a silent override, but still
+ * unwanted — prefixed both new tables with `trusted_` to make the
+ * namespace boundary explicit so the failure can never even
+ * surface.
  *
  * Table shape:
  *   - `trusted_sessions` — one row per `NANOCLAW_SESSION_NAME`.
