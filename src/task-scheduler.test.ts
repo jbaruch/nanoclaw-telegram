@@ -43,6 +43,7 @@ import {
   computeNextRun,
   computeNextRunDetailed,
   getCompletedTaskTtlMs,
+  parseTaskSkill,
   startSchedulerLoop,
 } from './task-scheduler.js';
 import { logger } from './logger.js';
@@ -1675,5 +1676,56 @@ describe('task scheduler', () => {
     const resurrected = resurrectZombieTasks();
     expect(resurrected).toEqual([]);
     expect(getTaskById('cron-frozen')?.status).toBe('completed');
+  });
+});
+
+describe('parseTaskSkill', () => {
+  // The orchestrator prepends `Skill(skill: "tessl__heartbeat")` (and
+  // similar) directly into prompts created by `syncNonMainHeartbeat` /
+  // the housekeeping/morning-brief setup paths. The shape is fixed
+  // (literal SDK invocation syntax), so the regex extraction is
+  // appropriate per `script-delegation.md`'s "fully enumerable"
+  // carve-out.
+
+  it('extracts the skill name from a heartbeat-shaped prompt (mid-prompt call)', () => {
+    expect(
+      parseTaskSkill(
+        'MANDATORY FIRST ACTION: Call Skill(skill: "tessl__heartbeat") BEFORE doing anything else.',
+      ),
+    ).toBe('tessl__heartbeat');
+  });
+
+  it('handles single-quoted invocations', () => {
+    expect(
+      parseTaskSkill("Run Skill(skill: 'tessl__nightly-housekeeping') now."),
+    ).toBe('tessl__nightly-housekeeping');
+  });
+
+  it('tolerates extra whitespace around the colon', () => {
+    expect(parseTaskSkill('Skill(  skill:  "tessl__morning-brief" )')).toBe(
+      'tessl__morning-brief',
+    );
+  });
+
+  it('returns the FIRST match when a prompt mentions multiple skills', () => {
+    expect(
+      parseTaskSkill(
+        'Skill(skill: "tessl__heartbeat") then later Skill(skill: "tessl__morning-brief")',
+      ),
+    ).toBe('tessl__heartbeat');
+  });
+
+  it('returns undefined for raw-text scheduled tasks (one-shot reminders)', () => {
+    expect(
+      parseTaskSkill('Tell Baruch about lunch in 3 hours'),
+    ).toBeUndefined();
+  });
+
+  it('returns undefined when the prompt mentions Skill in prose only', () => {
+    // Prose mention without the invocation parentheses must not match.
+    // Otherwise `the Skill: foo skill` would yield `foo`.
+    expect(
+      parseTaskSkill("Document the Skill: foo workflow in tomorrow's notes"),
+    ).toBeUndefined();
   });
 });

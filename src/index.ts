@@ -19,7 +19,8 @@ import {
   TIMEZONE,
 } from './config.js';
 import { clearCheckpoints, writeCheckpoint } from './checkpoint.js';
-import { classifyUsage, computeThresholds } from './threshold.js';
+import { computeThresholds } from './threshold.js';
+import { emitSessionTokens } from './usage-telemetry.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
 import {
@@ -1544,39 +1545,26 @@ async function runAgent(
         // through the per-turn noise. Telemetry is always-on
         // (decoupled from ENABLE_THRESHOLD_NUKE) — collecting curves
         // before the flip is exactly the data the flip decision
-        // needs.
+        // needs. The emit/classify body lives in `usage-telemetry.ts`
+        // (#349) so the scheduled-task path emits the same shape; the
+        // post-emit `thresholdReached` latch stays here because it
+        // drives the inbound-only kill-auto-compaction handshake
+        // below — scheduled-task fires don't trigger that path.
         if (output.usage) {
           lastUsedTokens = output.usage.input_tokens;
-          const state = classifyUsage(output.usage.input_tokens, thresholds);
-          const logFields = {
+          const state = emitSessionTokens(output.usage, {
             group: group.name,
             session: sessions[group.folder]?.[DEFAULT_SESSION_NAME],
-            input_tokens: output.usage.input_tokens,
-            output_tokens: output.usage.output_tokens,
-            cache_read: output.usage.cache_read_input_tokens,
-            cache_creation: output.usage.cache_creation_input_tokens,
-            percent: Number(
-              (
-                (output.usage.input_tokens / thresholds.contextWindow) *
-                100
-              ).toFixed(1),
-            ),
-            threshold_state: state,
-            threshold_warn: thresholds.warn,
-            threshold_nuke: thresholds.nuke,
-          };
-          if (state === 'nuke') {
-            logger.error(logFields, 'session_tokens_nuke');
-            // Latch on first nuke crossing this turn — multiple
-            // assistant messages in one runQuery can each emit usage
-            // above the threshold, and we only want one checkpoint
-            // write per turn.
-            if (thresholdReached !== 'nuke') thresholdReached = 'nuke';
-          } else if (state === 'warn') {
-            logger.warn(logFields, 'session_tokens_warn');
-            if (thresholdReached === null) thresholdReached = 'warn';
-          } else {
-            logger.info(logFields, 'session_tokens');
+            thresholds,
+          });
+          // Latch on first nuke crossing this turn — multiple
+          // assistant messages in one runQuery can each emit usage
+          // above the threshold, and we only want one checkpoint
+          // write per turn.
+          if (state === 'nuke' && thresholdReached !== 'nuke') {
+            thresholdReached = 'nuke';
+          } else if (state === 'warn' && thresholdReached === null) {
+            thresholdReached = 'warn';
           }
         }
 

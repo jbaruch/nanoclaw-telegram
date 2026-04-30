@@ -2,13 +2,20 @@ import { ChildProcess } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
 
-import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
+import {
+  ASSISTANT_NAME,
+  MODEL_CONTEXT_WINDOW,
+  SCHEDULER_POLL_INTERVAL,
+  TIMEZONE,
+} from './config.js';
 import {
   ContainerOutput,
   runContainerAgent,
   writeTasksSnapshot,
 } from './container-runner.js';
 import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
+import { computeThresholds } from './threshold.js';
+import { emitSessionTokens } from './usage-telemetry.js';
 import {
   getAllTasks,
   getDormantRecurringTasks,
@@ -26,6 +33,27 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
+
+/**
+ * Extract the first `Skill(skill: "...")` invocation name from a
+ * scheduled-task prompt for `taskSkill` telemetry tagging (#349). The
+ * shape is fully enumerable — it's the literal SDK skill-invocation
+ * syntax the orchestrator itself prepends in heartbeat / housekeeping
+ * / morning-brief prompts (e.g.
+ * `Skill(skill: "tessl__heartbeat")`) — so a regex is appropriate.
+ *
+ * Returns `undefined` when the prompt has no skill call at all (raw
+ * scheduled reminders, ad-hoc one-shots), and the caller falls back
+ * to `prompt[:64]` for bucketable identity.
+ *
+ * The prompt shape is NOT prefix-only — heartbeat prompts wrap the
+ * call in a `MANDATORY FIRST ACTION:` directive — so the regex scans
+ * the whole string, not just the leading characters.
+ */
+export function parseTaskSkill(prompt: string): string | undefined {
+  const match = prompt.match(/Skill\(\s*skill:\s*["']([^"']+)["']/);
+  return match?.[1];
+}
 
 /**
  * Compute the next run time for a recurring task, anchored to the
@@ -388,6 +416,20 @@ async function runTask(
   let result: string | null = null;
   let error: string | null = null;
 
+  // Per-fire telemetry context (#349). Computed once so every
+  // streamed `usage` payload classifies against the same window
+  // without recomputing the formula on every turn. `taskSkill` is
+  // safe to log because it's derived from the literal SDK skill-
+  // invocation syntax (a fixed identifier — `tessl__heartbeat`,
+  // `tessl__nightly-housekeeping`, etc.). The raw prompt is NOT
+  // logged: scheduled-task prompts include user-authored reminders
+  // ("Remind me to call Dr. X about Y results …") that would land
+  // verbatim in host-logs — `taskId` plus an optional join against
+  // `scheduled_tasks` covers any case where an operator needs to
+  // see what a row's prompt actually was, without the leak.
+  const thresholds = computeThresholds(MODEL_CONTEXT_WINDOW);
+  const taskSkill = parseTaskSkill(task.prompt);
+
   // #193: scheduled tasks NEVER resume the SDK session. Every run starts
   // a fresh turn. Two distinct tasks (a lunch reminder firing minutes
   // after a heartbeat) used to share `sessions[group][maintenance]` and
@@ -470,6 +512,28 @@ async function runTask(
         if (streamedOutput.newSessionId) {
           observedSessionIds.add(streamedOutput.newSessionId);
         }
+        // Kill-auto-compaction telemetry on the scheduled-task path
+        // (#349). Same `session_tokens` log key + state classification
+        // as the inbound path in `src/index.ts`, plus scheduled-task
+        // discriminators (taskId / scheduleType / taskSkill) so cost
+        // analyses can bucket by recurring-task identity. Session is
+        // intentionally undefined here — #193's contract is that
+        // scheduled-task fires never persist a sessionId, so the
+        // telemetry line reflects that absence rather than emitting a
+        // stale value. The return state is discarded: the inbound-only
+        // kill-auto-compaction handshake (`thresholdReached` latch +
+        // `nuke_session` call) does NOT apply to maintenance fires —
+        // each fire is already a single-turn discardable session by
+        // #193, so no nuke-on-cross is needed.
+        emitSessionTokens(streamedOutput.usage, {
+          group: group.name,
+          thresholds,
+          extra: {
+            taskId: task.id,
+            scheduleType: task.schedule_type,
+            taskSkill,
+          },
+        });
         if (streamedOutput.result) {
           result = streamedOutput.result;
           // Strip <internal> tags — suppress entirely if nothing remains
