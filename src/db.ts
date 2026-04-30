@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
-import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
+import { ASSISTANT_NAME, DATA_DIR, GROUPS_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { STATE_MIGRATIONS } from './state-migrations/index.js';
@@ -1842,5 +1842,154 @@ function migrateJsonState(): void {
         );
       }
     }
+  }
+
+  // Migrate per-group orders-db.json files (#294). Unlike the helpers
+  // above (DATA_DIR-rooted), this scans every `groups/<name>/` folder
+  // for an `orders-db.json` because the file historically lived in the
+  // admin group's working dir. Idempotent: a successful migration
+  // renames the source to `orders-db.json.migrated-YYYY-MM-DD`, so a
+  // re-run of `initDatabase` is a no-op once the file is gone.
+  migrateOrdersDbJsonFiles();
+}
+
+interface OrdersDbJsonRecord {
+  id: string;
+  source: string;
+  status: string;
+  amount?: number | null;
+  currency?: string | null;
+  description: string;
+  order_date: string;
+  expected_delivery?: string | null;
+  email_message_id: string;
+  to_address?: string | null;
+  flagged?: boolean;
+  flag_reason?: string | null;
+  last_updated: string;
+}
+
+interface OrdersDbJsonShape {
+  orders?: OrdersDbJsonRecord[];
+  last_checked?: string;
+  last_updated?: string;
+}
+
+function migrateOrdersDbJsonFiles(): void {
+  if (!fs.existsSync(GROUPS_DIR)) return;
+  let groupFolders: string[];
+  try {
+    groupFolders = fs
+      .readdirSync(GROUPS_DIR, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
+
+  // ON CONFLICT(email_message_id) DO NOTHING — first writer wins.
+  // Re-running the migration after a partial success is a no-op for
+  // already-imported rows, and the rename-to-`.migrated-<date>` step
+  // means a successful run won't be re-attempted at all. The PK `id`
+  // collision is implicitly covered: the email_message_id UNIQUE
+  // index fires first.
+  const insertOrder = db.prepare(
+    `INSERT INTO orders (
+       id, source, status, amount, currency, description, order_date,
+       expected_delivery, email_message_id, to_address, flagged,
+       flag_reason, last_updated
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(email_message_id) DO NOTHING`,
+  );
+  const upsertMetadata = db.prepare(
+    `INSERT INTO orders_metadata (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  );
+
+  const stamp = new Date().toISOString().slice(0, 10);
+
+  for (const folder of groupFolders) {
+    const filePath = path.join(GROUPS_DIR, folder, 'orders-db.json');
+    if (!fs.existsSync(filePath)) continue;
+
+    let parsed: OrdersDbJsonShape;
+    try {
+      parsed = JSON.parse(
+        fs.readFileSync(filePath, 'utf-8'),
+      ) as OrdersDbJsonShape;
+    } catch (err) {
+      if (!(err instanceof SyntaxError)) throw err;
+      logger.warn(
+        { folder, errName: err.name },
+        'orders-db.json migration: invalid JSON, skipping (file left in place)',
+      );
+      continue;
+    }
+    if (!Array.isArray(parsed.orders)) {
+      logger.warn(
+        { folder },
+        'orders-db.json migration: missing "orders" array, skipping',
+      );
+      continue;
+    }
+
+    // Wrap the per-file work in a single transaction so a partial
+    // crash mid-import (process kill, IO error on metadata write)
+    // can't leave the table in a half-migrated state. The version
+    // gate in applyStateMigrations is independent of this — the
+    // schema is already at v1; this is data backfill.
+    const importFile = db.transaction(() => {
+      let insertedRows = 0;
+      let skippedRows = 0;
+      for (const order of parsed.orders!) {
+        const result = insertOrder.run(
+          order.id,
+          order.source,
+          order.status,
+          order.amount ?? null,
+          order.currency ?? null,
+          order.description,
+          order.order_date,
+          order.expected_delivery ?? null,
+          order.email_message_id,
+          order.to_address ?? null,
+          order.flagged ? 1 : 0,
+          order.flag_reason ?? null,
+          order.last_updated,
+        );
+        if (result.changes > 0) insertedRows++;
+        else skippedRows++;
+      }
+      if (parsed.last_checked) {
+        upsertMetadata.run('last_checked', parsed.last_checked);
+      }
+      if (parsed.last_updated) {
+        upsertMetadata.run('last_updated', parsed.last_updated);
+      }
+      return { insertedRows, skippedRows };
+    });
+
+    let counts: { insertedRows: number; skippedRows: number };
+    try {
+      counts = importFile();
+    } catch (err) {
+      logger.error(
+        { folder, err },
+        'orders-db.json migration: transaction failed; file left in place for retry',
+      );
+      continue;
+    }
+
+    fs.renameSync(filePath, `${filePath}.migrated-${stamp}`);
+    logger.info(
+      {
+        folder,
+        inserted: counts.insertedRows,
+        skipped: counts.skippedRows,
+        total: parsed.orders.length,
+      },
+      'orders-db.json migration: imported and source renamed',
+    );
   }
 }
