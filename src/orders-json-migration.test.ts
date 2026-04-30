@@ -85,49 +85,50 @@ describe('orders-db.json → SQLite migration (#294)', () => {
       vi.resetModules();
       const { initDatabase, _closeDatabase } = await import('./db.js');
       initDatabase();
-
-      // Assert against the on-disk DB so the test exercises the full
-      // file-IO path (not a private in-memory test seam).
-      const db = new Database(path.join(tempDir, 'store', 'messages.db'));
       try {
-        const orders = db
-          .prepare('SELECT * FROM orders ORDER BY id')
-          .all() as Array<Record<string, unknown>>;
-        expect(orders).toHaveLength(2);
-        expect(orders[0]).toMatchObject({
-          id: 'amazon-2026-04-01-aaa',
-          source: 'amazon',
-          status: 'shipped',
-          email_message_id: 'msg-aaa',
-          flagged: 0,
-        });
-        expect(orders[1]).toMatchObject({
-          id: 'shopify-2026-04-10-bbb',
-          flagged: 1,
-          flag_reason: 'Large purchase: $49.50',
-        });
+        // Assert against the on-disk DB so the test exercises the full
+        // file-IO path (not a private in-memory test seam).
+        const db = new Database(path.join(tempDir, 'store', 'messages.db'));
+        try {
+          const orders = db
+            .prepare('SELECT * FROM orders ORDER BY id')
+            .all() as Array<Record<string, unknown>>;
+          expect(orders).toHaveLength(2);
+          expect(orders[0]).toMatchObject({
+            id: 'amazon-2026-04-01-aaa',
+            source: 'amazon',
+            status: 'shipped',
+            email_message_id: 'msg-aaa',
+            flagged: 0,
+          });
+          expect(orders[1]).toMatchObject({
+            id: 'shopify-2026-04-10-bbb',
+            flagged: 1,
+            flag_reason: 'Large purchase: $49.50',
+          });
 
-        const metadata = db
-          .prepare('SELECT key, value FROM orders_metadata ORDER BY key')
-          .all() as Array<{ key: string; value: string }>;
-        expect(metadata).toEqual([
-          { key: 'last_checked', value: '2026-04-12T00:00:00.000Z' },
-          { key: 'last_updated', value: '2026-04-11T00:00:00.000Z' },
-        ]);
+          const metadata = db
+            .prepare('SELECT key, value FROM orders_metadata ORDER BY key')
+            .all() as Array<{ key: string; value: string }>;
+          expect(metadata).toEqual([
+            { key: 'last_checked', value: '2026-04-12T00:00:00.000Z' },
+            { key: 'last_updated', value: '2026-04-11T00:00:00.000Z' },
+          ]);
+        } finally {
+          db.close();
+        }
+
+        // Source file renamed to .migrated-<YYYY-MM-DD> — the version
+        // gate alone wouldn't prevent a second migration on next start;
+        // the rename is what makes a re-run a no-op.
+        expect(fs.existsSync(filePath)).toBe(false);
+        const renamed = fs
+          .readdirSync(path.dirname(filePath))
+          .filter((f) => f.startsWith('orders-db.json.migrated-'));
+        expect(renamed).toHaveLength(1);
       } finally {
-        db.close();
+        _closeDatabase();
       }
-
-      // Source file renamed to .migrated-<YYYY-MM-DD> — the version
-      // gate alone wouldn't prevent a second migration on next start;
-      // the rename is what makes a re-run a no-op.
-      expect(fs.existsSync(filePath)).toBe(false);
-      const renamed = fs
-        .readdirSync(path.dirname(filePath))
-        .filter((f) => f.startsWith('orders-db.json.migrated-'));
-      expect(renamed).toHaveLength(1);
-
-      _closeDatabase();
     });
   });
 
@@ -142,17 +143,21 @@ describe('orders-db.json → SQLite migration (#294)', () => {
       vi.resetModules();
       const { initDatabase, _closeDatabase } = await import('./db.js');
       initDatabase();
-
-      const db = new Database(path.join(tempDir, 'store', 'messages.db'));
       try {
-        const count = (
-          db.prepare('SELECT COUNT(*) AS n FROM orders').get() as { n: number }
-        ).n;
-        expect(count).toBe(0);
+        const db = new Database(path.join(tempDir, 'store', 'messages.db'));
+        try {
+          const count = (
+            db.prepare('SELECT COUNT(*) AS n FROM orders').get() as {
+              n: number;
+            }
+          ).n;
+          expect(count).toBe(0);
+        } finally {
+          db.close();
+        }
       } finally {
-        db.close();
+        _closeDatabase();
       }
-      _closeDatabase();
     });
   });
 
@@ -179,19 +184,23 @@ describe('orders-db.json → SQLite migration (#294)', () => {
       vi.resetModules();
       const { initDatabase, _closeDatabase } = await import('./db.js');
       initDatabase();
-
-      const db = new Database(path.join(tempDir, 'store', 'messages.db'));
       try {
-        // ON CONFLICT(email_message_id) DO NOTHING — only the first
-        // group's row is inserted, second is silently skipped.
-        const count = (
-          db.prepare('SELECT COUNT(*) AS n FROM orders').get() as { n: number }
-        ).n;
-        expect(count).toBe(1);
+        const db = new Database(path.join(tempDir, 'store', 'messages.db'));
+        try {
+          // ON CONFLICT(email_message_id) DO NOTHING — only the first
+          // group's row is inserted, second is silently skipped.
+          const count = (
+            db.prepare('SELECT COUNT(*) AS n FROM orders').get() as {
+              n: number;
+            }
+          ).n;
+          expect(count).toBe(1);
+        } finally {
+          db.close();
+        }
       } finally {
-        db.close();
+        _closeDatabase();
       }
-      _closeDatabase();
     });
   });
 
@@ -234,17 +243,19 @@ describe('orders-db.json → SQLite migration (#294)', () => {
       vi.resetModules();
       const { initDatabase, _closeDatabase } = await import('./db.js');
       initDatabase();
-
-      const db = new Database(path.join(tempDir, 'store', 'messages.db'));
       try {
-        const ids = db
-          .prepare('SELECT id FROM orders ORDER BY id')
-          .all() as Array<{ id: string }>;
-        expect(ids.map((r) => r.id)).toEqual(['amazon-2026-04-01-real']);
+        const db = new Database(path.join(tempDir, 'store', 'messages.db'));
+        try {
+          const ids = db
+            .prepare('SELECT id FROM orders ORDER BY id')
+            .all() as Array<{ id: string }>;
+          expect(ids.map((r) => r.id)).toEqual(['amazon-2026-04-01-real']);
+        } finally {
+          db.close();
+        }
       } finally {
-        db.close();
+        _closeDatabase();
       }
-      _closeDatabase();
     });
   });
 
@@ -273,21 +284,22 @@ describe('orders-db.json → SQLite migration (#294)', () => {
       vi.resetModules();
       const { initDatabase, _closeDatabase } = await import('./db.js');
       initDatabase();
-
-      const db = new Database(path.join(tempDir, 'store', 'messages.db'));
       try {
-        const ids = db.prepare('SELECT id FROM orders').all() as Array<{
-          id: string;
-        }>;
-        expect(ids.map((r) => r.id)).toEqual(['amazon-2026-04-01-good']);
+        const db = new Database(path.join(tempDir, 'store', 'messages.db'));
+        try {
+          const ids = db.prepare('SELECT id FROM orders').all() as Array<{
+            id: string;
+          }>;
+          expect(ids.map((r) => r.id)).toEqual(['amazon-2026-04-01-good']);
+        } finally {
+          db.close();
+        }
+        // Good file renamed; bad file left in place for human triage.
+        expect(fs.existsSync(goodFile)).toBe(false);
+        expect(fs.existsSync(badFile)).toBe(true);
       } finally {
-        db.close();
+        _closeDatabase();
       }
-      // Good file renamed; bad file left in place for human triage.
-      expect(fs.existsSync(goodFile)).toBe(false);
-      expect(fs.existsSync(badFile)).toBe(true);
-
-      _closeDatabase();
     });
   });
 });
