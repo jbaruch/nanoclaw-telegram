@@ -53,7 +53,6 @@ import {
   __getObserverInternalsForTests,
   __resetObserverForTests,
   chunkText,
-  noteLatestUserMessage,
   observerEnabled,
   onAgentLine,
 } from './observer.js';
@@ -299,30 +298,22 @@ describe('observer', () => {
     });
   });
 
-  describe('noteLatestUserMessage keying', () => {
-    it('writes lastReactionEmoji under the composite key updateReaction reads', () => {
-      noteLatestUserMessage('tg:-100123', 'msg_77');
-      const internals = __getObserverInternalsForTests();
-      expect(internals.lastReactionEmoji.get('tg:-100123:msg_77')).toBe('👀');
-      // The latest-message map remains keyed by chat JID alone.
-      expect(internals.latestUserMessage.get('tg:-100123')).toBe('msg_77');
-    });
-  });
-
   describe('lastReactionEmoji cleanup on Query done', () => {
     it('drops the composite key for the query target on done', () => {
+      // Set up: a query for msg_5 that fires a tool_use → observer
+      // writes the composite dedupe entry under `${chatJid}:msg_5`.
       onAgentLine(
         'main',
-        'Query input: 100 chars, target_message_id=msg_5, scheduled_task=false',
+        'Query input: 100 chars, target_message_id=msg_5, scheduled_task=false, addressed=true',
       );
-      noteLatestUserMessage('tg:-100123', 'msg_5');
-      // Confirm the composite entry exists before done.
+      onAgentLine('main', '[msg #1] tool_use=Bash id=t1');
+      // Tool_use fired ⚡ via updateReaction; the dedupe map now
+      // holds `tg:-100123:msg_5 → ⚡`.
       expect(
         __getObserverInternalsForTests().lastReactionEmoji.get(
           'tg:-100123:msg_5',
         ),
-      ).toBe('👀');
-      onAgentLine('main', '[msg #1] tool_use=Bash id=t1');
+      ).toBe('⚡');
       onAgentLine(
         'main',
         'Query done. Messages: 1, results: 1, lastAssistantUuid: abc, closedDuringQuery: false, wall_ms=10, tokens_in=5, tokens_out=1, cache_hit_rate=10.0',
@@ -332,6 +323,63 @@ describe('observer', () => {
           'tg:-100123:msg_5',
         ),
       ).toBe(false);
+    });
+  });
+
+  describe('addressed-ness gate (#289)', () => {
+    it('suppresses progress reactions when Query input declares addressed=false', () => {
+      onAgentLine(
+        'main',
+        'Query input: 100 chars, target_message_id=msg_99, scheduled_task=false, addressed=false',
+      );
+      onAgentLine('main', '[msg #1] tool_use=Bash id=t1');
+      onAgentLine(
+        'main',
+        'Query done. Messages: 1, results: 1, lastAssistantUuid: abc, closedDuringQuery: false, wall_ms=10, tokens_in=5, tokens_out=1, cache_hit_rate=10.0',
+      );
+      // No reactions sent on the user's chat — observer-chat
+      // summary still flushes (that's a different channel) but the
+      // reactions table on the user message stays empty.
+      const reactionMessages = channel._sent.filter(
+        (m) => m.jid !== 'tg:-100123',
+      );
+      expect(reactionMessages).toHaveLength(0);
+      // The dedupe map should also be empty for the target — we
+      // never touched it because no reaction ever attempted to fire.
+      expect(
+        __getObserverInternalsForTests().lastReactionEmoji.has(
+          'tg:-100123:msg_99',
+        ),
+      ).toBe(false);
+    });
+
+    it('fires progress reactions when addressed=true', () => {
+      onAgentLine(
+        'main',
+        'Query input: 100 chars, target_message_id=msg_88, scheduled_task=false, addressed=true',
+      );
+      onAgentLine('main', '[msg #1] tool_use=Bash id=t1');
+      // Tool_use commits engagement and fires ⚡.
+      expect(
+        __getObserverInternalsForTests().lastReactionEmoji.get(
+          'tg:-100123:msg_88',
+        ),
+      ).toBe('⚡');
+    });
+
+    it('falls through to engagement gate when Query input omits addressed= (legacy)', () => {
+      onAgentLine(
+        'main',
+        'Query input: 100 chars, target_message_id=msg_77, scheduled_task=false',
+      );
+      onAgentLine('main', '[msg #1] tool_use=Bash id=t1');
+      // Backward compat: lines without `addressed=` behave as
+      // before — committed → reaction fires.
+      expect(
+        __getObserverInternalsForTests().lastReactionEmoji.get(
+          'tg:-100123:msg_77',
+        ),
+      ).toBe('⚡');
     });
   });
 
