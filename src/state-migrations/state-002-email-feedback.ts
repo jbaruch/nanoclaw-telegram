@@ -32,9 +32,15 @@ import type { StateMigration } from '../db.js';
  *     "have we seen this pattern before" lookup, which is the
  *     dominant read path (see brief-cleanup SKILL.md Step 6).
  *
- * The per-record `schema_version` field that the JSON shape carried
- * is dropped — `PRAGMA user_version` on the DB is the single source
- * of truth for shape, so per-record stamping became redundant.
+ * Historical note: this migration originally dropped the per-record
+ * `schema_version` field that the JSON shape carried, on the
+ * argument that `PRAGMA user_version` on the DB was sufficient for
+ * shape auditability. The `coding-policy: stateful-artifacts`
+ * reviewer disagreed, and `state-003-email-feedback-schema-version`
+ * (the next migration in this directory) restored the column. Every
+ * row has both axes now: DB-level `user_version` for "which
+ * migrations have run" and per-row `schema_version` for "which
+ * record contract this row was written under".
  */
 export const STATE_002_EMAIL_FEEDBACK: StateMigration = {
   version: 2,
