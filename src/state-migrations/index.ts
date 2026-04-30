@@ -8,6 +8,7 @@ import { STATE_005_NANOCLAW_STATE_SPLIT } from './state-005-nanoclaw-state-split
 import { STATE_006_TRUSTED_SESSION_STATE } from './state-006-trusted-session-state.js';
 import { STATE_007_MORNING_BRIEF_PENDING } from './state-007-morning-brief-pending.js';
 import { STATE_008_CALENDAR_STATE } from './state-008-calendar-state.js';
+import { STATE_009_PHASE_COMPLETIONS } from './state-009-phase-completions.js';
 
 /**
  * Registered state-table migrations, applied in order at orchestrator
@@ -28,4 +29,5 @@ export const STATE_MIGRATIONS: readonly StateMigration[] = [
   STATE_006_TRUSTED_SESSION_STATE,
   STATE_007_MORNING_BRIEF_PENDING,
   STATE_008_CALENDAR_STATE,
+  STATE_009_PHASE_COMPLETIONS,
 ];
