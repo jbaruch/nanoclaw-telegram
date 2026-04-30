@@ -879,14 +879,29 @@ export function buildVolumeMounts(
   });
 
   // Store directory (messages.db).
-  // Trusted/main: full DB (all groups). Untrusted: filtered copy (own chat only).
+  // Trusted/main: full DB (all groups), READ-WRITE so skills can persist
+  //   per-skill state in the new `state-NNN-*` tables (epic #293 — orders,
+  //   email_feedback, …). Trust model: trusted agents already have write
+  //   power on the group folder and on /workspace/state/, so direct DB
+  //   writes are inside the same trust boundary. Without rw access here,
+  //   apply-order.py / write-orders-metadata.py / etc. fail with
+  //   "attempt to write a readonly database" — observed in production on
+  //   the first check-orders run after the #294 tile flip.
+  // Untrusted: filtered copy (own chat only), READ-ONLY so an untrusted
+  //   agent cannot mutate cross-group state via writes against the
+  //   filtered DB.
+  // The orchestrator opens messages.db in WAL mode (see src/db.ts), and
+  // SQLite's WAL is process-level: as long as the agent's sqlite3 process
+  // has rw on the same `store/` dir (so the .wal and .shm sidecars are
+  // writable), concurrent writes from orchestrator + agent are safe. The
+  // dir mount above gives access to all three files together.
   if (isMain || group.containerConfig?.trusted) {
     const storeDir = path.join(process.cwd(), 'store');
     if (fs.existsSync(storeDir)) {
       mounts.push({
         hostPath: toHostPath(storeDir),
         containerPath: '/workspace/store',
-        readonly: true,
+        readonly: false,
       });
     }
   } else {
