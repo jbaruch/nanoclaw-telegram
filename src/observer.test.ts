@@ -10,18 +10,22 @@
  *
  * Specifically:
  *   - `onAgentLine` parses Query input boundaries (sets state, picks
- *     up `target_message_id`, picks up `scheduled_task`), per-block
- *     thinking / tool_use / tool_result events, and the final
- *     `Query done.` line including its metric tail.
+ *     up `target_message_id`, picks up `scheduled_task`, picks up
+ *     `addressed`), per-block thinking / tool_use / tool_result
+ *     events, and the final `Query done.` line including its metric
+ *     tail.
  *   - `committed` flips on the first non-thinking event so silent
  *     thinking-only turns leave the user's message untouched.
- *   - Watchdog arms for non-scheduled tasks and stays armed off for
- *     scheduled tasks (cron / heartbeat queries).
+ *   - Watchdog arms for non-scheduled tasks but stays unarmed for
+ *     scheduled tasks (cron / heartbeat queries) AND for explicitly
+ *     non-addressed queries (#289 — `requires_trigger=false`
+ *     bystander chatter that still routes to the agent).
  *   - `chunkText` handles under-size, exact-size, and over-size with
  *     whitespace fallback.
- *   - `noteLatestUserMessage` keys `lastReactionEmoji` under the
- *     same composite shape `updateReaction` consults — regression
- *     guard for the bug Copilot flagged in PR #240.
+ *   - `addressed=false` on the Query input line short-circuits the
+ *     entire reaction ladder; `addressed=true` fires it normally;
+ *     `addressed=` omitted falls through to the engagement gate
+ *     alone for backward compat.
  *   - `Query done.` cleanup drops `lastReactionEmoji` entries for
  *     the closing query — guards against the unbounded-growth bug
  *     Copilot flagged in PR #240.
@@ -53,7 +57,6 @@ import {
   __getObserverInternalsForTests,
   __resetObserverForTests,
   chunkText,
-  noteLatestUserMessage,
   observerEnabled,
   onAgentLine,
 } from './observer.js';
@@ -65,10 +68,21 @@ interface CapturedMessage {
   replyTo?: string;
 }
 
-function makeStubChannel(): Channel & { _sent: CapturedMessage[] } {
+interface CapturedReaction {
+  jid: string;
+  messageId: string;
+  emoji: string;
+}
+
+function makeStubChannel(): Channel & {
+  _sent: CapturedMessage[];
+  _reactions: CapturedReaction[];
+} {
   const sent: CapturedMessage[] = [];
+  const reactions: CapturedReaction[] = [];
   return {
     _sent: sent,
+    _reactions: reactions,
     name: 'stub',
     isConnected: () => true,
     ownsJid: (jid: string) =>
@@ -77,9 +91,14 @@ function makeStubChannel(): Channel & { _sent: CapturedMessage[] } {
     sendMessage: async (jid: string, body: string, replyTo?: string) => {
       sent.push({ jid, body, replyTo });
     },
-    sendReaction: async () => {},
+    sendReaction: async (jid: string, messageId: string, emoji: string) => {
+      reactions.push({ jid, messageId, emoji });
+    },
     isPrivateChat: async () => true,
-  } as unknown as Channel & { _sent: CapturedMessage[] };
+  } as unknown as Channel & {
+    _sent: CapturedMessage[];
+    _reactions: CapturedReaction[];
+  };
 }
 
 function makeGroups(
@@ -98,7 +117,10 @@ function makeGroups(
 }
 
 describe('observer', () => {
-  let channel: Channel & { _sent: CapturedMessage[] };
+  let channel: Channel & {
+    _sent: CapturedMessage[];
+    _reactions: CapturedReaction[];
+  };
   let groups: Record<string, RegisteredGroup>;
 
   beforeEach(() => {
@@ -299,30 +321,22 @@ describe('observer', () => {
     });
   });
 
-  describe('noteLatestUserMessage keying', () => {
-    it('writes lastReactionEmoji under the composite key updateReaction reads', () => {
-      noteLatestUserMessage('tg:-100123', 'msg_77');
-      const internals = __getObserverInternalsForTests();
-      expect(internals.lastReactionEmoji.get('tg:-100123:msg_77')).toBe('👀');
-      // The latest-message map remains keyed by chat JID alone.
-      expect(internals.latestUserMessage.get('tg:-100123')).toBe('msg_77');
-    });
-  });
-
   describe('lastReactionEmoji cleanup on Query done', () => {
     it('drops the composite key for the query target on done', () => {
+      // Set up: a query for msg_5 that fires a tool_use → observer
+      // writes the composite dedupe entry under `${chatJid}:msg_5`.
       onAgentLine(
         'main',
-        'Query input: 100 chars, target_message_id=msg_5, scheduled_task=false',
+        'Query input: 100 chars, target_message_id=msg_5, scheduled_task=false, addressed=true',
       );
-      noteLatestUserMessage('tg:-100123', 'msg_5');
-      // Confirm the composite entry exists before done.
+      onAgentLine('main', '[msg #1] tool_use=Bash id=t1');
+      // Tool_use fired ⚡ via updateReaction; the dedupe map now
+      // holds `tg:-100123:msg_5 → ⚡`.
       expect(
         __getObserverInternalsForTests().lastReactionEmoji.get(
           'tg:-100123:msg_5',
         ),
-      ).toBe('👀');
-      onAgentLine('main', '[msg #1] tool_use=Bash id=t1');
+      ).toBe('⚡');
       onAgentLine(
         'main',
         'Query done. Messages: 1, results: 1, lastAssistantUuid: abc, closedDuringQuery: false, wall_ms=10, tokens_in=5, tokens_out=1, cache_hit_rate=10.0',
@@ -332,6 +346,52 @@ describe('observer', () => {
           'tg:-100123:msg_5',
         ),
       ).toBe(false);
+    });
+  });
+
+  describe('addressed-ness gate (#289)', () => {
+    it('suppresses progress reactions when Query input declares addressed=false', () => {
+      onAgentLine(
+        'main',
+        'Query input: 100 chars, target_message_id=msg_99, scheduled_task=false, addressed=false',
+      );
+      onAgentLine('main', '[msg #1] tool_use=Bash id=t1');
+      onAgentLine(
+        'main',
+        'Query done. Messages: 1, results: 1, lastAssistantUuid: abc, closedDuringQuery: false, wall_ms=10, tokens_in=5, tokens_out=1, cache_hit_rate=10.0',
+      );
+      // The user-visible outcome is what matters: zero reactions
+      // dispatched on this query, including any watchdog blinks
+      // and the final 🤝.
+      expect(channel._reactions).toEqual([]);
+    });
+
+    it('fires progress reactions when addressed=true', () => {
+      onAgentLine(
+        'main',
+        'Query input: 100 chars, target_message_id=msg_88, scheduled_task=false, addressed=true',
+      );
+      onAgentLine('main', '[msg #1] tool_use=Bash id=t1');
+      // Tool_use commits engagement and fires ⚡ via sendReaction.
+      expect(channel._reactions).toEqual([
+        { jid: 'tg:-100123', messageId: 'msg_88', emoji: '⚡' },
+      ]);
+    });
+
+    it('falls through to engagement gate when Query input omits addressed= (legacy)', () => {
+      onAgentLine(
+        'main',
+        'Query input: 100 chars, target_message_id=msg_77, scheduled_task=false',
+      );
+      onAgentLine('main', '[msg #1] tool_use=Bash id=t1');
+      // Backward compat: lines without `addressed=` behave as
+      // before — committed → reaction fires. Useful for legacy
+      // log lines and any caller that has no addressed-ness signal
+      // to emit (the gate prefers a false-positive over silently
+      // dropping reactions on legacy paths).
+      expect(channel._reactions).toEqual([
+        { jid: 'tg:-100123', messageId: 'msg_77', emoji: '⚡' },
+      ]);
     });
   });
 

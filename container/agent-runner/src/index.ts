@@ -1477,8 +1477,25 @@ async function runQuery(
   const queryStartedAt = Date.now();
   const targetMessageId = replyThreadingState.latestInboundId ?? '-';
   const isScheduledTask = containerInput.isScheduledTask === true;
+  // #289 — emit the per-query addressed-ness signal so observer.ts
+  // can suppress its progress-emoji ladder (🤔/⚡/✍/watchdog blinks)
+  // for non-addressed inbounds in `requires_trigger=false` rooms.
+  // Without this, the agent reasons about every message and the
+  // observer's commit-gate fires a full progress sequence on
+  // bystander chatter — the exact noise the gate was meant to kill.
+  // Per-pipe `latestPipedAddressedToUs` wins over spawn-time, falls
+  // back to `containerInput.addressedToUs`. `-` is the "no signal"
+  // sentinel (legacy paths, scheduled tasks, callers that don't
+  // pass the flag) — observer parses it as `addressed=undefined`
+  // and falls through to the engagement-gate alone, preserving
+  // pre-#289 behavior so legacy / non-channel paths keep their
+  // reactions when they commit.
+  const queryAddressed =
+    latestPipedAddressedToUs ?? containerInput.addressedToUs;
+  const addressedField =
+    typeof queryAddressed === 'boolean' ? String(queryAddressed) : '-';
   log(
-    `Query input: ${prompt.length} chars, target_message_id=${targetMessageId}, scheduled_task=${isScheduledTask}`,
+    `Query input: ${prompt.length} chars, target_message_id=${targetMessageId}, scheduled_task=${isScheduledTask}, addressed=${addressedField}`,
   );
 
   // Poll IPC for the _close sentinel during the query. We deliberately do

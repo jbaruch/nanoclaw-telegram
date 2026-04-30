@@ -92,26 +92,17 @@ export async function initObserver(
   armSelfTest();
 }
 
-// Progress-reaction state: track the latest user message per chat so
-// container-stderr-driven events can update the reaction on the right
-// message as work unfolds. Also remember the last emoji we set, so we
-// don't spam the Telegram API with identical reactions.
-const latestUserMessage = new Map<string, string>(); // chatJid -> messageId
-const lastReactionEmoji = new Map<string, string>(); // chatJid -> emoji
-
-export function noteLatestUserMessage(
-  chatJid: string,
-  messageId: string,
-): void {
-  latestUserMessage.set(chatJid, messageId);
-  // 👀 is the initial reaction the telegram handler writes on the
-  // user's incoming message. Record it under the SAME composite key
-  // shape (`${chatJid}:${msgId}`) that updateReaction reads — using
-  // the chat JID alone left a different-shape entry that
-  // updateReaction never consulted, so the dedupe never fired and
-  // the next reaction (🤔) would re-write 👀-then-🤔 on the API.
-  lastReactionEmoji.set(`${chatJid}:${messageId}`, '👀');
-}
+// Per-(chat, message) dedupe map: remember the last emoji we set so
+// we don't re-fire identical reactions to the Telegram API. The map
+// is keyed `${chatJid}:${msgId}` because two in-flight messages in
+// the same chat must not collapse onto a single key — that would
+// cause one's emoji write to suppress the other's.
+//
+// `latestUserMessage` (host-seeded fallback) was removed in #289 once
+// the observer started parsing `target_message_id` from every Query
+// input log line — for channel-routed inbounds, the agent-runner
+// always emits one, so the host fallback was strictly redundant.
+const lastReactionEmoji = new Map<string, string>(); // `${chatJid}:${msgId}` -> emoji
 
 // Reverse map cache for folderToChatJid. Rebuilt only when the
 // registeredGroups dict identity changes (the orchestrator hands us a
@@ -137,16 +128,24 @@ function updateReaction(folder: string, emoji: string): void {
   if (!channelsRef) return;
   const chatJid = folderToChatJid(folder);
   if (!chatJid) return;
-  // Prefer the message ID this query is processing (parsed from
-  // the Query input prompt) over the chat's most-recent inbound.
-  // When messages arrive faster than the agent processes them,
-  // `latestUserMessage` races ahead and the agent's tool_use
-  // (still working on the older prompt) lands its reaction on
-  // the wrong message. The state-bound id is stable across the
-  // turn. Fall back to latestUserMessage when state has none —
-  // covers scheduled-task and raw-prompt paths.
   const state = states.get(folder);
-  const msgId = state?.targetMessageId ?? latestUserMessage.get(chatJid);
+  // #289 — addressed-ness gate. Suppress the entire reaction ladder
+  // (🤔/⚡/✍/watchdog blinks/done) for explicitly non-addressed
+  // queries. The agent reasons about every inbound in
+  // `requires_trigger=false` rooms but should not produce any
+  // visible reaction trail on bystander chatter — that was the
+  // noise this whole gate exists to kill. `undefined` falls through
+  // to the engagement-gate alone for backward compat with old log
+  // lines that don't carry the field.
+  if (state?.addressed === false) return;
+  // The agent-runner emits `target_message_id=<id>` on every Query
+  // input log line for channel-routed inbounds (the orchestrator
+  // wraps each in `<message id="…">` and `extractLatestInboundId`
+  // resolves it before logging). No fallback needed: scheduled
+  // tasks and raw prompts emit `-`, leaving `targetMessageId`
+  // undefined here — and those paths shouldn't fire reactions on
+  // any chat message anyway.
+  const msgId = state?.targetMessageId;
   if (!msgId) return;
   // Dedupe on (chat, msg) — using chat alone collapses across
   // different in-flight messages and would re-fire emojis on
@@ -238,12 +237,9 @@ function startWatchdog(source: string): void {
         w.pingsSent++;
         const chatJid = folderToChatJid(source);
         // Same per-state target as updateReaction — pin the ping
-        // to the message this query is actually processing, not
-        // whatever's the latest inbound.
+        // to the message this query is actually processing.
         const stateForPing = states.get(source);
-        const msgId =
-          stateForPing?.targetMessageId ??
-          (chatJid ? latestUserMessage.get(chatJid) : undefined);
+        const msgId = stateForPing?.targetMessageId;
         const groups = registeredGroupsRef?.();
         const isMainChat = chatJid && groups?.[chatJid]?.isMain === true;
         if (chatJid && msgId && isMainChat) {
@@ -293,7 +289,6 @@ export function __resetObserverForTests(): void {
   registeredGroupsRef = null;
   observerEnabledFlag = false;
   observerChatJidOverride = undefined;
-  latestUserMessage.clear();
   lastReactionEmoji.clear();
   cachedGroupsDict = null;
   cachedFolderToJid = new Map();
@@ -330,7 +325,7 @@ export function __enableObserverForTests(
 
 /** Test seam — read internal state for assertions. */
 export function __getObserverInternalsForTests() {
-  return { states, watchdogs, lastReactionEmoji, latestUserMessage };
+  return { states, watchdogs, lastReactionEmoji };
 }
 
 // Self-test: if the observer is enabled but the agent-runner log
@@ -376,13 +371,23 @@ interface QueryState {
   // turn fires reactions normally.
   committed: boolean;
   // The message ID this query is processing, parsed from the
-  // `<message id="N">` tag in the Query input prompt. Reactions
-  // fire on THIS message, not on the most-recent inbound — a fast-
-  // arriving newer message in the same chat would otherwise become
-  // `latestUserMessage` mid-turn and the agent's tool_use (still
-  // about the older prompt) would land its 🤔/⚡/✍ on the wrong
-  // message.
+  // `target_message_id=` field on the Query input log line (resolved
+  // by the agent-runner from the `<message id="N">` wrappers in the
+  // prompt body). Reactions fire on THIS message specifically — a
+  // fast-arriving newer message in the same chat would otherwise
+  // race into the wrong target if we picked "the chat's latest
+  // inbound" instead.
   targetMessageId?: string;
+  // #289 — addressed-ness signal for this query, parsed from the
+  // `addressed=true|false|-` field on the Query input log line.
+  // The reaction ladder (🤔/⚡/✍/watchdog blinks/done) is suppressed
+  // when this is `false` — the agent reasons about every inbound in
+  // `requires_trigger=false` rooms but should not produce any visible
+  // reaction trail on bystander chatter. `undefined` means "no signal
+  // emitted by the agent-runner" and we treat that as "fall through
+  // to the engagement gate alone" — keeps backward compatibility
+  // with old log lines that didn't carry the field.
+  addressed?: boolean;
 }
 
 // Keyed by container/group folder; one slot per concurrent query.
@@ -480,6 +485,14 @@ export function onAgentLine(source: string, raw: string): void {
     if (targetMatch && targetMatch[1] !== '-') {
       fresh.targetMessageId = targetMatch[1];
     }
+    // #289 — addressed-ness signal. Sentinel `-` means the
+    // agent-runner emitted "no signal" (legacy / scheduled paths);
+    // leave fresh.addressed as undefined so the engagement-gate
+    // alone governs reactions for backward compatibility.
+    const addressedMatch = /addressed=(true|false|-)/.exec(line);
+    if (addressedMatch && addressedMatch[1] !== '-') {
+      fresh.addressed = addressedMatch[1] === 'true';
+    }
     states.set(source, fresh);
     // Defuse any watchdog left over from a prior query that crashed
     // before emitting `Query done.` (SDK exception, agent-runner kill,
@@ -490,9 +503,11 @@ export function onAgentLine(source: string, raw: string): void {
     // deterministic done emoji rather than the new query's not-yet-
     // established state.
     stopWatchdog(source);
-    // A new query is starting — the 👀 reaction from telegram.ts is already
-    // on the message. Don't pre-emptively change it; the first thinking/tool
-    // event will swap to 🤔/🔧 naturally.
+    // A new query is starting. Don't pre-emptively send any
+    // reaction here — the agent-runner's react-first hook fires 👀
+    // from inside the container when the prompt is actually
+    // submitted (see `decideReactFirst`); the first thinking/tool
+    // event below will swap to 🤔/⚡ via the engagement-gated path.
     //
     // Don't arm the watchdog for scheduled tasks. Cron-driven queries
     // (SmartThings refresh, check-unanswered, heartbeat, etc.) run in
@@ -505,7 +520,13 @@ export function onAgentLine(source: string, raw: string): void {
     // field on the Query input line so we don't have to grep the
     // prompt preview for `[SCHEDULED TASK` markers.
     const isScheduledTask = /scheduled_task=true/.test(line);
-    if (!isScheduledTask) {
+    // #289 — also skip the watchdog on non-addressed queries.
+    // The blink emojis (🫡/🤓) and threshold pings ("Still working…")
+    // are noise on bystander chatter the agent is just reasoning
+    // about. `updateReaction` would no-op them anyway via the
+    // addressed-gate above, but starting an interval just to have
+    // every tick early-return wastes timers — gate at arm-time.
+    if (!isScheduledTask && fresh.addressed !== false) {
       startWatchdog(source);
     }
     return;
@@ -652,14 +673,8 @@ export function onAgentLine(source: string, raw: string): void {
     // (the query's targetMessageId) are known here, so we can purge
     // exactly the keys this query wrote without scanning every entry.
     const chatJid = folderToChatJid(source);
-    if (chatJid) {
-      if (state.targetMessageId) {
-        lastReactionEmoji.delete(`${chatJid}:${state.targetMessageId}`);
-      }
-      const latest = latestUserMessage.get(chatJid);
-      if (latest) {
-        lastReactionEmoji.delete(`${chatJid}:${latest}`);
-      }
+    if (chatJid && state.targetMessageId) {
+      lastReactionEmoji.delete(`${chatJid}:${state.targetMessageId}`);
     }
     states.delete(source);
     return;

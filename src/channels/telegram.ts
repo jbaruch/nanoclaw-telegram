@@ -4,12 +4,7 @@ import path from 'path';
 import { Api, Bot, InputFile } from 'grammy';
 import OpenAI from 'openai';
 
-import {
-  ASSISTANT_NAME,
-  GROUPS_DIR,
-  TRIGGER_PATTERN,
-  getTriggerPattern,
-} from '../config.js';
+import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import {
   getLatestMessage,
   getMessageById,
@@ -18,7 +13,6 @@ import {
 } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
-import { noteLatestUserMessage } from '../observer.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import { sanitizeTelegramHtml } from './telegram-sanitize.js';
 import {
@@ -32,37 +26,6 @@ export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
-}
-
-/**
- * Observer-bookkeeping gate (#289) — decides whether
- * `noteLatestUserMessage` should fire so the observer can attach
- * progress reactions (🤔 / ⚡ / ✍) when the agent commits.
- *
- * The host-side 👀 emit was removed deliberately: that's a "channel
- * received" claim and lies during distress modes (stuck container,
- * wedged IPC). The 👀 now originates from the agent-runner's
- * `react-first` hook, which only fires when the container is
- * actually alive and processing — see `decideReactFirst` and the
- * orchestrator-side `isAddressedToUs` helper that gates it.
- *
- * The "addressed-ness" criteria here mirror the orchestrator's
- * `isAddressedToUs` so the observer doesn't seed dedupe state for
- * bystander chatter the agent-runner will (correctly) decline to
- * react to. Independent of `requires_trigger`.
- */
-export function evaluateTriggerGate(
-  group: RegisteredGroup,
-  content: string,
-  options: { replyToOurBot: boolean; isPrivateChat: boolean },
-): { recordObserver: boolean } {
-  const isMain = group.isMain ?? false;
-  const triggerHit =
-    isMain ||
-    options.isPrivateChat ||
-    getTriggerPattern(group.trigger).test(content.trim()) ||
-    options.replyToOurBot;
-  return { recordObserver: triggerHit };
 }
 
 /**
@@ -1286,23 +1249,12 @@ export class TelegramChannel implements Channel {
         'Telegram message stored',
       );
 
-      // Observer-bookkeeping gate (#289). The 👀 ack itself comes
-      // from the agent-runner's react-first hook (where firing IS
-      // proof of liveness); here we only seed `noteLatestUserMessage`
-      // so the observer's progress emojis can attach to the right
-      // message if/when the agent commits.
-      const replyFrom = ctx.message.reply_to_message?.from;
-      const replyToOurBot =
-        !!replyFrom?.is_bot &&
-        replyFrom?.username?.toLowerCase() === ctx.me?.username?.toLowerCase();
-      const { recordObserver } = evaluateTriggerGate(group, content, {
-        replyToOurBot,
-        isPrivateChat: ctx.chat.type === 'private',
-      });
-
-      if (recordObserver) {
-        noteLatestUserMessage(chatJid, msgId);
-      }
+      // No host-side reaction or observer seeding here — both moved
+      // out in #289. 👀 fires from the agent-runner's react-first
+      // hook (only when the container is genuinely alive); the
+      // observer's progress emojis pin to `target_message_id` from
+      // the agent-runner's Query input log line and gate themselves
+      // on that line's `addressed=true|false` field.
     });
 
     // Handle non-text messages with placeholders so the agent knows something was sent
@@ -1434,24 +1386,8 @@ export class TelegramChannel implements Channel {
         is_from_me: false,
       });
 
-      // Observer-bookkeeping gate (#289). For voice the trigger
-      // pattern can only run against the resolved transcript, so
-      // this fires after transcription completes. The 👀 ack itself
-      // is fired by the agent-runner's react-first hook once the
-      // container is alive and processing — see
-      // `decideReactFirst` in container/agent-runner/src/react-first.ts.
-      const replyFrom = ctx.message.reply_to_message?.from;
-      const replyToOurBot =
-        !!replyFrom?.is_bot &&
-        replyFrom?.username?.toLowerCase() === ctx.me?.username?.toLowerCase();
-      const { recordObserver } = evaluateTriggerGate(group, content, {
-        replyToOurBot,
-        isPrivateChat: ctx.chat.type === 'private',
-      });
-
-      if (recordObserver) {
-        noteLatestUserMessage(chatJid, msgId);
-      }
+      // No host-side reaction here either — see the matching block
+      // in the message:text handler for the rationale.
     });
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
     this.bot.on('message:document', async (ctx) => {
