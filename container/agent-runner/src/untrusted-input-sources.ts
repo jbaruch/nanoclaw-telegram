@@ -37,13 +37,20 @@ export function wrapUntrustedInput(
   return `<untrusted-input source="${sourceAttr}">\n${content}\n</untrusted-input>`;
 }
 
-function escapeAttr(s: string): string {
-  // `&` must be replaced first; substituting it after `&quot;` etc. would
-  // double-encode (`&quot;` → `&amp;quot;`). URLs in `web:` sources
-  // routinely contain `&` query separators, and identifiers in `gmail:` /
-  // `slack:` could contain `<` / `>` literals — leaving any of those
-  // un-escaped produces malformed markup that #322's walk-back would
-  // mis-parse.
+/**
+ * Escape an XML/HTML attribute value. Exported so PR 4's
+ * `provenance-sentinel.ts` reuses the same rules — keeping in-band
+ * (Encoding A) and sidecar (Encoding B) escapes in lockstep, so a
+ * future rule change can't quietly drift between the two.
+ *
+ * `&` must be replaced first; substituting it after `&quot;` etc. would
+ * double-encode (`&quot;` → `&amp;quot;`). URLs in `web:` sources
+ * routinely contain `&` query separators, and identifiers in `gmail:` /
+ * `slack:` could contain `<` / `>` literals — leaving any of those
+ * un-escaped produces malformed markup that #322's walk-back would
+ * mis-parse.
+ */
+export function escapeAttr(s: string): string {
   return s
     .replace(/&/g, '&amp;')
     .replace(/"/g, '&quot;')
