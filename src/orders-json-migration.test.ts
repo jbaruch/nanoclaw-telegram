@@ -187,8 +187,9 @@ describe('orders-db.json → SQLite migration (#294)', () => {
       try {
         const db = new Database(path.join(tempDir, 'store', 'messages.db'));
         try {
-          // ON CONFLICT(email_message_id) DO NOTHING — only the first
-          // group's row is inserted, second is silently skipped.
+          // Bare ON CONFLICT DO NOTHING — only the first group's row
+          // is inserted; the second conflicting row (same
+          // email_message_id) is silently skipped.
           const count = (
             db.prepare('SELECT COUNT(*) AS n FROM orders').get() as {
               n: number;
