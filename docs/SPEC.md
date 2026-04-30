@@ -335,7 +335,7 @@ Inside every spawned container, the `/workspace/` tree is laid out as follows. S
 | `/workspace/global/` | `groups/global/` | trusted/main: full · untrusted: SOUL.md only | RO | Shared identity (SOUL.md), shared formatting rules. |
 | `/workspace/trusted/` | `trusted/` | trusted/main only | RW | Cross-tier shared writable state (skills that ONLY run on trusted/main). Untrusted containers do NOT get this mount at all. |
 | **`/workspace/state/`** | **`data/state/<folder>/`** | **all** | **RW** | **Canonical per-group writable state for skills that need to persist across runs. Always available regardless of trust tier (#99 Cat 4). Use this when a skill needs a writable analog of `/workspace/group/`.** |
-| `/workspace/store/` | `store/` (filtered DB on untrusted) | all | RO | `messages.db` SQLite — read-only. |
+| `/workspace/store/` | `store/` (filtered DB on untrusted) | all | trusted/main: RW · untrusted: RO | `messages.db` SQLite. Trusted/main get the full DB read-write so skills can persist per-skill state in `state-NNN-*` tables (epic #293 — orders, email_feedback, …); WAL mode + the orchestrator's busy_timeout pragma keeps concurrent writes safe. Untrusted gets a filtered ro copy. |
 | `/workspace/host-logs/` | `data/host-logs/` | main only | RO | Orchestrator stdout/stderr + per-container streaming logs. Admin-tile-only by construction (#103). |
 | `/workspace/extra/<name>/` | operator-configured | per `containerConfig.additionalMounts` | per-mount | Operator-specified extra mounts (e.g. local code repos). |
 | `/home/node/.claude/` | `data/sessions/<group>/<slot>/.claude/` | all | RW | Per-session SDK state (transcripts under `projects/`, settings, memory). Skills generally shouldn't write here directly — let the SDK manage it. |

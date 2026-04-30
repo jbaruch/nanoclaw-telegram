@@ -682,6 +682,33 @@ describe('buildVolumeMounts — untrusted group isolation', () => {
     }
   });
 
+  it('/workspace/store mount stays read-only for untrusted containers (cross-group safety)', () => {
+    // Untrusted containers must NOT be able to mutate the filtered DB
+    // — even though the file is per-group, write access would let an
+    // untrusted agent corrupt its own filtered view. Read-only on
+    // untrusted is the safety side of the asymmetric trust boundary
+    // introduced for epic #293 (trusted/main get rw, untrusted stays
+    // ro). The rw side is covered by the dedicated
+    // `buildVolumeMounts — /workspace/store mount rw/ro by trust`
+    // describe block at the bottom of this file.
+    const originalCwd = process.cwd();
+    process.chdir(PROJECT_DIR);
+    try {
+      const mounts = buildVolumeMounts(
+        makeUntrustedGroup(),
+        false,
+        'chatA@g.us',
+      );
+      const storeMount = mounts.find(
+        (m) => m.containerPath === '/workspace/store',
+      );
+      expect(storeMount).toBeDefined();
+      expect(storeMount!.readonly).toBe(true);
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
   it('/workspace/store mount points at the filtered DB, not the full store', () => {
     const originalCwd = process.cwd();
     process.chdir(PROJECT_DIR);
@@ -1174,5 +1201,79 @@ describe('buildVolumeMounts — pre-spawn IPC sweep skips during handoff (#288)'
     buildVolumeMounts(makeUntrustedGroup(), false, 'sweep-post-handoff@g.us');
 
     expect(fs.existsSync(plantedFile)).toBe(false);
+  });
+});
+
+describe('buildVolumeMounts — /workspace/store mount rw/ro by trust (epic #293)', () => {
+  function makeMainGroup(): RegisteredGroup {
+    return {
+      name: 'Main',
+      folder: 'main',
+      trigger: '@Andy',
+      added_at: new Date().toISOString(),
+    };
+  }
+
+  function makeTrustedGroup(): RegisteredGroup {
+    return {
+      name: 'Trusted',
+      folder: 'trusted-group',
+      trigger: '@T',
+      added_at: new Date().toISOString(),
+      containerConfig: { trusted: true },
+    };
+  }
+
+  beforeEach(() => {
+    // buildVolumeMounts writes a managed AGENTS.md into the group dir
+    // on first call, so the dir has to exist. The store mount resolves
+    // off `path.join(process.cwd(), 'store')` (process.cwd() is chdir'd
+    // to PROJECT_DIR below), so the dir has to exist there too — the
+    // mocked STORE_DIR constant is unrelated to how the mount path is
+    // built in container-runner.ts.
+    seedMessagesDb();
+    fs.mkdirSync(path.join(GROUPS_DIR, 'main'), { recursive: true });
+    fs.mkdirSync(path.join(GROUPS_DIR, 'trusted-group'), { recursive: true });
+    fs.mkdirSync(path.join(PROJECT_DIR, 'store'), { recursive: true });
+  });
+
+  // Trusted/main containers need rw access on store/ so skills can write
+  // to the per-skill state tables (orders, email_feedback, …) created by
+  // the orchestrator's state-NNN-* migrations. Without rw, apply-order.py
+  // / write-orders-metadata.py / etc. fail with "attempt to write a
+  // readonly database" — production-observed bug after the #294 tile flip.
+
+  it('mounts /workspace/store read-write for the main group', () => {
+    const originalCwd = process.cwd();
+    process.chdir(PROJECT_DIR);
+    try {
+      const mounts = buildVolumeMounts(makeMainGroup(), true, 'main@g.us');
+      const storeMount = mounts.find(
+        (m) => m.containerPath === '/workspace/store',
+      );
+      expect(storeMount).toBeDefined();
+      expect(storeMount!.readonly).toBe(false);
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('mounts /workspace/store read-write for trusted (non-main) groups', () => {
+    const originalCwd = process.cwd();
+    process.chdir(PROJECT_DIR);
+    try {
+      const mounts = buildVolumeMounts(
+        makeTrustedGroup(),
+        false,
+        'trusted@g.us',
+      );
+      const storeMount = mounts.find(
+        (m) => m.containerPath === '/workspace/store',
+      );
+      expect(storeMount).toBeDefined();
+      expect(storeMount!.readonly).toBe(false);
+    } finally {
+      process.chdir(originalCwd);
+    }
   });
 });

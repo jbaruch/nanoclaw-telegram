@@ -842,10 +842,11 @@ export function buildVolumeMounts(
   // wipe; otherwise grows monotonically with whatever skills choose
   // to persist. Distinct from `/workspace/group/` (group-shared,
   // trust-conditional readonly), `/workspace/trusted/` (trusted-only),
-  // `/workspace/store/` (messages.db, readonly), `/workspace/global/`
-  // (global config). Skills that previously wrote to
-  // `/workspace/group/` for cross-run state should migrate to
-  // `/workspace/state/`.
+  // `/workspace/store/` (messages.db — rw on trusted/main for the
+  // state-NNN-* tables, ro filtered copy on untrusted), and
+  // `/workspace/global/` (global config). Skills that previously
+  // wrote to `/workspace/group/` for cross-run state should migrate
+  // to `/workspace/state/`.
   const stateDir = path.join(DATA_DIR, 'state', group.folder);
   fs.mkdirSync(stateDir, { recursive: true });
   const stateUid = HOST_UID ?? 1000;
@@ -879,14 +880,31 @@ export function buildVolumeMounts(
   });
 
   // Store directory (messages.db).
-  // Trusted/main: full DB (all groups). Untrusted: filtered copy (own chat only).
+  // Trusted/main: full DB (all groups), READ-WRITE so skills can persist
+  //   per-skill state in the new `state-NNN-*` tables (epic #293 — orders,
+  //   email_feedback, …). Trust model: trusted agents already have write
+  //   power on the group folder and on /workspace/state/, so direct DB
+  //   writes are inside the same trust boundary. Without rw access here,
+  //   apply-order.py / write-orders-metadata.py / etc. fail with
+  //   "attempt to write a readonly database" — observed in production on
+  //   the first check-orders run after the #294 tile flip.
+  // Untrusted: filtered copy (own chat only), READ-ONLY so an untrusted
+  //   agent cannot mutate cross-group state via writes against the
+  //   filtered DB.
+  // The orchestrator opens messages.db in WAL mode (see src/db.ts).
+  // WAL coordinates concurrent writers via filesystem locks on
+  // messages.db plus its `.wal` and `.shm` sidecars — both processes
+  // need rw on all three files in the same directory. Mounting the
+  // `store/` dir (rather than the file alone) gives the agent access
+  // to the sidecars too. The orchestrator's `busy_timeout = 5000`
+  // pragma plus per-script transactions keep contention bounded.
   if (isMain || group.containerConfig?.trusted) {
     const storeDir = path.join(process.cwd(), 'store');
     if (fs.existsSync(storeDir)) {
       mounts.push({
         hostPath: toHostPath(storeDir),
         containerPath: '/workspace/store',
-        readonly: true,
+        readonly: false,
       });
     }
   } else {

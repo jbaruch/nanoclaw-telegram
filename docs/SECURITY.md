@@ -5,8 +5,8 @@
 | Trust Level | Who gets it | Capabilities |
 |-------------|-------------|-------------|
 | **Main** (isMain: true) | Admin control group | Full DB, writable group folder, all tiles, all credentials, group management |
-| **Trusted** (containerConfig.trusted: true) | Personal/friends groups | Full DB (read-only), writable group folder, core+trusted tiles, limited credentials |
-| **Untrusted** (default) | Public/external groups | Filtered DB (own chat only), read-only group folder, core+untrusted tiles, no credentials |
+| **Trusted** (containerConfig.trusted: true) | Personal/friends groups | Full DB (read-write — skills persist per-skill state in `state-NNN-*` tables), writable group folder, core+trusted tiles, limited credentials |
+| **Untrusted** (default) | Public/external groups | Filtered DB (own chat only, read-only), read-only group folder, core+untrusted tiles, no credentials |
 
 ## Security Boundaries
 
@@ -36,7 +36,7 @@ Untrusted containers receive a filtered SQLite copy containing only their own gr
 | `/workspace/group` | read-write | read-write | **read-only** |
 | `/workspace/global` | full directory | full directory (ro) | **SOUL-untrusted.md only** |
 | `/workspace/trusted` | read-write | read-write | **not mounted** |
-| `/workspace/store` | full DB (ro) | full DB (ro) | **filtered DB (ro)** |
+| `/workspace/store` | full DB (rw) | full DB (rw) | **filtered DB (ro)** |
 | `/workspace/ipc` | full (rw) | full (rw) | **split: messages/ rw, input/ ro, no tasks/** |
 
 ### 3. IPC Security
@@ -111,7 +111,7 @@ Single-command deploy via `scripts/deploy.sh`:
 |------------|------|---------|-----------|
 | Root filesystem | writable | writable | **read-only** |
 | Group folder | read-write | read-write | **read-only** |
-| Message database | full (rw) | full (ro) | **own chat only (ro)** |
+| Message database | full (rw) | full (rw) | **own chat only (ro)** |
 | Global memory | full dir (rw) | full dir (ro) | **SOUL-untrusted.md only** |
 | Shared trusted dir | read-write | read-write | **not mounted** |
 | IPC tasks | full | full | **not mounted** |
