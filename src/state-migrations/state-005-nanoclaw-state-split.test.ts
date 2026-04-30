@@ -127,6 +127,67 @@ describe('state-005-nanoclaw-state-split', () => {
     }
   });
 
+  it('email_seen_ids default seen_at produces ISO-8601 with T and Z (lex-safe with explicit writers)', () => {
+    // The trim-to-N contract relies on lex compare. Default writers
+    // (omitting seen_at) and explicit writers (passing ISO-8601)
+    // must produce sortable strings in the same shape. Verify the
+    // default's literal output matches the documented form
+    // YYYY-MM-DDTHH:MM:SS.SSSZ — `CURRENT_TIMESTAMP` would have
+    // produced `YYYY-MM-DD HH:MM:SS` (no T, no Z) and broken lex
+    // compare against explicit ISO-8601 writers.
+    const database = new Database(':memory:');
+    try {
+      applyStateMigrations(database, ALL);
+      database
+        .prepare(`INSERT INTO email_seen_ids (email_id) VALUES (?)`)
+        .run('id-default');
+      const row = database
+        .prepare(
+          `SELECT seen_at FROM email_seen_ids WHERE email_id = 'id-default'`,
+        )
+        .get() as { seen_at: string };
+      // ISO-8601 with T separator, fractional seconds, Z suffix.
+      expect(row.seen_at).toMatch(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$/,
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it('email_seen_ids trim-to-N works correctly with mixed default + explicit writers', () => {
+    // Combine an explicit-seen_at write (past) with a default-seen_at
+    // write (now) — the explicit-past row must trim out, the
+    // default-now row must survive. This is the exact scenario the
+    // CURRENT_TIMESTAMP→strftime fix addresses.
+    const database = new Database(':memory:');
+    try {
+      applyStateMigrations(database, ALL);
+      database
+        .prepare(`INSERT INTO email_seen_ids (email_id, seen_at) VALUES (?, ?)`)
+        .run('past', '2020-01-01T00:00:00.000Z');
+      database
+        .prepare(`INSERT INTO email_seen_ids (email_id) VALUES (?)`)
+        .run('now-default');
+
+      database
+        .prepare(
+          `DELETE FROM email_seen_ids
+            WHERE email_id NOT IN
+              (SELECT email_id FROM email_seen_ids
+                ORDER BY seen_at DESC LIMIT 1)`,
+        )
+        .run();
+
+      const survivors = database
+        .prepare('SELECT email_id FROM email_seen_ids')
+        .all() as Array<{ email_id: string }>;
+      expect(survivors.map((r) => r.email_id)).toEqual(['now-default']);
+    } finally {
+      database.close();
+    }
+  });
+
   it('email_seen_ids has the seen_at index', () => {
     const database = new Database(':memory:');
     try {

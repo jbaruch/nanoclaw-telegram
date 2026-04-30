@@ -26,6 +26,18 @@ import type { StateMigration } from '../db.js';
  *   - `email_seen_ids.seen_at` indexed for the trim-to-N sweep
  *     (`DELETE FROM email_seen_ids WHERE email_id NOT IN (SELECT
  *     email_id FROM email_seen_ids ORDER BY seen_at DESC LIMIT N)`).
+ *     Default value uses `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+ *     rather than `CURRENT_TIMESTAMP` because the trim-to-N
+ *     contract relies on lex ordering and writers passing explicit
+ *     `seen_at` use ISO-8601 with `T` and `Z` (JS
+ *     `Date#toISOString()`). `CURRENT_TIMESTAMP` produces
+ *     `YYYY-MM-DD HH:MM:SS` (no `T`, no `Z`); mixing the two
+ *     shapes in the same column would break the index lookup AND
+ *     the windowed DELETE. Same `%f` (fractional-seconds)
+ *     reasoning applies as state-004's purge predicate — see #296.
+ *   - `resumable_cycles.updated_at` uses the same
+ *     `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` default for the same
+ *     lex-ordering rationale.
  *   - `resumable_cycles.skill_name` is the natural PK because each
  *     skill owns at most one in-flight cycle; the cleanup contract
  *     collapses to a single `DELETE WHERE skill_name=? AND cycle_id=?`.
@@ -55,7 +67,7 @@ export const STATE_005_NANOCLAW_STATE_SPLIT: StateMigration = {
 
     CREATE TABLE email_seen_ids (
       email_id       TEXT PRIMARY KEY,
-      seen_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      seen_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
       schema_version INTEGER NOT NULL DEFAULT 1
     );
     CREATE INDEX idx_email_seen_ids_seen_at
@@ -68,7 +80,7 @@ export const STATE_005_NANOCLAW_STATE_SPLIT: StateMigration = {
       continuation_n  INTEGER NOT NULL DEFAULT 0,
       remaining_steps TEXT,
       schema_version  INTEGER NOT NULL DEFAULT 1,
-      updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     );
   `,
 };
