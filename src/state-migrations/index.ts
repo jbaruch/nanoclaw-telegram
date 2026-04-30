@@ -4,6 +4,7 @@ import { STATE_001_ORDERS } from './state-001-orders.js';
 import { STATE_002_EMAIL_FEEDBACK } from './state-002-email-feedback.js';
 import { STATE_003_EMAIL_FEEDBACK_SCHEMA_VERSION } from './state-003-email-feedback-schema-version.js';
 import { STATE_004_SCHEDULED_REMINDERS } from './state-004-scheduled-reminders.js';
+import { STATE_005_NANOCLAW_STATE_SPLIT } from './state-005-nanoclaw-state-split.js';
 
 /**
  * Registered state-table migrations, applied in order at orchestrator
@@ -20,4 +21,5 @@ export const STATE_MIGRATIONS: readonly StateMigration[] = [
   STATE_002_EMAIL_FEEDBACK,
   STATE_003_EMAIL_FEEDBACK_SCHEMA_VERSION,
   STATE_004_SCHEDULED_REMINDERS,
+  STATE_005_NANOCLAW_STATE_SPLIT,
 ];
