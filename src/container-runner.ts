@@ -842,10 +842,11 @@ export function buildVolumeMounts(
   // wipe; otherwise grows monotonically with whatever skills choose
   // to persist. Distinct from `/workspace/group/` (group-shared,
   // trust-conditional readonly), `/workspace/trusted/` (trusted-only),
-  // `/workspace/store/` (messages.db, readonly), `/workspace/global/`
-  // (global config). Skills that previously wrote to
-  // `/workspace/group/` for cross-run state should migrate to
-  // `/workspace/state/`.
+  // `/workspace/store/` (messages.db — rw on trusted/main for the
+  // state-NNN-* tables, ro filtered copy on untrusted), and
+  // `/workspace/global/` (global config). Skills that previously
+  // wrote to `/workspace/group/` for cross-run state should migrate
+  // to `/workspace/state/`.
   const stateDir = path.join(DATA_DIR, 'state', group.folder);
   fs.mkdirSync(stateDir, { recursive: true });
   const stateUid = HOST_UID ?? 1000;

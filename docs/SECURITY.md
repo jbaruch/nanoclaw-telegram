@@ -111,7 +111,7 @@ Single-command deploy via `scripts/deploy.sh`:
 |------------|------|---------|-----------|
 | Root filesystem | writable | writable | **read-only** |
 | Group folder | read-write | read-write | **read-only** |
-| Message database | full (rw) | full (ro) | **own chat only (ro)** |
+| Message database | full (rw) | full (rw) | **own chat only (ro)** |
 | Global memory | full dir (rw) | full dir (ro) | **SOUL-untrusted.md only** |
 | Shared trusted dir | read-write | read-write | **not mounted** |
 | IPC tasks | full | full | **not mounted** |
