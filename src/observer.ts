@@ -503,9 +503,11 @@ export function onAgentLine(source: string, raw: string): void {
     // deterministic done emoji rather than the new query's not-yet-
     // established state.
     stopWatchdog(source);
-    // A new query is starting — the 👀 reaction from telegram.ts is already
-    // on the message. Don't pre-emptively change it; the first thinking/tool
-    // event will swap to 🤔/🔧 naturally.
+    // A new query is starting. Don't pre-emptively send any
+    // reaction here — the agent-runner's react-first hook fires 👀
+    // from inside the container when the prompt is actually
+    // submitted (see `decideReactFirst`); the first thinking/tool
+    // event below will swap to 🤔/⚡ via the engagement-gated path.
     //
     // Don't arm the watchdog for scheduled tasks. Cron-driven queries
     // (SmartThings refresh, check-unanswered, heartbeat, etc.) run in

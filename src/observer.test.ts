@@ -10,18 +10,22 @@
  *
  * Specifically:
  *   - `onAgentLine` parses Query input boundaries (sets state, picks
- *     up `target_message_id`, picks up `scheduled_task`), per-block
- *     thinking / tool_use / tool_result events, and the final
- *     `Query done.` line including its metric tail.
+ *     up `target_message_id`, picks up `scheduled_task`, picks up
+ *     `addressed`), per-block thinking / tool_use / tool_result
+ *     events, and the final `Query done.` line including its metric
+ *     tail.
  *   - `committed` flips on the first non-thinking event so silent
  *     thinking-only turns leave the user's message untouched.
- *   - Watchdog arms for non-scheduled tasks and stays armed off for
- *     scheduled tasks (cron / heartbeat queries).
+ *   - Watchdog arms for non-scheduled tasks but stays unarmed for
+ *     scheduled tasks (cron / heartbeat queries) AND for explicitly
+ *     non-addressed queries (#289 — `requires_trigger=false`
+ *     bystander chatter that still routes to the agent).
  *   - `chunkText` handles under-size, exact-size, and over-size with
  *     whitespace fallback.
- *   - `noteLatestUserMessage` keys `lastReactionEmoji` under the
- *     same composite shape `updateReaction` consults — regression
- *     guard for the bug Copilot flagged in PR #240.
+ *   - `addressed=false` on the Query input line short-circuits the
+ *     entire reaction ladder; `addressed=true` fires it normally;
+ *     `addressed=` omitted falls through to the engagement gate
+ *     alone for backward compat.
  *   - `Query done.` cleanup drops `lastReactionEmoji` entries for
  *     the closing query — guards against the unbounded-growth bug
  *     Copilot flagged in PR #240.
@@ -64,10 +68,21 @@ interface CapturedMessage {
   replyTo?: string;
 }
 
-function makeStubChannel(): Channel & { _sent: CapturedMessage[] } {
+interface CapturedReaction {
+  jid: string;
+  messageId: string;
+  emoji: string;
+}
+
+function makeStubChannel(): Channel & {
+  _sent: CapturedMessage[];
+  _reactions: CapturedReaction[];
+} {
   const sent: CapturedMessage[] = [];
+  const reactions: CapturedReaction[] = [];
   return {
     _sent: sent,
+    _reactions: reactions,
     name: 'stub',
     isConnected: () => true,
     ownsJid: (jid: string) =>
@@ -76,9 +91,14 @@ function makeStubChannel(): Channel & { _sent: CapturedMessage[] } {
     sendMessage: async (jid: string, body: string, replyTo?: string) => {
       sent.push({ jid, body, replyTo });
     },
-    sendReaction: async () => {},
+    sendReaction: async (jid: string, messageId: string, emoji: string) => {
+      reactions.push({ jid, messageId, emoji });
+    },
     isPrivateChat: async () => true,
-  } as unknown as Channel & { _sent: CapturedMessage[] };
+  } as unknown as Channel & {
+    _sent: CapturedMessage[];
+    _reactions: CapturedReaction[];
+  };
 }
 
 function makeGroups(
@@ -97,7 +117,10 @@ function makeGroups(
 }
 
 describe('observer', () => {
-  let channel: Channel & { _sent: CapturedMessage[] };
+  let channel: Channel & {
+    _sent: CapturedMessage[];
+    _reactions: CapturedReaction[];
+  };
   let groups: Record<string, RegisteredGroup>;
 
   beforeEach(() => {
@@ -337,15 +360,16 @@ describe('observer', () => {
         'main',
         'Query done. Messages: 1, results: 1, lastAssistantUuid: abc, closedDuringQuery: false, wall_ms=10, tokens_in=5, tokens_out=1, cache_hit_rate=10.0',
       );
-      // No reactions sent on the user's chat — observer-chat
-      // summary still flushes (that's a different channel) but the
-      // reactions table on the user message stays empty.
-      const reactionMessages = channel._sent.filter(
-        (m) => m.jid !== 'tg:-100123',
+      // No reactions sent — channel.sendReaction was never invoked.
+      expect(channel._reactions).toHaveLength(0);
+      // Watchdog interval also never armed for the non-addressed
+      // query — the noise the gate exists to suppress includes the
+      // 🫡/🤓 blink emojis.
+      expect(__getObserverInternalsForTests().watchdogs.has('main')).toBe(
+        false,
       );
-      expect(reactionMessages).toHaveLength(0);
-      // The dedupe map should also be empty for the target — we
-      // never touched it because no reaction ever attempted to fire.
+      // Dedupe map untouched — `updateReaction` returned before
+      // touching it, so the target key never had an entry.
       expect(
         __getObserverInternalsForTests().lastReactionEmoji.has(
           'tg:-100123:msg_99',
@@ -359,7 +383,10 @@ describe('observer', () => {
         'Query input: 100 chars, target_message_id=msg_88, scheduled_task=false, addressed=true',
       );
       onAgentLine('main', '[msg #1] tool_use=Bash id=t1');
-      // Tool_use commits engagement and fires ⚡.
+      // Tool_use commits engagement and fires ⚡ via sendReaction.
+      expect(channel._reactions).toEqual([
+        { jid: 'tg:-100123', messageId: 'msg_88', emoji: '⚡' },
+      ]);
       expect(
         __getObserverInternalsForTests().lastReactionEmoji.get(
           'tg:-100123:msg_88',
@@ -374,12 +401,13 @@ describe('observer', () => {
       );
       onAgentLine('main', '[msg #1] tool_use=Bash id=t1');
       // Backward compat: lines without `addressed=` behave as
-      // before — committed → reaction fires.
-      expect(
-        __getObserverInternalsForTests().lastReactionEmoji.get(
-          'tg:-100123:msg_77',
-        ),
-      ).toBe('⚡');
+      // before — committed → reaction fires. Useful for legacy
+      // log lines and any caller that has no addressed-ness signal
+      // to emit (the gate prefers a false-positive over silently
+      // dropping reactions on legacy paths).
+      expect(channel._reactions).toEqual([
+        { jid: 'tg:-100123', messageId: 'msg_77', emoji: '⚡' },
+      ]);
     });
   });
 

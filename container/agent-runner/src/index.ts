@@ -1484,9 +1484,12 @@ async function runQuery(
   // observer's commit-gate fires a full progress sequence on
   // bystander chatter — the exact noise the gate was meant to kill.
   // Per-pipe `latestPipedAddressedToUs` wins over spawn-time, falls
-  // back to `containerInput.addressedToUs`. `-` means "no signal"
-  // (legacy paths, scheduled tasks); observer treats that as
-  // unaddressed for safety.
+  // back to `containerInput.addressedToUs`. `-` is the "no signal"
+  // sentinel (legacy paths, scheduled tasks, callers that don't
+  // pass the flag) — observer parses it as `addressed=undefined`
+  // and falls through to the engagement-gate alone, preserving
+  // pre-#289 behavior so legacy / non-channel paths keep their
+  // reactions when they commit.
   const queryAddressed =
     latestPipedAddressedToUs ?? containerInput.addressedToUs;
   const addressedField =
