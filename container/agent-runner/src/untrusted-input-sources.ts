@@ -38,5 +38,16 @@ export function wrapUntrustedInput(
 }
 
 function escapeAttr(s: string): string {
-  return s.replace(/"/g, '&quot;').replace(/[\r\n]+/g, ' ');
+  // `&` must be replaced first; substituting it after `&quot;` etc. would
+  // double-encode (`&quot;` → `&amp;quot;`). URLs in `web:` sources
+  // routinely contain `&` query separators, and identifiers in `gmail:` /
+  // `slack:` could contain `<` / `>` literals — leaving any of those
+  // un-escaped produces malformed markup that #322's walk-back would
+  // mis-parse.
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/[\r\n]+/g, ' ');
 }

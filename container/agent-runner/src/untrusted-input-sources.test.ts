@@ -32,6 +32,31 @@ describe('wrapUntrustedInput', () => {
     );
   });
 
+  it('escapes ampersands in URL query strings (web:)', () => {
+    expect(
+      wrapUntrustedInput('x', 'web', 'https://example.com/?a=1&b=2'),
+    ).toBe(
+      '<untrusted-input source="web:https://example.com/?a=1&amp;b=2">\nx\n</untrusted-input>',
+    );
+  });
+
+  it('escapes < and > in source values', () => {
+    expect(wrapUntrustedInput('x', 'gmail', 'msg=<id>')).toBe(
+      '<untrusted-input source="gmail:msg=&lt;id&gt;">\nx\n</untrusted-input>',
+    );
+  });
+
+  it('escapes & first so quote escapes are not double-encoded', () => {
+    // `&` is replaced before `"` so the `&` inside the resulting `&quot;`
+    // entity is NOT itself re-encoded to `&amp;quot;`.
+    expect(wrapUntrustedInput('x', 'web', 'a&b')).toBe(
+      '<untrusted-input source="web:a&amp;b">\nx\n</untrusted-input>',
+    );
+    expect(wrapUntrustedInput('x', 'web', 'a"&b')).toBe(
+      '<untrusted-input source="web:a&quot;&amp;b">\nx\n</untrusted-input>',
+    );
+  });
+
   it('collapses newlines inside the source value to a space', () => {
     expect(wrapUntrustedInput('x', 'file', '/a/b\n/c')).toBe(
       '<untrusted-input source="file:/a/b /c">\nx\n</untrusted-input>',
