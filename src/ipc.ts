@@ -15,6 +15,8 @@ import { sendPoolMessage } from './channels/telegram.js';
 import {
   AvailableGroup,
   DEFAULT_SESSION_NAME,
+  resolveAgentModel,
+  resolvePerGroupAgentModel,
   sessionInputDirName,
 } from './container-runner.js';
 import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
@@ -1827,6 +1829,15 @@ export async function processTaskIpc(
       // query for any N.
       const lastMessages = getLastFromMeMessages(targets);
 
+      // Resolve the orchestrator-wide default once. Each row then runs
+      // the per-group resolver against this baseline so the value
+      // reported here matches what `runContainerAgent` actually sets
+      // as `AGENT_MODEL` on spawn — including the typo-fallback
+      // behavior of `resolvePerGroupAgentModel`.
+      const globalDefaultAgentModel = resolveAgentModel(
+        process.env.AGENT_MODEL,
+      );
+
       const rows = targets.map((jid) => {
         const group = registeredGroups[jid];
         const tile: 'admin' | 'trusted' | 'untrusted' = group.isMain
@@ -1866,6 +1877,17 @@ export async function processTaskIpc(
                 maintenance: deps.getContainerStatus(jid, 'maintenance'),
               }
             : { default: 'not-spawned', maintenance: 'not-spawned' },
+          // Effective AGENT_MODEL for this group's next spawn — the
+          // per-group `containerConfig.agentModel` override resolved
+          // against the orchestrator-wide default. Surfaced for cost
+          // attribution / audit so operators don't have to grep spawn
+          // logs to learn which group runs which model (#395 follow-up).
+          // Mirrors the resolver at the spawn site exactly: typo-bad
+          // overrides resolve to the global default here too.
+          effective_agent_model: resolvePerGroupAgentModel(
+            group.containerConfig?.agentModel,
+            globalDefaultAgentModel,
+          ),
         };
       });
 
