@@ -174,8 +174,14 @@ export function extractCompactProvenance(transcriptContent: string): Set<string>
     let entry: unknown;
     try {
       entry = JSON.parse(line);
-    } catch {
-      continue;
+    } catch (err) {
+      // JSON.parse only throws SyntaxError on malformed input; that's
+      // the only failure mode this loop intentionally tolerates (live
+      // transcripts can carry trailing partial writes during a hot
+      // read). Any other thrown value is a real defect — propagate
+      // per `rules/error-handling.md` rather than silently swallowing.
+      if (err instanceof SyntaxError) continue;
+      throw err;
     }
     for (const text of flattenStrings(entry)) {
       collectFromText(text, out);
@@ -228,16 +234,48 @@ function collectFromText(text: string, out: Set<string>): void {
   }
 }
 
-function addIfValid(source: string | undefined, out: Set<string>): void {
-  if (typeof source !== 'string' || source.length === 0) return;
-  if (Buffer.byteLength(source, 'utf8') > MAX_SOURCE_BYTES) return;
-  // A valid typed source has a `prefix:value` shape with at least one
-  // non-empty character on each side. Reject `:foo`, `bar:`, and bare
-  // `baz` so the sidecar never carries malformed entries that the ACL
-  // would later collapse to the UNKNOWN_PREFIX sentinel for the wrong
-  // reason.
+/**
+ * Single source-of-truth predicate for "this string is safe to drop
+ * into a synthetic Encoding B marker line". Used both by the
+ * extractor (`addIfValid`) and by the parser (`parseSidecar`) so the
+ * two entry points can't drift — an attacker-crafted sidecar gets the
+ * same shape rules a real Encoding A/B sweep applies.
+ *
+ * Rules:
+ *
+ *   - non-empty string, byte-capped at `MAX_SOURCE_BYTES`
+ *   - typed `prefix:value` shape: at least one non-empty char on each
+ *     side of the first `:` so the ACL classifier doesn't collapse to
+ *     UNKNOWN_PREFIX for the wrong reason
+ *   - no `\r` / `\n` — `buildPostCompactReminder` interpolates the
+ *     value into a single Encoding B line that's matched by an
+ *     `^…$` multiline-anchored regex; an embedded newline would
+ *     break the regex on the synthetic line AND let an attacker
+ *     escape the marker context to inject arbitrary system-reminder
+ *     text after the marker
+ *   - no `"` — embedded double-quote in `source="..."` would close
+ *     the attribute prematurely and let an attacker inject extra
+ *     `tool_use_id="..."` or other attribute payload
+ *
+ * The Encoding A/B regexes already block `\n` (the captures use
+ * `[^"]*`, which matches newlines in JS by default — but the
+ * line-anchored Encoding B regex only matches if the WHOLE marker
+ * is on one line, so an embedded `\n` in a real transcript would
+ * already fail to capture). Restating the rule here is defence in
+ * depth for the parseSidecar path, which doesn't go through those
+ * regexes.
+ */
+function isWellFormedSource(source: unknown): source is string {
+  if (typeof source !== 'string' || source.length === 0) return false;
+  if (Buffer.byteLength(source, 'utf8') > MAX_SOURCE_BYTES) return false;
+  if (/[\r\n"]/.test(source)) return false;
   const colon = source.indexOf(':');
-  if (colon <= 0 || colon >= source.length - 1) return;
+  if (colon <= 0 || colon >= source.length - 1) return false;
+  return true;
+}
+
+function addIfValid(source: string | undefined, out: Set<string>): void {
+  if (!isWellFormedSource(source)) return;
   out.add(source);
 }
 
@@ -288,8 +326,14 @@ export function writeCompactProvenanceSidecar(
     );
     return filePath;
   } catch (err) {
+    // fs.mkdirSync / writeFileSync only throw `ErrnoException`s
+    // (EACCES on a hardened mount, EROFS on a read-only volume, ENOSPC
+    // on a full disk, etc.). JSON.stringify on `payload` cannot throw —
+    // every field is a typed primitive. So any non-ErrnoException here
+    // is a real defect; propagate per `rules/error-handling.md`.
+    if (!isErrnoException(err)) throw err;
     log?.(
-      `compact_provenance: sidecar write failed (${err instanceof Error ? err.message : String(err)})`,
+      `compact_provenance: sidecar write failed (${err.code ?? 'unknown'}: ${err.message})`,
     );
     return null;
   }
@@ -309,10 +353,20 @@ export function parseSidecar(raw: unknown): CompactProvenanceSidecar | null {
   if (typeof r.session_id !== 'string' || r.session_id.length === 0) return null;
   if (typeof r.created_at !== 'number' || !Number.isFinite(r.created_at)) return null;
   if (!Array.isArray(r.sources)) return null;
+  // Cap the array length BEFORE validating entries — an attacker-crafted
+  // sidecar with a million well-formed sources would otherwise pin a CPU
+  // re-validating each one. The cap matches the extractor's `MAX_SOURCES`
+  // so a legitimate sidecar never trips it (the writer already truncated
+  // at the same limit).
+  if (r.sources.length > MAX_SOURCES) return null;
   const sources: string[] = [];
   for (const s of r.sources) {
-    if (typeof s !== 'string') return null;
-    if (Buffer.byteLength(s, 'utf8') > MAX_SOURCE_BYTES) return null;
+    // Re-apply the SAME predicate the extractor uses. Without this,
+    // a sidecar that was tampered with at rest could carry sources
+    // with embedded newlines / double-quotes / missing colons; those
+    // would either bypass the Encoding B regex entirely (re-opening
+    // gates) or escape into adjacent attribute slots.
+    if (!isWellFormedSource(s)) return null;
     sources.push(s);
   }
   return {
@@ -352,24 +406,22 @@ export function readAndClearSidecar(
     const raw = fs.readFileSync(filePath, 'utf-8');
     payload = parseSidecar(JSON.parse(raw));
   } catch (err) {
+    // The two expected failure modes here are file-IO (`ErrnoException`
+    // on a vanished / unreadable / permission-denied file) and
+    // `SyntaxError` on a corrupt JSON payload. Both are recoverable —
+    // drop the bad file and return empty. Anything else (TypeError on a
+    // future refactor, etc.) is a real defect; propagate per
+    // `rules/error-handling.md`.
+    if (!(err instanceof SyntaxError) && !isErrnoException(err)) throw err;
     log?.(
       `compact_provenance: sidecar read failed (${err instanceof Error ? err.message : String(err)})`,
     );
-    // Drop the bad file so it doesn't block future runs.
-    try {
-      fs.unlinkSync(filePath);
-    } catch {
-      // already gone or unwritable; nothing to do
-    }
+    safeUnlink(filePath, log);
     return new Set();
   }
   if (!payload) {
     log?.(`compact_provenance: sidecar payload invalid; discarding`);
-    try {
-      fs.unlinkSync(filePath);
-    } catch {
-      // already gone or unwritable; nothing to do
-    }
+    safeUnlink(filePath, log);
     return new Set();
   }
   if (payload.session_id !== expectedSessionId) {
@@ -378,14 +430,57 @@ export function readAndClearSidecar(
     );
     return new Set();
   }
+  safeUnlink(filePath, log);
+  return new Set(payload.sources);
+}
+
+/**
+ * Type guard for `NodeJS.ErrnoException`. Node's fs APIs throw plain
+ * `Error` objects with a string `code` field (`ENOENT`, `EACCES`,
+ * `EROFS`, `EBUSY`, …); we use the presence of a string `code` as
+ * the duck-type check. `instanceof` against `NodeJS.ErrnoException`
+ * doesn't work — there's no constructor for it at runtime; the type
+ * is structural.
+ */
+function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
+  return (
+    err instanceof Error &&
+    typeof (err as NodeJS.ErrnoException).code === 'string'
+  );
+}
+
+/**
+ * Remove the sidecar file if present, tolerating only the expected
+ * fs error codes. ENOENT is the common case (file already deleted by a
+ * concurrent reader / never written / pruned by a janitor); the rest
+ * are listed because a hardened mount or read-only filesystem can
+ * surface any of them when a write/unlink races against a remount.
+ * Anything outside this set propagates so a permission regression or
+ * disk-fault doesn't go silent.
+ */
+const EXPECTED_UNLINK_CODES = new Set([
+  'ENOENT',
+  'EACCES',
+  'EPERM',
+  'EROFS',
+  'EBUSY',
+  'EIO',
+]);
+
+function safeUnlink(filePath: string, log?: (msg: string) => void): void {
   try {
     fs.unlinkSync(filePath);
-  } catch {
-    // best-effort delete; a stranded file is harmless because
-    // `expectedSessionId` keying means a future PostCompact in this
-    // session won't re-pick it up (we've already returned its contents).
+  } catch (err) {
+    if (!isErrnoException(err) || !EXPECTED_UNLINK_CODES.has(err.code ?? '')) {
+      throw err;
+    }
+    // Stranded files are harmless: the path is keyed on session id, so
+    // a stale entry only ever gets re-read by the same session id again,
+    // and we've already returned its contents to the caller.
+    log?.(
+      `compact_provenance: sidecar unlink skipped (${err.code ?? 'unknown'})`,
+    );
   }
-  return new Set(payload.sources);
 }
 
 /**
@@ -410,8 +505,10 @@ export function readAndClearSidecar(
  *      marker back to this module.
  *
  * The reminder text is intentionally NOT escaped — the source values
- * are gated by `addIfValid` (no newlines, byte-capped) at the extractor,
- * so by the time they reach this function they're safe to interpolate.
+ * are gated by `isWellFormedSource` (no `\r` / `\n`, no `"`, byte-capped,
+ * `prefix:value` shape) at every entry point (extractor + parser), so
+ * by the time they reach this function they are guaranteed to be safe
+ * to interpolate.
  */
 export function buildPostCompactReminder(sources: ReadonlySet<string>): string | null {
   if (sources.size === 0) return null;
@@ -453,8 +550,13 @@ export function persistCompactProvenance(
   try {
     content = fs.readFileSync(transcriptPath, 'utf-8');
   } catch (err) {
+    // Same posture as the read path in `readAndClearSidecar` —
+    // recoverable IO errors degrade gracefully (sidecar simply isn't
+    // written; PostCompact treats absence as "no prior state"); any
+    // other thrown value is a defect and propagates.
+    if (!isErrnoException(err)) throw err;
     log?.(
-      `compact_provenance: transcript read failed (${err instanceof Error ? err.message : String(err)})`,
+      `compact_provenance: transcript read failed (${err.code ?? 'unknown'}: ${err.message})`,
     );
     return 0;
   }

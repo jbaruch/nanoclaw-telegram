@@ -176,6 +176,59 @@ describe('extractCompactProvenance', () => {
     expect([...extractCompactProvenance(jsonl)]).toEqual([]);
   });
 
+  it('rejects sources containing newline characters', () => {
+    // A `\n` in the source would break the line-anchored Encoding B
+    // regex on the synthetic post-compaction marker, AND let an
+    // attacker escape the marker line to inject arbitrary
+    // system-reminder text. Both Encoding A and Encoding B emitters
+    // already reject newlines via attribute escaping, so this is a
+    // belt-and-suspenders defence at the sidecar boundary.
+    const jsonlA = jsonlOf([
+      {
+        type: 'user',
+        message: {
+          content: '<untrusted-input source="web:line1\nline2">x</untrusted-input>',
+        },
+      },
+    ]);
+    expect([...extractCompactProvenance(jsonlA)]).toEqual([]);
+    const jsonlB = jsonlOf([
+      {
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              content:
+                'PROVENANCE_MARKER: source="web:a\rb" tool_use_id="tu_x"',
+            },
+          ],
+        },
+      },
+    ]);
+    expect([...extractCompactProvenance(jsonlB)]).toEqual([]);
+  });
+
+  it('Encoding A/B regex tokenisation already keeps embedded quotes out of captures', () => {
+    // The regexes capture `[^"]*` for source values, so an attempt to
+    // sneak a `"` into the source attribute terminates the capture at
+    // the first quote — `web:a"b` only ever yields `web:a`, never
+    // a multi-attribute payload. Combined with `addIfValid`'s explicit
+    // quote rejection, both Encoding A and Encoding B paths are safe;
+    // the parseSidecar path covered separately below handles the
+    // tampered-at-rest case where the regex isn't involved.
+    const jsonl = jsonlOf([
+      {
+        type: 'user',
+        message: {
+          content:
+            '<untrusted-input source="web:safe">x</untrusted-input>',
+        },
+      },
+    ]);
+    expect([...extractCompactProvenance(jsonl)]).toEqual(['web:safe']);
+  });
+
   it('caps the result at MAX_SOURCES and preserves earliest sources', () => {
     const blocks: Array<Record<string, unknown>> = [];
     for (let i = 0; i < MAX_SOURCES + 5; i++) {
@@ -280,6 +333,102 @@ describe('parseSidecar', () => {
   it('rejects sources entries exceeding the byte cap', () => {
     const huge = 'x'.repeat(3000);
     expect(parseSidecar({ schema_version: 1, session_id: 'a', created_at: 0, sources: [huge] })).toBeNull();
+  });
+
+  it('rejects malformed prefix:value entries (sidecar tampering)', () => {
+    // The extractor enforces prefix:value at write time, but a
+    // sidecar can be edited at rest. parseSidecar must re-validate
+    // every entry — otherwise a tampered sidecar lands synthetic
+    // markers whose post-compaction effect isn't what the ACL
+    // expects.
+    expect(
+      parseSidecar({
+        schema_version: 1,
+        session_id: 'a',
+        created_at: 0,
+        sources: ['no-colon'],
+      }),
+    ).toBeNull();
+    expect(
+      parseSidecar({
+        schema_version: 1,
+        session_id: 'a',
+        created_at: 0,
+        sources: [':leading-colon'],
+      }),
+    ).toBeNull();
+    expect(
+      parseSidecar({
+        schema_version: 1,
+        session_id: 'a',
+        created_at: 0,
+        sources: ['trailing-colon:'],
+      }),
+    ).toBeNull();
+  });
+
+  it('rejects sources containing newlines or quotes (sidecar tampering)', () => {
+    // The reminder builder interpolates source values into
+    // `source="..."` slots and into single-line markers; an embedded
+    // `\n` or `"` from a tampered sidecar would either escape the
+    // attribute boundary or break the Encoding B line shape.
+    expect(
+      parseSidecar({
+        schema_version: 1,
+        session_id: 'a',
+        created_at: 0,
+        sources: ['web:line1\nline2'],
+      }),
+    ).toBeNull();
+    expect(
+      parseSidecar({
+        schema_version: 1,
+        session_id: 'a',
+        created_at: 0,
+        sources: ['web:has"quote'],
+      }),
+    ).toBeNull();
+    expect(
+      parseSidecar({
+        schema_version: 1,
+        session_id: 'a',
+        created_at: 0,
+        sources: ['web:carriage\rreturn'],
+      }),
+    ).toBeNull();
+  });
+
+  it('rejects sources arrays exceeding MAX_SOURCES', () => {
+    // A tampered sidecar with a million entries would otherwise pin a
+    // CPU re-validating each one before failing the contents check.
+    // The cap matches the writer's so a legitimate file never trips it.
+    const oversized = Array.from(
+      { length: MAX_SOURCES + 1 },
+      (_, i) => `web:https://e${i}.io`,
+    );
+    expect(
+      parseSidecar({
+        schema_version: 1,
+        session_id: 'a',
+        created_at: 0,
+        sources: oversized,
+      }),
+    ).toBeNull();
+  });
+
+  it('accepts sources arrays exactly at MAX_SOURCES', () => {
+    const atCap = Array.from(
+      { length: MAX_SOURCES },
+      (_, i) => `web:https://e${i}.io`,
+    );
+    const result = parseSidecar({
+      schema_version: 1,
+      session_id: 'a',
+      created_at: 0,
+      sources: atCap,
+    });
+    expect(result).not.toBeNull();
+    expect(result!.sources.length).toBe(MAX_SOURCES);
   });
 });
 

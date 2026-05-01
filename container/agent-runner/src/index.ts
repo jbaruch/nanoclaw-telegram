@@ -411,20 +411,21 @@ function createPreCompactHook(assistantName?: string): HookCallback {
     // #327 — persist provenance sidecar for the matching PostCompact
     // hook. Independent of the archive flow above: archive may be
     // skipped (no messages) yet still need to capture provenance, and
-    // a sidecar-write failure must not regress the archive.
+    // an archive-write failure must not regress sidecar persistence.
+    //
+    // `persistCompactProvenance` is documented to swallow recoverable
+    // IO/parse errors internally; any exception that escapes is a real
+    // defect, so we don't wrap it in a catch-all here per
+    // `rules/error-handling.md`. If the test suite stops covering that
+    // contract, the failure will surface here loudly instead of being
+    // silently logged into oblivion.
     if (sessionId) {
-      try {
-        persistCompactProvenance(
-          transcriptPath,
-          COMPACT_PROVENANCE_STATE_DIR,
-          sessionId,
-          log,
-        );
-      } catch (err) {
-        log(
-          `compact_provenance: persist failed (${err instanceof Error ? err.message : String(err)})`,
-        );
-      }
+      persistCompactProvenance(
+        transcriptPath,
+        COMPACT_PROVENANCE_STATE_DIR,
+        sessionId,
+        log,
+      );
     }
 
     return {};
@@ -453,19 +454,15 @@ function createPostCompactHook(): HookCallback {
     if (!sessionId) {
       return {};
     }
-    let sources: Set<string>;
-    try {
-      sources = readAndClearSidecar(
-        COMPACT_PROVENANCE_STATE_DIR,
-        sessionId,
-        log,
-      );
-    } catch (err) {
-      log(
-        `compact_provenance: sidecar read failed (${err instanceof Error ? err.message : String(err)})`,
-      );
-      return {};
-    }
+    // `readAndClearSidecar` swallows expected IO/parse errors
+    // internally; any exception that escapes is a real defect, so per
+    // `rules/error-handling.md` we let it propagate rather than
+    // converting to a log line that would mask a genuine fault.
+    const sources = readAndClearSidecar(
+      COMPACT_PROVENANCE_STATE_DIR,
+      sessionId,
+      log,
+    );
     if (sources.size === 0) {
       return {};
     }
