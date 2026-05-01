@@ -9,8 +9,10 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IPC_POLL_INTERVAL,
+  STORE_DIR,
   TIMEZONE,
 } from './config.js';
+import { syncBackupRepo } from './backup-sync.js';
 import { sendPoolMessage } from './channels/telegram.js';
 import {
   AvailableGroup,
@@ -2571,12 +2573,9 @@ export async function processTaskIpc(
 
     case 'github_backup':
       if (data.requestId) {
-        const backupDir = path.join(
-          process.cwd(),
-          'groups',
-          sourceGroup,
-          'backup-repo',
-        );
+        const groupDir = path.join(GROUPS_DIR, sourceGroup);
+        const backupDir = path.join(groupDir, 'backup-repo');
+        const dbPath = path.join(STORE_DIR, 'messages.db');
         const resultPath = scriptResultPath(sourceGroup, data);
 
         if (!fs.existsSync(backupDir)) {
@@ -2587,10 +2586,45 @@ export async function processTaskIpc(
           break;
         }
 
+        // Sync live group state into backup-repo BEFORE git plumbing.
+        // After the state-001…state-010 epic, the JSON state files
+        // that the previous pipeline relied on stopped existing on
+        // disk (state lives in store/messages.db now), so `git add
+        // -A` had nothing to stage and the daily commit was a no-op
+        // for 18 days. The sync step copies MEMORY.md /
+        // daily_discoveries.md, mirrors memory/, and dumps the
+        // SQLite state-table surface into backup-repo/state/<table>.sql
+        // so per-day diffs become meaningful again. See #397.
+        let syncSummary;
+        try {
+          syncSummary = syncBackupRepo({ groupDir, backupDir, dbPath });
+        } catch (e) {
+          // Non-Error throws (TypeScript allows `throw 42`) bubble up
+          // — those indicate a bug, not an operational sync failure.
+          if (!(e instanceof Error)) throw e;
+          logger.error(
+            { sourceGroup, groupDir, backupDir, dbPath, error: e.message },
+            'github_backup sync failed',
+          );
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({ error: e.message, stage: 'sync' }),
+          );
+          break;
+        }
+
         const commitMsg =
           data.message || `backup: ${new Date().toISOString().split('T')[0]}`;
         logger.info(
-          { sourceGroup, backupDir, commitMsg },
+          {
+            sourceGroup,
+            backupDir,
+            commitMsg,
+            copied: syncSummary.copied.length,
+            removed: syncSummary.removed.length,
+            dumped: syncSummary.dumped.length,
+            skipped: syncSummary.skipped.length,
+          },
           'Running github_backup',
         );
 
@@ -2603,7 +2637,7 @@ export async function processTaskIpc(
           'bash',
           [
             '-c',
-            `cd "${backupDir}" && git add -A && git diff --cached --quiet && echo '{"stdout":"Nothing to commit."}' || (git commit -m "${commitMsg.replace(/"/g, '\\"')}" && git push && echo '{"stdout":"Committed and pushed."}')`,
+            `cd "${backupDir}" && git add -A && (git diff --cached --quiet && echo '{"committed":false,"stdout":"Nothing to commit."}' || (git commit -m "${commitMsg.replace(/"/g, '\\"')}" && git push && echo '{"committed":true,"stdout":"Committed and pushed."}'))`,
           ],
           {
             timeout: 60_000,
@@ -2636,20 +2670,27 @@ export async function processTaskIpc(
                 JSON.stringify({
                   error: error.message,
                   stderr: stderr.slice(-500),
+                  stage: 'git',
+                  sync_summary: syncSummary,
                 }),
               );
             } else {
               // stdout is the JSON echo from the bash script
+              const lastLine = stdout.trim().split('\n').pop() ?? '';
+              let parsed: { committed?: boolean; stdout?: string };
               try {
-                const parsed = JSON.parse(stdout.trim().split('\n').pop()!);
-                fs.writeFileSync(resultPath, JSON.stringify(parsed));
+                parsed = JSON.parse(lastLine) as typeof parsed;
               } catch {
-                fs.writeFileSync(
-                  resultPath,
-                  JSON.stringify({ stdout: stdout.trim() }),
-                );
+                parsed = { stdout: stdout.trim() };
               }
-              logger.info({ sourceGroup }, 'github_backup completed');
+              fs.writeFileSync(
+                resultPath,
+                JSON.stringify({ ...parsed, sync_summary: syncSummary }),
+              );
+              logger.info(
+                { sourceGroup, committed: parsed.committed },
+                'github_backup completed',
+              );
             }
           },
         );

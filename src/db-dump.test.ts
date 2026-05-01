@@ -4,7 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { runDumpPlan, STATE_TABLES } from './dump-state-tables.js';
+import { runDumpPlan, STATE_TABLES } from './db-dump.js';
 
 let tmpRoot: string;
 let dbPath: string;
