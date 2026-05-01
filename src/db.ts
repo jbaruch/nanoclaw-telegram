@@ -1961,6 +1961,18 @@ function migrateJsonState(): void {
   // `calendar-state.json.migrated-YYYY-MM-DD`, so a re-run of
   // `initDatabase` is a no-op once the file is gone.
   migrateCalendarStateJsonFiles();
+
+  // Migrate per-group heartbeat-state.json files into the
+  // `phase_completions` table (#301). The state-009 schema landed in
+  // PR #346; this pass populates the three phase rows (heartbeat,
+  // nightly, weekly) from the JSON-era envelope plus the heartbeat-
+  // specific `last_composio_check` extra in the heartbeat row's
+  // `metadata` JSON blob (writer-decides convention per the state-009
+  // doc-header). UPSERT keyed on `phase` so a re-run with newer values
+  // wins without resetting defaulted columns. Source renamed to
+  // `heartbeat-state.json.migrated-YYYY-MM-DD` on success — re-run is
+  // a no-op once the suffix is in place.
+  migrateHeartbeatStateJsonFiles();
 }
 
 interface OrdersDbJsonRecord {
@@ -2716,5 +2728,145 @@ function migrateCalendarStateJsonFiles(): void {
       'calendar-state.json',
       counts,
     );
+  }
+}
+
+/**
+ * Shape of the JSON-era `groups/<name>/heartbeat-state.json` envelope
+ * the heartbeat / nightly / weekly skills used to share via
+ * `LOCK_EX` (#301). Every key is optional because the file accumulated
+ * incrementally — an early-stage group may have only run the heartbeat
+ * phase, leaving `nightly_last_completed` / `weekly_last_completed`
+ * absent until those phases first ran. The migration imports whichever
+ * keys are present and silently skips the absent ones.
+ *
+ * `last_composio_check` is the heartbeat skill's local extra; per the
+ * state-009 doc-header it lands inside the `metadata` JSON blob on the
+ * `heartbeat` row when present. `nightly` and `weekly` rows have no
+ * phase-specific extras today, so their `metadata` is NULL.
+ */
+interface HeartbeatStateJsonShape {
+  heartbeat_last_completed?: unknown;
+  nightly_last_completed?: unknown;
+  weekly_last_completed?: unknown;
+  last_composio_check?: unknown;
+}
+
+function migrateHeartbeatStateJsonFiles(): void {
+  const groupFolders = listGroupFoldersForMigration();
+  if (groupFolders.length === 0) return;
+
+  // UPSERT keyed on `phase` (PK) — see the state-009 doc-header for
+  // the full rationale. Crucially NOT `INSERT OR REPLACE`: the latter
+  // is delete+insert in SQLite and would reset defaulted columns the
+  // UPSERT doesn't name — load-bearingly `schema_version`, which the
+  // owner skill bumps to drive future shape migrations. The UPSERT
+  // here touches exactly the three columns the writer cares about
+  // and stamps `updated_at` explicitly so a writer-supplied
+  // `last_completed` from a clock that drifts can't outrun the row's
+  // own mutation log.
+  // metadata uses COALESCE(excluded.metadata, metadata) so a NULL
+  // payload (e.g. a JSON file with `nightly_last_completed` set but no
+  // `last_composio_check`) doesn't wipe metadata that an earlier run
+  // already wrote into the row. The non-NULL precedence is "newest
+  // wins"; NULL is treated as "no opinion, leave existing".
+  const upsertPhase = db.prepare(
+    `INSERT INTO phase_completions (phase, last_completed, metadata)
+     VALUES (?, ?, ?)
+     ON CONFLICT(phase) DO UPDATE SET
+       last_completed = excluded.last_completed,
+       metadata       = COALESCE(excluded.metadata, phase_completions.metadata),
+       updated_at     = CURRENT_TIMESTAMP`,
+  );
+
+  const stamp = migrationDateStamp();
+  const fileLabel = 'heartbeat-state.json';
+
+  for (const folder of groupFolders) {
+    const filePath = path.join(GROUPS_DIR, folder, 'heartbeat-state.json');
+    if (!fs.existsSync(filePath)) continue;
+
+    let raw: string;
+    try {
+      raw = fs.readFileSync(filePath, 'utf-8');
+    } catch (err) {
+      // TOCTOU: file may disappear between `existsSync` and
+      // `readFileSync` (concurrent migration run, manual cleanup).
+      // Treat ENOENT as an idempotent info-level skip; every other
+      // errno propagates per `coding-policy: error-handling`.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        logger.info(
+          { folder, filePath },
+          'heartbeat-state.json migration: file disappeared between existsSync and readFileSync, skipping',
+        );
+        continue;
+      }
+      throw err;
+    }
+
+    const parsed = parseJsonObjectOrWarn(raw, folder, fileLabel);
+    if (parsed === null) continue;
+
+    // Phase-row plan. The shape is deliberately a small array so the
+    // three branches share one loop and one transaction — adding a
+    // future phase (e.g. `composio` split out of the heartbeat blob)
+    // is a one-line append, not a fourth branch to keep in sync.
+    //
+    // `metadataObj` is the writer-decides convention from the
+    // state-009 doc-header: today only `heartbeat` carries an extra
+    // (`last_composio_check`); `nightly` and `weekly` stay NULL. A
+    // reader doesn't infer "no extras" from "{}" — absence means
+    // "no extras to record".
+    const composio = (parsed as HeartbeatStateJsonShape).last_composio_check;
+    const phases: ReadonlyArray<{
+      phase: string;
+      tsKey: keyof HeartbeatStateJsonShape;
+      metadataObj: Record<string, unknown> | null;
+    }> = [
+      {
+        phase: 'heartbeat',
+        tsKey: 'heartbeat_last_completed',
+        metadataObj:
+          typeof composio === 'string' && composio.length > 0
+            ? { last_composio_check: composio }
+            : null,
+      },
+      { phase: 'nightly', tsKey: 'nightly_last_completed', metadataObj: null },
+      { phase: 'weekly', tsKey: 'weekly_last_completed', metadataObj: null },
+    ];
+
+    // Wrap the per-file work in a single transaction so a partial
+    // failure on one of the three phase UPSERTs rolls all of them
+    // back. Without the transaction wrapper, a crash mid-import (e.g.
+    // a future CHECK constraint violation on the `weekly` row) would
+    // leave the table with `heartbeat` / `nightly` committed and
+    // `weekly` missing — the operator would then have to triage a
+    // half-migrated state.
+    const importFile = db.transaction(() => {
+      let importedPhases = 0;
+      for (const { phase, tsKey, metadataObj } of phases) {
+        const ts = (parsed as HeartbeatStateJsonShape)[tsKey];
+        if (typeof ts !== 'string' || ts.length === 0) continue;
+        upsertPhase.run(
+          phase,
+          ts,
+          metadataObj === null ? null : JSON.stringify(metadataObj),
+        );
+        importedPhases++;
+      }
+      return { importedPhases };
+    });
+
+    let counts: { importedPhases: number };
+    try {
+      counts = importFile();
+    } catch (err) {
+      // The helper either returns true (caller continues) or rethrows;
+      // there's no third path. Match the calendar-state pattern.
+      handleConstraintViolationOrRethrow(err, folder, fileLabel);
+      continue;
+    }
+
+    renameMigratedSource(filePath, stamp, folder, fileLabel, counts);
   }
 }
