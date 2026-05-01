@@ -5,8 +5,10 @@
 FROM node:22-slim
 
 # Install Docker CLI, build tools for native modules (better-sqlite3),
-# and GitHub CLI (required by scripts/promote-to-tile-repo.sh to open
-# tile-repo PRs and summon Copilot review via GraphQL).
+# the sqlite3 CLI (used by src/db-dump.ts for `.dump` per-table SQL
+# exports — see #397's github_backup pipeline), and GitHub CLI
+# (required by scripts/promote-to-tile-repo.sh to open tile-repo PRs
+# and summon Copilot review via GraphQL).
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
@@ -14,6 +16,7 @@ RUN apt-get update && apt-get install -y \
     python3 \
     make \
     g++ \
+    sqlite3 \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
