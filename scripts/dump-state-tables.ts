@@ -21,22 +21,20 @@ import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
 
-// Tables created by `src/db.ts` createSchema() and the
-// state-001…state-010 migrations, in declaration order. Add to this
-// list when a new table joins the migrated state surface — the dump
-// script's contract is "everything in STATE_TABLES is recoverable
-// from <outDir>/<table>.sql".
+// Tables that comprise the irreplaceable state surface — the queue
+// and config tables called out in #398. Adding a new table here
+// extends the dump contract: "everything in STATE_TABLES is
+// recoverable from <outDir>/<table>.sql".
+//
+// Intentionally excluded by default: bulk caches that are recoverable
+// from their upstream source — `messages`, `chats`, `reactions`
+// (Telegram is the source of truth for the message log), `sessions`
+// (ephemeral SDK session cache), `smart_home_events` (recoverable
+// from Hubitat). They're also large enough that buffering `.dump`
+// output through `maxBuffer` would either OOM or produce dumps that
+// don't diff usefully in `backup-repo`. Pass `--tables messages`
+// (etc.) to dump them explicitly.
 export const STATE_TABLES: readonly string[] = [
-  // src/db.ts createSchema
-  'chats',
-  'messages',
-  'scheduled_tasks',
-  'task_run_logs',
-  'reactions',
-  'router_state',
-  'sessions',
-  'registered_groups',
-  'smart_home_events',
   // state-001
   'orders',
   'orders_metadata',
@@ -63,7 +61,29 @@ export const STATE_TABLES: readonly string[] = [
   // state-010
   'tz_state',
   'follow_me_tasks',
+  // src/db.ts createSchema — small queue/log tables called out in #398
+  'scheduled_tasks',
+  'task_run_logs',
 ];
+
+// SQLite identifiers may contain letters, digits, and underscores,
+// and must not start with a digit. Restrictive but covers every
+// table this codebase has ever defined and rejects metacharacters
+// (`;`, `'`, spaces, ` -- `, etc.) that the `sqlite3` CLI's command
+// parser would otherwise interpret. Operator-supplied `--tables`
+// values are validated against this regex; failure aborts the run
+// rather than silently dropping the offender.
+const TABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function validateTableNames(tables: readonly string[]): void {
+  for (const t of tables) {
+    if (!TABLE_NAME_RE.test(t)) {
+      throw new Error(
+        `dump-state-tables: invalid table name ${JSON.stringify(t)} — must match /^[A-Za-z_][A-Za-z0-9_]*$/. Pass only real SQLite table identifiers via --tables.`,
+      );
+    }
+  }
+}
 
 export interface DumpReport {
   dumped: string[];
@@ -131,6 +151,7 @@ export function runDumpPlan(args: {
   tables?: readonly string[];
 }): DumpReport {
   const tables = args.tables ?? STATE_TABLES;
+  validateTableNames(tables);
   if (!fs.existsSync(args.dbPath)) {
     throw new Error(
       `dump-state-tables: db not found at ${args.dbPath} — pass --db-path pointing at a SQLite file (default project layout: store/messages.db)`,
@@ -152,7 +173,10 @@ export function runDumpPlan(args: {
   return report;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href
+) {
   const args = process.argv.slice(2);
   const flag = (name: string): string | undefined => {
     const idx = args.indexOf(name);

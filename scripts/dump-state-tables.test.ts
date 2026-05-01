@@ -162,11 +162,35 @@ describe('STATE_TABLES', () => {
       'phase_completions',
       'tz_state',
       'follow_me_tasks',
+      'scheduled_tasks',
+      'task_run_logs',
     ];
     for (const t of required) expect(STATE_TABLES).toContain(t);
   });
 
+  it('excludes bulk-cache tables that are recoverable from their upstream source', () => {
+    // `messages`, `chats`, `reactions` are recoverable from Telegram;
+    // `sessions` is an ephemeral SDK cache; `smart_home_events` is
+    // recoverable from Hubitat. They're also large enough that
+    // buffered `.dump` would OOM and produce poor diffs.
+    const excluded = ['messages', 'chats', 'reactions', 'sessions', 'smart_home_events'];
+    for (const t of excluded) expect(STATE_TABLES).not.toContain(t);
+  });
+
   it('has no duplicate entries', () => {
     expect(new Set(STATE_TABLES).size).toBe(STATE_TABLES.length);
+  });
+});
+
+describe('table name validation', () => {
+  it('rejects table names containing metacharacters', () => {
+    expect(() =>
+      runDumpPlan({ dbPath, outDir, tables: ["orders'; DROP TABLE x; --"] }),
+    ).toThrow(/invalid table name/);
+    expect(() => runDumpPlan({ dbPath, outDir, tables: ['a b'] })).toThrow(/invalid table name/);
+    expect(() => runDumpPlan({ dbPath, outDir, tables: ['1leading_digit'] })).toThrow(
+      /invalid table name/,
+    );
+    expect(() => runDumpPlan({ dbPath, outDir, tables: [''] })).toThrow(/invalid table name/);
   });
 });
