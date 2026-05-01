@@ -50,6 +50,12 @@ import {
   recordEvent,
   RateLimitCounters,
 } from './rate-limits.js';
+import {
+  QuarantineFlagState,
+  createQuarantineFlagState,
+  decideMemoryWrite,
+  promptCarriesUntrustedInput,
+} from './memory-quarantine.js';
 import { decideGroundTruthReminder } from './ground-truth-reminder.js';
 import { detectLazyVerification } from './lazy-verification.js';
 import { createReadonlyWarner } from './ipc-readonly-warn.js';
@@ -75,7 +81,7 @@ import {
 } from './silent-turn-audit.js';
 import { buildSubagentRuleFilePaths } from './subagent-prompt.js';
 import { wrapUntrustedInput } from './untrusted-input-sources.js';
-import { wrapMcpToolResult } from './untrusted-input-wrap.js';
+import { inferReadSource, wrapMcpToolResult } from './untrusted-input-wrap.js';
 import {
   formatSentinel,
   inferSentinelSource,
@@ -1687,6 +1693,174 @@ function createComposioArgValidatorHook(): HookCallback {
 }
 
 /**
+ * #325 — Memory write quarantine hooks.
+ *
+ * The trio operates on a per-`runQuery` `processedExternalContent`
+ * flag (in-memory; resets each runQuery):
+ *
+ *   1. `createQuarantineFlagPromptHook` — UserPromptSubmit. Scans the
+ *      prompt body for `<untrusted-input source="...">` markers
+ *      (cross-group / untrusted-container wraps) and flips the flag
+ *      if found. The flag-flip happens BEFORE any tool call in the
+ *      turn, so a Write that immediately follows a poisoned prompt
+ *      lands in quarantine instead of the real path.
+ *
+ *   2. `createQuarantineFlagFlipPostHook` — PostToolUse on tools that
+ *      can emit #321 markers. Reuses the same classifiers
+ *      (`inferReadSource` for MCP read tools, `inferSentinelSource`
+ *      for built-ins) so the flip stays in lockstep with marker
+ *      emission — a future emitter that adds a new prefix doesn't
+ *      need to remember to flip the flag here too.
+ *
+ *   3. `createMemoryQuarantineHook` — PreToolUse on `Write` / `Edit`.
+ *      When the flag is set and the target is under
+ *      `/workspace/trusted/` (excluding the quarantine subtree), the
+ *      hook itself writes the model's content to
+ *      `/workspace/trusted/quarantine/<session-id>/<rel-path>` and
+ *      denies the original call. Edit denies hard with a deny reason
+ *      explaining the redirect (surgical-edit semantics don't survive
+ *      redirect to a fresh quarantine snapshot).
+ */
+function createQuarantineFlagPromptHook(
+  state: QuarantineFlagState,
+): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const submit = input as UserPromptSubmitHookInput;
+    if (state.processedExternalContent) return {};
+    if (promptCarriesUntrustedInput(submit.prompt)) {
+      state.processedExternalContent = true;
+      log(
+        `UserPromptSubmit: memory_quarantine flag flipped — prompt carries <untrusted-input> wrap`,
+      );
+    }
+    return {};
+  };
+}
+
+function createQuarantineFlagFlipPostHook(
+  state: QuarantineFlagState,
+): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const post = input as PostToolUseHookInput;
+    if (state.processedExternalContent) return {};
+    // Either marker source is enough — both classifiers return null
+    // for tools that don't emit a marker, so the flip is gated to
+    // tools that actually pulled external content.
+    const readSource = inferReadSource(post.tool_name);
+    const sentinelSource =
+      readSource === null
+        ? inferSentinelSource(post.tool_name, post.tool_input)
+        : null;
+    if (readSource === null && sentinelSource === null) return {};
+    state.processedExternalContent = true;
+    const which = readSource ? 'wrap' : 'sentinel';
+    const prefix = readSource?.prefix ?? sentinelSource?.prefix;
+    log(
+      `PostToolUse: memory_quarantine flag flipped — ${post.tool_name} emitted ${which} prefix=${prefix}`,
+    );
+    return {};
+  };
+}
+
+function createMemoryQuarantineHook(
+  fsModule: typeof import('fs'),
+  state: QuarantineFlagState,
+  sessionIdFor: () => string,
+): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const pre = input as PreToolUseHookInput;
+    if (pre.tool_name !== 'Write' && pre.tool_name !== 'Edit') return {};
+    const filePath = (pre.tool_input as { file_path?: unknown })?.file_path;
+    if (typeof filePath !== 'string' || filePath.length === 0) return {};
+
+    const decision = decideMemoryWrite({
+      toolName: pre.tool_name,
+      filePath,
+      flag: state,
+      sessionId: sessionIdFor(),
+    });
+
+    if (decision.kind === 'allow') return {};
+
+    if (decision.kind === 'deny') {
+      log(
+        `PreToolUse: memory_quarantine DENY ${pre.tool_name} on ${decision.originalPath}`,
+      );
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse' as const,
+          permissionDecision: 'deny' as const,
+          permissionDecisionReason: decision.reason,
+        },
+      };
+    }
+
+    // kind === 'redirect' — Write the model's content to the
+    // quarantine path ourselves, then deny the original call. This
+    // makes the redirect structural; agent cooperation isn't
+    // required, and a denied-then-not-cooperated case still results
+    // in the trusted/ file remaining unchanged (which is the safe
+    // outcome).
+    const content = (pre.tool_input as { content?: unknown })?.content;
+    if (typeof content !== 'string') {
+      log(
+        `PreToolUse: memory_quarantine WARN — Write on ${decision.originalPath} had non-string content; falling back to plain deny`,
+      );
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse' as const,
+          permissionDecision: 'deny' as const,
+          permissionDecisionReason: decision.reason,
+        },
+      };
+    }
+    try {
+      fsModule.mkdirSync(path.dirname(decision.quarantinedTo), {
+        recursive: true,
+      });
+      // Atomic write — temp + rename — same posture as the other
+      // /workspace/trusted/ writers (#320 / #324) so a concurrent
+      // promote operation can't observe a partial file.
+      const tmpPath = `${decision.quarantinedTo}.tmp.${process.pid}`;
+      fsModule.writeFileSync(tmpPath, content);
+      fsModule.renameSync(tmpPath, decision.quarantinedTo);
+    } catch (err) {
+      // Quarantine write failed — deny the original write rather
+      // than passing it through. Failing closed here means a
+      // misconfigured quarantine subtree (e.g. permissions issue)
+      // doesn't accidentally let the real /workspace/trusted/
+      // write succeed.
+      log(
+        `PreToolUse: memory_quarantine FAIL_CLOSED — write to ${decision.quarantinedTo} failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse' as const,
+          permissionDecision: 'deny' as const,
+          permissionDecisionReason:
+            `memory_quarantine: redirect target ${decision.quarantinedTo} ` +
+            `could not be written. The original /workspace/trusted/ write ` +
+            `is denied to keep the trust boundary intact. Operator: check ` +
+            `quarantine subtree permissions and retry.`,
+        },
+      };
+    }
+    log(
+      `PreToolUse: memory_quarantine REDIRECT ${decision.originalPath} → ${decision.quarantinedTo}`,
+    );
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: 'deny' as const,
+        permissionDecisionReason: decision.reason,
+      },
+    };
+  };
+}
+
+/**
  * #226 (tracks #214) — authoritative-source-nudge. Intercept entity-
  * lookup tool calls (Composio search/list, raw `SELECT FROM chats
  * LIMIT`, reads of the `available_groups.json` snapshot) and inject a
@@ -2346,6 +2520,17 @@ async function runQuery(
   replyThreadingState.latestInboundId = extractLatestInboundId(prompt);
   const isMaintenanceSession = containerInput.sessionName === 'maintenance';
 
+  // #325 — memory write quarantine flag. Per-runQuery, in-memory.
+  // UserPromptSubmit / PostToolUse hooks flip the flag when external
+  // content is observed; PreToolUse on Write/Edit redirects to
+  // /workspace/trusted/quarantine/<session-id>/... when set.
+  // Lifetime: one runQuery() call. The flag is monotonic within a
+  // runQuery (once external content is seen, it stays seen) — a
+  // chained MessageStream that loops back to a "clean" turn does
+  // not undo the flip; the trust boundary correctly records that
+  // THIS run's session has touched external content.
+  const quarantineFlagState = createQuarantineFlagState();
+
   // #142 — silent-turn-audit state shared by the UserPromptSubmit /
   // PreToolUse / Stop hooks. Lifetime: one runQuery() call.
   // UserPromptSubmit resets the per-turn flags, so this single state
@@ -2755,6 +2940,14 @@ async function runQuery(
             hooks: [createReplyThreadingPromptHook(replyThreadingState)],
           },
           { hooks: [createSilentTurnPromptHook(silentTurnState)] },
+          // #325 — flip the memory-write-quarantine flag if the
+          // prompt body carries any `<untrusted-input source="...">`
+          // wrap (cross-group / untrusted-container). Runs at
+          // prompt-time so a Write that immediately follows the
+          // poisoned prompt lands in quarantine.
+          {
+            hooks: [createQuarantineFlagPromptHook(quarantineFlagState)],
+          },
         ],
         // #135 — block end-of-turn messages that surface banned
         // verification excuses without enumerating real attempts.
@@ -2885,6 +3078,26 @@ async function runQuery(
             matcher: '^(Write|Edit|Bash)$',
             hooks: [createConfirmationTokenWriteGate()],
           },
+          // #325 — memory-write quarantine. PreToolUse on Write/Edit
+          // checks the per-runQuery `processedExternalContent` flag
+          // (set by the UserPromptSubmit / PostToolUse flag-flip
+          // hooks). When set and the target is under
+          // /workspace/trusted/ (excluding the quarantine subtree),
+          // Write is intercepted — the hook itself persists content
+          // to /workspace/trusted/quarantine/<sid>/<rel> and denies
+          // the original call. Edit denies hard with a redirect-
+          // explainer reason. Runs AFTER #324's write gate so token-
+          // file mutations are still rejected on their own grounds.
+          {
+            matcher: '^(Write|Edit)$',
+            hooks: [
+              createMemoryQuarantineHook(
+                fs,
+                quarantineFlagState,
+                () => sessionId ?? 'unknown',
+              ),
+            ],
+          },
           // #322 — capability ACL. Walks the transcript back to the
           // most recent operator user-turn boundary, collects every
           // untrusted-provenance marker (Encoding A wrap or Encoding B
@@ -2932,6 +3145,11 @@ async function runQuery(
               createMcpToolResultSanitizerHook(),
               createComposioFidelityHook(),
               createUntrustedInputWrapHook(),
+              // #325 — flag-flip on MCP read-tool emission. Reuses
+              // `inferReadSource` so a future allowlist row that
+              // adds a new prefix flips the flag automatically
+              // without touching this file.
+              createQuarantineFlagFlipPostHook(quarantineFlagState),
             ],
           },
           {
@@ -2940,7 +3158,13 @@ async function runQuery(
             // `MyBash` or `ReadMore`. Match only the exact built-in
             // tool names.
             matcher: '^(WebFetch|WebSearch|Read|Bash)$',
-            hooks: [createProvenanceSentinelHook()],
+            hooks: [
+              createProvenanceSentinelHook(),
+              // #325 — flag-flip on built-in sentinel emission.
+              // Same dispatch as the wrap branch; one of the two
+              // classifiers fires per tool family.
+              createQuarantineFlagFlipPostHook(quarantineFlagState),
+            ],
           },
         ],
       },
