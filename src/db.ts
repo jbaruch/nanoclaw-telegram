@@ -1973,6 +1973,15 @@ function migrateJsonState(): void {
   // `heartbeat-state.json.migrated-YYYY-MM-DD` on success — re-run is
   // a no-op once the suffix is in place.
   migrateHeartbeatStateJsonFiles();
+
+  // Migrate per-group task-tz-state.json files into the singleton
+  // `tz_state` row + `follow_me_tasks` per-skill rows (#302). The
+  // state-010 schema landed in PR #348; this pass populates both
+  // tables from the JSON-era envelope. UPSERT semantics throughout —
+  // never `INSERT OR REPLACE`, which would silently reset
+  // `schema_version` (a column the writer's UPSERT doesn't name) on
+  // every re-run.
+  migrateTaskTzStateJsonFiles();
 }
 
 interface OrdersDbJsonRecord {
@@ -2868,5 +2877,262 @@ function migrateHeartbeatStateJsonFiles(): void {
     }
 
     renameMigratedSource(filePath, stamp, folder, fileLabel, counts);
+  }
+}
+
+interface TaskTzStateFollowMeTaskJson {
+  name: string;
+  local_time: string;
+  schedule_value: string;
+  last_run_date?: string | null;
+  pending_run_at?: string | null;
+}
+
+interface TaskTzStateJsonShape {
+  current_tz?: string;
+  home_tz?: string;
+  scheduler_tz?: string | null;
+  follow_me_tasks?: TaskTzStateFollowMeTaskJson[];
+}
+
+const TASK_TZ_STATE_FILE_LABEL = 'task-tz-state.json';
+
+/**
+ * Migrate per-group `task-tz-state.json` files (#302, data-import
+ * follow-up to schema PR #348). Mirrors the orders / morning-brief /
+ * calendar-state pattern: scans every `groups/<name>/task-tz-state.
+ * json`, parses the envelope, and writes the three timezone scalars
+ * to the singleton `tz_state` row plus N rows to `follow_me_tasks`
+ * inside a single transaction.
+ *
+ * Both writes use `ON CONFLICT(...) DO UPDATE` (UPSERT) — NEVER
+ * `INSERT OR REPLACE`, which is delete+insert in SQLite and would
+ * silently reset defaulted columns like `schema_version` on every
+ * re-import. The schema-doc on state-010 spells this out as the
+ * contract; the multi-group test in
+ * `task-tz-state-json-migration.test.ts` pins it down by manually
+ * bumping `schema_version` between two group imports and asserting
+ * the bump survives the second import's UPSERT.
+ *
+ * `tz_state` UPSERT deliberately omits `schema_version` from the
+ * column list: the column's `DEFAULT 1` fires on insert; on conflict
+ * the `DO UPDATE SET` clause only touches the three timezone scalars,
+ * so an existing `schema_version` is preserved (the migration is data
+ * backfill, not a schema upgrade).
+ *
+ * `follow_me_tasks` UPSERT re-stamps `updated_at = CURRENT_TIMESTAMP`
+ * in the conflict branch so a re-import shows up as a fresh row
+ * mutation in the audit log.
+ *
+ * Skip-and-warn when `current_tz` or `home_tz` is missing/empty —
+ * both are `TEXT NOT NULL` on `tz_state`, so attempting the insert
+ * would throw a constraint violation. We catch it before the
+ * transaction starts so the file stays in place for triage and the
+ * `follow_me_tasks` rows below also don't import (the JSON envelope
+ * is malformed; partial import would be misleading).
+ *
+ * Idempotent via the standard `.migrated-YYYY-MM-DD` rename.
+ */
+function migrateTaskTzStateJsonFiles(): void {
+  const groupFolders = listGroupFoldersForMigration();
+  if (groupFolders.length === 0) return;
+
+  // tz_state UPSERT: column list deliberately excludes
+  // `schema_version` so the schema's `DEFAULT 1` fires on insert and
+  // the existing value is preserved on conflict. CHECK(id=1) makes
+  // tz_state a true singleton — the second group's import updates
+  // the same row in place rather than landing id=2 (which would also
+  // fail loudly via the CHECK).
+  const upsertTzState = db.prepare(
+    `INSERT INTO tz_state (id, current_tz, home_tz, scheduler_tz)
+     VALUES (1, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       current_tz   = excluded.current_tz,
+       home_tz      = excluded.home_tz,
+       scheduler_tz = excluded.scheduler_tz`,
+  );
+
+  // follow_me_tasks UPSERT: re-stamp `updated_at` on conflict so the
+  // audit log captures the re-import as a fresh row mutation. PK is
+  // `name`; sibling rows (other task names) are untouched.
+  const upsertFollowMeTask = db.prepare(
+    `INSERT INTO follow_me_tasks
+       (name, local_time, schedule_value, last_run_date, pending_run_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(name) DO UPDATE SET
+       local_time     = excluded.local_time,
+       schedule_value = excluded.schedule_value,
+       last_run_date  = excluded.last_run_date,
+       pending_run_at = excluded.pending_run_at,
+       updated_at     = CURRENT_TIMESTAMP`,
+  );
+
+  const stamp = migrationDateStamp();
+
+  for (const folder of groupFolders) {
+    const filePath = path.join(GROUPS_DIR, folder, 'task-tz-state.json');
+    if (!fs.existsSync(filePath)) continue;
+
+    let raw: string;
+    try {
+      raw = fs.readFileSync(filePath, 'utf-8');
+    } catch (err) {
+      // TOCTOU race: existsSync above is best-effort; the file may
+      // disappear before readFileSync. Mirror the orders / morning-
+      // brief handling — info-log on ENOENT, propagate every other
+      // errno per `coding-policy: error-handling`.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        logger.info(
+          { folder, filePath },
+          `${TASK_TZ_STATE_FILE_LABEL} migration: file disappeared between existsSync and readFileSync, skipping`,
+        );
+        continue;
+      }
+      throw err;
+    }
+
+    const parsed = parseJsonObjectOrWarn(
+      raw,
+      folder,
+      TASK_TZ_STATE_FILE_LABEL,
+    ) as TaskTzStateJsonShape | null;
+    if (parsed === null) continue;
+
+    // Both `current_tz` and `home_tz` are NOT NULL on `tz_state`. An
+    // empty string would satisfy NOT NULL but break every reader
+    // (morning-brief, nightly, weekly, check-calendar, heartbeat-
+    // precheck) that uses the value as an IANA zone name. Treat
+    // missing / non-string / empty all as "malformed envelope": warn,
+    // leave the file in place for triage, and DON'T import the
+    // sibling `follow_me_tasks` rows (a partial import would silently
+    // ship N task rows without their tz context).
+    if (
+      typeof parsed.current_tz !== 'string' ||
+      parsed.current_tz.length === 0 ||
+      typeof parsed.home_tz !== 'string' ||
+      parsed.home_tz.length === 0
+    ) {
+      logger.warn(
+        {
+          folder,
+          hasCurrentTz: typeof parsed.current_tz === 'string',
+          hasHomeTz: typeof parsed.home_tz === 'string',
+        },
+        `${TASK_TZ_STATE_FILE_LABEL} migration: missing or empty current_tz / home_tz, skipping (file left in place)`,
+      );
+      continue;
+    }
+
+    const currentTz = parsed.current_tz;
+    const homeTz = parsed.home_tz;
+    // `scheduler_tz` is nullable on the schema (informational only;
+    // not load-bearing per the schema-doc). Coerce missing /
+    // non-string / empty to NULL.
+    const schedulerTz =
+      typeof parsed.scheduler_tz === 'string' && parsed.scheduler_tz.length > 0
+        ? parsed.scheduler_tz
+        : null;
+
+    // `follow_me_tasks`: distinguish "missing" (key absent) from
+    // "wrong-typed" (key present but not an array — e.g. an object).
+    // Missing is the legitimate "no follow-me jobs configured"
+    // envelope; we still land tz_state and rename. Wrong-typed is a
+    // corruption signal: warn (with the rejected type) and skip the
+    // entire group's file so the original task payload survives for
+    // human triage instead of being silently discarded by the rename.
+    const followMeRaw: unknown = parsed.follow_me_tasks;
+    let followMeTasks: TaskTzStateFollowMeTaskJson[];
+    if (followMeRaw === undefined) {
+      followMeTasks = [];
+    } else if (Array.isArray(followMeRaw)) {
+      followMeTasks = followMeRaw as TaskTzStateFollowMeTaskJson[];
+    } else {
+      logger.warn(
+        {
+          folder,
+          followMeType: followMeRaw === null ? 'null' : typeof followMeRaw,
+        },
+        `${TASK_TZ_STATE_FILE_LABEL} migration: follow_me_tasks is not an array, skipping (file left in place)`,
+      );
+      continue;
+    }
+
+    // The UPSERT counter splits inserts (first import for this
+    // group) from refreshes (subsequent groups' singleton refresh)
+    // because SQLite returns `changes = 1` for both branches —
+    // labelling the combined number `tz_state_inserted` would be
+    // misleading on the multi-group / re-run path. Use SELECT-then-
+    // UPSERT to distinguish: if the singleton row already exists,
+    // count as a refresh; otherwise, an insert.
+    const tzStateExistsBefore =
+      (
+        db.prepare('SELECT COUNT(*) AS n FROM tz_state WHERE id = 1').get() as {
+          n: number;
+        }
+      ).n > 0;
+    const counts = {
+      tz_state_inserted: 0,
+      tz_state_refreshed: 0,
+      follow_me_upserted: 0,
+      skipped: 0,
+    };
+    try {
+      const importFile = db.transaction(() => {
+        const tzResult = upsertTzState.run(currentTz, homeTz, schedulerTz);
+        if (tzResult.changes > 0) {
+          if (tzStateExistsBefore) counts.tz_state_refreshed++;
+          else counts.tz_state_inserted++;
+        }
+        for (const task of followMeTasks) {
+          if (!isObjectRow(task)) {
+            logger.warn(
+              { folder, queue: 'follow_me_tasks' },
+              `${TASK_TZ_STATE_FILE_LABEL} migration: skipping non-object row`,
+            );
+            counts.skipped++;
+            continue;
+          }
+          const result = upsertFollowMeTask.run(
+            task.name as string,
+            task.local_time as string,
+            task.schedule_value as string,
+            // Both nullable cursor fields use `?? null` so an
+            // explicit `null` and a missing key both round-trip as
+            // SQL NULL. The reader contract on state-010 explicitly
+            // tolerates NULL on both columns.
+            (task.last_run_date as string | null | undefined) ?? null,
+            (task.pending_run_at as string | null | undefined) ?? null,
+          );
+          if (result.changes > 0) counts.follow_me_upserted++;
+          else counts.skipped++;
+        }
+      });
+      importFile();
+    } catch (err) {
+      // Per `coding-policy: error-handling`: only constraint-class
+      // SqliteError is recoverable here — those are the per-file
+      // data-quality failures the per-file isolation contract was
+      // written for. Anything else (TypeError, non-constraint
+      // SqliteError like SQLITE_CORRUPT/BUSY) propagates so the
+      // operator sees the real failure rather than a swept-under-
+      // the-rug warn. Transaction already rolled back on throw, so
+      // no partial rows landed in either case.
+      if (
+        handleConstraintViolationOrRethrow(
+          err,
+          folder,
+          TASK_TZ_STATE_FILE_LABEL,
+        )
+      )
+        continue;
+    }
+
+    renameMigratedSource(filePath, stamp, folder, TASK_TZ_STATE_FILE_LABEL, {
+      tz_state_inserted: counts.tz_state_inserted,
+      tz_state_refreshed: counts.tz_state_refreshed,
+      follow_me_upserted: counts.follow_me_upserted,
+      skipped: counts.skipped,
+      total: followMeTasks.length,
+    });
   }
 }
