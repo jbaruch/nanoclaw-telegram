@@ -68,7 +68,7 @@ import {
   inferSentinelSource,
 } from './provenance-sentinel.js';
 import {
-  decideCapabilityAcl,
+  decideCapabilityAclIterable,
   WalkBackMessage,
 } from './capability-acl.js';
 import { fileURLToPath } from 'url';
@@ -605,12 +605,9 @@ function extractBlockText(block: unknown): string {
 function createCapabilityAclHook(): HookCallback {
   return async (input, _toolUseId, _context) => {
     const pre = input as PreToolUseHookInput;
-    let messages: WalkBackMessage[] = [];
+    let session: SessionMessage[];
     try {
-      const session = await getSessionMessages(pre.session_id);
-      messages = session
-        .map(sessionMessageToWalkBack)
-        .filter((m): m is WalkBackMessage => m !== null);
+      session = await getSessionMessages(pre.session_id);
     } catch (err) {
       log(
         `capability_acl: transcript read failed, allowing tool=${pre.tool_name} reason=${
@@ -619,7 +616,15 @@ function createCapabilityAclHook(): HookCallback {
       );
       return {};
     }
-    const decision = decideCapabilityAcl(pre.tool_name, messages);
+    // Walk backward lazily — the iterator emits one converted
+    // WalkBackMessage at a time, so the walk-back stops at the boundary
+    // without paying the cost of converting older messages. On a long
+    // session with a short span, this keeps the gate latency bounded by
+    // span size rather than transcript size.
+    const decision = decideCapabilityAclIterable(
+      pre.tool_name,
+      lazyReverseWalkBack(session),
+    );
     if (decision.kind === 'allow') return {};
     log(
       `capability_acl: DENY tool=${pre.tool_name} prefixes=[${decision.prefixes.join(',')}]`,
@@ -632,6 +637,15 @@ function createCapabilityAclHook(): HookCallback {
       },
     };
   };
+}
+
+function* lazyReverseWalkBack(
+  session: ReadonlyArray<SessionMessage>,
+): IterableIterator<WalkBackMessage> {
+  for (let i = session.length - 1; i >= 0; i--) {
+    const wb = sessionMessageToWalkBack(session[i]);
+    if (wb !== null) yield wb;
+  }
 }
 
 /**

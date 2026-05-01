@@ -42,9 +42,10 @@ import { SourcePrefix } from './untrusted-input-sources.js';
 /**
  * Allowed-sink table per source prefix.
  *
- * Each entry is matched against the tool name with `String#match` semantics
- * (string prefix-equality OR regex match). Tool names follow the SDK
- * conventions:
+ * Each entry is matched against the tool name by `isToolAllowed` —
+ * strings are matched with EXACT equality (so `Read` does not match
+ * `ReadMore`); regexes are matched with `RegExp#test`. Tool names
+ * follow the SDK conventions:
  *   - Built-in tools: `Read`, `Write`, `Edit`, `Bash`, `WebFetch`, etc.
  *   - MCP tools: `mcp__<server>__<action>`, e.g. `mcp__nanoclaw__send_message`.
  *
@@ -184,36 +185,69 @@ const ENCODING_B_REGEX =
   /^PROVENANCE_MARKER:\s+source="([^"]*)"\s+tool_use_id="[^"]*"/m;
 
 /**
+ * Sentinel prefix used when a marker carries a `source=` value whose
+ * prefix is NOT in `SINK_ALLOWLISTS`. Could happen if a future emitter
+ * (or a partial deployment / version skew) introduces a new prefix
+ * before this module knows about it. Treating it as "no marker" would
+ * silently bypass the gate — exactly the failure mode the gate exists
+ * to prevent. Treating it as the most restrictive allowlist (inert
+ * sinks only) fails closed.
+ */
+export const UNKNOWN_PREFIX = '__unknown__' as const;
+
+/**
+ * The set of prefixes the walk-back can return. Equal to `SourcePrefix`
+ * plus the `UNKNOWN_PREFIX` sentinel for forward-compat / version-skew
+ * safety.
+ */
+export type AclPrefix = SourcePrefix | typeof UNKNOWN_PREFIX;
+
+/**
  * Extract the `prefix` portion of every provenance marker in a string.
  * Returns the set of unique prefixes — values are not preserved here
  * because the ACL keys on prefix only.
  *
- * Both encodings are scanned. An unrecognized prefix (one not in the
- * `SourcePrefix` union) is dropped silently — better to ignore than to
- * crash on a future taxonomy addition that hasn't reached this module
- * yet.
+ * Both encodings are scanned. An unrecognized prefix collapses to the
+ * `UNKNOWN_PREFIX` sentinel so the ACL fails closed against a future
+ * emitter or partial-deployment skew rather than treating the marker
+ * as absent.
  */
-export function extractMarkerPrefixes(text: string): Set<SourcePrefix> {
-  const out = new Set<SourcePrefix>();
+export function extractMarkerPrefixes(text: string): Set<AclPrefix> {
+  const out = new Set<AclPrefix>();
   if (typeof text !== 'string' || text.length === 0) return out;
   for (const match of text.matchAll(ENCODING_A_REGEX)) {
-    const prefix = parseSourcePrefix(match[1]);
-    if (prefix) out.add(prefix);
+    out.add(classifySourcePrefix(match[1]));
   }
   for (const match of text.matchAll(new RegExp(ENCODING_B_REGEX, 'gm'))) {
-    const prefix = parseSourcePrefix(match[1]);
-    if (prefix) out.add(prefix);
+    out.add(classifySourcePrefix(match[1]));
   }
   return out;
 }
 
-function parseSourcePrefix(sourceAttr: string): SourcePrefix | null {
+function classifySourcePrefix(sourceAttr: string): AclPrefix {
   const colon = sourceAttr.indexOf(':');
   const candidate = colon === -1 ? sourceAttr : sourceAttr.slice(0, colon);
   if (Object.prototype.hasOwnProperty.call(SINK_ALLOWLISTS, candidate)) {
     return candidate as SourcePrefix;
   }
-  return null;
+  return UNKNOWN_PREFIX;
+}
+
+/**
+ * Allowlist used when the walk-back encounters a marker with an
+ * unrecognized prefix. Inert sinks only — the model can read, search,
+ * and reason, but cannot send messages, write files, or call any
+ * destructive tool. The conservative posture matches the rule: a marker
+ * we don't understand is still a marker; the chain is untrusted-
+ * provenance and the gate fires.
+ */
+const UNKNOWN_PREFIX_ALLOWLIST: ReadonlyArray<RegExp | string> = COMMON_INERT_SINKS;
+
+function getAllowlistForPrefix(
+  prefix: AclPrefix,
+): ReadonlyArray<RegExp | string> {
+  if (prefix === UNKNOWN_PREFIX) return UNKNOWN_PREFIX_ALLOWLIST;
+  return SINK_ALLOWLISTS[prefix];
 }
 
 /**
@@ -246,14 +280,32 @@ export interface WalkBackMessage {
  */
 export function walkBackForProvenance(
   messages: ReadonlyArray<WalkBackMessage>,
-): Set<SourcePrefix> {
-  const collected = new Set<SourcePrefix>();
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
+): Set<AclPrefix> {
+  return walkBackIterableForProvenance(reverseIterable(messages));
+}
+
+/**
+ * Iterable variant: caller supplies an iterable of messages already in
+ * REVERSE order (most-recent first). The walk consumes messages until
+ * it hits the boundary, so a lazy backward iterator over the SDK's
+ * transcript can stop early instead of pre-materializing the whole
+ * `WalkBackMessage[]`. PreToolUse fires on every tool call; with a long
+ * session and short spans, lazy iteration keeps the gate latency
+ * bounded by span size, not transcript size.
+ */
+export function walkBackIterableForProvenance(
+  reversed: Iterable<WalkBackMessage>,
+): Set<AclPrefix> {
+  const collected = new Set<AclPrefix>();
+  for (const m of reversed) {
     for (const p of extractMarkerPrefixes(m.text)) collected.add(p);
     if (isBoundary(m)) break;
   }
   return collected;
+}
+
+function* reverseIterable<T>(arr: ReadonlyArray<T>): IterableIterator<T> {
+  for (let i = arr.length - 1; i >= 0; i--) yield arr[i];
 }
 
 function isBoundary(m: WalkBackMessage): boolean {
@@ -262,19 +314,27 @@ function isBoundary(m: WalkBackMessage): boolean {
 
 /**
  * Compute the intersection of allowed-sink lists across every prefix
- * in `prefixes`. Returns the most-restrictive set the call must
+ * in `prefixes`. The result is the most-restrictive set the call must
  * satisfy.
  *
- * Returned patterns are deduped by string identity (regex objects are
- * compared by reference; identical strings collapse). An empty
+ * Implementation: filter the FIRST prefix's list down to entries that
+ * also appear in every other prefix's list, where "appear" is
+ * determined by `sinkPatternsEqual` — strings match by `===`, regexes
+ * match by identical `source` AND `flags`. There is no separate dedup
+ * pass; if `first` happens to contain duplicates, they survive in the
+ * output (none of the canonical lists in this module do). An empty
  * intersection means "no sink allowed" — every call denies.
+ *
+ * The `UNKNOWN_PREFIX` sentinel resolves through `getAllowlistForPrefix`
+ * to a deliberately tiny inert list, so any unknown marker collapses
+ * the intersection toward "deny everything but read-only inspection".
  */
 export function intersectAllowedSinks(
-  prefixes: ReadonlyArray<SourcePrefix> | Set<SourcePrefix>,
+  prefixes: ReadonlyArray<AclPrefix> | Set<AclPrefix>,
 ): ReadonlyArray<RegExp | string> {
   const arr = Array.from(prefixes);
   if (arr.length === 0) return [];
-  const lists = arr.map((p) => SINK_ALLOWLISTS[p]);
+  const lists = arr.map(getAllowlistForPrefix);
   const [first, ...rest] = lists;
   return first.filter((sink) =>
     rest.every((list) => list.some((other) => sinkPatternsEqual(sink, other))),
@@ -323,14 +383,29 @@ export type AclDecision =
   | {
       kind: 'deny';
       reason: string;
-      prefixes: ReadonlyArray<SourcePrefix>;
+      prefixes: ReadonlyArray<AclPrefix>;
     };
 
 export function decideCapabilityAcl(
   toolName: string,
   messages: ReadonlyArray<WalkBackMessage>,
 ): AclDecision {
-  const prefixes = walkBackForProvenance(messages);
+  return decideCapabilityAclIterable(
+    toolName,
+    reverseIterable(messages),
+  );
+}
+
+/**
+ * Iterable variant — see `walkBackIterableForProvenance`. Used by the
+ * PreToolUse hook so the SDK transcript can be walked lazily backward
+ * without pre-materializing the full `WalkBackMessage[]`.
+ */
+export function decideCapabilityAclIterable(
+  toolName: string,
+  reversed: Iterable<WalkBackMessage>,
+): AclDecision {
+  const prefixes = walkBackIterableForProvenance(reversed);
   if (prefixes.size === 0) {
     return { kind: 'allow', reason: 'operator-originated, trusted boundary' };
   }

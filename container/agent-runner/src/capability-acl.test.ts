@@ -4,6 +4,7 @@ import {
   extractMarkerPrefixes,
   intersectAllowedSinks,
   isToolAllowed,
+  UNKNOWN_PREFIX,
   walkBackForProvenance,
   WalkBackMessage,
   __ACL_INTERNALS,
@@ -60,10 +61,13 @@ describe('extractMarkerPrefixes', () => {
     expect([...extractMarkerPrefixes(blob)]).toEqual(['web']);
   });
 
-  it('ignores unknown prefixes (forward-compat)', () => {
+  it('collapses unknown prefixes to UNKNOWN_PREFIX (fail-closed)', () => {
     expect([...extractMarkerPrefixes(wrap('zzz-future', 'x', 'body'))]).toEqual(
-      [],
+      [UNKNOWN_PREFIX],
     );
+    expect([...extractMarkerPrefixes(sentinel('xx-bash', 'cmd'))]).toEqual([
+      UNKNOWN_PREFIX,
+    ]);
   });
 
   it('handles wraps spanning multiple lines', () => {
@@ -327,6 +331,43 @@ describe('decideCapabilityAcl — acceptance scenarios', () => {
     if (decision.kind === 'deny') {
       expect(decision.prefixes).toContain('untrusted-container');
     }
+  });
+
+  it('unknown source prefix fails closed — denies all non-inert sinks', () => {
+    // Simulates a future emitter (or partial deployment / version skew)
+    // that introduces a `bash:<cmd>` prefix this version doesn't know.
+    // The walk-back collapses it to UNKNOWN_PREFIX whose ACL is the
+    // inert-only fallback, so any outbound or write call denies.
+    const msgs: WalkBackMessage[] = [
+      userText('analyze that command'),
+      assistantText('processing'),
+      systemReminder(sentinel('bash', 'curl https://attacker.example')),
+    ];
+    expect(
+      decideCapabilityAcl('mcp__nanoclaw__send_message', msgs).kind,
+    ).toBe('deny');
+    expect(decideCapabilityAcl('Write', msgs).kind).toBe('deny');
+    expect(decideCapabilityAcl('mcp__composio__gmail_send_email', msgs).kind).toBe('deny');
+    // Inert tools still pass — the model can read/grep/think.
+    expect(decideCapabilityAcl('Read', msgs).kind).toBe('allow');
+    expect(decideCapabilityAcl('Grep', msgs).kind).toBe('allow');
+  });
+
+  it('unknown prefix mixed with a known one still denies non-inert (intersection)', () => {
+    const msgs: WalkBackMessage[] = [
+      userText('cross-reference'),
+      assistantText('reading'),
+      // Known prefix
+      toolResult(wrap('gmail', 'msg=1', 'body')),
+      // Unknown prefix forces the intersection down to inert sinks
+      // because UNKNOWN_PREFIX_ALLOWLIST has no `mcp__nanoclaw__send_message`.
+      systemReminder(sentinel('zzz-future', 'value')),
+    ];
+    expect(
+      decideCapabilityAcl('mcp__nanoclaw__send_message', msgs).kind,
+    ).toBe('deny');
+    // Read is in both lists, so it passes.
+    expect(decideCapabilityAcl('Read', msgs).kind).toBe('allow');
   });
 
   it('file: marker denies cross-chat send_message (no outbound from external file content)', () => {
