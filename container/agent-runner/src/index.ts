@@ -22,6 +22,7 @@ import {
   getSessionMessages,
   HookCallback,
   PostToolUseHookInput,
+  PostCompactHookInput,
   PreCompactHookInput,
   PreToolUseHookInput,
   SessionMessage,
@@ -95,6 +96,12 @@ import {
   walkBackIterableForProvenance,
   WalkBackMessage,
 } from './capability-acl.js';
+import {
+  DEFAULT_STATE_DIR as COMPACT_PROVENANCE_STATE_DIR,
+  buildPostCompactReminder,
+  persistCompactProvenance,
+  readAndClearSidecar,
+} from './compact-provenance.js';
 import {
   bashTargetsAllowlist,
   classifySink,
@@ -344,6 +351,19 @@ function getSessionSummary(
 
 /**
  * Archive the full transcript to conversations/ before compaction.
+ *
+ * Also persists the compact-provenance sidecar (#327): the live
+ * pre-compaction transcript is the only place the `<untrusted-input>`
+ * wraps and `PROVENANCE_MARKER:` sentinels still exist (the SDK's
+ * summariser strips them). PreCompact is the only hook that can read
+ * those signals; PostCompact then re-injects them as a synthetic
+ * systemMessage so the capability-ACL walk-back continues to honour
+ * untrusted-provenance after compaction. See `compact-provenance.ts`
+ * for the full mechanism.
+ *
+ * Sidecar persistence runs as a separate try block from the archive:
+ * a corrupt or missing transcript path can fail one without taking
+ * down the other.
  */
 function createPreCompactHook(assistantName?: string): HookCallback {
   return async (input, _toolUseId, _context) => {
@@ -362,34 +382,101 @@ function createPreCompactHook(assistantName?: string): HookCallback {
 
       if (messages.length === 0) {
         log('No messages to archive');
-        return {};
+      } else {
+        const summary = getSessionSummary(sessionId, transcriptPath);
+        const name = summary ? sanitizeFilename(summary) : generateFallbackName();
+
+        const conversationsDir = '/workspace/group/conversations';
+        fs.mkdirSync(conversationsDir, { recursive: true });
+
+        const date = new Date().toISOString().split('T')[0];
+        const filename = `${date}-${name}.md`;
+        const filePath = path.join(conversationsDir, filename);
+
+        const markdown = formatTranscriptMarkdown(
+          messages,
+          summary,
+          assistantName,
+        );
+        fs.writeFileSync(filePath, markdown);
+
+        log(`Archived conversation to ${filePath}`);
       }
-
-      const summary = getSessionSummary(sessionId, transcriptPath);
-      const name = summary ? sanitizeFilename(summary) : generateFallbackName();
-
-      const conversationsDir = '/workspace/group/conversations';
-      fs.mkdirSync(conversationsDir, { recursive: true });
-
-      const date = new Date().toISOString().split('T')[0];
-      const filename = `${date}-${name}.md`;
-      const filePath = path.join(conversationsDir, filename);
-
-      const markdown = formatTranscriptMarkdown(
-        messages,
-        summary,
-        assistantName,
-      );
-      fs.writeFileSync(filePath, markdown);
-
-      log(`Archived conversation to ${filePath}`);
     } catch (err) {
       log(
         `Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
 
+    // #327 — persist provenance sidecar for the matching PostCompact
+    // hook. Independent of the archive flow above: archive may be
+    // skipped (no messages) yet still need to capture provenance, and
+    // a sidecar-write failure must not regress the archive.
+    if (sessionId) {
+      try {
+        persistCompactProvenance(
+          transcriptPath,
+          COMPACT_PROVENANCE_STATE_DIR,
+          sessionId,
+          log,
+        );
+      } catch (err) {
+        log(
+          `compact_provenance: persist failed (${err instanceof Error ? err.message : String(err)})`,
+        );
+      }
+    }
+
     return {};
+  };
+}
+
+/**
+ * #327 — Post-compaction provenance re-injection.
+ *
+ * Reads the sidecar that PreCompact wrote, deletes it, and emits a
+ * `systemMessage` containing one synthetic `PROVENANCE_MARKER:` line
+ * per source seen pre-compaction. The systemMessage lands in the
+ * post-compaction transcript as a `system`-role SessionMessage that
+ * `capability-acl.ts`'s walk-back picks up alongside the canonical
+ * Encoding B markers.
+ *
+ * Runs sync — the sidecar is a small JSON file and the reminder
+ * generation is purely string concatenation. If the sidecar is missing
+ * (PreCompact skipped because the transcript had no markers), the
+ * hook returns an empty payload and the SDK proceeds normally.
+ */
+function createPostCompactHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const post = input as PostCompactHookInput;
+    const sessionId = post.session_id;
+    if (!sessionId) {
+      return {};
+    }
+    let sources: Set<string>;
+    try {
+      sources = readAndClearSidecar(
+        COMPACT_PROVENANCE_STATE_DIR,
+        sessionId,
+        log,
+      );
+    } catch (err) {
+      log(
+        `compact_provenance: sidecar read failed (${err instanceof Error ? err.message : String(err)})`,
+      );
+      return {};
+    }
+    if (sources.size === 0) {
+      return {};
+    }
+    const reminder = buildPostCompactReminder(sources);
+    if (!reminder) {
+      return {};
+    }
+    log(
+      `compact_provenance: post-compact reminder injected sources=${sources.size}`,
+    );
+    return { systemMessage: reminder };
   };
 }
 
@@ -3020,6 +3107,11 @@ async function runQuery(
         PreCompact: [
           { hooks: [createPreCompactHook(containerInput.assistantName)] },
         ],
+        // #327 — re-inject pre-compaction provenance markers as a
+        // systemMessage so the capability-ACL walk-back keeps honouring
+        // untrusted-provenance after the SDK summariser strips the
+        // canonical wraps. Pairs with the sidecar PreCompact persists.
+        PostCompact: [{ hooks: [createPostCompactHook()] }],
         // #141 — auto-inject MEMORY.md / RUNBOOK.md / latest daily log
         // before the first turn fires. Source filter (`startup` only)
         // and assistantName gate live inside the callback.
