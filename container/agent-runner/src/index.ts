@@ -86,7 +86,11 @@ import {
 } from './silent-turn-audit.js';
 import { buildSubagentRuleFilePaths } from './subagent-prompt.js';
 import { wrapUntrustedInput } from './untrusted-input-sources.js';
-import { inferReadSource, wrapMcpToolResult } from './untrusted-input-wrap.js';
+import {
+  inferReadSource,
+  wrapMcpToolResult,
+  type SummariseBodyOptions,
+} from './untrusted-input-wrap.js';
 import {
   formatSentinel,
   inferSentinelSource,
@@ -116,6 +120,7 @@ import {
   saveConfirmationTokens,
   TokenFileValidationError,
 } from './confirmation-tokens.js';
+import Anthropic from '@anthropic-ai/sdk';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -571,16 +576,62 @@ function createMcpToolResultSanitizerHook(): HookCallback {
  * the model-visible final form; fidelity inspects raw text before the
  * envelope is added so it doesn't mistake wrap tags for fabricated IDs.
  */
-function createUntrustedInputWrapHook(): HookCallback {
+/**
+ * #319 — body summarisation options for the wrap hook. Returns
+ * `undefined` when `SUMMARISE_COMPOSIO_BODIES !== '1'`, in which case
+ * the wrap hook keeps its pre-#319 envelope-only behaviour. The
+ * Anthropic client is constructed lazily on first call and cached so
+ * per-runQuery reads share one TCP keepalive pool — the SDK picks up
+ * `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` from env, populated by
+ * the OneCLI proxy at container startup.
+ *
+ * Default-off per acceptance: per-group enablement is decoupled from
+ * the deploy that ships this code path. Flip per-group after observing
+ * the `summary_latencies_ms=...` log telemetry.
+ */
+let cachedSummariseBodyOpts: SummariseBodyOptions | null | undefined;
+function getSummariseBodyOpts(): SummariseBodyOptions | undefined {
+  if (cachedSummariseBodyOpts !== undefined) {
+    return cachedSummariseBodyOpts ?? undefined;
+  }
+  if (process.env.SUMMARISE_COMPOSIO_BODIES !== '1') {
+    cachedSummariseBodyOpts = null;
+    return undefined;
+  }
+  cachedSummariseBodyOpts = { client: new Anthropic() };
+  return cachedSummariseBodyOpts;
+}
+
+function createUntrustedInputWrapHook(
+  summariseOpts?: SummariseBodyOptions,
+): HookCallback {
   return async (input, _toolUseId, _context) => {
     const post = input as PostToolUseHookInput;
     if (!post.tool_name?.startsWith('mcp__')) return {};
-    const { wrapped, mutated } = wrapMcpToolResult(
+    const {
+      wrapped,
+      mutated,
+      summaryLatenciesMs,
+      summaryOutcomes,
+    } = await wrapMcpToolResult(
       post.tool_name,
       post.tool_response,
+      summariseOpts,
     );
     if (!mutated) return {};
-    log(`untrusted_input_wrap tool=${post.tool_name}`);
+    if (summaryLatenciesMs.length > 0) {
+      // Telemetry per acceptance: per-tool latency + outcome metadata
+      // so per-group `SUMMARISE_COMPOSIO_BODIES` flag tuning can be
+      // data-driven. Logs metadata only (no body bytes) per
+      // `no-secrets` — external content can carry tokens.
+      log(
+        `untrusted_input_wrap tool=${post.tool_name} ` +
+          `summary_latencies_ms=${summaryLatenciesMs.join(',')} ` +
+          `summary_outcomes=${summaryOutcomes.join(',')}`,
+      );
+    } else {
+      log(`untrusted_input_wrap tool=${post.tool_name}`);
+    }
     return {
       hookSpecificOutput: {
         hookEventName: 'PostToolUse' as const,
@@ -3340,7 +3391,7 @@ async function runQuery(
             hooks: [
               createMcpToolResultSanitizerHook(),
               createComposioFidelityHook(),
-              createUntrustedInputWrapHook(),
+              createUntrustedInputWrapHook(getSummariseBodyOpts()),
               // #325 — flag-flip on MCP read-tool emission. Reuses
               // `inferReadSource` so a future allowlist row that
               // adds a new prefix flips the flag automatically
