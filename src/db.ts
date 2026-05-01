@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import Database, { SqliteError } from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
@@ -1851,6 +1851,16 @@ function migrateJsonState(): void {
   // renames the source to `orders-db.json.migrated-YYYY-MM-DD`, so a
   // re-run of `initDatabase` is a no-op once the file is gone.
   migrateOrdersDbJsonFiles();
+
+  // Migrate per-group morning-brief-pending.json files (#299). Same
+  // per-group-scan pattern as the orders import above: the source
+  // file historically lived under each group's working dir, the
+  // schema-only migration in state-007 created the three queue tables,
+  // and this pass populates them from the JSON-era shape. Idempotent:
+  // each successful per-file import renames the source to
+  // `morning-brief-pending.json.migrated-YYYY-MM-DD`, so a re-run of
+  // `initDatabase` is a no-op once the file is gone.
+  migrateMorningBriefPendingJsonFiles();
 }
 
 interface OrdersDbJsonRecord {
@@ -2101,6 +2111,331 @@ function migrateOrdersDbJsonFiles(): void {
         total: orders.length,
       },
       'orders-db.json migration: imported and source renamed',
+    );
+  }
+}
+
+interface MorningBriefCleanupItemJson {
+  id: string;
+  type: string;
+  question?: string | null;
+  subject?: string | null;
+  sender?: string | null;
+  added?: string | null;
+}
+
+interface MorningBriefPendingDecisionJson {
+  id: string;
+  question: string;
+  added?: string | null;
+}
+
+interface MorningBriefUndatedTaskJson {
+  id: string;
+  title: string;
+  tasklist_id: string;
+  added?: string | null;
+}
+
+interface MorningBriefPendingJsonShape {
+  cleanup_items?: MorningBriefCleanupItemJson[];
+  pending_decisions?: MorningBriefPendingDecisionJson[];
+  undated_tasks?: MorningBriefUndatedTaskJson[];
+}
+
+function migrateMorningBriefPendingJsonFiles(): void {
+  if (!fs.existsSync(GROUPS_DIR)) return;
+  let groupFolders: string[];
+  try {
+    groupFolders = fs
+      .readdirSync(GROUPS_DIR, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .filter((entry) => isValidGroupFolder(entry.name))
+      .map((entry) => entry.name)
+      // Sort so PK-conflict resolution under `ON CONFLICT(id) DO NOTHING`
+      // is deterministic across filesystems and locales — same rationale
+      // as the orders migration above (readdirSync order is impl-defined,
+      // plain code-point comparison is locale-free).
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
+
+  // ON CONFLICT(id) DO NOTHING (NOT `INSERT OR IGNORE`): re-running
+  // with leftover rows (e.g. an operator copied a partial DB back over
+  // an already-imported one) is a silent no-op on the PK conflict, but
+  // a NOT NULL violation on `type`/`question`/`title`/`tasklist_id`
+  // still throws. `INSERT OR IGNORE` would silently swallow those too,
+  // and we'd rename the source file thinking the import succeeded —
+  // bad data lost without a trace. Per-row, when `added` is missing in
+  // the source we omit the column from the INSERT so the schema's
+  // `DEFAULT CURRENT_TIMESTAMP` fires — that's the contract documented
+  // on state-007.
+  const insertCleanupItemWithAdded = db.prepare(
+    `INSERT INTO pending_cleanup_items
+       (id, type, question, subject, sender, added)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO NOTHING`,
+  );
+  const insertCleanupItemDefaultAdded = db.prepare(
+    `INSERT INTO pending_cleanup_items
+       (id, type, question, subject, sender)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO NOTHING`,
+  );
+  const insertDecisionWithAdded = db.prepare(
+    `INSERT INTO pending_decisions (id, question, added)
+     VALUES (?, ?, ?)
+     ON CONFLICT(id) DO NOTHING`,
+  );
+  const insertDecisionDefaultAdded = db.prepare(
+    `INSERT INTO pending_decisions (id, question) VALUES (?, ?)
+     ON CONFLICT(id) DO NOTHING`,
+  );
+  const insertUndatedTaskWithAdded = db.prepare(
+    `INSERT INTO pending_undated_tasks
+       (id, title, tasklist_id, added)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(id) DO NOTHING`,
+  );
+  const insertUndatedTaskDefaultAdded = db.prepare(
+    `INSERT INTO pending_undated_tasks (id, title, tasklist_id)
+     VALUES (?, ?, ?)
+     ON CONFLICT(id) DO NOTHING`,
+  );
+
+  const stamp = new Date().toISOString().slice(0, 10);
+
+  for (const folder of groupFolders) {
+    const filePath = path.join(
+      GROUPS_DIR,
+      folder,
+      'morning-brief-pending.json',
+    );
+    if (!fs.existsSync(filePath)) continue;
+
+    let parsed: MorningBriefPendingJsonShape;
+    try {
+      parsed = JSON.parse(
+        fs.readFileSync(filePath, 'utf-8'),
+      ) as MorningBriefPendingJsonShape;
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        logger.warn(
+          { folder, errName: err.name },
+          'morning-brief-pending.json migration: invalid JSON, skipping (file left in place)',
+        );
+        continue;
+      }
+      // TOCTOU race: existsSync above is best-effort; file may
+      // disappear before readFileSync. Mirror orders' handling — log
+      // info on ENOENT, propagate every other errno.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        logger.info(
+          { folder, filePath },
+          'morning-brief-pending.json migration: file disappeared between existsSync and readFileSync, skipping',
+        );
+        continue;
+      }
+      throw err;
+    }
+
+    // `JSON.parse` happily returns null / numbers / strings / arrays
+    // for syntactically valid but non-object payloads. Bind those to
+    // a property access and we'd throw "cannot read properties of
+    // null" before the array-shape guard below ever ran, halting the
+    // whole migration on one bad file. Warn-and-skip per
+    // `coding-policy: error-handling` (try alternatives before
+    // failing) instead.
+    if (
+      parsed === null ||
+      typeof parsed !== 'object' ||
+      Array.isArray(parsed)
+    ) {
+      logger.warn(
+        {
+          folder,
+          parsedType:
+            parsed === null
+              ? 'null'
+              : Array.isArray(parsed)
+                ? 'array'
+                : typeof parsed,
+        },
+        'morning-brief-pending.json migration: payload is not an object, skipping (file left in place)',
+      );
+      continue;
+    }
+
+    const cleanupItems = parsed.cleanup_items;
+    const pendingDecisions = parsed.pending_decisions;
+    const undatedTasks = parsed.undated_tasks;
+    if (
+      !Array.isArray(cleanupItems) &&
+      !Array.isArray(pendingDecisions) &&
+      !Array.isArray(undatedTasks)
+    ) {
+      logger.warn(
+        { folder },
+        'morning-brief-pending.json migration: no recognised arrays (cleanup_items / pending_decisions / undated_tasks), skipping',
+      );
+      continue;
+    }
+
+    // One transaction per file so a mid-import crash can't leave any
+    // of the three tables half-populated. Same rationale as the orders
+    // migration; see the comment block on `migrateOrdersDbJsonFiles`.
+    const cleanupCounts = { inserted: 0, skipped: 0, total: 0 };
+    const decisionCounts = { inserted: 0, skipped: 0, total: 0 };
+    const undatedTaskCounts = { inserted: 0, skipped: 0, total: 0 };
+    try {
+      // Per-row object guard: a stale `null`/string/number element in
+      // any of the three arrays would otherwise throw a TypeError
+      // inside the transaction (e.g. `null.added` blows up before any
+      // INSERT runs), and the narrowed catch below would propagate
+      // that as an "unexpected" error and halt orchestrator startup.
+      // Skip non-object elements with a warn instead — same shape as
+      // the file-level non-object guard above.
+      const isObjectRow = (row: unknown): row is Record<string, unknown> =>
+        row !== null && typeof row === 'object' && !Array.isArray(row);
+
+      const importFile = db.transaction(() => {
+        if (Array.isArray(cleanupItems)) {
+          cleanupCounts.total = cleanupItems.length;
+          for (const item of cleanupItems) {
+            if (!isObjectRow(item)) {
+              logger.warn(
+                { folder, queue: 'cleanup_items' },
+                'morning-brief-pending.json migration: skipping non-object row',
+              );
+              cleanupCounts.skipped++;
+              continue;
+            }
+            const result = item.added
+              ? insertCleanupItemWithAdded.run(
+                  item.id,
+                  item.type,
+                  item.question ?? null,
+                  item.subject ?? null,
+                  item.sender ?? null,
+                  item.added,
+                )
+              : insertCleanupItemDefaultAdded.run(
+                  item.id,
+                  item.type,
+                  item.question ?? null,
+                  item.subject ?? null,
+                  item.sender ?? null,
+                );
+            if (result.changes > 0) cleanupCounts.inserted++;
+            else cleanupCounts.skipped++;
+          }
+        }
+        if (Array.isArray(pendingDecisions)) {
+          decisionCounts.total = pendingDecisions.length;
+          for (const decision of pendingDecisions) {
+            if (!isObjectRow(decision)) {
+              logger.warn(
+                { folder, queue: 'pending_decisions' },
+                'morning-brief-pending.json migration: skipping non-object row',
+              );
+              decisionCounts.skipped++;
+              continue;
+            }
+            const result = decision.added
+              ? insertDecisionWithAdded.run(
+                  decision.id,
+                  decision.question,
+                  decision.added,
+                )
+              : insertDecisionDefaultAdded.run(decision.id, decision.question);
+            if (result.changes > 0) decisionCounts.inserted++;
+            else decisionCounts.skipped++;
+          }
+        }
+        if (Array.isArray(undatedTasks)) {
+          undatedTaskCounts.total = undatedTasks.length;
+          for (const task of undatedTasks) {
+            if (!isObjectRow(task)) {
+              logger.warn(
+                { folder, queue: 'undated_tasks' },
+                'morning-brief-pending.json migration: skipping non-object row',
+              );
+              undatedTaskCounts.skipped++;
+              continue;
+            }
+            const result = task.added
+              ? insertUndatedTaskWithAdded.run(
+                  task.id,
+                  task.title,
+                  task.tasklist_id,
+                  task.added,
+                )
+              : insertUndatedTaskDefaultAdded.run(
+                  task.id,
+                  task.title,
+                  task.tasklist_id,
+                );
+            if (result.changes > 0) undatedTaskCounts.inserted++;
+            else undatedTaskCounts.skipped++;
+          }
+        }
+      });
+      importFile();
+    } catch (err) {
+      // Per `coding-policy: error-handling`: catch only SqliteError
+      // with a constraint-class code (NOT NULL / UNIQUE / CHECK /
+      // PRIMARY KEY / FOREIGN KEY) — those are the recoverable data-
+      // quality failures the per-file isolation contract was written
+      // for. Anything else (a TypeError, a ReferenceError, a non-
+      // constraint SqliteError like SQLITE_CORRUPT or SQLITE_BUSY) is
+      // either a programming bug or a real environment problem that
+      // halting startup loudly will surface, instead of being swept
+      // under a per-file warn. The transaction rolled back on throw,
+      // so no partial rows landed in either case.
+      if (
+        err instanceof SqliteError &&
+        typeof err.code === 'string' &&
+        err.code.startsWith('SQLITE_CONSTRAINT_')
+      ) {
+        logger.warn(
+          { folder, errCode: err.code, err },
+          'morning-brief-pending.json migration: row violated a DB constraint, rolling back and leaving source file in place for triage',
+        );
+        continue;
+      }
+      throw err;
+    }
+
+    // Rename is metadata cleanup; the data import already committed.
+    // ENOENT is the only recoverable errno (file vanished between
+    // import and rename — idempotent no-op since the data is in SQL);
+    // every other errno propagates.
+    try {
+      fs.renameSync(filePath, `${filePath}.migrated-${stamp}`);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      logger.info(
+        {
+          folder,
+          cleanup: cleanupCounts,
+          decisions: decisionCounts,
+          undated_tasks: undatedTaskCounts,
+        },
+        'morning-brief-pending.json migration: imported; source already absent at rename time',
+      );
+      continue;
+    }
+    logger.info(
+      {
+        folder,
+        cleanup: cleanupCounts,
+        decisions: decisionCounts,
+        undated_tasks: undatedTaskCounts,
+        renamed_to: `${filePath}.migrated-${stamp}`,
+      },
+      'morning-brief-pending.json migration: imported and source renamed',
     );
   }
 }
