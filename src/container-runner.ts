@@ -10,8 +10,10 @@ import os from 'os';
 import path from 'path';
 
 import {
-  CONTAINER_IMAGE,
   AGENT_AUTO_COMPACT_WINDOW,
+  ASSISTANT_NAME,
+  ASSISTANT_USERNAME,
+  CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
@@ -1891,6 +1893,18 @@ function buildContainerArgs(
   }
   args.push('-e', `AGENT_MODEL=${effectiveAgentModel}`);
   args.push('-e', `AGENT_EFFORT=${AGENT_EFFORT}`);
+
+  // Forward the orchestrator's authoritative assistant identity into the
+  // agent container so the agent-runner can prepend an identity preamble
+  // to systemPromptAppend (see container/agent-runner/src/index.ts —
+  // buildIdentityPreamble). These are not secrets; pass them directly via
+  // -e rather than going through the SECRET_FILES env-file plumbing.
+  // Without this, untrusted-tier containers lacking explicit identity
+  // statements in their persona files have been observed templating
+  // themselves from fictional examples in tile rules (e.g. @AyeAye /
+  // @AyeAyeSureBot from nanoclaw-core 0.1.94).
+  args.push('-e', `ASSISTANT_NAME=${ASSISTANT_NAME}`);
+  args.push('-e', `ASSISTANT_USERNAME=${ASSISTANT_USERNAME}`);
 
   // Tell agent-runner whether the host is running the optional
   // observer pipeline (src/observer.ts). When true, agent-runner

@@ -225,6 +225,18 @@ const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 
+// Identity preamble functions live in `./identity-preamble.ts` so the
+// preamble unit tests can import them without transitively pulling
+// `@anthropic-ai/claude-agent-sdk` (an agent-runner-local dep that
+// isn't installed by the root CI's `npm ci`). Imported here for the
+// runtime call site below, and re-exported so external callers that
+// already pull from `./index.js` keep working unchanged.
+import {
+  buildIdentityPreamble,
+  resolveIdentityPreamble,
+} from './identity-preamble.js';
+export { buildIdentityPreamble, resolveIdentityPreamble };
+
 /**
  * Effort levels the SDK's `query()` accepts (as of
  * `@anthropic-ai/claude-agent-sdk` 0.2.112). Kept here as a runtime
@@ -2979,6 +2991,24 @@ async function runQuery(
   const soulMdPath = '/workspace/global/SOUL.md';
   const formattingMdPath = '/workspace/global/FORMATTING.md';
   const appendParts: string[] = [];
+
+  // Identity preamble — must come FIRST so it sits at the top of the
+  // appended system prompt and reads as authoritative context. Forwarded
+  // by the orchestrator via -e ASSISTANT_NAME / ASSISTANT_USERNAME (see
+  // src/container-runner.ts). Skip entirely if either env var is missing
+  // — emitting a half-formed preamble would be worse than no preamble.
+  const identityPreamble = resolveIdentityPreamble(
+    process.env.ASSISTANT_NAME,
+    process.env.ASSISTANT_USERNAME,
+  );
+  if (identityPreamble) {
+    appendParts.push(identityPreamble);
+  } else {
+    log(
+      'identity preamble skipped — ASSISTANT_NAME or ASSISTANT_USERNAME not set',
+    );
+  }
+
   if (fs.existsSync(soulMdPath)) {
     appendParts.push(fs.readFileSync(soulMdPath, 'utf-8'));
   }

@@ -10,6 +10,8 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 // Mock config
 vi.mock('./config.js', () => ({
   AGENT_AUTO_COMPACT_WINDOW: 800000,
+  ASSISTANT_NAME: 'LoMBot',
+  ASSISTANT_USERNAME: 'limlombot',
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
@@ -988,5 +990,47 @@ describe('per-group AGENT_MODEL override on container spawn', () => {
         (c) => typeof c[1] === 'string' && c[1].includes('AGENT_MODEL'),
       );
     expect(warnCalls.length).toBe(0);
+  });
+});
+
+// ----------------------------------------------------------------------
+// ASSISTANT_NAME / ASSISTANT_USERNAME forwarding (#407, cherry-pick of
+// ligolnik/nanoclaw-public#90).
+//
+// The orchestrator's authoritative identity config must reach the agent
+// container so the agent-runner can prepend an identity preamble to
+// systemPromptAppend (see container/agent-runner/src/index.ts —
+// buildIdentityPreamble). Without this, untrusted-tier containers
+// without an explicit identity statement in their persona files have
+// been observed templating themselves from fictional bot handles in
+// tile rules (live repro: a LoMBot deployment reading the @AyeAye /
+// @AyeAyeSureBot canonical example from nanoclaw-core 0.1.94 and
+// claiming those handles as its own identity).
+//
+// These are not secrets, so the test config mock above sets them as
+// plain strings ('LoMBot' / 'limlombot') and the assertion checks they
+// flow straight through to the spawn args via -e.
+// ----------------------------------------------------------------------
+
+describe('ASSISTANT_NAME / ASSISTANT_USERNAME forwarding', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('forwards ASSISTANT_NAME and ASSISTANT_USERNAME on container spawn', async () => {
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).toContain('ASSISTANT_NAME=LoMBot');
+    expect(args).toContain('ASSISTANT_USERNAME=limlombot');
   });
 });
