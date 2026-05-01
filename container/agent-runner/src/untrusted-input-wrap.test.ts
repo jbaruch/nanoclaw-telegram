@@ -465,23 +465,20 @@ describe('wrapMcpToolResult — body summarisation (#319)', () => {
     expect(wrappedText).toContain('<summarisation-failed reason="api_error"');
   });
 
-  it('catches unexpected (non-SDK) errors and wraps with reason=unexpected_error', async () => {
-    // `extractStructuredSummary` propagates non-SDK errors per the
-    // error-handling policy. The wrap module's contract is graceful
-    // fallback — the model still gets the envelope + raw body with a
-    // marker, and the operator sees the unexpected error in logs (the
-    // detail is captured on the marker).
+  it('PROPAGATES unexpected (non-SDK) errors per error-handling policy', async () => {
+    // `extractStructuredSummary` propagates non-SDK errors so real
+    // bugs surface — the wrap path must not re-catch them and convert
+    // them into a graceful `<summarisation-failed>` marker (that
+    // would hide the bug). Mirrors the equivalent contract test in
+    // `structured-summary.test.ts`.
     const opts = mockSummariser({ reject: new Error('boom') });
-    const { summaryOutcomes, wrapped } = await wrapMcpToolResult(
-      'mcp__composio__gmail_fetch_emails',
-      { content: [{ type: 'text', text: 'subject: x' }] },
-      opts,
-    );
-    expect(summaryOutcomes).toEqual(['unexpected_error']);
-    const wrappedText = (wrapped as { content: Array<{ text: string }> })
-      .content[0].text;
-    expect(wrappedText).toContain('<summarisation-failed reason="unexpected_error"');
-    expect(wrappedText).toContain('boom');
+    await expect(
+      wrapMcpToolResult(
+        'mcp__composio__gmail_fetch_emails',
+        { content: [{ type: 'text', text: 'subject: x' }] },
+        opts,
+      ),
+    ).rejects.toThrow(/boom/);
   });
 
   it('summarises calendar event description, replacing free-form text with structured digest', async () => {

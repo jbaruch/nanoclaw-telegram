@@ -271,8 +271,7 @@ export type SummaryOutcome =
   | 'sub_agent_returned_nothing'
   | 'sub_agent_returned_invalid_shape'
   | 'sub_agent_refused'
-  | 'api_error'
-  | 'unexpected_error';
+  | 'api_error';
 
 /**
  * Caller-supplied dependency for body summarisation. Decoupling the SDK
@@ -434,9 +433,14 @@ async function runBodySummary(
 ): Promise<BodySummaryResult> {
   // Caller checks `summariseEnabled` before calling, but the type
   // narrowing is local — re-assert here so the rest of the function can
-  // assume `summariseBody` is set.
+  // assume `summariseBody` is set. Throwing rather than returning a
+  // sentinel matches `error-handling`: a missing config at this point
+  // is a programmer bug, not a runtime condition the wrap should
+  // silently paper over.
   if (!row.summariseBody) {
-    return { text: rawText, outcome: 'unexpected_error' };
+    throw new Error(
+      `untrusted-input-wrap: runBodySummary invoked on row without summariseBody (prefix=${row.prefix})`,
+    );
   }
 
   // Every row that carries `summariseBody` MUST use a prefix that
@@ -448,30 +452,24 @@ async function runBodySummary(
   // to the sub-agent system prompt.
   const sourceKind = asSummarySourceKind(row.prefix);
 
-  let result: ExtractResult<unknown>;
-  try {
-    result = await extractStructuredSummary({
-      rawText,
-      source: { kind: sourceKind, identifier: row.value },
-      extractionGoal: row.summariseBody.extractionGoal,
-      schema: row.summariseBody.schema,
-      client: opts.client,
-      model: opts.model,
-      timeoutMs: opts.timeoutMs,
-      maxInputBytes: opts.maxInputBytes,
-    });
-  } catch (err) {
-    // `extractStructuredSummary` re-throws unexpected (non-SDK) errors
-    // per the error-handling policy. The wrap module's contract is
-    // graceful fallback: the body is wrapped with a failed-summary
-    // marker, the model still sees it, and the unexpected error
-    // surfaces in the log.
-    const detail = err instanceof Error ? err.message : String(err);
-    return {
-      text: buildFailedBodyMarker('unexpected_error', detail) + rawText,
-      outcome: 'unexpected_error',
-    };
-  }
+  // `extractStructuredSummary` returns structured `{ kind: 'error' }`
+  // results for expected failure modes (timeout, sub-agent refused,
+  // API error, etc.) and re-throws unexpected errors per
+  // `jbaruch/coding-policy: error-handling`. We do NOT catch here:
+  // unexpected exceptions must propagate so real bugs surface
+  // instead of being silently rewrapped as `<summarisation-failed>`
+  // markers. Expected outcomes flow through the `result.kind` branch
+  // below.
+  const result: ExtractResult<unknown> = await extractStructuredSummary({
+    rawText,
+    source: { kind: sourceKind, identifier: row.value },
+    extractionGoal: row.summariseBody.extractionGoal,
+    schema: row.summariseBody.schema,
+    client: opts.client,
+    model: opts.model,
+    timeoutMs: opts.timeoutMs,
+    maxInputBytes: opts.maxInputBytes,
+  });
 
   if (result.kind === 'ok') {
     // The sub-agent's structured output replaces the raw body.
