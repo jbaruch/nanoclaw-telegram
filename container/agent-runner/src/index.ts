@@ -96,6 +96,10 @@ import {
   inferSentinelSource,
 } from './provenance-sentinel.js';
 import {
+  decideExternalFileSummary,
+  runExternalFileSummary,
+} from './external-file-summary.js';
+import {
   decideCapabilityAclIterable,
   walkBackIterableForProvenance,
   WalkBackMessage,
@@ -589,6 +593,23 @@ function createMcpToolResultSanitizerHook(): HookCallback {
  * the deploy that ships this code path. Flip per-group after observing
  * the `summary_latencies_ms=...` log telemetry.
  */
+/**
+ * Shared lazy-cached Anthropic SDK client. Used by both the #319
+ * Composio body summariser and the #392 external-file summariser —
+ * keeping one client instance per process so the underlying agent
+ * (and TCP keepalive pool, retry budget, etc.) isn't duplicated when
+ * both flags are enabled. The SDK picks up `ANTHROPIC_API_KEY` /
+ * `ANTHROPIC_BASE_URL` from env, populated by the OneCLI proxy at
+ * container startup.
+ */
+let cachedAnthropicClient: Anthropic | null = null;
+function getAnthropicClient(): Anthropic {
+  if (cachedAnthropicClient === null) {
+    cachedAnthropicClient = new Anthropic();
+  }
+  return cachedAnthropicClient;
+}
+
 let cachedSummariseBodyOpts: SummariseBodyOptions | null | undefined;
 function getSummariseBodyOpts(): SummariseBodyOptions | undefined {
   if (cachedSummariseBodyOpts !== undefined) {
@@ -598,7 +619,7 @@ function getSummariseBodyOpts(): SummariseBodyOptions | undefined {
     cachedSummariseBodyOpts = null;
     return undefined;
   }
-  cachedSummariseBodyOpts = { client: new Anthropic() };
+  cachedSummariseBodyOpts = { client: getAnthropicClient() };
   return cachedSummariseBodyOpts;
 }
 
@@ -691,6 +712,81 @@ function createMemoryStalenessReminderHook(): HookCallback {
       hookSpecificOutput: {
         hookEventName: 'PostToolUse' as const,
         additionalContext: buildStalenessReminder(decision.resolvedPath),
+      },
+    };
+  };
+}
+
+/**
+ * #392 — Two-context split for `Read` of external file paths. PreToolUse
+ * on `Read`: classify the resolved path, read the file in the hook,
+ * route the bytes through the no-tools sub-agent in `extractStructuredSummary`,
+ * and DENY the original `Read` with a reason carrying the structured
+ * digest plus the same Encoding-B sentinel that
+ * `createProvenanceSentinelHook` would have emitted on the un-summarised
+ * path. The parent agent's transcript carries the digest, not the raw
+ * bytes — and #322's walk-back keeps gating on the `file:<path>` source
+ * because the deny reason includes the sentinel verbatim.
+ *
+ * Default-off via `SUMMARISE_EXTERNAL_FILES=1`. When the flag is off,
+ * or the resolved path is internal (workspace mount roots), the hook
+ * passes through and the existing PostToolUse `provenance-sentinel`
+ * branch handles marker emission as before.
+ *
+ * Failure posture: file-read errors (ENOENT/EACCES/...) and
+ * summariser failures (timeout, refusal, API error) pass through,
+ * allowing the original `Read` to run — the SDK produces its
+ * canonical error in the first case, and the marker-based ACL gate
+ * is the active defence in the second. Unexpected errors propagate
+ * per `jbaruch/coding-policy: error-handling`.
+ */
+function createExternalFileSummaryHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const pre = input as PreToolUseHookInput;
+    if (pre.tool_name !== 'Read') return {};
+    const filePath = (pre.tool_input as { file_path?: unknown })?.file_path;
+    const decision = decideExternalFileSummary({
+      filePath: typeof filePath === 'string' ? filePath : '',
+      toolUseId: pre.tool_use_id,
+      summariseEnabled: process.env.SUMMARISE_EXTERNAL_FILES === '1',
+    });
+    if (decision.kind === 'pass-through') return {};
+    const result = await runExternalFileSummary({
+      resolved: decision.resolved,
+      sourceMarker: decision.sourceMarker,
+      client: getAnthropicClient(),
+    });
+    // Filenames are POSIX-legal carriers of `\r`/`\n`; collapse them
+    // out of the log basename so a model-controlled path can't forge
+    // additional log lines (fake "deploy succeeded" / "auth bypass"
+    // entries that downstream log scanners would treat as real).
+    const safeBasename = path
+      .basename(decision.resolved)
+      .replace(/[\r\n]+/g, ' ');
+    if (result.kind === 'pass-through') {
+      // file_read_error: fall through and let the SDK Read produce
+      // the canonical error.
+      // summariser_<reason>: fall through and let the raw Read flow
+      // through; the PostToolUse provenance-sentinel emits the
+      // file: marker and #322's ACL gates outbound sinks. The
+      // marker-based defence is the active layer when the
+      // summariser is unavailable.
+      log(
+        `PreToolUse: external_file_summary PASS_THROUGH ` +
+          `reason=${result.reason} path=${safeBasename}`,
+      );
+      return {};
+    }
+    log(
+      `PreToolUse: external_file_summary DENY-WITH-DIGEST ` +
+        `path=${safeBasename} ` +
+        `latency_ms=${result.latencyMs} truncated=${result.truncated}`,
+    );
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: 'deny' as const,
+        permissionDecisionReason: result.denyReason,
       },
     };
   };
@@ -3344,6 +3440,21 @@ async function runQuery(
                 () => effectiveSessionId,
               ),
             ],
+          },
+          // #392 — two-context split for `Read` of external file
+          // paths. PreToolUse on `Read`: when the resolved path is
+          // outside the workspace mount roots AND
+          // `SUMMARISE_EXTERNAL_FILES=1`, read the file in the hook,
+          // route the bytes through the no-tools sub-agent, and deny
+          // the original Read with a reason carrying the structured
+          // digest plus the Encoding-B sentinel — so the parent
+          // never sees the raw bytes but #322's walk-back keeps
+          // gating on `file:<path>`. Workspace reads bypass; flag-off
+          // bypass; file-read / summariser failures pass through to
+          // the existing PostToolUse marker path.
+          {
+            matcher: '^Read$',
+            hooks: [createExternalFileSummaryHook()],
           },
           // #322 — capability ACL. Walks the transcript back to the
           // most recent operator user-turn boundary, collects every
