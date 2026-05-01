@@ -4,6 +4,14 @@ import path from 'path';
 
 import { ASSISTANT_NAME, DATA_DIR, GROUPS_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
+import {
+  handleConstraintViolationOrRethrow,
+  isObjectRow,
+  listGroupFoldersForMigration,
+  migrationDateStamp,
+  parseJsonObjectOrWarn,
+  renameMigratedSource,
+} from './json-state-import.js';
 import { logger } from './logger.js';
 import { STATE_MIGRATIONS } from './state-migrations/index.js';
 import {
@@ -1942,6 +1950,17 @@ function migrateJsonState(): void {
   // `morning-brief-pending.json.migrated-YYYY-MM-DD`, so a re-run of
   // `initDatabase` is a no-op once the file is gone.
   migrateMorningBriefPendingJsonFiles();
+
+  // Migrate per-group calendar-state.json files (#300). Same
+  // per-group-scan pattern: the source file historically lived under
+  // each group's working dir as a JSON envelope wrapping a per-day
+  // `events` array, the schema-only migration in state-008 created
+  // `calendar_snapshots` + `calendar_events` (FK + cascade), and this
+  // pass populates them from the JSON-era shape. Idempotent: each
+  // successful per-file import renames the source to
+  // `calendar-state.json.migrated-YYYY-MM-DD`, so a re-run of
+  // `initDatabase` is a no-op once the file is gone.
+  migrateCalendarStateJsonFiles();
 }
 
 interface OrdersDbJsonRecord {
@@ -2517,6 +2536,185 @@ function migrateMorningBriefPendingJsonFiles(): void {
         renamed_to: `${filePath}.migrated-${stamp}`,
       },
       'morning-brief-pending.json migration: imported and source renamed',
+    );
+  }
+}
+
+/**
+ * Migrate per-group `calendar-state.json` files into the
+ * `calendar_snapshots` + `calendar_events` tables created by
+ * state-008 (#300). Per-group-scan pattern (same as the orders and
+ * morning-brief-pending migrations above) refactored onto the shared
+ * helpers in `src/json-state-import.ts`: parse-shape guard, per-row
+ * object guard, narrowed `SqliteError` constraint catch, deterministic
+ * folder ordering, and ENOENT-tolerant rename. See PR #368 for the
+ * helper extraction rationale.
+ *
+ * JSON-era envelope shape:
+ *   {
+ *     "date":       "YYYY-MM-DD",
+ *     "fetched_at": "ISO8601",
+ *     "events":     [
+ *       { event_id, title, start, end?, reminder_task_id? }, ...
+ *     ]
+ *   }
+ *
+ * Insert order is snapshot-row-first, then per-event rows. Under the
+ * current production setting (`PRAGMA foreign_keys` is OFF — see the
+ * doc-header on `state-008-calendar-state.ts`) this is purely a
+ * style/consistency choice; once the orchestrator flips
+ * `foreign_keys = ON` globally, the ordering becomes load-bearing
+ * because `calendar_events.date` references `calendar_snapshots.date`
+ * via `ON DELETE CASCADE` and an event INSERT for an absent snapshot
+ * would fire SQLITE_CONSTRAINT_FOREIGNKEY. Doing the snapshot first
+ * inside the per-file transaction keeps the import correct under
+ * either FK setting.
+ *
+ * `ON CONFLICT(date) DO NOTHING` on the snapshot insert: re-running
+ * with leftover state (e.g. an operator copied a partial DB back over
+ * an already-imported one) is a silent no-op on the PK conflict, but
+ * a NOT NULL violation on `fetched_at` still throws and rolls back.
+ * Same shape on the event insert keyed on `event_id` — the PK is
+ * Google Calendar's own event ID, so re-importing the same source
+ * file on top of a partial migration just re-converges on the
+ * already-stored row.
+ */
+function migrateCalendarStateJsonFiles(): void {
+  const groupFolders = listGroupFoldersForMigration();
+  if (groupFolders.length === 0) return;
+
+  const insertSnapshot = db.prepare(
+    `INSERT INTO calendar_snapshots (date, fetched_at)
+     VALUES (?, ?)
+     ON CONFLICT(date) DO NOTHING`,
+  );
+  const insertEvent = db.prepare(
+    `INSERT INTO calendar_events
+       (event_id, date, title, start, end, reminder_task_id)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(event_id) DO NOTHING`,
+  );
+
+  const stamp = migrationDateStamp();
+
+  for (const folder of groupFolders) {
+    const filePath = path.join(GROUPS_DIR, folder, 'calendar-state.json');
+    if (!fs.existsSync(filePath)) continue;
+
+    let raw: string;
+    try {
+      raw = fs.readFileSync(filePath, 'utf-8');
+    } catch (err) {
+      // TOCTOU race: existsSync above is best-effort; the file may
+      // disappear before readFileSync. Mirror the orders / morning-
+      // brief-pending migrations — log info on ENOENT, propagate every
+      // other errno.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        logger.info(
+          { folder, filePath },
+          'calendar-state.json migration: file disappeared between existsSync and readFileSync, skipping',
+        );
+        continue;
+      }
+      throw err;
+    }
+
+    const parsed = parseJsonObjectOrWarn(raw, folder, 'calendar-state.json');
+    if (parsed === null) continue;
+
+    const date = parsed.date;
+    const fetchedAt = parsed.fetched_at;
+    if (typeof date !== 'string' || typeof fetchedAt !== 'string') {
+      // The two fields the snapshot row keys on / records. If either
+      // is missing or wrong-typed, we can't write a snapshot row at
+      // all, and the FK column on the events would dangle. Warn and
+      // leave the file in place for triage.
+      logger.warn(
+        { folder },
+        'calendar-state.json migration: missing or non-string date / fetched_at, skipping (file left in place)',
+      );
+      continue;
+    }
+    // Distinguish "missing" (key absent or undefined) from
+    // "wrong-typed" (key present but not an array — e.g. an object
+    // or a string). Missing is a valid empty-day shape: still import
+    // the snapshot row and rename. Wrong-typed is a corruption signal
+    // that the schema can't migrate; warn (with the rejected type) and
+    // skip the entire group's file so the events payload survives for
+    // human triage instead of being silently discarded by the rename.
+    const eventsRaw: unknown = parsed.events;
+    let events: unknown[];
+    if (eventsRaw === undefined) {
+      events = [];
+    } else if (Array.isArray(eventsRaw)) {
+      events = eventsRaw;
+    } else {
+      logger.warn(
+        {
+          folder,
+          eventsType: eventsRaw === null ? 'null' : typeof eventsRaw,
+        },
+        'calendar-state.json migration: events is not an array, skipping (file left in place)',
+      );
+      continue;
+    }
+
+    const counts = {
+      inserted_snapshots: 0,
+      inserted_events: 0,
+      skipped_events: 0,
+      total_events: events.length,
+    };
+    try {
+      const importFile = db.transaction(() => {
+        // Snapshot first — see doc-header. The conflict resolver
+        // returns 0 changes if a previous run already inserted today's
+        // snapshot; we count `inserted_snapshots` only on the change.
+        const snapshotResult = insertSnapshot.run(date, fetchedAt);
+        if (snapshotResult.changes > 0) counts.inserted_snapshots++;
+
+        for (const ev of events) {
+          if (!isObjectRow(ev)) {
+            logger.warn(
+              { folder, queue: 'events' },
+              'calendar-state.json migration: skipping non-object row',
+            );
+            counts.skipped_events++;
+            continue;
+          }
+          const result = insertEvent.run(
+            ev.event_id,
+            date,
+            ev.title,
+            ev.start,
+            ev.end ?? null,
+            ev.reminder_task_id ?? null,
+          );
+          if (result.changes > 0) counts.inserted_events++;
+          else counts.skipped_events++;
+        }
+      });
+      importFile();
+    } catch (err) {
+      // Narrowed catch: only constraint-class SqliteError is the
+      // recoverable per-file failure (NOT NULL on title/start, FK
+      // dangling, etc.). Anything else (a TypeError from a bug, a
+      // SQLITE_BUSY from a noisy environment) propagates — operator
+      // visibility per `coding-policy: error-handling`. The
+      // transaction has already rolled back on throw, so no partial
+      // rows landed.
+      if (
+        handleConstraintViolationOrRethrow(err, folder, 'calendar-state.json')
+      )
+        continue;
+    }
+
+    renameMigratedSource(
+      filePath,
+      stamp,
+      folder,
+      'calendar-state.json',
+      counts,
     );
   }
 }
