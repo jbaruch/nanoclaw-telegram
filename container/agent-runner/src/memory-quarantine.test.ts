@@ -167,7 +167,7 @@ describe('decideMemoryWrite — flag set + trusted target', () => {
     }
   });
 
-  it('denies Edit (surgical-edit semantics dont survive redirect)', () => {
+  it("denies Edit (surgical-edit semantics don't survive redirect)", () => {
     const flag = { processedExternalContent: true };
     const decision = decideMemoryWrite({
       toolName: 'Edit',

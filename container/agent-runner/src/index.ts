@@ -1693,6 +1693,40 @@ function createComposioArgValidatorHook(): HookCallback {
 }
 
 /**
+ * Predicate for the narrow fail-closed path in the memory-
+ * quarantine redirect step (#325). Filesystem errors from
+ * `mkdirSync` / `writeFileSync` / `renameSync` are operationally
+ * expected — permissions issue on the quarantine subtree, disk
+ * full, the target file already exists with read-only flags, etc.
+ * Everything else (a TypeError from a botched call signature, a
+ * RangeError from too-large content, an unexpected runtime error)
+ * is a defect and propagates per
+ * `jbaruch/coding-policy: error-handling`.
+ *
+ * Match by `NodeJS.ErrnoException.code` rather than by Error
+ * subclass — the fs APIs throw raw `Error` instances with a
+ * `code` property, not custom subclasses.
+ */
+const QUARANTINE_WRITE_RECOVERABLE_CODES: ReadonlySet<string> = new Set([
+  'EACCES', // permission denied
+  'EPERM', // operation not permitted
+  'ENOENT', // path component missing despite mkdirSync (concurrent rmdir)
+  'EROFS', // read-only filesystem
+  'ENOSPC', // no space left on device
+  'EDQUOT', // disk quota exceeded
+  'EIO', // generic I/O error
+  'EBUSY', // resource locked (concurrent promote)
+  'EEXIST', // target exists with wrong perms after rename
+]);
+
+function isExpectedQuarantineWriteError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const code = (err as NodeJS.ErrnoException).code;
+  if (typeof code !== 'string') return false;
+  return QUARANTINE_WRITE_RECOVERABLE_CODES.has(code);
+}
+
+/**
  * #325 — Memory write quarantine hooks.
  *
  * The trio operates on a per-`runQuery` `processedExternalContent`
@@ -1804,13 +1838,24 @@ function createMemoryQuarantineHook(
     const content = (pre.tool_input as { content?: unknown })?.content;
     if (typeof content !== 'string') {
       log(
-        `PreToolUse: memory_quarantine WARN — Write on ${decision.originalPath} had non-string content; falling back to plain deny`,
+        `PreToolUse: memory_quarantine WARN — Write on ${decision.originalPath} had non-string content; denying with no quarantine snapshot written`,
       );
+      // Different reason than the redirect path — we did NOT write
+      // a quarantine snapshot, so the model shouldn't be told to
+      // expect one. Per Copilot review on #325: a misleading
+      // "redirected to <path>" reason here would lead the agent
+      // to read a snapshot that doesn't exist.
       return {
         hookSpecificOutput: {
           hookEventName: 'PreToolUse' as const,
           permissionDecision: 'deny' as const,
-          permissionDecisionReason: decision.reason,
+          permissionDecisionReason:
+            `memory_quarantine: Write to ${decision.originalPath} was denied ` +
+            `because tool_input.content was not a string, so the redirect ` +
+            `to ${decision.quarantinedTo} could not be performed. No ` +
+            `quarantine file was written. The original /workspace/trusted/ ` +
+            `write remains denied to keep the trust boundary intact. Retry ` +
+            `with string content if you want the write quarantined.`,
         },
       };
     }
@@ -1825,11 +1870,16 @@ function createMemoryQuarantineHook(
       fsModule.writeFileSync(tmpPath, content);
       fsModule.renameSync(tmpPath, decision.quarantinedTo);
     } catch (err) {
-      // Quarantine write failed — deny the original write rather
-      // than passing it through. Failing closed here means a
-      // misconfigured quarantine subtree (e.g. permissions issue)
-      // doesn't accidentally let the real /workspace/trusted/
-      // write succeed.
+      // Narrow to expected filesystem failures per
+      // `jbaruch/coding-policy: error-handling`. Anything else is a
+      // real defect and propagates instead of being silently
+      // converted into a deny.
+      if (!isExpectedQuarantineWriteError(err)) throw err;
+      // Quarantine write failed (permissions / IO / disk full).
+      // Deny the original write rather than passing it through —
+      // failing closed here means a misconfigured quarantine
+      // subtree doesn't accidentally let the real /workspace/
+      // trusted/ write succeed.
       log(
         `PreToolUse: memory_quarantine FAIL_CLOSED — write to ${decision.quarantinedTo} failed: ${
           err instanceof Error ? err.message : String(err)
@@ -2530,6 +2580,18 @@ async function runQuery(
   // not undo the flip; the trust boundary correctly records that
   // THIS run's session has touched external content.
   const quarantineFlagState = createQuarantineFlagState();
+  // Effective session id used as the quarantine subdir name. The
+  // input `sessionId` is `undefined` for fresh sessions and on the
+  // stale-session retry path. Without a per-runQuery fallback that
+  // collides across runs, every fresh-session quarantine write
+  // would land under `quarantine/unknown/...` and overwrite the
+  // previous run's snapshots. A pid+timestamp+random pending id
+  // gives each runQuery its own subtree until the SDK assigns the
+  // real session id (captured below from `system/init` and
+  // preferred when available).
+  let effectiveSessionId =
+    sessionId ??
+    `pending-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
   // #142 — silent-turn-audit state shared by the UserPromptSubmit /
   // PreToolUse / Stop hooks. Lifetime: one runQuery() call.
@@ -3094,7 +3156,7 @@ async function runQuery(
               createMemoryQuarantineHook(
                 fs,
                 quarantineFlagState,
-                () => sessionId ?? 'unknown',
+                () => effectiveSessionId,
               ),
             ],
           },
@@ -3362,6 +3424,15 @@ async function runQuery(
 
     if (message.type === 'system' && message.subtype === 'init') {
       newSessionId = message.session_id;
+      // Once the SDK assigns the real session id, the
+      // memory-quarantine hook should use it for the subdir name —
+      // a Write that happens after init (the common case) lands
+      // under the real id; a Write that happens BEFORE init (rare;
+      // would have to be triggered by the prompt seed) keeps the
+      // pending-* fallback set at runQuery start.
+      if (typeof newSessionId === 'string' && newSessionId.length > 0) {
+        effectiveSessionId = newSessionId;
+      }
       log(`Session initialized: ${newSessionId}`);
     }
 
