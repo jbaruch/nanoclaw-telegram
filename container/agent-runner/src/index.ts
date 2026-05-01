@@ -38,6 +38,18 @@ import { detectAuthoritativeLookup } from './authoritative-source.js';
 import { evaluateBashCommand } from './bash-safety-net.js';
 import { validateComposioArgs } from './composio-arg-validator.js';
 import { detectComposioFidelity } from './composio-fidelity.js';
+import {
+  COUNTERS_FILENAME,
+  DEFAULT_CAP_MATRIX,
+  applyOverrides,
+  classifyTool as classifyRateTool,
+  decideRate,
+  emptyCounters,
+  parseCounters,
+  parseOverrides,
+  recordEvent,
+  RateLimitCounters,
+} from './rate-limits.js';
 import { decideGroundTruthReminder } from './ground-truth-reminder.js';
 import { detectLazyVerification } from './lazy-verification.js';
 import { createReadonlyWarner } from './ipc-readonly-warn.js';
@@ -853,6 +865,192 @@ function* lazyReverseWalkBack(
     const wb = sessionMessageToWalkBack(session[i]);
     if (wb !== null) yield wb;
   }
+}
+
+/**
+ * #323 — rate-limits state file (per-group; lives under
+ * /workspace/state which is the group-scoped state mount, so an
+ * injection in one chat can't poison another chat's counters).
+ *
+ * Optional override file at /workspace/trusted/rate-limit-overrides.json
+ * lets the operator tighten (or selectively widen) any cap row.
+ */
+const RATE_LIMIT_STATE_DIR = '/workspace/state';
+const RATE_LIMIT_OVERRIDES_PATH =
+  '/workspace/trusted/rate-limit-overrides.json';
+
+function loadRateLimitCounters(
+  fsModule: typeof import('fs'),
+): RateLimitCounters {
+  const filePath = path.join(RATE_LIMIT_STATE_DIR, COUNTERS_FILENAME);
+  let raw: string;
+  try {
+    raw = fsModule.readFileSync(filePath, 'utf8');
+  } catch (err) {
+    // Distinguish "file doesn't exist yet" (legitimate cold start)
+    // from real I/O errors (EACCES, EIO, EBUSY). `existsSync` would
+    // mask the latter as "missing", silently resetting counters
+    // every fire. Treat ENOENT as cold start; let everything else
+    // propagate so a real misconfiguration surfaces.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return emptyCounters();
+    }
+    throw err;
+  }
+  let parsed: RateLimitCounters | null;
+  try {
+    parsed = parseCounters(JSON.parse(raw));
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
+    log(
+      `rate_limits: counters file at ${filePath} unparseable (${
+        err.message
+      }) — starting fresh window`,
+    );
+    return emptyCounters();
+  }
+  if (parsed === null) {
+    log(
+      `rate_limits: counters file at ${filePath} failed validation — starting fresh window`,
+    );
+    return emptyCounters();
+  }
+  return parsed;
+}
+
+function saveRateLimitCounters(
+  fsModule: typeof import('fs'),
+  counters: RateLimitCounters,
+): void {
+  if (!fsModule.existsSync(RATE_LIMIT_STATE_DIR)) {
+    fsModule.mkdirSync(RATE_LIMIT_STATE_DIR, { recursive: true });
+  }
+  const filePath = path.join(RATE_LIMIT_STATE_DIR, COUNTERS_FILENAME);
+  // Atomic write — temp file + rename so a concurrent reader can't
+  // observe partial JSON. Same posture as #324's token store.
+  const tmpPath = `${filePath}.tmp.${process.pid}`;
+  fsModule.writeFileSync(tmpPath, JSON.stringify(counters));
+  fsModule.renameSync(tmpPath, filePath);
+}
+
+function loadRateLimitMatrix(fsModule: typeof import('fs')) {
+  let raw: string;
+  try {
+    raw = fsModule.readFileSync(RATE_LIMIT_OVERRIDES_PATH, 'utf8');
+  } catch (err) {
+    // ENOENT = file genuinely absent (operator hasn't customized
+    // the matrix); use defaults silently. Anything else (EACCES,
+    // EIO) propagates so a misconfiguration surfaces — same posture
+    // as `loadRateLimitCounters`.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return DEFAULT_CAP_MATRIX;
+    }
+    throw err;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
+    log(
+      `rate_limits: overrides at ${RATE_LIMIT_OVERRIDES_PATH} unparseable (${
+        err.message
+      }) — using DEFAULT_CAP_MATRIX`,
+    );
+    return DEFAULT_CAP_MATRIX;
+  }
+  const overrides = parseOverrides(parsed);
+  if (overrides === null) {
+    log(
+      `rate_limits: overrides at ${RATE_LIMIT_OVERRIDES_PATH} failed validation — using DEFAULT_CAP_MATRIX`,
+    );
+    return DEFAULT_CAP_MATRIX;
+  }
+  return applyOverrides(DEFAULT_CAP_MATRIX, overrides);
+}
+
+/**
+ * #323 — rate limits hook. Provenance-conditional cap on `Task` (sub-
+ * agent spawn) and `mcp__nanoclaw__schedule_task`. Walks back from
+ * the call to the most recent operator user-turn boundary collecting
+ * untrusted-provenance prefixes (#321/#322 markers), classifies the
+ * chain into a row of the cap matrix, and:
+ *   - operator-trusted → audit-log only (the heartbeat warning
+ *     surfaces unusual cadence, but never denies operator workflow);
+ *   - operator-untrusted / untrusted-source / cross-group / mixed →
+ *     deny when the rolling 1-hour window count would exceed the row's
+ *     per-hour cap, allow + record the event otherwise.
+ *
+ * Counter file lives at /workspace/state/rate-limit-counters.json
+ * (group-scoped). Operator override file at
+ * /workspace/trusted/rate-limit-overrides.json (host-only writable
+ * per #324's gate posture — the agent can't reach `/workspace/trusted/`
+ * through Write/Edit/Bash).
+ */
+function createRateLimitsHook(
+  fsModule: typeof import('fs'),
+  isTrustedContainer: boolean,
+  nowFn: () => number = () => Math.floor(Date.now() / 1000),
+): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const pre = input as PreToolUseHookInput;
+    const rateKind = classifyRateTool(pre.tool_name);
+    if (rateKind === null) return {};
+
+    let session: SessionMessage[];
+    try {
+      session = await getSessionMessages(pre.session_id);
+    } catch (err) {
+      if (!isExpectedTranscriptUnavailable(err)) throw err;
+      log(
+        `rate_limits: transcript not yet readable, allowing tool=${pre.tool_name} reason=${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return {};
+    }
+
+    const prefixes = walkBackIterableForProvenance(
+      lazyReverseWalkBack(session),
+    );
+
+    const matrix = loadRateLimitMatrix(fsModule);
+    const counters = loadRateLimitCounters(fsModule);
+    const nowSec = nowFn();
+
+    const decision = decideRate(
+      rateKind,
+      prefixes,
+      isTrustedContainer,
+      counters,
+      matrix,
+      nowSec,
+    );
+
+    if (decision.kind === 'deny') {
+      log(
+        `rate_limits: DENY tool=${pre.tool_name} kind=${rateKind} provenance=${decision.provenance} cap=${decision.cap} observed=${decision.observed}`,
+      );
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse' as const,
+          permissionDecision: 'deny' as const,
+          permissionDecisionReason: decision.reason,
+        },
+      };
+    }
+
+    if (decision.auditOnlyExceeded === true) {
+      log(
+        `rate_limits: AUDIT_ONLY_EXCEEDED tool=${pre.tool_name} kind=${rateKind} provenance=${decision.provenance} — operator workflow over heartbeat threshold but not gated`,
+      );
+    }
+
+    // Record the event on allow. The hook is the only writer; the
+    // counters file is owned by this module per stateful-artifacts.
+    saveRateLimitCounters(fsModule, recordEvent(rateKind, counters, nowSec));
+    return {};
+  };
 }
 
 /**
@@ -2699,6 +2897,17 @@ async function runQuery(
           {
             matcher: '.*',
             hooks: [createCapabilityAclHook()],
+          },
+          // #323 — rate limits on Task (sub-agent spawn) and
+          // mcp__nanoclaw__schedule_task. Provenance-conditional:
+          // operator-trusted = audit-only, untrusted-provenance =
+          // gated. Anchored alternation matcher to fire only on the
+          // two tracked tools — the rate-limits.classifyTool() inside
+          // the hook is the source of truth (matcher is a perf hint
+          // so non-tracked tools don't pay the transcript-walk cost).
+          {
+            matcher: '^(Task|mcp__nanoclaw__schedule_task)$',
+            hooks: [createRateLimitsHook(fs, !!containerInput.isTrusted)],
           },
         ],
         // #117 — strip invisible-Unicode + cap byte size on every MCP
