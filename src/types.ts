@@ -39,6 +39,22 @@ export interface ContainerConfig {
    * "trigger-required → auto-heartbeat" coupling.
    */
   enableHeartbeat?: boolean;
+  /**
+   * Per-group AGENT_MODEL override (#395). When set, the orchestrator
+   * forwards this value as the `AGENT_MODEL` env var on container spawn
+   * for this group only, in place of the global default. Accepts the
+   * same forms as the global env (`opus`, `sonnet[1m]`,
+   * `claude-opus-4-7[1m]`, etc.). Validated through
+   * `resolvePerGroupAgentModel`: an unknown-prefix value falls back to
+   * the global default rather than passing through, so a fat-fingered
+   * per-group override can't silently route to a non-existent model and
+   * crash every spawn for that group.
+   *
+   * Undefined / null / empty / whitespace-only → use the global
+   * AGENT_MODEL (preserves pre-#395 behaviour for groups that don't opt
+   * in). Cleared via the `set_agent_model` IPC with `agentModel: null`.
+   */
+  agentModel?: string;
 }
 
 export interface RegisteredGroup {

@@ -834,6 +834,10 @@ export async function processTaskIpc(
     containerConfig?: RegisteredGroup['containerConfig'];
     // For set_trusted
     trusted?: boolean;
+    // For set_agent_model (#395). `string` = per-group override, `null` =
+    // clear the override (fall back to global AGENT_MODEL).
+    // `undefined` is rejected at the handler.
+    agentModel?: string | null;
     // For host operations / github_backup / promote_staging / sessionize
     requestId?: string;
     message?: string;
@@ -1593,6 +1597,106 @@ export async function processTaskIpc(
         );
       }
       break;
+
+    case 'set_agent_model': {
+      // Partial update: change `containerConfig.agentModel` only (#395).
+      // Authorization mirrors schedule_task — main can target any
+      // registered group; non-main can target only its own folder so an
+      // untrusted agent can't quietly downgrade another group's model
+      // (or escalate its own to a more expensive one for someone else's
+      // bill). Sibling containerConfig fields (trusted, additionalMounts,
+      // enableHeartbeat, timeout) are preserved verbatim — set_trusted /
+      // set_trigger semantics, applied to a new column.
+      const groupFolder =
+        typeof data.groupFolder === 'string' ? data.groupFolder.trim() : '';
+      if (!groupFolder) {
+        logger.warn(
+          { data },
+          'Invalid set_agent_model request - missing/empty groupFolder',
+        );
+        break;
+      }
+      // `agentModel` accepts string (set/replace) or null (clear). Anything
+      // else (number, object, undefined) is rejected — we don't want a
+      // malformed payload to silently no-op.
+      if (typeof data.agentModel !== 'string' && data.agentModel !== null) {
+        logger.warn(
+          { data },
+          'Invalid set_agent_model request - agentModel must be string or null',
+        );
+        break;
+      }
+      // Locate the target group entry by folder. We need the JID to
+      // call deps.registerGroup; iterate the in-memory registry rather
+      // than touching the DB directly so the source-of-truth stays in
+      // ipc.ts's existing pattern.
+      let targetJid: string | undefined;
+      let targetGroup: RegisteredGroup | undefined;
+      for (const [jid, g] of Object.entries(registeredGroups)) {
+        if (g.folder === groupFolder) {
+          targetJid = jid;
+          targetGroup = g;
+          break;
+        }
+      }
+      if (!targetJid || !targetGroup) {
+        logger.warn(
+          { groupFolder },
+          'set_agent_model: group not registered (use register_group first)',
+        );
+        break;
+      }
+      // Authorization: non-main can only modify its own folder.
+      if (!isMain && groupFolder !== sourceGroup) {
+        logger.warn(
+          { sourceGroup, groupFolder },
+          'Unauthorized set_agent_model attempt blocked',
+        );
+        break;
+      }
+      const nextContainerConfig: RegisteredGroup['containerConfig'] = {
+        ...(targetGroup.containerConfig ?? {}),
+      };
+      if (data.agentModel === null) {
+        // Explicit clear — drop the field so it serialises as absent
+        // (not as JSON null) and the runtime falls through to the
+        // global AGENT_MODEL.
+        delete nextContainerConfig.agentModel;
+      } else {
+        const trimmed = data.agentModel.trim();
+        if (trimmed.length === 0) {
+          // Treat empty/whitespace as a clear, same way
+          // resolvePerGroupAgentModel folds empty into fallback.
+          delete nextContainerConfig.agentModel;
+        } else {
+          nextContainerConfig.agentModel = trimmed;
+        }
+      }
+      deps.registerGroup(targetJid, {
+        ...targetGroup,
+        containerConfig: nextContainerConfig,
+      });
+      logger.info(
+        {
+          groupFolder,
+          agentModel: nextContainerConfig.agentModel ?? null,
+          source: sourceGroup,
+        },
+        'set_agent_model: updated per-group AGENT_MODEL override',
+      );
+      // Refresh available_groups.json so containers see the new
+      // override on their next read. `isMain` (not hardcoded true)
+      // because a non-main source legally lands here when modifying
+      // its own folder.
+      const availableGroups = deps.getAvailableGroups();
+      deps.writeGroupsSnapshot(
+        sourceGroup,
+        isMain,
+        availableGroups,
+        new Set(Object.keys(registeredGroups)),
+      );
+      break;
+    }
 
     case 'nuke_session':
       if (data.groupFolder) {

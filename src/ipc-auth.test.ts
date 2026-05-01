@@ -1657,6 +1657,204 @@ describe('set_trigger', () => {
   });
 });
 
+// --- set_agent_model (#395) ---
+//
+// Per-group `containerConfig.agentModel` override. Authorisation mirrors
+// schedule_task — main can target any group; non-main can target only
+// its own folder. Sibling containerConfig fields must survive untouched
+// (regression-bait — set_trusted clobbered them pre-#105).
+
+describe('set_agent_model', () => {
+  it('main group can set agentModel on a registered group', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_agent_model',
+        groupFolder: 'other-group',
+        agentModel: 'sonnet[1m]',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const group = getRegisteredGroup('other@g.us');
+    expect(group?.containerConfig?.agentModel).toBe('sonnet[1m]');
+    // Other fields preserved.
+    expect(group?.trigger).toBe('@Andy');
+    expect(group?.folder).toBe('other-group');
+  });
+
+  it('non-main group can set agentModel on its own folder', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_agent_model',
+        groupFolder: 'other-group',
+        agentModel: 'opus',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+
+    expect(getRegisteredGroup('other@g.us')?.containerConfig?.agentModel).toBe(
+      'opus',
+    );
+  });
+
+  it('non-main group cannot set agentModel on another group', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_agent_model',
+        groupFolder: 'third-group',
+        agentModel: 'opus',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('third@g.us')?.containerConfig?.agentModel,
+    ).toBeUndefined();
+  });
+
+  it('clears agentModel when payload is null', async () => {
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      containerConfig: { agentModel: 'opus' },
+    });
+    groups['other@g.us'] = {
+      ...OTHER_GROUP,
+      containerConfig: { agentModel: 'opus' },
+    };
+
+    await processTaskIpc(
+      {
+        type: 'set_agent_model',
+        groupFolder: 'other-group',
+        agentModel: null,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.agentModel,
+    ).toBeUndefined();
+  });
+
+  it('preserves sibling containerConfig fields on update', async () => {
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      containerConfig: {
+        trusted: true,
+        enableHeartbeat: true,
+        additionalMounts: [
+          { hostPath: '/tmp/extra', containerPath: 'extra', readonly: true },
+        ],
+      },
+    });
+    groups['other@g.us'] = getRegisteredGroup('other@g.us')!;
+
+    await processTaskIpc(
+      {
+        type: 'set_agent_model',
+        groupFolder: 'other-group',
+        agentModel: 'haiku',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const cfg = getRegisteredGroup('other@g.us')?.containerConfig;
+    expect(cfg?.agentModel).toBe('haiku');
+    expect(cfg?.trusted).toBe(true);
+    expect(cfg?.enableHeartbeat).toBe(true);
+    expect(cfg?.additionalMounts).toEqual([
+      { hostPath: '/tmp/extra', containerPath: 'extra', readonly: true },
+    ]);
+  });
+
+  it('rejects missing groupFolder', async () => {
+    await processTaskIpc(
+      // groupFolder omitted
+      { type: 'set_agent_model', agentModel: 'opus' } as Parameters<
+        typeof processTaskIpc
+      >[0],
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.agentModel,
+    ).toBeUndefined();
+  });
+
+  it('rejects non-string non-null agentModel (defense vs malformed payload)', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_agent_model',
+        groupFolder: 'other-group',
+        // 42 is neither a string nor null — must be rejected, not coerced.
+        agentModel: 42 as unknown as string,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.agentModel,
+    ).toBeUndefined();
+  });
+
+  it('treats empty/whitespace agentModel as a clear', async () => {
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      containerConfig: { agentModel: 'opus' },
+    });
+    groups['other@g.us'] = {
+      ...OTHER_GROUP,
+      containerConfig: { agentModel: 'opus' },
+    };
+
+    await processTaskIpc(
+      {
+        type: 'set_agent_model',
+        groupFolder: 'other-group',
+        agentModel: '   ',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.agentModel,
+    ).toBeUndefined();
+  });
+
+  it('set_agent_model on unregistered groupFolder is a no-op', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_agent_model',
+        groupFolder: 'never-registered-folder',
+        agentModel: 'opus',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // No new registration created.
+    const allFolders = Object.values(groups).map((g) => g.folder);
+    expect(allFolders).not.toContain('never-registered-folder');
+  });
+});
+
 // --- tessl_update / push_staged_to_branch authorization ---
 //
 // These handlers are main-only because they touch the global tile

@@ -258,6 +258,47 @@ export function resolveAgentModel(raw: string | undefined): string {
   }
   return trimmed;
 }
+
+/**
+ * Resolve a per-group `containerConfig.agentModel` override to the value
+ * actually forwarded to the spawned container (#395). Stricter than the
+ * global `resolveAgentModel`:
+ *
+ *   - empty / whitespace-only / undefined / null → fall back to `fallback`
+ *     (the global AGENT_MODEL). Same intent as the global helper, so an
+ *     operator that clears the per-group field via `set_agent_model`
+ *     `null` reverts the group to the global default rather than
+ *     surfacing an empty string downstream.
+ *
+ *   - unknown-prefix value (`'foobar'`, `'claud-opus-4-7'`) → ALSO fall
+ *     back to `fallback`, with a warn. The global helper passes
+ *     unknown-prefix values through to surface typos at startup; per-
+ *     group overrides are set at runtime via IPC by an agent (or
+ *     operator) and there's no operator-driven startup audit log to
+ *     catch a typo before it kills the next spawn for that group.
+ *     Failing closed to the global default keeps the group running
+ *     while the warn flags the bad value.
+ *
+ * Returns the trimmed override on a known prefix, or `fallback` in all
+ * other cases. Exported so tests can pin the four branches independently
+ * of the global `resolveAgentModel` contract.
+ */
+export function resolvePerGroupAgentModel(
+  raw: string | undefined | null,
+  fallback: string,
+): string {
+  const trimmed = typeof raw === 'string' ? raw.trim() : '';
+  if (!trimmed) return fallback;
+  if (!KNOWN_MODEL_PREFIX_RE.test(trimmed)) {
+    logger.warn(
+      { agentModel: trimmed, fallback },
+      'Per-group AGENT_MODEL override does not look like a Claude model ID — falling back to global default. Expected forms: full ID like "claude-opus-4-7[1m]" or alias like "opus" / "sonnet[1m]".',
+    );
+    return fallback;
+  }
+  return trimmed;
+}
+
 const AGENT_MODEL = resolveAgentModel(process.env.AGENT_MODEL);
 
 /**
@@ -1827,7 +1868,28 @@ function buildContainerArgs(
   // — see constants at the top of this file. Keeping these on the env
   // (not baked into the agent image) lets model bumps / effort retuning
   // ship with an orchestrator rebuild only.
-  args.push('-e', `AGENT_MODEL=${AGENT_MODEL}`);
+  //
+  // #395: per-group `containerConfig.agentModel` override. When set and
+  // valid, replaces the global AGENT_MODEL for this group's spawn only;
+  // an unknown-prefix value falls back to the global default (see
+  // `resolvePerGroupAgentModel` for branching). One info log per spawn
+  // when an override is actually in effect — useful for cost / latency
+  // attribution when a group quietly runs on a different model.
+  const perGroupAgentModelRaw = group.containerConfig?.agentModel;
+  const effectiveAgentModel = perGroupAgentModelRaw
+    ? resolvePerGroupAgentModel(perGroupAgentModelRaw, AGENT_MODEL)
+    : AGENT_MODEL;
+  if (effectiveAgentModel !== AGENT_MODEL) {
+    logger.info(
+      {
+        groupFolder: group.folder,
+        agentModel: effectiveAgentModel,
+        globalDefault: AGENT_MODEL,
+      },
+      'Per-group AGENT_MODEL override active',
+    );
+  }
+  args.push('-e', `AGENT_MODEL=${effectiveAgentModel}`);
   args.push('-e', `AGENT_EFFORT=${AGENT_EFFORT}`);
 
   // Tell agent-runner whether the host is running the optional

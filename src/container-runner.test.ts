@@ -144,6 +144,7 @@ import {
   ContainerOutput,
   selectTiles,
   resolveAgentModel,
+  resolvePerGroupAgentModel,
   DEFAULT_AGENT_MODEL,
 } from './container-runner.js';
 import { logger } from './logger.js';
@@ -824,5 +825,168 @@ describe('resolveAgentModel', () => {
     );
     expect(resolveAgentModel('\topus\n')).toBe('opus');
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+});
+
+// ----------------------------------------------------------------------
+// resolvePerGroupAgentModel — per-group AGENT_MODEL override (#395).
+// Stricter than resolveAgentModel: empty AND unknown-prefix both fall
+// back to the global default, so a fat-fingered IPC `set_agent_model`
+// can't silently route a group's spawns to a non-existent model.
+// ----------------------------------------------------------------------
+
+describe('resolvePerGroupAgentModel', () => {
+  const FALLBACK = DEFAULT_AGENT_MODEL;
+
+  beforeEach(() => {
+    vi.mocked(logger.warn).mockClear();
+  });
+
+  it('returns fallback when override is undefined', () => {
+    expect(resolvePerGroupAgentModel(undefined, FALLBACK)).toBe(FALLBACK);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('returns fallback when override is null (clear-the-override path)', () => {
+    expect(resolvePerGroupAgentModel(null, FALLBACK)).toBe(FALLBACK);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('returns fallback when override is empty / whitespace-only', () => {
+    expect(resolvePerGroupAgentModel('', FALLBACK)).toBe(FALLBACK);
+    expect(resolvePerGroupAgentModel('   ', FALLBACK)).toBe(FALLBACK);
+    expect(resolvePerGroupAgentModel('\t\n ', FALLBACK)).toBe(FALLBACK);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('returns the trimmed override on a known-prefix value', () => {
+    expect(resolvePerGroupAgentModel('claude-opus-4-7[1m]', FALLBACK)).toBe(
+      'claude-opus-4-7[1m]',
+    );
+    expect(resolvePerGroupAgentModel('opus', FALLBACK)).toBe('opus');
+    expect(resolvePerGroupAgentModel('sonnet[1m]', FALLBACK)).toBe(
+      'sonnet[1m]',
+    );
+    expect(resolvePerGroupAgentModel('haiku', FALLBACK)).toBe('haiku');
+    expect(resolvePerGroupAgentModel('  opus  ', FALLBACK)).toBe('opus');
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('falls back to global default + warns on unknown-prefix override', () => {
+    // Stricter than the global resolveAgentModel: per-group overrides
+    // are set at runtime via IPC, so a typo can't be caught at startup
+    // — failing closed to the global default keeps the group running.
+    expect(resolvePerGroupAgentModel('claud-opus-4-7', FALLBACK)).toBe(
+      FALLBACK,
+    );
+    expect(resolvePerGroupAgentModel('foobar', FALLBACK)).toBe(FALLBACK);
+    expect(logger.warn).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(logger.warn).mock.calls[0][1]).toContain(
+      'Per-group AGENT_MODEL override does not look like a Claude model ID',
+    );
+  });
+});
+
+// ----------------------------------------------------------------------
+// Per-group AGENT_MODEL override — spawn-arg integration (#395).
+// Verifies the override flows through buildContainerArgs to the actual
+// `-e AGENT_MODEL=…` arg on the docker command line, and that the global
+// default is used otherwise.
+// ----------------------------------------------------------------------
+
+describe('per-group AGENT_MODEL override on container spawn', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    vi.mocked(logger.info).mockClear();
+    vi.mocked(logger.warn).mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('uses the global default AGENT_MODEL when no per-group override is set', async () => {
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).toContain(`AGENT_MODEL=${DEFAULT_AGENT_MODEL}`);
+    // No "override active" log when nothing was overridden.
+    const infoCalls = vi.mocked(logger.info).mock.calls;
+    expect(
+      infoCalls.some(
+        (c) => typeof c[1] === 'string' && c[1].includes('override active'),
+      ),
+    ).toBe(false);
+  });
+
+  it('forwards a valid per-group override and emits one info log', async () => {
+    const overrideGroup: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: { agentModel: 'claude-sonnet-4-6[1m]' },
+    };
+    const promise = runContainerAgent(overrideGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).toContain('AGENT_MODEL=claude-sonnet-4-6[1m]');
+    expect(args).not.toContain(`AGENT_MODEL=${DEFAULT_AGENT_MODEL}`);
+
+    // Exactly one info-level "override active" log per spawn.
+    const infoCalls = vi
+      .mocked(logger.info)
+      .mock.calls.filter(
+        (c) => typeof c[1] === 'string' && c[1].includes('override active'),
+      );
+    expect(infoCalls.length).toBe(1);
+  });
+
+  it('falls back to global default + warns when override has unknown prefix', async () => {
+    const overrideGroup: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: { agentModel: 'claud-opus-4-7' },
+    };
+    const promise = runContainerAgent(overrideGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    // Failed closed: bad prefix → global default, not the typo.
+    expect(args).toContain(`AGENT_MODEL=${DEFAULT_AGENT_MODEL}`);
+    expect(args).not.toContain('AGENT_MODEL=claud-opus-4-7');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ agentModel: 'claud-opus-4-7' }),
+      expect.stringContaining(
+        'Per-group AGENT_MODEL override does not look like a Claude model ID',
+      ),
+    );
+  });
+
+  it('treats empty-string override as no override (no warn)', async () => {
+    const overrideGroup: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: { agentModel: '' },
+    };
+    const promise = runContainerAgent(overrideGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).toContain(`AGENT_MODEL=${DEFAULT_AGENT_MODEL}`);
+    // Empty override is the "no override" signal — no warn log.
+    const warnCalls = vi
+      .mocked(logger.warn)
+      .mock.calls.filter(
+        (c) => typeof c[1] === 'string' && c[1].includes('AGENT_MODEL'),
+      );
+    expect(warnCalls.length).toBe(0);
   });
 });
