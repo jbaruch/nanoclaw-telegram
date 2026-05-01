@@ -20,7 +20,7 @@ A rule whose only enforcement is "the model reads it and decides to comply" stay
 |---|---|---|---|---|
 | 1 | Cross-group user content arrives wrapped in `<untrusted-input>` and that wrap propagates through compaction | RULES.md *Post-Compaction Trust* | Encoding A wrap (#29 / #321) + #322 capability ACL keys on marker presence — denies sinks the prefix doesn't allow. Compaction-summary preservation is the open piece (#327). | Partial — see row 1a |
 | 1a | Post-compaction untrusted-input markers preserved in the summary itself | RULES.md *Post-Compaction Trust* | A compaction-aware summary template that requires every claim to carry `[from-owner]` / `[from-system]` / `[from-untrusted: <prefix>]` and a post-compaction trust rule that honors the new tags. | **OPEN — #327 (LLM01/LLM04 Provenance-aware compaction summaries)** |
-| 2 | Post-compaction skill blocks are HISTORY, not new tasks | RULES.md *Context Recovery* (refs incidents 2026-04-24 / 2026-04-25) | A `system-reminder` rendering hook that rewrites the skill block from "Continue to follow these guidelines" → "This skill ALREADY RAN; do not re-execute". Lives in the post-compaction injection point. | **OPEN — #386** |
+| 2 | Post-compaction skill blocks are HISTORY, not new tasks | RULES.md *Context Recovery* (refs incidents 2026-04-24 / 2026-04-25) | The originally-proposed `system-reminder` rendering hook isn't viable — the Claude Agent SDK doesn't expose a hook surface for mutating system-reminders, and reliable detection of the SDK's compaction-summary skill-block format from outside the SDK is heuristic at best. The actual structural fix is **#104 (kill auto-compaction)**: replace auto-compaction with threshold-triggered nuke + `## Facts`/`## Reasoning` checkpoint + `session-reentry` skill on the next turn. A nuked session has no system-reminders carrying stale skill blocks, so the class of incident is structurally eliminated rather than patched. #386 was filed by this audit, then closed as superseded once the SDK constraint was discovered. | **OPEN — #104 (kill auto-compaction umbrella; multi-phase, in flight)** |
 | 3 | External web/email/calendar content carries provenance — agent recognizes "this came from outside" | implicit in *Verification protocol* | Encoding B sentinel (#321 PR 4) for built-in tools (`WebFetch`, `WebSearch`, `Read` external paths, `Bash` `agent-browser`); Encoding A wrap (#321 PR 2) for MCP read tools (Composio gmail/calendar/slack/github + Tessl registry). Walk-back collects markers; #322 ACL acts on them. | **DONE — #321 PRs 1–4 (#329, #330, #341, #342, #382)** |
 | 4 | Memory writes from sessions that touched external content are quarantined, not laundered | RULES.md *Memory hygiene* (the laundering channel) | Per-runQuery `processedExternalContent` flag flipped on prompt-wrap or PostToolUse marker emission; PreToolUse on `Write`/`Edit` redirects to `/workspace/trusted/quarantine/<sid>/...` when set. | **DONE — #325 (PR #385)** |
 | 5 | Outbound from untrusted-provenance chains is gated against an operator-managed allowlist | RULES.md *Egress hygiene* | #320 PreToolUse hook on Composio gmail/slack and `send_message_to_chat`; provenance-conditional (operator-trusted bypasses by default; `enforce_for_operator: true` opts in). | **DONE — #320 (PR #358)** |
@@ -33,14 +33,20 @@ A rule whose only enforcement is "the model reads it and decides to comply" stay
 | 12 | Wrap covers ALL external content sources, not just cross-group user prompts | RULES.md *Provenance hygiene* (implicit) | #321 PRs ship the typed source taxonomy and dual-encoding (Encoding A in-band wrap for MCP; Encoding B sidecar sentinel for built-in tools), covering WebFetch, WebSearch, Read on external paths, Bash agent-browser, Composio gmail/calendar/slack/github reads, and Tessl registry reads. | **DONE — #321 PRs 1–4 + WebSearch+Tessl follow-up (#382)** |
 | 13 | Two-context split: parent agent never sees raw external bytes; sub-model summarizes first | RULES.md *Sub-model handoff* (proposal incident) | The `extractStructuredSummary` library landed in #367 (#319 v1, library-only); consumer wiring (agent-browser, check-email, check-calendar) is the open piece. | **OPEN — #319 (LLM01 Two-context split for untrusted content processing) — library landed, consumers pending** |
 
-## Open follow-up issues (filed by this PR)
+## Follow-up issues
 
-This PR files two new issues for the rows that don't already have a tracked follow-up:
+The audit's open rows resolve to one of the existing umbrella issues; #387 was newly filed by the audit; #386 was newly filed by the audit and then closed as superseded once an SDK constraint surfaced.
 
-- **#386** (row 2) — `Reframe post-compaction skill blocks as history`. System-reminder rewriting hook so a re-loaded skill block is treated as "ALREADY RAN" rather than "Continue to follow these guidelines". Reference incidents: 2026-04-24, 2026-04-25 JCON scrape.
+- **#319** (row 13) — Two-context split: library landed in #367; consumer wiring (agent-browser, check-email, check-calendar) is the open piece.
+- **#327** (row 1a) — Provenance-aware compaction summaries.
 - **#387** (row 11) — `Memory read-time staleness reminder`. Read-time wrapper that injects a "verify against live source" reminder when the agent reads a `MEMORY.md` / daily-log path. Complement to #325's write-time quarantine.
+- **#104** (row 2) — Kill-auto-compaction umbrella (multi-phase, in flight). Replaces #386 after the system-reminder rendering hook turned out to be blocked by an SDK constraint.
 
-The other open rows are already tracked by existing umbrella issues (#319, #327). Combined with the umbrella's other in-flight children, that's five structural replacements filed as their own issues — well above the #328 acceptance threshold of three.
+Closed as superseded:
+
+- **#386** — `Reframe post-compaction skill blocks as history`. Originally filed by this audit, closed once investigation found the proposed system-reminder rendering hook isn't viable from outside the Claude Agent SDK; the actual structural fix is the kill-auto-compaction work already tracked under #104. Row 2 redirected accordingly.
+
+The audit's acceptance threshold of three structural replacements filed as their own issues is satisfied via #319, #325, #327, and #387 — plus the kill-auto-compaction work tracked under #104.
 
 ## Accepted residual risk
 
