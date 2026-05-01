@@ -28,7 +28,7 @@ afterEach(() => {
 function makeDbWithOrders(): void {
   const db = new Database(dbPath);
   db.exec(
-    'CREATE TABLE orders (id INTEGER PRIMARY KEY, sku TEXT); INSERT INTO orders VALUES (1, \'sku-a\');',
+    "CREATE TABLE orders (id INTEGER PRIMARY KEY, sku TEXT); INSERT INTO orders VALUES (1, 'sku-a');",
   );
   db.close();
 }
@@ -43,10 +43,12 @@ describe('syncBackupRepo', () => {
 
     expect(result.copied).toContain('MEMORY.md');
     expect(result.copied).toContain('daily_discoveries.md');
-    expect(fs.readFileSync(path.join(backupDir, 'MEMORY.md'), 'utf8')).toBe('live memory\n');
-    expect(fs.readFileSync(path.join(backupDir, 'daily_discoveries.md'), 'utf8')).toBe(
-      'today: x\n',
+    expect(fs.readFileSync(path.join(backupDir, 'MEMORY.md'), 'utf8')).toBe(
+      'live memory\n',
     );
+    expect(
+      fs.readFileSync(path.join(backupDir, 'daily_discoveries.md'), 'utf8'),
+    ).toBe('today: x\n');
   });
 
   it('overwrites stale copies in the destination', () => {
@@ -56,7 +58,9 @@ describe('syncBackupRepo', () => {
 
     syncBackupRepo({ groupDir, backupDir, dbPath });
 
-    expect(fs.readFileSync(path.join(backupDir, 'MEMORY.md'), 'utf8')).toBe('fresh\n');
+    expect(fs.readFileSync(path.join(backupDir, 'MEMORY.md'), 'utf8')).toBe(
+      'fresh\n',
+    );
   });
 
   it('skips single files that do not exist in the source — no error, no record', () => {
@@ -102,7 +106,10 @@ describe('syncBackupRepo', () => {
 
     expect(result.copied).toContain('memory/archive/2026/q1.md');
     expect(
-      fs.readFileSync(path.join(backupDir, 'memory', 'archive', '2026', 'q1.md'), 'utf8'),
+      fs.readFileSync(
+        path.join(backupDir, 'memory', 'archive', '2026', 'q1.md'),
+        'utf8',
+      ),
     ).toBe('q1\n');
   });
 
@@ -116,7 +123,9 @@ describe('syncBackupRepo', () => {
 
     expect(result.copied.filter((p) => p.startsWith('memory/'))).toEqual([]);
     expect(result.removed).toEqual([]);
-    expect(fs.readFileSync(path.join(destMemory, 'historical.md'), 'utf8')).toBe('keep\n');
+    expect(
+      fs.readFileSync(path.join(destMemory, 'historical.md'), 'utf8'),
+    ).toBe('keep\n');
   });
 
   it('runs dump plan and reports dumped + skipped tables', () => {
@@ -127,7 +136,9 @@ describe('syncBackupRepo', () => {
     expect(result.dumped).toContain('orders');
     // Other STATE_TABLES tables that don't exist in this fixture DB
     expect(result.skipped.length).toBeGreaterThan(0);
-    expect(fs.existsSync(path.join(backupDir, 'state', 'orders.sql'))).toBe(true);
+    expect(fs.existsSync(path.join(backupDir, 'state', 'orders.sql'))).toBe(
+      true,
+    );
   });
 
   it('throws actionable error when group dir is missing', () => {

@@ -102,7 +102,12 @@ function preflightSqlite3Cli(): void {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
   } catch (e) {
-    if (e && typeof e === 'object' && 'code' in e && (e as { code: unknown }).code === 'ENOENT') {
+    if (
+      e &&
+      typeof e === 'object' &&
+      'code' in e &&
+      (e as { code: unknown }).code === 'ENOENT'
+    ) {
       throw new Error(
         'dump-state-tables: sqlite3 CLI not on PATH — install via your package manager (apt: sqlite3, brew: sqlite, Synology: SynoCommunity sqlite3)',
         { cause: e },

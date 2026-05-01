@@ -79,7 +79,11 @@ function toPosixPrefix(prefix: string, rel: string): string {
   return [prefix, ...rel.split(path.sep)].join('/');
 }
 
-function mirrorMemoryDir(srcDir: string, destDir: string, result: SyncResult): void {
+function mirrorMemoryDir(
+  srcDir: string,
+  destDir: string,
+  result: SyncResult,
+): void {
   if (!fs.existsSync(srcDir)) return;
   fs.mkdirSync(destDir, { recursive: true });
   const srcFiles = new Set(listFilesRecursive(srcDir));
@@ -118,7 +122,12 @@ export function syncBackupRepo(args: {
     );
   }
 
-  const result: SyncResult = { copied: [], removed: [], dumped: [], skipped: [] };
+  const result: SyncResult = {
+    copied: [],
+    removed: [],
+    dumped: [],
+    skipped: [],
+  };
 
   for (const name of SINGLE_FILE_NAMES) {
     const wrote = copySingleFile(
