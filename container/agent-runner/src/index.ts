@@ -79,6 +79,13 @@ import {
   loadEgressAllowlist,
   pathTargetsAllowlist,
 } from './egress-allowlist.js';
+import {
+  classifyDestructiveOp,
+  decideConfirmation,
+  loadConfirmationTokens,
+  saveConfirmationTokens,
+  TokenFileValidationError,
+} from './confirmation-tokens.js';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -675,6 +682,24 @@ function isExpectedTranscriptUnavailable(err: unknown): boolean {
 }
 
 /**
+ * Predicate for the narrow fail-handling path in
+ * `createConfirmationTokenHook` when loading the token file.
+ * Only two failure shapes are operationally expected:
+ *   - `SyntaxError` — malformed JSON (operator typo, mid-flush partial)
+ *   - `TokenFileValidationError` — token-record shape / type /
+ *     timestamp validation rejected a record (intentional fail-closed
+ *     branch from `validateTokenRecord`)
+ * Everything else (EACCES, EIO, unexpected runtime errors) propagates
+ * so a real bug or misconfiguration surfaces, per `error-handling`
+ * policy.
+ */
+function isExpectedTokenLoadError(err: unknown): boolean {
+  if (err instanceof SyntaxError) return true;
+  if (err instanceof TokenFileValidationError) return true;
+  return false;
+}
+
+/**
  * Predicate for the narrow fail-open path in
  * `createEgressAllowlistHook`. Same shape as
  * `isExpectedTranscriptUnavailable`: only `SyntaxError` (parse mid-flush
@@ -690,17 +715,91 @@ function isExpectedAllowlistLoadError(err: unknown): boolean {
 }
 
 /**
- * Block agent-side mutations to the egress allowlist file. The
- * operator owns this file (host-side direct edit, or the future
- * #324-token-gated agent flow); a poisoned chain in a trusted/main
- * container could otherwise call Write / Edit / Bash to add an
- * attacker-controlled destination before sending. This gate denies
- * those calls structurally.
- *
- * The matcher is `Write|Edit|Bash`; classification inside the hook is
- * the source of truth. A future #324-token-aware variant could let
- * the operator unblock by minting a `egress_allowlist_mutation` token,
- * but v1 of the egress allowlist keeps it strictly host-only.
+ * Path of the egress allowlist file. Mounted RW into trusted/main
+ * containers only (untrusted containers don't have this mount), so a
+ * compromised untrusted-container session can't tamper with the file
+ * via Write — the only path that can edit it is the operator from main
+ * (per #324, mutations require the OOB confirmation token).
+ */
+const EGRESS_ALLOWLIST_PATH = '/workspace/trusted/egress_allowlist.json';
+
+/**
+ * #320 — Egress allowlist for outbound communication. Provenance-
+ * conditional gate complementing #322's structural ACL: where #322
+ * decides whether the chain can REACH an outbound tool at all, this
+ * hook decides — for tools that ARE reached — whether the destination
+ * is on the operator-managed allowlist.
+ */
+function createEgressAllowlistHook(fs: typeof import('fs')): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const pre = input as PreToolUseHookInput;
+    if (classifySink(pre.tool_name) === null) return {};
+
+    let session: SessionMessage[];
+    try {
+      session = await getSessionMessages(pre.session_id);
+    } catch (err) {
+      if (!isExpectedTranscriptUnavailable(err)) throw err;
+      log(
+        `egress_allowlist: transcript not yet readable, allowing tool=${pre.tool_name} reason=${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return {};
+    }
+
+    const prefixes = walkBackIterableForProvenance(
+      lazyReverseWalkBack(session),
+    );
+    const hasUntrustedProvenance = prefixes.size > 0;
+
+    let allowlist;
+    try {
+      allowlist = loadEgressAllowlist(fs, EGRESS_ALLOWLIST_PATH);
+    } catch (err) {
+      if (!isExpectedAllowlistLoadError(err)) throw err;
+      log(
+        `egress_allowlist: load failed at ${EGRESS_ALLOWLIST_PATH} — ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      if (!hasUntrustedProvenance) return {};
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse' as const,
+          permissionDecision: 'deny' as const,
+          permissionDecisionReason:
+            `egress_allowlist: ${EGRESS_ALLOWLIST_PATH} could not be loaded ` +
+            `and the call chain has untrusted-provenance content. The gate ` +
+            `is failing closed. Operator: fix the allowlist JSON, then retry.`,
+        },
+      };
+    }
+
+    const decision = decideEgress({
+      toolName: pre.tool_name,
+      toolInput: pre.tool_input,
+      hasUntrustedProvenance,
+      allowlist,
+    });
+
+    if (decision.kind !== 'deny') return {};
+    log(
+      `egress_allowlist: DENY tool=${pre.tool_name} sink=${decision.sink} provenance_prefixes=[${[...prefixes].join(',')}]`,
+    );
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: 'deny' as const,
+        permissionDecisionReason: decision.reason,
+      },
+    };
+  };
+}
+
+/**
+ * Block agent-side mutations to the egress allowlist file. Same
+ * structural protection as the confirmation-token write gate.
  */
 function createEgressAllowlistWriteGate(): HookCallback {
   const safeRealpath = (p: string): string | null => {
@@ -756,52 +855,62 @@ function* lazyReverseWalkBack(
 }
 
 /**
- * Path of the egress allowlist file. Mounted RW into trusted/main
- * containers only (untrusted containers don't have this mount), so a
- * compromised untrusted-container session can't tamper with the file
- * via Write — the only path that can edit it is the operator from main
- * (per #324, mutations require the OOB confirmation token).
+ * Confirmation-token file path. Mounted RW into trusted/main containers
+ * (untrusted containers don't have `/workspace/trusted/`). Tampering by
+ * the agent is structurally blocked by `createConfirmationTokenWriteGate`
+ * below — Write/Edit on this path always denies, regardless of tier.
  */
-const EGRESS_ALLOWLIST_PATH = '/workspace/trusted/egress_allowlist.json';
+const CONFIRMATION_TOKENS_PATH = '/workspace/trusted/aye_confirm_tokens.json';
 
 /**
- * #320 — Egress allowlist for outbound communication. Provenance-
- * conditional gate complementing #322's structural ACL: where #322
- * decides whether the chain can REACH an outbound tool at all, this
- * hook decides — for tools that ARE reached — whether the destination
- * is on the operator-managed allowlist.
+ * #324 — Destructive-op confirmation gate. Provenance-conditional:
  *
- * Default posture (per #318 design principle):
- *   - Operator-originated trusted chain → allow without consulting the
- *     allowlist. Operator may opt in via `enforce_for_operator: true`
- *     in the allowlist file.
- *   - Untrusted-provenance chain → enforce. Destination must match an
- *     entry; unmatched destinations deny with a structured reason
- *     pointing the operator at #324's `aye-confirm` flow.
+ *   - Operator-originated trusted chain → allow. The in-chat
+ *     confirmation IS the confirmation; minting an OOB token for
+ *     something the operator literally just typed is paperwork
+ *     theatre that trains them to mint reflexively.
+ *   - Untrusted-provenance chain → require an unspent, scope-matching,
+ *     unexpired token issued via the host-side `aye-confirm` CLI.
+ *     Token consumed on use; the file is rewritten with the new
+ *     `used: true` flag.
  *
- * Tools NOT in the gated-sink list are passed through untouched —
- * #322's ACL is the other line of defense.
- *
- * Fail-open posture matches the capability-acl hook: only the narrowly-
- * expected `ENOENT` / `SyntaxError` failures get an allow + log;
- * everything else propagates (per `error-handling` policy).
+ * Fail-CLOSED on token-file load errors under untrusted provenance —
+ * a corrupt token file under attack conditions must not silently widen
+ * the gate. Operator-trusted chains pass through with a log when the
+ * file is malformed (the operator will see the error).
  */
-function createEgressAllowlistHook(fs: typeof import('fs')): HookCallback {
+function createConfirmationTokenHook(fs: typeof import('fs')): HookCallback {
   return async (input, _toolUseId, _context) => {
     const pre = input as PreToolUseHookInput;
-    if (classifySink(pre.tool_name) === null) return {};
+    const classification = classifyDestructiveOp(pre.tool_name, pre.tool_input);
+    if (!classification) return {};
 
     let session: SessionMessage[];
     try {
       session = await getSessionMessages(pre.session_id);
     } catch (err) {
       if (!isExpectedTranscriptUnavailable(err)) throw err;
+      // FAIL CLOSED for destructive ops when provenance can't be
+      // determined. Allowing every destructive call during pre-init
+      // / mid-flush windows would be a bypass for any chain that
+      // could engineer a transcript-read race. The cost is one
+      // failed retry on legitimate fresh sessions; the call succeeds
+      // on the next attempt once the transcript is readable.
+      const reason = err instanceof Error ? err.message : String(err);
       log(
-        `egress_allowlist: transcript not yet readable, allowing tool=${pre.tool_name} reason=${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `confirmation_token: transcript not yet readable, denying tool=${pre.tool_name} reason=${reason}`,
       );
-      return {};
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse' as const,
+          permissionDecision: 'deny' as const,
+          permissionDecisionReason:
+            `confirmation_token: cannot verify call-chain provenance for ` +
+            `destructive tool '${pre.tool_name}' because the session ` +
+            `transcript is not yet readable (${reason}). Failing closed; ` +
+            `retry once the transcript is readable.`,
+        },
+      };
     }
 
     const prefixes = walkBackIterableForProvenance(
@@ -809,53 +918,167 @@ function createEgressAllowlistHook(fs: typeof import('fs')): HookCallback {
     );
     const hasUntrustedProvenance = prefixes.size > 0;
 
-    let allowlist;
+    let tokens;
     try {
-      allowlist = loadEgressAllowlist(fs, EGRESS_ALLOWLIST_PATH);
+      tokens = loadConfirmationTokens(fs, CONFIRMATION_TOKENS_PATH);
     } catch (err) {
-      // Narrow the catch to the two operationally-recoverable shapes
-      // (`error-handling` policy: catch specific exception types, let
-      // unexpected exceptions propagate). Anything else (EACCES,
-      // unexpected runtime errors, etc.) surfaces as a real bug.
-      if (!isExpectedAllowlistLoadError(err)) throw err;
+      // Narrow catch to expected file-content failures only:
+      //   - SyntaxError: malformed JSON (manual-edit typo or
+      //     mid-flush partial)
+      //   - TokenFileValidationError: shape / type / timestamp
+      //     validation rejected a record
+      // Anything else (EACCES, EIO, unexpected runtime errors, etc.)
+      // propagates per `jbaruch/coding-policy: error-handling`.
+      if (!isExpectedTokenLoadError(err)) throw err;
       log(
-        `egress_allowlist: load failed at ${EGRESS_ALLOWLIST_PATH} — ${
+        `confirmation_token: token file load failed at ${CONFIRMATION_TOKENS_PATH} — ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
-      // Under operator-trusted, log and pass (the operator will see
-      // the error from their own diagnostics). Under untrusted
-      // provenance, FAIL CLOSED — better to deny outbound than to
-      // silently widen the gate because someone fat-fingered the JSON.
       if (!hasUntrustedProvenance) return {};
       return {
         hookSpecificOutput: {
           hookEventName: 'PreToolUse' as const,
           permissionDecision: 'deny' as const,
           permissionDecisionReason:
-            `egress_allowlist: ${EGRESS_ALLOWLIST_PATH} could not be loaded ` +
-            `and the call chain has untrusted-provenance content. The gate ` +
-            `is failing closed. Operator: fix the allowlist JSON, then retry.`,
+            `confirmation_token: ${CONFIRMATION_TOKENS_PATH} could not be ` +
+            `loaded and the call chain has untrusted-provenance content. ` +
+            `The gate is failing closed. Operator: fix the token file JSON, ` +
+            `or remint via 'aye-confirm', then retry.`,
         },
       };
     }
 
-    const decision = decideEgress({
+    const decision = decideConfirmation({
       toolName: pre.tool_name,
       toolInput: pre.tool_input,
       hasUntrustedProvenance,
-      allowlist,
+      tokens,
+      nowIso: new Date().toISOString(),
     });
 
-    if (decision.kind !== 'deny') return {};
+    if (decision.kind === 'pass' || decision.kind === 'allow') return {};
+
+    if (decision.kind === 'allow_with_token') {
+      // Persist the consumed-token state IMMEDIATELY so an interleaved
+      // call from another tool-use can't reuse the same token. The
+      // write itself bypasses the write-gate by setting an env var
+      // sentinel the gate checks (see createConfirmationTokenWriteGate).
+      try {
+        process.env.NANOCLAW_INTERNAL_TOKEN_WRITE = '1';
+        saveConfirmationTokens(fs, CONFIRMATION_TOKENS_PATH, decision.updatedTokens);
+      } finally {
+        delete process.env.NANOCLAW_INTERNAL_TOKEN_WRITE;
+      }
+      // Log scope + outcome only — `decision.token.token` is secret
+      // material. Even a 6-char prefix is token material per
+      // `jbaruch/coding-policy: no-secrets` (no logging of secrets at
+      // any level). The operator can correlate via the file's
+      // `issued_at` if they need traceability.
+      log(
+        `confirmation_token: consumed scope=${decision.token.scope} expires_at=${decision.token.expires_at}`,
+      );
+      return {};
+    }
+
     log(
-      `egress_allowlist: DENY tool=${pre.tool_name} sink=${decision.sink} provenance_prefixes=[${[...prefixes].join(',')}]`,
+      `confirmation_token: DENY tool=${pre.tool_name} scope=${decision.scope} provenance_prefixes=[${[...prefixes].join(',')}]`,
     );
     return {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse' as const,
         permissionDecision: 'deny' as const,
         permissionDecisionReason: decision.reason,
+      },
+    };
+  };
+}
+
+/**
+ * Block agent-side mutations to the confirmation-token file. The host
+ * CLI is the only legitimate writer; the agent forging tokens via
+ * Write/Edit/Bash would defeat the gate entirely.
+ *
+ * Detection layers — all three must miss for the call to pass:
+ *   1. Absolute-path equality (Write/Edit `file_path` === target).
+ *   2. Resolved-path equality after `path.resolve` from cwd
+ *      (catches `Write file_path: 'aye_confirm_tokens.json'` when
+ *      cwd is `/workspace/trusted`).
+ *   3. Realpath equality (catches symlinks pointing at the target).
+ *   4. Bash command containing the absolute path OR the basename
+ *      `aye_confirm_tokens.json` (catches `cd /workspace/trusted &&
+ *      echo > aye_confirm_tokens.json` and similar shell indirection).
+ *
+ * Bypass for legitimate consumption writes: the hook sets
+ * `NANOCLAW_INTERNAL_TOKEN_WRITE=1` for the duration of its own
+ * `saveConfirmationTokens` call. Tool-driven Write/Edit/Bash never
+ * sets this var.
+ */
+function createConfirmationTokenWriteGate(): HookCallback {
+  const tokenBasename = path.basename(CONFIRMATION_TOKENS_PATH);
+  const safeRealpath = (p: string): string | null => {
+    try {
+      return fs.realpathSync(p);
+    } catch (err) {
+      // Narrow to the path-resolution errno cases that legitimately
+      // mean "this path doesn't resolve" — the candidate doesn't
+      // exist, isn't a directory mid-path, or has a symlink loop.
+      // Anything else (EACCES on a real path, unexpected runtime
+      // errors) propagates per `jbaruch/coding-policy: error-handling`.
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP') {
+        return null;
+      }
+      throw err;
+    }
+  };
+  const tokenFileRealpath = safeRealpath(CONFIRMATION_TOKENS_PATH);
+
+  function pathTargetsTokenFile(candidate: string): boolean {
+    if (candidate === CONFIRMATION_TOKENS_PATH) return true;
+    if (path.basename(candidate) === tokenBasename) return true;
+    const resolved = path.isAbsolute(candidate)
+      ? path.normalize(candidate)
+      : path.resolve(candidate);
+    if (resolved === CONFIRMATION_TOKENS_PATH) return true;
+    const rp = safeRealpath(candidate);
+    return (
+      rp !== null && tokenFileRealpath !== null && rp === tokenFileRealpath
+    );
+  }
+
+  return async (input, _toolUseId, _context) => {
+    if (process.env.NANOCLAW_INTERNAL_TOKEN_WRITE === '1') return {};
+    const pre = input as PreToolUseHookInput;
+    const targetsTokenFile = (() => {
+      if (pre.tool_name === 'Write' || pre.tool_name === 'Edit') {
+        const fp = (pre.tool_input as { file_path?: unknown })?.file_path;
+        return typeof fp === 'string' && pathTargetsTokenFile(fp);
+      }
+      if (pre.tool_name === 'Bash') {
+        const cmd = (pre.tool_input as { command?: unknown })?.command;
+        if (typeof cmd !== 'string') return false;
+        return (
+          cmd.includes(CONFIRMATION_TOKENS_PATH) ||
+          cmd.includes(tokenBasename)
+        );
+      }
+      return false;
+    })();
+    if (!targetsTokenFile) return {};
+    log(
+      `confirmation_token_write_gate: DENY tool=${pre.tool_name} — agent cannot mutate ${CONFIRMATION_TOKENS_PATH}`,
+    );
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: 'deny' as const,
+        permissionDecisionReason:
+          `${CONFIRMATION_TOKENS_PATH} is host-only — the agent cannot ` +
+          `mint, modify, or delete confirmation tokens. To authorize a ` +
+          `destructive op, the operator runs 'aye-confirm' from a ` +
+          `host-side terminal; the file then updates and the agent's ` +
+          `next attempt at the gated tool consumes the matching token.`,
       },
     };
   };
@@ -2398,6 +2621,26 @@ async function runQuery(
           {
             matcher: '^(Write|Edit|Bash)$',
             hooks: [createEgressAllowlistWriteGate()],
+          },
+          // #324 — destructive-op confirmation gate. Provenance-
+          // conditional: operator-originated trusted chains pass,
+          // untrusted-provenance chains require an unspent OOB token
+          // minted by the host-side `aye-confirm` CLI. Matches every
+          // nanoclaw MCP tool; classifyDestructiveOp() inside the
+          // hook is the source of truth (so adding a new destructive
+          // tool is a one-line edit in confirmation-tokens.ts, not a
+          // matcher edit here).
+          {
+            matcher: '^mcp__nanoclaw__.*$',
+            hooks: [createConfirmationTokenHook(fs)],
+          },
+          // #324 — block agent-side mutations to the token file. Matches
+          // Write/Edit/Bash because all three could touch the file;
+          // the gate inside the hook is the source of truth (matcher
+          // is a perf hint).
+          {
+            matcher: '^(Write|Edit|Bash)$',
+            hooks: [createConfirmationTokenWriteGate()],
           },
           // #322 — capability ACL. Walks the transcript back to the
           // most recent operator user-turn boundary, collects every
