@@ -1989,6 +1989,12 @@ function migrateJsonState(): void {
   // both tables from the JSON-era envelope. UPSERT semantics on both
   // tables — never INSERT OR REPLACE.
   migrateTrustedSessionStateJsonFiles();
+
+  // Migrate per-group nanoclaw-state.json files (the multi-key junk
+  // drawer) into the three state-005 tables: email_state singleton,
+  // email_seen_ids set, resumable_cycles per-skill rows (#297).
+  // UPSERT throughout — never INSERT OR REPLACE.
+  migrateNanoclawStateJsonFiles();
 }
 
 interface OrdersDbJsonRecord {
@@ -3353,5 +3359,367 @@ function migrateTrustedSessionStateJsonFiles(): void {
       sessions: sessionCounts,
       singleton: singletonUpserted,
     });
+  }
+}
+
+interface NanoclawStateResumableCycleJson {
+  cycle_id?: unknown;
+  slot_key?: unknown;
+  continuation_n?: unknown;
+  remaining_steps?: unknown;
+}
+
+interface NanoclawStateJsonShape {
+  last_email_checked?: unknown;
+  date?: unknown;
+  fetched_at?: unknown;
+  seen_email_ids?: unknown;
+  resumable_cycles?: unknown;
+}
+
+/**
+ * Migrate per-group `nanoclaw-state.json` files (#297) into the three
+ * SQLite tables created by state-005:
+ *
+ *   - `email_state`        — singleton row (`id = 1`) holding the email-
+ *                            cursor fields (`last_email_checked`, `date`,
+ *                            `fetched_at`).
+ *   - `email_seen_ids`     — append-mostly dedup set; one row per id from
+ *                            the JSON `seen_email_ids` array.
+ *   - `resumable_cycles`   — one row per skill_name from the JSON
+ *                            `resumable_cycles.<skill_name>` subtree.
+ *
+ * The JSON-era shape was a multi-writer junk drawer (the exact bug class
+ * #293 targets), so per-file isolation matters: a single malformed source
+ * must not abort the pass for other groups. Each per-file work is wrapped
+ * in `db.transaction` so a row violating a NOT NULL / CHECK / PK
+ * constraint inside the writer rolls the whole file's import back; the
+ * narrowed `handleConstraintViolationOrRethrow` catch turns the throw
+ * into a per-file warn and leaves the source file in place for triage.
+ *
+ * UPSERT semantics:
+ *   - `email_state` is a singleton (`CHECK(id = 1)`) so we use
+ *     `INSERT … ON CONFLICT(id) DO UPDATE SET …` — NOT `INSERT OR
+ *     REPLACE`, which would silently nuke the existing `schema_version`
+ *     column instead of preserving it across multi-group re-import. Each
+ *     group's nanoclaw-state.json contributes the same singleton row;
+ *     under the deterministic folder sort, the last writer (alphabetical
+ *     order) wins on the cursor fields. (In practice each install has at
+ *     most one nanoclaw-state.json source, so this only matters for
+ *     defensive behaviour during multi-group migration.)
+ *   - `email_seen_ids` uses `INSERT … ON CONFLICT(email_id) DO NOTHING` —
+ *     re-runs are silent no-ops on duplicate ids (the table is a dedup
+ *     set; re-importing the same id should not bump `seen_at`).
+ *   - `resumable_cycles` uses `INSERT … ON CONFLICT(skill_name) DO
+ *     UPDATE SET …` — the latest source-file shape wins for each skill,
+ *     same alphabetical-folder-sort tie-break as `email_state`.
+ *
+ * Per-column policy on missing fields: if a top-level cursor field
+ * (`last_email_checked` / `date` / `fetched_at`) is absent, omit it from
+ * the INSERT column list so the schema's column default (NULL on these
+ * three) fires rather than binding `null` ourselves. Same approach the
+ * morning-brief import uses for its `added` column with
+ * `DEFAULT CURRENT_TIMESTAMP`. For `email_state` the three cursor
+ * columns share the same nullable semantics, but documenting the
+ * pattern keeps the writer aligned with the schema-default contract for
+ * the wider epic. See state-005 doc-header for the rationale on UPSERT
+ * vs INSERT OR REPLACE and on the `strftime` defaults.
+ */
+function migrateNanoclawStateJsonFiles(): void {
+  const groupFolders = listGroupFoldersForMigration();
+  const stamp = migrationDateStamp();
+
+  // email_state singleton UPSERT. Build the prepared statements lazily
+  // per writer-column-set so we can omit absent cursor fields and let
+  // the schema default fire. Building all four shapes up front keeps
+  // the per-file path branchless.
+  //
+  // The DO UPDATE clause references `excluded.<col>` (SQLite's name for
+  // the row that would have been inserted). Crucially it does NOT touch
+  // `schema_version` — preserving the existing value across re-import,
+  // which is the whole reason we pick UPSERT over INSERT OR REPLACE.
+  const insertEmailStateAll = db.prepare(
+    `INSERT INTO email_state (id, last_email_checked, date, fetched_at)
+     VALUES (1, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       last_email_checked = excluded.last_email_checked,
+       date               = excluded.date,
+       fetched_at         = excluded.fetched_at`,
+  );
+  const insertEmailStateLastOnly = db.prepare(
+    `INSERT INTO email_state (id, last_email_checked) VALUES (1, ?)
+     ON CONFLICT(id) DO UPDATE SET last_email_checked = excluded.last_email_checked`,
+  );
+  const insertEmailStateDateOnly = db.prepare(
+    `INSERT INTO email_state (id, date) VALUES (1, ?)
+     ON CONFLICT(id) DO UPDATE SET date = excluded.date`,
+  );
+  const insertEmailStateFetchedOnly = db.prepare(
+    `INSERT INTO email_state (id, fetched_at) VALUES (1, ?)
+     ON CONFLICT(id) DO UPDATE SET fetched_at = excluded.fetched_at`,
+  );
+  const insertEmailStateLastDate = db.prepare(
+    `INSERT INTO email_state (id, last_email_checked, date) VALUES (1, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       last_email_checked = excluded.last_email_checked,
+       date               = excluded.date`,
+  );
+  const insertEmailStateLastFetched = db.prepare(
+    `INSERT INTO email_state (id, last_email_checked, fetched_at) VALUES (1, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       last_email_checked = excluded.last_email_checked,
+       fetched_at         = excluded.fetched_at`,
+  );
+  const insertEmailStateDateFetched = db.prepare(
+    `INSERT INTO email_state (id, date, fetched_at) VALUES (1, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       date       = excluded.date,
+       fetched_at = excluded.fetched_at`,
+  );
+
+  // email_seen_ids: ON CONFLICT(email_id) DO NOTHING — append-mostly
+  // dedup set. Re-imports are silent no-ops on duplicates; we don't
+  // bump `seen_at` since the JSON-era source carries no per-id
+  // timestamp anyway.
+  const insertSeenEmailId = db.prepare(
+    `INSERT INTO email_seen_ids (email_id) VALUES (?)
+     ON CONFLICT(email_id) DO NOTHING`,
+  );
+
+  // resumable_cycles: UPSERT by skill_name — the latest source-file
+  // shape wins for each skill. `continuation_n` defaults to 0 in the
+  // schema; we still bind explicitly (defaulting to 0 here too) so the
+  // writer's column list is uniform across rows. `remaining_steps` is
+  // a JSON blob (TEXT) — we store whatever the source shape carries
+  // verbatim, including null.
+  const upsertResumableCycle = db.prepare(
+    `INSERT INTO resumable_cycles
+       (skill_name, cycle_id, slot_key, continuation_n, remaining_steps)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(skill_name) DO UPDATE SET
+       cycle_id        = excluded.cycle_id,
+       slot_key        = excluded.slot_key,
+       continuation_n  = excluded.continuation_n,
+       remaining_steps = excluded.remaining_steps,
+       updated_at      = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+  );
+
+  for (const folder of groupFolders) {
+    const filePath = path.join(GROUPS_DIR, folder, 'nanoclaw-state.json');
+    if (!fs.existsSync(filePath)) continue;
+
+    let raw: string;
+    try {
+      raw = fs.readFileSync(filePath, 'utf-8');
+    } catch (err) {
+      // TOCTOU race: existsSync above is best-effort. Mirror the orders
+      // / morning-brief handling — log info on ENOENT, propagate every
+      // other errno per `coding-policy: error-handling`.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        logger.info(
+          { folder, filePath },
+          'nanoclaw-state.json migration: file disappeared between existsSync and readFileSync, skipping',
+        );
+        continue;
+      }
+      throw err;
+    }
+
+    const parsed = parseJsonObjectOrWarn(
+      raw,
+      folder,
+      'nanoclaw-state.json',
+    ) as NanoclawStateJsonShape | null;
+    if (parsed === null) continue;
+
+    // Pre-flight: warn for each top-level section that's missing or
+    // wrong-shape. The contract is "import what we can" — a missing
+    // resumable_cycles object doesn't block email_state or
+    // email_seen_ids importing.
+    const hasEmailCursorField =
+      typeof parsed.last_email_checked === 'string' ||
+      typeof parsed.date === 'string' ||
+      typeof parsed.fetched_at === 'string';
+    if (!hasEmailCursorField) {
+      logger.warn(
+        { folder },
+        'nanoclaw-state.json migration: no email cursor fields (last_email_checked / date / fetched_at) at top level, skipping email_state',
+      );
+    }
+    const seenEmailIds = parsed.seen_email_ids;
+    if (!Array.isArray(seenEmailIds)) {
+      logger.warn(
+        {
+          folder,
+          seenType: Array.isArray(seenEmailIds) ? 'array' : typeof seenEmailIds,
+        },
+        'nanoclaw-state.json migration: seen_email_ids missing or not an array, skipping email_seen_ids',
+      );
+    }
+    const resumableCyclesObj = parsed.resumable_cycles;
+    if (!isObjectRow(resumableCyclesObj)) {
+      logger.warn(
+        {
+          folder,
+          cyclesType:
+            resumableCyclesObj === null
+              ? 'null'
+              : Array.isArray(resumableCyclesObj)
+                ? 'array'
+                : typeof resumableCyclesObj,
+        },
+        'nanoclaw-state.json migration: resumable_cycles missing or not an object, skipping resumable_cycles',
+      );
+    }
+
+    if (
+      !hasEmailCursorField &&
+      !Array.isArray(seenEmailIds) &&
+      !isObjectRow(resumableCyclesObj)
+    ) {
+      // Nothing recognised — leave file in place for triage rather than
+      // renaming a source we never actually imported.
+      logger.warn(
+        { folder },
+        'nanoclaw-state.json migration: no recognised sections, skipping (file left in place)',
+      );
+      continue;
+    }
+
+    const counts = {
+      email_state_upserted: 0,
+      seen_ids_inserted: 0,
+      seen_ids_skipped: 0,
+      cycles_upserted: 0,
+      cycles_skipped: 0,
+    };
+
+    try {
+      const importFile = db.transaction(() => {
+        // email_state singleton — only INSERT/UPSERT if at least one
+        // cursor field is present. Pick the prepared statement
+        // matching the present-fields combination so absent fields
+        // are omitted from the column list (and the schema default
+        // fires / column stays NULL) rather than binding null.
+        if (hasEmailCursorField) {
+          const lec =
+            typeof parsed.last_email_checked === 'string'
+              ? parsed.last_email_checked
+              : null;
+          const dt = typeof parsed.date === 'string' ? parsed.date : null;
+          const fa =
+            typeof parsed.fetched_at === 'string' ? parsed.fetched_at : null;
+          if (lec !== null && dt !== null && fa !== null) {
+            insertEmailStateAll.run(lec, dt, fa);
+          } else if (lec !== null && dt !== null) {
+            insertEmailStateLastDate.run(lec, dt);
+          } else if (lec !== null && fa !== null) {
+            insertEmailStateLastFetched.run(lec, fa);
+          } else if (dt !== null && fa !== null) {
+            insertEmailStateDateFetched.run(dt, fa);
+          } else if (lec !== null) {
+            insertEmailStateLastOnly.run(lec);
+          } else if (dt !== null) {
+            insertEmailStateDateOnly.run(dt);
+          } else if (fa !== null) {
+            insertEmailStateFetchedOnly.run(fa);
+          }
+          counts.email_state_upserted = 1;
+        }
+
+        // email_seen_ids — one row per string in the JSON array; per-row
+        // type guard skips non-string entries (the email_id PK is
+        // TEXT NOT NULL; binding e.g. a number would coerce silently).
+        if (Array.isArray(seenEmailIds)) {
+          for (const id of seenEmailIds) {
+            if (typeof id !== 'string') {
+              logger.warn(
+                { folder, idType: id === null ? 'null' : typeof id },
+                'nanoclaw-state.json migration: skipping non-string entry in seen_email_ids',
+              );
+              counts.seen_ids_skipped++;
+              continue;
+            }
+            const result = insertSeenEmailId.run(id);
+            if (result.changes > 0) counts.seen_ids_inserted++;
+            else counts.seen_ids_skipped++;
+          }
+        }
+
+        // resumable_cycles — one row per skill_name in the JSON object.
+        // Per-row object guard skips stale null/string/number values
+        // (a writer bug could plant those; without the guard a property
+        // access would TypeError before any INSERT runs and propagate
+        // as an unexpected error through the narrowed catch).
+        if (isObjectRow(resumableCyclesObj)) {
+          for (const [skillName, cycleRecord] of Object.entries(
+            resumableCyclesObj,
+          )) {
+            if (!isObjectRow(cycleRecord)) {
+              logger.warn(
+                { folder, skillName },
+                'nanoclaw-state.json migration: skipping non-object resumable_cycles entry',
+              );
+              counts.cycles_skipped++;
+              continue;
+            }
+            const cycle = cycleRecord as NanoclawStateResumableCycleJson;
+            // cycle_id and slot_key are NOT NULL on the schema; let the
+            // constraint catch missing values (handled by the narrowed
+            // catch below — file left in place for triage).
+            const cycleId =
+              typeof cycle.cycle_id === 'string' ? cycle.cycle_id : null;
+            const slotKey =
+              typeof cycle.slot_key === 'string' ? cycle.slot_key : null;
+            const continuationN =
+              typeof cycle.continuation_n === 'number'
+                ? cycle.continuation_n
+                : 0;
+            // remaining_steps is a JSON blob — schema column is TEXT so
+            // accept either a string (already-stringified) or stringify
+            // an object/array on the way in. null stays null.
+            let remainingSteps: string | null;
+            if (
+              cycle.remaining_steps === null ||
+              cycle.remaining_steps === undefined
+            ) {
+              remainingSteps = null;
+            } else if (typeof cycle.remaining_steps === 'string') {
+              remainingSteps = cycle.remaining_steps;
+            } else {
+              remainingSteps = JSON.stringify(cycle.remaining_steps);
+            }
+            upsertResumableCycle.run(
+              skillName,
+              cycleId,
+              slotKey,
+              continuationN,
+              remainingSteps,
+            );
+            counts.cycles_upserted++;
+          }
+        }
+      });
+      importFile();
+    } catch (err) {
+      // Per-file isolation: a constraint violation on any of the three
+      // writers rolls the whole transaction back, the file stays put
+      // for human triage, and we move on to the next group. Anything
+      // else (TypeError, ReferenceError, non-constraint SqliteError)
+      // propagates per `coding-policy: error-handling`.
+      if (
+        handleConstraintViolationOrRethrow(err, folder, 'nanoclaw-state.json')
+      ) {
+        continue;
+      }
+    }
+
+    renameMigratedSource(
+      filePath,
+      stamp,
+      folder,
+      'nanoclaw-state.json',
+      counts,
+    );
   }
 }
