@@ -12,7 +12,7 @@ import {
   STORE_DIR,
   TIMEZONE,
 } from './config.js';
-import { syncBackupRepo } from './backup-sync.js';
+import { syncBackupRepo, type SyncResult } from './backup-sync.js';
 import { sendPoolMessage } from './channels/telegram.js';
 import {
   AvailableGroup,
@@ -2573,18 +2573,24 @@ export async function processTaskIpc(
 
     case 'github_backup':
       if (data.requestId) {
+        // Authorization: github_backup performs a host-side filesystem
+        // sync + `git push` using GITHUB_TOKEN — same privilege class
+        // as `audible_backup`, `dominos_pizza`, `promote_staging`, all
+        // of which gate on `isMain`. Untrusted-tier groups have a
+        // separate `#324` token gate at the container layer (the
+        // confirmation-tokens hook), but the host-side gate here
+        // shrinks the blast radius further: a compromised non-main
+        // container can't trigger the backup pipeline by writing an
+        // IPC task file directly.
+        if (!isMain) {
+          logger.warn({ sourceGroup }, 'Unauthorized github_backup attempt');
+          break;
+        }
+
         const groupDir = path.join(GROUPS_DIR, sourceGroup);
         const backupDir = path.join(groupDir, 'backup-repo');
         const dbPath = path.join(STORE_DIR, 'messages.db');
         const resultPath = scriptResultPath(sourceGroup, data);
-
-        if (!fs.existsSync(backupDir)) {
-          fs.writeFileSync(
-            resultPath,
-            JSON.stringify({ error: `backup-repo not found at ${backupDir}` }),
-          );
-          break;
-        }
 
         // Sync live group state into backup-repo BEFORE git plumbing.
         // After the state-001…state-010 epic, the JSON state files
@@ -2595,7 +2601,11 @@ export async function processTaskIpc(
         // daily_discoveries.md, mirrors memory/, and dumps the
         // SQLite state-table surface into backup-repo/state/<table>.sql
         // so per-day diffs become meaningful again. See #397.
-        let syncSummary;
+        // syncBackupRepo also validates groupDir / backupDir existence
+        // and throws an actionable error if either is missing — the
+        // catch block below converts that into a structured
+        // `{ error, stage: 'sync' }` envelope.
+        let syncSummary: SyncResult;
         try {
           syncSummary = syncBackupRepo({ groupDir, backupDir, dbPath });
         } catch (e) {
@@ -2675,12 +2685,19 @@ export async function processTaskIpc(
                 }),
               );
             } else {
-              // stdout is the JSON echo from the bash script
+              // stdout is the JSON echo from the bash script. The
+              // catch is narrowed to SyntaxError per
+              // `jbaruch/coding-policy: error-handling` — only the
+              // expected "malformed-JSON-from-bash" path falls back
+              // to the raw-stdout shape; any other thrown class
+              // (programmer error, OOM, runtime fault) propagates as
+              // a real failure.
               const lastLine = stdout.trim().split('\n').pop() ?? '';
               let parsed: { committed?: boolean; stdout?: string };
               try {
                 parsed = JSON.parse(lastLine) as typeof parsed;
-              } catch {
+              } catch (e) {
+                if (!(e instanceof SyntaxError)) throw e;
                 parsed = { stdout: stdout.trim() };
               }
               fs.writeFileSync(

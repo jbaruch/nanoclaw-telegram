@@ -24,9 +24,9 @@
  *      If the source `memory/` directory itself doesn't exist, the
  *      dest is left untouched (don't blow away historical content
  *      just because the source disappeared).
- *   3. Calling `runDumpPlan` from `scripts/dump-state-tables.ts` to
- *      produce per-table SQL dumps in `backup-repo/state/` (#398) —
- *      restoring coverage of the SQLite-resident state surface.
+ *   3. Calling `runDumpPlan` from `./db-dump.js` to produce per-table
+ *      SQL dumps in `backup-repo/state/` (#398) — restoring coverage
+ *      of the SQLite-resident state surface.
  *
  * Returns a structured summary so the IPC handler can write a
  * machine-readable result envelope and the calling skill (nightly
@@ -68,9 +68,12 @@ function listFilesRecursive(root: string, base = ''): string[] {
     } else if (e.isFile()) {
       out.push(rel);
     }
-    // Symlinks and other non-file types are ignored — `memory/` is
-    // expected to hold plain markdown files written by the agent;
-    // anything else would be a bug to surface, not silently sync.
+    // Symlinks and other non-file Dirent types are intentionally
+    // skipped — `memory/` is expected to hold plain markdown files
+    // written by the agent. Throwing here would block the entire
+    // backup over a single oddly-typed entry; skipping keeps the
+    // pipeline running and surfaces the anomaly at the next operator
+    // walk of the working tree.
   }
   return out;
 }
