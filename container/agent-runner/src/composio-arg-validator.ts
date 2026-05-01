@@ -40,11 +40,19 @@
  * value with multi-byte characters can't sneak past a chars-based limit.
  * `noControlChars` rejects ASCII control chars (`< 0x20` and `0x7F`)
  * except the explicit allowlist — `\n` (0x0A) and `\t` (0x09).
+ *
+ * `mayBeArray` opts a field into accepting `string[]` — every element
+ * is then validated independently under the same constraint. Default
+ * (omitted / `false`) treats arrays as `wrong_type`. This flag exists
+ * so body fields (`body`, `text`) — which Composio accepts only as
+ * strings — can't be smuggled in as arrays to bypass the per-element
+ * byte cap and ship N*100KB total payload.
  */
 export interface FieldConstraint {
   noNewlines?: boolean;
   maxBytes?: number;
   noControlChars?: boolean;
+  mayBeArray?: boolean;
 }
 
 /**
@@ -66,6 +74,20 @@ const BODY_MAX_BYTES = 100_000;
 const HEADER_NO_NEWLINES: FieldConstraint = {
   noNewlines: true,
   maxBytes: RFC_5322_HEADER_BYTES,
+};
+
+/**
+ * Recipient-list header — same single-line / RFC-5322-cap rules as
+ * `HEADER_NO_NEWLINES`, but Composio accepts both `string` and
+ * `string[]` shapes (`to: "a@x.io"` and `to: ["a@x.io", "b@y.io"]`
+ * are both legal). `mayBeArray` opts each element into the same
+ * per-string constraint; the size cap is per-element, which mirrors
+ * RFC 5322's per-line limit (each address is its own header line).
+ */
+const HEADER_NO_NEWLINES_LIST: FieldConstraint = {
+  noNewlines: true,
+  maxBytes: RFC_5322_HEADER_BYTES,
+  mayBeArray: true,
 };
 
 const BODY_LIMIT: FieldConstraint = {
@@ -94,21 +116,29 @@ interface ToolRules {
 
 const TOOL_RULES: ReadonlyArray<ToolRules> = [
   // Gmail send / reply / draft — every variant the egress-allowlist
-  // already classifies as `gmail_send`.
+  // already classifies as `gmail_send`. Recipient-list fields
+  // (`to`, `cc`, `bcc`, `recipient_email`, `recipient`, `recipients`)
+  // accept both `string` and `string[]` per Composio's input shape;
+  // the array path validates every element under the same single-
+  // line / RFC-5322-cap rule. `subject` and `body` are string-only —
+  // arrays there would smuggle past the per-element body cap.
   {
     pattern: /^mcp__composio__gmail_(send|reply)\w*$/i,
     fields: {
       subject: HEADER_NO_NEWLINES,
-      recipient_email: HEADER_NO_NEWLINES,
-      to: HEADER_NO_NEWLINES,
-      cc: HEADER_NO_NEWLINES,
-      bcc: HEADER_NO_NEWLINES,
+      recipient_email: HEADER_NO_NEWLINES_LIST,
+      recipient: HEADER_NO_NEWLINES_LIST,
+      recipients: HEADER_NO_NEWLINES_LIST,
+      to: HEADER_NO_NEWLINES_LIST,
+      cc: HEADER_NO_NEWLINES_LIST,
+      bcc: HEADER_NO_NEWLINES_LIST,
       body: BODY_LIMIT,
     },
   },
   // Slack post / send-DM — channel is the header surface, text is
   // the body. `user` (DM target) gets the same header treatment as
   // channel because newlines / oversize there confuse Slack's parser.
+  // None of the Slack fields legitimately come as arrays.
   {
     pattern: /^mcp__composio__slack_(post|send)\w*$/i,
     fields: {
@@ -165,27 +195,52 @@ export function validateComposioArgs(
     const value = input[fieldName];
     if (value === undefined || value === null) continue;
 
-    // Composio routinely accepts a string OR string[] in the same
-    // header field (`to`, `cc`, `bcc` all take both shapes). Validate
-    // every element of an array under the same constraint so an
-    // injection can't ride in via the array variant when the scalar
-    // variant is gated.
+    // Composio recipient-list header fields (`to`, `cc`, `bcc`,
+    // `recipient_email`, `recipient`, `recipients`) accept both
+    // `string` and `string[]` shapes. Body fields (`body`, `text`)
+    // and non-list headers (`subject`, `channel`, `user`) are
+    // string-only — accepting arrays there would let an injection
+    // smuggle past the per-element byte cap by shipping multiple
+    // 100KB chunks under one field name.
     if (Array.isArray(value)) {
+      if (constraint.mayBeArray !== true) {
+        return denyForField(
+          toolName,
+          fieldName,
+          'wrong_type',
+          `value is array, expected string (this field does not accept arrays)`,
+        );
+      }
       for (let i = 0; i < value.length; i++) {
         const elem = value[i];
         if (typeof elem !== 'string') {
-          return denyForField(toolName, fieldName, 'wrong_type',
-            `array element at index ${i} is ${typeof elem}, expected string`);
+          return denyForField(
+            toolName,
+            fieldName,
+            'wrong_type',
+            `array element at index ${i} is ${typeof elem}, expected string`,
+          );
         }
         const v = checkString(elem, constraint);
-        if (v) return denyForField(toolName, `${fieldName}[${i}]`, v.violation, v.detail);
+        if (v) {
+          return denyForField(
+            toolName,
+            `${fieldName}[${i}]`,
+            v.violation,
+            v.detail,
+          );
+        }
       }
       continue;
     }
 
     if (typeof value !== 'string') {
-      return denyForField(toolName, fieldName, 'wrong_type',
-        `value is ${typeof value}, expected string or string[]`);
+      return denyForField(
+        toolName,
+        fieldName,
+        'wrong_type',
+        `value is ${typeof value}, expected ${constraint.mayBeArray ? 'string or string[]' : 'string'}`,
+      );
     }
 
     const v = checkString(value, constraint);

@@ -237,6 +237,79 @@ describe('validateComposioArgs — header byte cap', () => {
   });
 });
 
+describe('validateComposioArgs — array smuggling guard on non-list fields', () => {
+  it('denies body as an array (would bypass per-element byte cap)', () => {
+    // Without the mayBeArray guard, two 99 KB elements would each pass
+    // the per-element 100 KB cap while shipping ~200 KB total payload.
+    const decision = validateComposioArgs('mcp__composio__gmail_send_email', {
+      recipient_email: 'a@x.io',
+      subject: 'hi',
+      body: ['a'.repeat(99_000), 'b'.repeat(99_000)],
+    });
+    expect(decision.kind).toBe('deny');
+    if (decision.kind === 'deny') {
+      expect(decision.field).toBe('body');
+      expect(decision.violation).toBe('wrong_type');
+    }
+  });
+
+  it('denies subject as an array', () => {
+    const decision = validateComposioArgs('mcp__composio__gmail_send_email', {
+      recipient_email: 'a@x.io',
+      subject: ['Status', 'Update'],
+      body: 'hi',
+    });
+    expect(decision.kind).toBe('deny');
+    if (decision.kind === 'deny') {
+      expect(decision.field).toBe('subject');
+      expect(decision.violation).toBe('wrong_type');
+    }
+  });
+
+  it('denies slack text as an array', () => {
+    const decision = validateComposioArgs('mcp__composio__slack_post_message', {
+      channel: '#general',
+      text: ['line1', 'line2'],
+    });
+    expect(decision.kind).toBe('deny');
+    if (decision.kind === 'deny') {
+      expect(decision.field).toBe('text');
+      expect(decision.violation).toBe('wrong_type');
+    }
+  });
+
+  it('denies slack channel as an array', () => {
+    const decision = validateComposioArgs('mcp__composio__slack_post_message', {
+      channel: ['#general', '#leak'],
+      text: 'hi',
+    });
+    expect(decision.kind).toBe('deny');
+    if (decision.kind === 'deny') {
+      expect(decision.field).toBe('channel');
+      expect(decision.violation).toBe('wrong_type');
+    }
+  });
+
+  it('still ALLOWS recipient_email as an array (legitimate Composio shape)', () => {
+    const decision = validateComposioArgs('mcp__composio__gmail_send_email', {
+      recipient_email: ['a@x.io', 'b@y.io'],
+      subject: 'hi',
+      body: 'hi',
+    });
+    expect(decision.kind).toBe('allow');
+  });
+
+  it('still ALLOWS to as an array (legitimate Composio shape)', () => {
+    const decision = validateComposioArgs('mcp__composio__gmail_send_email', {
+      recipient_email: 'a@x.io',
+      to: ['b@y.io', 'c@z.io'],
+      subject: 'hi',
+      body: 'hi',
+    });
+    expect(decision.kind).toBe('allow');
+  });
+});
+
 describe('validateComposioArgs — type checks', () => {
   it('denies subject as a number', () => {
     const decision = validateComposioArgs('mcp__composio__gmail_send_email', {
