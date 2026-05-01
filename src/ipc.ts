@@ -9,8 +9,10 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IPC_POLL_INTERVAL,
+  STORE_DIR,
   TIMEZONE,
 } from './config.js';
+import { syncBackupRepo, type SyncResult } from './backup-sync.js';
 import { sendPoolMessage } from './channels/telegram.js';
 import {
   AvailableGroup,
@@ -2571,18 +2573,52 @@ export async function processTaskIpc(
 
     case 'github_backup':
       if (data.requestId) {
-        const backupDir = path.join(
-          process.cwd(),
-          'groups',
-          sourceGroup,
-          'backup-repo',
-        );
+        // Authorization: github_backup performs a host-side filesystem
+        // sync + `git push` using GITHUB_TOKEN — same privilege class
+        // as `audible_backup`, `dominos_pizza`, `promote_staging`, all
+        // of which gate on `isMain`. Untrusted-tier groups have a
+        // separate `#324` token gate at the container layer (the
+        // confirmation-tokens hook), but the host-side gate here
+        // shrinks the blast radius further: a compromised non-main
+        // container can't trigger the backup pipeline by writing an
+        // IPC task file directly.
+        if (!isMain) {
+          logger.warn({ sourceGroup }, 'Unauthorized github_backup attempt');
+          break;
+        }
+
+        const groupDir = path.join(GROUPS_DIR, sourceGroup);
+        const backupDir = path.join(groupDir, 'backup-repo');
+        const dbPath = path.join(STORE_DIR, 'messages.db');
         const resultPath = scriptResultPath(sourceGroup, data);
 
-        if (!fs.existsSync(backupDir)) {
+        // Sync live group state into backup-repo BEFORE git plumbing.
+        // After the state-001…state-010 epic, the JSON state files
+        // that the previous pipeline relied on stopped existing on
+        // disk (state lives in store/messages.db now), so `git add
+        // -A` had nothing to stage and the daily commit was a no-op
+        // for 18 days. The sync step copies MEMORY.md /
+        // daily_discoveries.md, mirrors memory/, and dumps the
+        // SQLite state-table surface into backup-repo/state/<table>.sql
+        // so per-day diffs become meaningful again. See #397.
+        // syncBackupRepo also validates groupDir / backupDir existence
+        // and throws an actionable error if either is missing — the
+        // catch block below converts that into a structured
+        // `{ error, stage: 'sync' }` envelope.
+        let syncSummary: SyncResult;
+        try {
+          syncSummary = syncBackupRepo({ groupDir, backupDir, dbPath });
+        } catch (e) {
+          // Non-Error throws (TypeScript allows `throw 42`) bubble up
+          // — those indicate a bug, not an operational sync failure.
+          if (!(e instanceof Error)) throw e;
+          logger.error(
+            { sourceGroup, groupDir, backupDir, dbPath, error: e.message },
+            'github_backup sync failed',
+          );
           fs.writeFileSync(
             resultPath,
-            JSON.stringify({ error: `backup-repo not found at ${backupDir}` }),
+            JSON.stringify({ error: e.message, stage: 'sync' }),
           );
           break;
         }
@@ -2590,7 +2626,15 @@ export async function processTaskIpc(
         const commitMsg =
           data.message || `backup: ${new Date().toISOString().split('T')[0]}`;
         logger.info(
-          { sourceGroup, backupDir, commitMsg },
+          {
+            sourceGroup,
+            backupDir,
+            commitMsg,
+            copied: syncSummary.copied.length,
+            removed: syncSummary.removed.length,
+            dumped: syncSummary.dumped.length,
+            skipped: syncSummary.skipped.length,
+          },
           'Running github_backup',
         );
 
@@ -2603,7 +2647,7 @@ export async function processTaskIpc(
           'bash',
           [
             '-c',
-            `cd "${backupDir}" && git add -A && git diff --cached --quiet && echo '{"stdout":"Nothing to commit."}' || (git commit -m "${commitMsg.replace(/"/g, '\\"')}" && git push && echo '{"stdout":"Committed and pushed."}')`,
+            `cd "${backupDir}" && git add -A && (git diff --cached --quiet && echo '{"committed":false,"stdout":"Nothing to commit."}' || (git commit -m "${commitMsg.replace(/"/g, '\\"')}" && git push && echo '{"committed":true,"stdout":"Committed and pushed."}'))`,
           ],
           {
             timeout: 60_000,
@@ -2636,20 +2680,34 @@ export async function processTaskIpc(
                 JSON.stringify({
                   error: error.message,
                   stderr: stderr.slice(-500),
+                  stage: 'git',
+                  sync_summary: syncSummary,
                 }),
               );
             } else {
-              // stdout is the JSON echo from the bash script
+              // stdout is the JSON echo from the bash script. The
+              // catch is narrowed to SyntaxError per
+              // `jbaruch/coding-policy: error-handling` — only the
+              // expected "malformed-JSON-from-bash" path falls back
+              // to the raw-stdout shape; any other thrown class
+              // (programmer error, OOM, runtime fault) propagates as
+              // a real failure.
+              const lastLine = stdout.trim().split('\n').pop() ?? '';
+              let parsed: { committed?: boolean; stdout?: string };
               try {
-                const parsed = JSON.parse(stdout.trim().split('\n').pop()!);
-                fs.writeFileSync(resultPath, JSON.stringify(parsed));
-              } catch {
-                fs.writeFileSync(
-                  resultPath,
-                  JSON.stringify({ stdout: stdout.trim() }),
-                );
+                parsed = JSON.parse(lastLine) as typeof parsed;
+              } catch (e) {
+                if (!(e instanceof SyntaxError)) throw e;
+                parsed = { stdout: stdout.trim() };
               }
-              logger.info({ sourceGroup }, 'github_backup completed');
+              fs.writeFileSync(
+                resultPath,
+                JSON.stringify({ ...parsed, sync_summary: syncSummary }),
+              );
+              logger.info(
+                { sourceGroup, committed: parsed.committed },
+                'github_backup completed',
+              );
             }
           },
         );

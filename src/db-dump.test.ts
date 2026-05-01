@@ -4,7 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { runDumpPlan, STATE_TABLES } from './dump-state-tables.js';
+import { runDumpPlan, STATE_TABLES } from './db-dump.js';
 
 let tmpRoot: string;
 let dbPath: string;
@@ -63,7 +63,9 @@ describe('runDumpPlan', () => {
     expect(sql).toContain('CREATE TABLE orders');
     expect(sql).toContain("INSERT INTO orders VALUES(1,'u1','sku-a')");
     expect(sql).toContain("INSERT INTO orders VALUES(2,'u2','sku-b')");
-    expect(fs.existsSync(path.join(outDir, 'scheduled_reminders.sql'))).toBe(false);
+    expect(fs.existsSync(path.join(outDir, 'scheduled_reminders.sql'))).toBe(
+      false,
+    );
   });
 
   it('round-trips: dumped SQL replays into a fresh DB and produces matching rows', () => {
@@ -78,7 +80,10 @@ describe('runDumpPlan', () => {
       },
     ]);
     runDumpPlan({ dbPath, outDir, tables: ['pending_decisions'] });
-    const sql = fs.readFileSync(path.join(outDir, 'pending_decisions.sql'), 'utf8');
+    const sql = fs.readFileSync(
+      path.join(outDir, 'pending_decisions.sql'),
+      'utf8',
+    );
 
     const replayPath = path.join(tmpRoot, 'replay.db');
     const replayDb = new Database(replayPath);
@@ -173,7 +178,13 @@ describe('STATE_TABLES', () => {
     // `sessions` is an ephemeral SDK cache; `smart_home_events` is
     // recoverable from Hubitat. They're also large enough that
     // buffered `.dump` would OOM and produce poor diffs.
-    const excluded = ['messages', 'chats', 'reactions', 'sessions', 'smart_home_events'];
+    const excluded = [
+      'messages',
+      'chats',
+      'reactions',
+      'sessions',
+      'smart_home_events',
+    ];
     for (const t of excluded) expect(STATE_TABLES).not.toContain(t);
   });
 
@@ -187,10 +198,14 @@ describe('table name validation', () => {
     expect(() =>
       runDumpPlan({ dbPath, outDir, tables: ["orders'; DROP TABLE x; --"] }),
     ).toThrow(/invalid table name/);
-    expect(() => runDumpPlan({ dbPath, outDir, tables: ['a b'] })).toThrow(/invalid table name/);
-    expect(() => runDumpPlan({ dbPath, outDir, tables: ['1leading_digit'] })).toThrow(
+    expect(() => runDumpPlan({ dbPath, outDir, tables: ['a b'] })).toThrow(
       /invalid table name/,
     );
-    expect(() => runDumpPlan({ dbPath, outDir, tables: [''] })).toThrow(/invalid table name/);
+    expect(() =>
+      runDumpPlan({ dbPath, outDir, tables: ['1leading_digit'] }),
+    ).toThrow(/invalid table name/);
+    expect(() => runDumpPlan({ dbPath, outDir, tables: [''] })).toThrow(
+      /invalid table name/,
+    );
   });
 });
