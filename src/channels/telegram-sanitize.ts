@@ -262,8 +262,18 @@ export function sanitizeTelegramHtml(text: string): string {
   // same protectStray treatment as any other stray. Without `_`, the
   // regex misses them entirely; they slip through Phase 1b and reach
   // Telegram as raw `<…>` → 400 → plain-text fallback.
+  //
+  // The class also accepts `:` and `.` so namespaced tags (`<svg:rect>`,
+  // `<x:custom>`) and dotted tag names (`<x.y>`) get protected too —
+  // Telegram parses neither and 400s on raw `<…>`. Tag-start and
+  // continuation use `\p{L}` / `\p{L}\p{N}` (Unicode letter / letter+
+  // number) so non-ASCII agent traces (e.g. Cyrillic `<язык>`) flow
+  // through the same escape path. See #284 for the slip-through audit
+  // that motivated the widening; the negative cases (math `<a < b>`,
+  // bare `<`, ` < ` whitespace) still don't over-match because the
+  // start anchor requires `\p{L}` immediately after `</?`.
   out = out.replace(
-    /<\/?[a-zA-Z][a-zA-Z0-9_-]*(?:\s[^>]*)?\s*\/?>/g,
+    /<\/?[\p{L}][\p{L}\p{N}_.:-]*(?:\s[^>]*)?\s*\/?>/gu,
     protectStray,
   );
 

@@ -325,6 +325,53 @@ describe('sanitizeTelegramHtml — HTML entity escaping', () => {
       sanitizeTelegramHtml('<tool_use_error>e</tool_use_error>\n**bold** here'),
     ).toBe('&lt;tool_use_error&gt;e&lt;/tool_use_error&gt;\n<b>bold</b> here');
   });
+
+  // --- #284: namespaced, dotted, and Unicode-letter tag names. The
+  // pre-#284 char class `[a-zA-Z][a-zA-Z0-9_-]*` rejected `:`, `.`, and
+  // every non-ASCII letter, so namespaced tags (`<svg:rect>`), dotted
+  // tags (`<x.y>`), and Cyrillic-letter tags (`<язык>`) slipped past
+  // Phase 1b entirely and reached Telegram as raw `<…>` → 400 → plain
+  // text fallback. Widened to `[\p{L}][\p{L}\p{N}_.:-]*` with the `u`
+  // flag — same protectStray + Phase-3 escape path as the underscored
+  // tags above.
+  it('namespaced stray tag (<svg:rect>) is escaped', () => {
+    expect(sanitizeTelegramHtml('<svg:rect>x</svg:rect>')).toBe(
+      '&lt;svg:rect&gt;x&lt;/svg:rect&gt;',
+    );
+  });
+
+  it('dotted stray tag (<x.y>) is escaped', () => {
+    expect(sanitizeTelegramHtml('<x.y>z</x.y>')).toBe(
+      '&lt;x.y&gt;z&lt;/x.y&gt;',
+    );
+  });
+
+  it('Cyrillic-letter stray tag (<язык>) is escaped', () => {
+    expect(sanitizeTelegramHtml('<язык>привет</язык>')).toBe(
+      '&lt;язык&gt;привет&lt;/язык&gt;',
+    );
+  });
+
+  // --- #284 negative case: math expression `<a < b>`. The
+  // `(?:\s[^>]*)?` attribute-blob clause swallows the inner `<`, so
+  // the regex matches the whole token and routes it through
+  // protectStray → Phase 3 HTML-escape. That's the desired outcome:
+  // unescaped `<` / `>` in body text would confuse Telegram's HTML
+  // parser regardless of whether we call it a "tag" — escaping it is
+  // the right answer either way.
+  it('math expression <a < b> escapes brackets, does not over-protect', () => {
+    expect(sanitizeTelegramHtml('<a < b>')).toBe('&lt;a &lt; b&gt;');
+  });
+
+  it('numeric-leading <3D> is not matched as a tag (leading digit fails \\p{L})', () => {
+    // Phase 1b doesn't protect; the regex requires `\p{L}` after
+    // `</?`, so a leading digit short-circuits the match. The literal
+    // text passes through unchanged. Telegram will choke on this if it
+    // ships, but that's a separate concern from the stray-tag regex's
+    // responsibility: numeric-leading constructs aren't HTML tags by
+    // any spec.
+    expect(sanitizeTelegramHtml('<3D>')).toBe('<3D>');
+  });
 });
 
 // --- Existing HTML element spans: contents must be preserved verbatim ---
