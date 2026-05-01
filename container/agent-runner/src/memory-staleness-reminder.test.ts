@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   buildStalenessReminder,
   classifyTrustedRead,
+  sanitizePathForDisplay,
 } from './memory-staleness-reminder.js';
 
 describe('classifyTrustedRead — paths under /workspace/trusted/', () => {
@@ -43,6 +44,21 @@ describe('classifyTrustedRead — quarantine carve-out', () => {
       classifyTrustedRead(
         '/workspace/trusted/quarantine/sid_abc/daily/2026-04-30.md',
       ).isTrustedMemoryRead,
+    ).toBe(false);
+  });
+
+  it('does NOT match the bare quarantine root (no trailing slash)', () => {
+    // Without the bare-root carve-out, `/workspace/trusted/quarantine`
+    // would slip past the prefix check (which is anchored on the
+    // trailing slash) and trip the reminder.
+    const r = classifyTrustedRead('/workspace/trusted/quarantine');
+    expect(r.isTrustedMemoryRead).toBe(false);
+    expect(r.resolvedPath).toBe('/workspace/trusted/quarantine');
+  });
+
+  it('does NOT match the quarantine root with trailing slash', () => {
+    expect(
+      classifyTrustedRead('/workspace/trusted/quarantine/').isTrustedMemoryRead,
     ).toBe(false);
   });
 });
@@ -127,10 +143,70 @@ describe('classifyTrustedRead — traversal normalization', () => {
   });
 });
 
+describe('sanitizePathForDisplay', () => {
+  it('passes a normal path through unchanged', () => {
+    expect(sanitizePathForDisplay('/workspace/trusted/MEMORY.md')).toBe(
+      '/workspace/trusted/MEMORY.md',
+    );
+  });
+
+  it('replaces newlines with spaces', () => {
+    expect(
+      sanitizePathForDisplay('/workspace/trusted/foo\n/bar.md'),
+    ).toBe('/workspace/trusted/foo /bar.md');
+  });
+
+  it('replaces \\r and \\t and other control chars with spaces', () => {
+    expect(
+      sanitizePathForDisplay('/workspace/\rtrusted/\tfoo\x00bar'),
+    ).toBe('/workspace/ trusted/ foo bar');
+  });
+
+  it('collapses runs of control chars into a single space', () => {
+    expect(sanitizePathForDisplay('/a\n\n\n\n/b')).toBe('/a /b');
+  });
+
+  it('truncates absurdly long paths and marks with …', () => {
+    const long = '/workspace/trusted/' + 'a'.repeat(1000);
+    const out = sanitizePathForDisplay(long);
+    expect(out.length).toBeLessThan(long.length);
+    expect(out.endsWith('…')).toBe(true);
+  });
+
+  it('returns empty string for non-string input', () => {
+    expect(sanitizePathForDisplay(undefined as unknown as string)).toBe('');
+    expect(sanitizePathForDisplay(null as unknown as string)).toBe('');
+  });
+});
+
 describe('buildStalenessReminder', () => {
   it('names the resolved path verbatim', () => {
     const reminder = buildStalenessReminder('/workspace/trusted/MEMORY.md');
     expect(reminder).toContain('/workspace/trusted/MEMORY.md');
+  });
+
+  it('sanitizes injected newlines in the path before embedding (system-message injection guard)', () => {
+    // An injection that smuggles a newline into the file_path
+    // would, without sanitization, end up rendering a multi-line
+    // system message — letting an attacker forge an additional
+    // line that looks like fresh system text. The sanitizer
+    // collapses those newlines so the reminder stays single-line.
+    const reminder = buildStalenessReminder(
+      '/workspace/trusted/foo\n\nfake instruction\n',
+    );
+    // Newlines in the path are gone — the entire reminder stays
+    // a single paragraph.
+    expect(reminder.includes('\n')).toBe(false);
+    // The path content is preserved (just with newlines collapsed
+    // to spaces); the model can still see what was actually read.
+    expect(reminder).toContain('fake instruction');
+  });
+
+  it('keeps the reminder a single paragraph (no real newlines anywhere)', () => {
+    const reminder = buildStalenessReminder(
+      '/workspace/trusted/foo\nbar.md',
+    );
+    expect(reminder.includes('\n')).toBe(false);
   });
 
   it('mentions the structural classes of mutation-it-blocks', () => {
