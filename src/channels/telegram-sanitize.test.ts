@@ -363,14 +363,14 @@ describe('sanitizeTelegramHtml — HTML entity escaping', () => {
     expect(sanitizeTelegramHtml('<a < b>')).toBe('&lt;a &lt; b&gt;');
   });
 
-  it('numeric-leading <3D> is not matched as a tag (leading digit fails \\p{L})', () => {
-    // Phase 1b doesn't protect; the regex requires `\p{L}` after
-    // `</?`, so a leading digit short-circuits the match. The literal
-    // text passes through unchanged. Telegram will choke on this if it
-    // ships, but that's a separate concern from the stray-tag regex's
-    // responsibility: numeric-leading constructs aren't HTML tags by
-    // any spec.
-    expect(sanitizeTelegramHtml('<3D>')).toBe('<3D>');
+  it('numeric-leading <3D> is escaped (Telegram 400s on the raw form)', () => {
+    // `<3D>` isn't a valid HTML tag by spec (tag names must start with
+    // a letter), but Telegram's HTML parser still 400s on the raw
+    // angle brackets, falling the message back to plain text. The
+    // start anchor `[\p{L}\p{N}]` allows digit-leading tokens through
+    // the same protectStray + Phase-3 escape path so the user sees
+    // their Markdown elsewhere on the message survive.
+    expect(sanitizeTelegramHtml('<3D>')).toBe('&lt;3D&gt;');
   });
 });
 
