@@ -70,9 +70,9 @@ export function inferReadSource(toolName: string): ReadSource | null {
   for (const { pattern, prefix } of READ_TOOL_PATTERNS) {
     if (pattern.test(toolName)) {
       // Strip the `mcp__<server>__` prefix so the value is just the
-      // action — `gmail_fetch_emails`, `tessl_search`, etc. Walk-back
-      // never sees the redundant server segment, but the action stays
-      // for human-readable provenance traces.
+      // remaining action/tool suffix — `gmail_fetch_emails`, `search`,
+      // etc. Walk-back never sees the redundant server segment, but the
+      // action stays for human-readable provenance traces.
       const value = toolName.replace(/^mcp__[^_]+__/, '');
       return { prefix, value };
     }
