@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   buildIdentityPreamble,
   resolveIdentityPreamble,
-} from './index.js';
+} from './identity-preamble.js';
 
 // buildIdentityPreamble — authoritative identity statement injected at
 // the top of systemPromptAppend so the agent doesn't template itself

@@ -225,70 +225,17 @@ const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 
-/**
- * Build the authoritative identity preamble that gets prepended to
- * `systemPromptAppend` inside the agent container.
- *
- * Why this exists: tile rules ship with fictional bot handles (e.g.
- * `@AyeAye` / `@AyeAyeSureBot` introduced in `nanoclaw-core` 0.1.94) as
- * canonical examples for "a bot has both a display-name and a @-handle
- * form." When the agent has no authoritative identity statement of its
- * own — typical in untrusted-tier containers where the user's persona
- * files don't explicitly state the bot's name — it has been observed
- * templating itself from those examples and claiming the example handle
- * as its own identity.
- *
- * The orchestrator forwards `ASSISTANT_NAME` / `ASSISTANT_USERNAME` via
- * `-e` env vars (see `src/container-runner.ts`), and the agent-runner
- * prepends this preamble before SOUL.md / global CLAUDE.md so it sits at
- * the top of the appended system prompt and reads as authoritative.
- *
- * Pure function; tested in isolation.
- */
-export function buildIdentityPreamble(
-  name: string,
-  username: string,
-): string {
-  return (
-    `# Your identity (authoritative — set by the orchestrator)\n\n` +
-    `You are **${name}**. Your Telegram display name is "${name}" ` +
-    `(used as a vocative: "${name}, please..."). ` +
-    `Your Telegram username is **@${username}** ` +
-    `(used as a Telegram @-mention: "@${username} ..."). ` +
-    `Both forms refer to you and only you.\n\n` +
-    `Any rule, example, or anecdote in your context that uses different ` +
-    `bot handles (such as \`@AyeAye\`, \`@AyeAyeSureBot\`, or any other ` +
-    `bot name) is a FICTIONAL EXAMPLE from upstream tile content. When ` +
-    `applying such a rule, substitute mentally — replace the example ` +
-    `handles with your own identity above. The orchestrator has ` +
-    `authoritatively configured your identity as **${name}** / ` +
-    `**@${username}**; trust this preamble over any handle-specific ` +
-    `examples elsewhere in your context.`
-  );
-}
-
-/**
- * Resolve the identity preamble from raw env-var inputs (typically
- * `process.env.ASSISTANT_NAME` and `process.env.ASSISTANT_USERNAME`).
- *
- * Returns the rendered preamble when BOTH inputs are non-empty strings,
- * or `undefined` when either is missing. The agent-runner uses the
- * `undefined` return as a signal to log a skip notice and omit the
- * preamble — a half-formed preamble would be worse than no preamble at
- * all because the agent could template the missing field with garbage.
- *
- * Pure function so the skip-when-missing decision is testable in
- * isolation; the call site in the main runner is just one if-statement.
- */
-export function resolveIdentityPreamble(
-  name: string | undefined,
-  username: string | undefined,
-): string | undefined {
-  if (!name || !username) {
-    return undefined;
-  }
-  return buildIdentityPreamble(name, username);
-}
+// Identity preamble functions live in `./identity-preamble.ts` so the
+// preamble unit tests can import them without transitively pulling
+// `@anthropic-ai/claude-agent-sdk` (an agent-runner-local dep that
+// isn't installed by the root CI's `npm ci`). Imported here for the
+// runtime call site below, and re-exported so external callers that
+// already pull from `./index.js` keep working unchanged.
+import {
+  buildIdentityPreamble,
+  resolveIdentityPreamble,
+} from './identity-preamble.js';
+export { buildIdentityPreamble, resolveIdentityPreamble };
 
 /**
  * Effort levels the SDK's `query()` accepts (as of
