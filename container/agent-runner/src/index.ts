@@ -36,6 +36,7 @@ import {
 } from './poison-defense.js';
 import { detectAuthoritativeLookup } from './authoritative-source.js';
 import { evaluateBashCommand } from './bash-safety-net.js';
+import { validateComposioArgs } from './composio-arg-validator.js';
 import { detectComposioFidelity } from './composio-fidelity.js';
 import { decideGroundTruthReminder } from './ground-truth-reminder.js';
 import { detectLazyVerification } from './lazy-verification.js';
@@ -1458,6 +1459,36 @@ function createBashSafetyNetHook(): HookCallback {
 }
 
 /**
+ * #326 — Composio outbound argument validator. Checks per-field
+ * constraints on the way out (header-injection guard on `subject`/
+ * `to`/`cc`/`bcc`/`channel`/`user`, byte cap + control-char guard on
+ * `body`/`text`) before the bytes leave the container. Tool-only —
+ * does not look at provenance, because header injection and oversize
+ * bodies are wrong regardless of who issued the call. Symmetric
+ * counterpart to #117's incoming-result sanitizer.
+ *
+ * Logged-deny field is the field name (not the value) per `no-secrets`
+ * — a body or recipient string can carry tokens or PII.
+ */
+function createComposioArgValidatorHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const pre = input as PreToolUseHookInput;
+    const decision = validateComposioArgs(pre.tool_name, pre.tool_input);
+    if (decision.kind === 'allow') return {};
+    log(
+      `PreToolUse: composio_arg_validator DENY tool=${pre.tool_name} field=${decision.field} violation=${decision.violation}`,
+    );
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: 'deny' as const,
+        permissionDecisionReason: decision.reason,
+      },
+    };
+  };
+}
+
+/**
  * #226 (tracks #214) — authoritative-source-nudge. Intercept entity-
  * lookup tool calls (Composio search/list, raw `SELECT FROM chats
  * LIMIT`, reads of the `available_groups.json` snapshot) and inject a
@@ -2599,6 +2630,20 @@ async function runQuery(
           {
             matcher: 'mcp__nanoclaw__(react_to_message|send_message)',
             hooks: [createSilentTurnTrackingHook(silentTurnState)],
+          },
+          // #326 — Composio outbound arg validator. Per-field shape
+          // checks (header-injection guard on subject/to/cc/bcc/
+          // channel/user, byte cap + control-char guard on body/text)
+          // before the bytes leave the container. Runs BEFORE the
+          // egress allowlist so a malformed arg is rejected without
+          // paying the transcript-walk cost. Tool-only — does not
+          // look at provenance. Matcher restricts the sweep to the
+          // Composio outbound family; the validator's internal rule
+          // table is the source of truth (matcher is a perf hint).
+          {
+            matcher:
+              '^mcp__composio__(gmail_(send|reply)|slack_(post|send))\\w*$',
+            hooks: [createComposioArgValidatorHook()],
           },
           // #320 — egress allowlist. Destination-level filter for
           // outbound tools (Composio gmail.send, slack.post,
