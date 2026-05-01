@@ -44,6 +44,7 @@ import {
   writeHandoffMarker,
 } from './handoff.js';
 import {
+  clearTaskSessionIdsForGroup,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -2397,6 +2398,26 @@ async function main(): Promise<void> {
           logger.info(
             { groupFolder, sessionName: slot, sessionId, count: wiped },
             'Wiped session artifacts (transcript + tool-results dir)',
+          );
+        }
+      }
+
+      // Step 4b (#336): clear per-task `session_id` columns for any
+      // scheduled task in this group that referenced the just-wiped
+      // maintenance transcripts. Without this, the next fire of a
+      // recurring task would pass `resume:` an id whose JSONL is
+      // gone — the SDK would 404 and start fresh anyway, just
+      // noisily. Only clears when the maintenance slot was actually
+      // touched: a 'default'-only nuke leaves scheduled-task sessions
+      // untouched (they live in maintenance, with their own ids).
+      // Fires before `skipReentry` so checkpoint state and per-task
+      // session state both reach "clean slate" together.
+      if (session === 'maintenance' || session === 'all') {
+        const cleared = clearTaskSessionIdsForGroup(groupFolder);
+        if (cleared > 0) {
+          logger.info(
+            { groupFolder, count: cleared },
+            'Cleared per-task session_ids — next fire of each will start a fresh SDK session (#336)',
           );
         }
       }

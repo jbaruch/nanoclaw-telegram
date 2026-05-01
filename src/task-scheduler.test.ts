@@ -20,6 +20,7 @@ vi.mock('./container-runner.js', () => ({
 
 import {
   _initTestDatabase,
+  clearTaskSessionIdsForGroup,
   createTask,
   deleteTask,
   getAllChats,
@@ -29,6 +30,7 @@ import {
   pruneCompletedTasks,
   resurrectZombieTasks,
   setSession,
+  setTaskSessionId,
   storeChatMetadata,
   updateTask,
   updateTaskAfterRun,
@@ -289,14 +291,17 @@ describe('task scheduler', () => {
     expect(getTaskById('cron-broken')?.status).toBe('paused');
   });
 
-  it('scheduled task ignores any cached maintenance sessionId and never persists a new one (#193)', async () => {
-    // Regression for #193: the lunch reminder bled heartbeat-loop
-    // language from a 6-day-old maintenance turn because every
-    // context_mode=group task on a folder shared the same
-    // sessions[folder][maintenance] resume slot. Each scheduled run
-    // must be a fresh SDK turn — even if a prior sessionId is sitting
-    // in the cache, it must NOT be passed in as `resume`, and the
-    // streamed `newSessionId` must NOT be persisted back to the slot.
+  it('once-task never reads or writes the maintenance slot session cache (#193 + #336)', async () => {
+    // #193 regression: the lunch reminder bled heartbeat-loop language
+    // from a 6-day-old maintenance turn because every task on a folder
+    // shared the same `sessions[folder][maintenance]` resume slot. The
+    // structural fix was: scheduled tasks NEVER use the slot cache.
+    // #336 adds per-task session reuse via `scheduled_tasks.session_id`,
+    // but explicitly out-of-scope for `schedule_type === 'once'` —
+    // one-shots stay fresh-per-fire. So even with #336 landed: a once-
+    // task must (a) not read the slot cache for `resume`, (b) not write
+    // `newSessionId` to the slot cache, AND (c) not persist
+    // `newSessionId` to its row's `session_id` column.
     const MAIN_GROUP = {
       name: 'Main',
       folder: 'main',
@@ -360,11 +365,14 @@ describe('task scheduler', () => {
     expect(containerInput.sessionName).toBe(MAINTENANCE_SESSION_NAME);
 
     // The seeded prior sessionId is left untouched (no overwrite) and
-    // the streamed newSessionId was NOT persisted — the next run also
-    // starts fresh.
+    // the streamed newSessionId was NOT persisted to the slot cache —
+    // the next run also starts fresh.
     expect(getSession('main', MAINTENANCE_SESSION_NAME)).toBe(
       'prior-maint-session',
     );
+    // #336: the streamed newSessionId also must NOT have written
+    // through to `task.session_id` — once-tasks are out of scope.
+    expect(getTaskById('group-ctx-task')?.session_id ?? null).toBeNull();
   });
 
   it('wipes the just-finished JSONL transcript so orphans do not accumulate (#193)', async () => {
@@ -580,7 +588,12 @@ describe('task scheduler', () => {
     expect(containerInput.continuationCycleId).toBeUndefined();
   });
 
-  it('maintenance task with context_mode=isolated does NOT persist newSessionId', async () => {
+  it('once-task does NOT persist newSessionId on its row (#336 out-of-scope guard)', async () => {
+    // The gating field for #336 reuse is `schedule_type` (recurring vs
+    // once), NOT `context_mode` (which is inert on the schema per
+    // #193's note). This test pins the once-task path: even when the
+    // SDK reports a newSessionId, no DB write to `session_id` should
+    // happen, and the slot cache stays untouched.
     const MAIN_GROUP = {
       name: 'Main',
       folder: 'main',
@@ -589,7 +602,6 @@ describe('task scheduler', () => {
       isMain: true,
     };
 
-    // No prior sessionId in the cache for isolated tasks.
     createTask({
       id: 'isolated-task',
       group_folder: 'main',
@@ -636,13 +648,15 @@ describe('task scheduler', () => {
 
     await vi.advanceTimersByTimeAsync(10);
 
-    // Isolated tasks start fresh — no sessionId passed in.
+    // Once-tasks start fresh — no sessionId passed in.
     const containerInput = mockRunContainerAgent.mock.calls[0][1];
     expect(containerInput.sessionId).toBeUndefined();
 
-    // And the streamed newSessionId was NOT persisted — an isolated task
-    // finishing must not contaminate the maintenance slot's chain.
+    // And the streamed newSessionId was NOT persisted — neither to the
+    // slot cache (cross-task bleed prevention) nor to the row's
+    // `session_id` column (#336 out-of-scope for once-tasks).
     expect(getSession('main', MAINTENANCE_SESSION_NAME)).toBeUndefined();
+    expect(getTaskById('isolated-task')?.session_id ?? null).toBeNull();
   });
 
   it('streamed scheduled-task result writes a bot row to messages.db', async () => {
@@ -1727,5 +1741,401 @@ describe('parseTaskSkill', () => {
     expect(
       parseTaskSkill("Document the Skill: foo workflow in tomorrow's notes"),
     ).toBeUndefined();
+  });
+});
+
+describe('per-task session_id reuse (#336)', () => {
+  // Each test below drives the scheduler against a recurring task and
+  // asserts on three observable surfaces:
+  //   1. ContainerInput.sessionId — what gets passed as `resume:` to
+  //      runContainerAgent
+  //   2. scheduled_tasks.session_id (via getTaskById) — what's
+  //      persisted for the next fire
+  //   3. wipeSessionJsonl call args — which JSONL transcripts get
+  //      cleaned up in the post-run finally
+  // Together these pin the contract: recurring tasks reuse the same
+  // session id across fires while orphans (rotated mid-run, or stale
+  // after a nuke) get cleaned up off disk.
+
+  const RECURRING_GROUP = {
+    name: 'Main',
+    folder: 'main',
+    trigger: 'always',
+    added_at: '2026-01-01T00:00:00.000Z',
+    isMain: true,
+  };
+
+  beforeEach(() => {
+    _initTestDatabase();
+    _resetSchedulerLoopForTests();
+    mockRunContainerAgent.mockClear();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * Helper: drive the scheduler through one fire of a single recurring
+   * task and return the captured ContainerInput + the wipeSpy. Reduces
+   * boilerplate across tests below — every case sets up the same four
+   * scheduler dependencies (registeredGroups, queue, onProcess,
+   * sendMessage) the same way; the per-test variation lives in the
+   * mockRunContainerAgent implementation and the task row state.
+   */
+  async function fireOnce(): Promise<{
+    containerInput: { sessionId?: string; sessionName?: string };
+    wipeSpy: ReturnType<typeof vi.fn>;
+  }> {
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+    const wipeSpy = vi.fn(() => 1);
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
+      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+      wipeSessionJsonl: wipeSpy,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    const containerInput = mockRunContainerAgent.mock.calls[0]?.[1];
+    return { containerInput, wipeSpy };
+  }
+
+  it('first fire of a recurring task persists newSessionId for next fire', async () => {
+    createTask({
+      id: 'heartbeat-task',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'Skill(skill: "tessl__heartbeat")',
+      schedule_type: 'interval',
+      schedule_value: '1800000',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result: 'ok',
+          newSessionId: 'sdk-issued-id-A',
+        } as ContainerOutput);
+        return {
+          status: 'success',
+          result: 'ok',
+          newSessionId: 'sdk-issued-id-A',
+        };
+      },
+    );
+
+    const { containerInput, wipeSpy } = await fireOnce();
+
+    // No prior id → fresh start (no resume).
+    expect(containerInput.sessionId).toBeUndefined();
+    // Newly-issued id persisted for next fire.
+    expect(getTaskById('heartbeat-task')?.session_id).toBe('sdk-issued-id-A');
+    // Live id is NOT wiped — the next fire needs it on disk.
+    expect(wipeSpy).not.toHaveBeenCalled();
+  });
+
+  it('subsequent fire of a recurring task resumes the persisted session_id', async () => {
+    createTask({
+      id: 'heartbeat-task',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'Skill(skill: "tessl__heartbeat")',
+      schedule_type: 'interval',
+      schedule_value: '1800000',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    setTaskSessionId('heartbeat-task', 'persisted-id-X');
+
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        // Clean resume: SDK loaded X, kept it, and re-emits X.
+        await onOutput({
+          status: 'success',
+          result: 'ok',
+          newSessionId: 'persisted-id-X',
+        } as ContainerOutput);
+        return {
+          status: 'success',
+          result: 'ok',
+          newSessionId: 'persisted-id-X',
+        };
+      },
+    );
+
+    const { containerInput, wipeSpy } = await fireOnce();
+
+    // Persisted id is passed as `resume:`.
+    expect(containerInput.sessionId).toBe('persisted-id-X');
+    // Row stays at the same id (no rotation).
+    expect(getTaskById('heartbeat-task')?.session_id).toBe('persisted-id-X');
+    // The live id is NOT wiped — must survive for the next fire.
+    expect(wipeSpy).not.toHaveBeenCalled();
+  });
+
+  it('SDK rotation mid-run wipes the orphan and persists the new id', async () => {
+    // Edge case: SDK loaded session X, decided to rotate to Y mid-
+    // stream (e.g. transcript pruning under the hood). Y's transcript
+    // is the new live one; X's is now orphan and must be wiped or
+    // it leaks on disk forever.
+    createTask({
+      id: 'heartbeat-task',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'Skill(skill: "tessl__heartbeat")',
+      schedule_type: 'interval',
+      schedule_value: '1800000',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    setTaskSessionId('heartbeat-task', 'rotated-from-X');
+
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        // Mid-run rotation: SDK reports X first, then switches to Y.
+        await onOutput({
+          status: 'success',
+          result: null,
+          newSessionId: 'rotated-from-X',
+        } as ContainerOutput);
+        await onOutput({
+          status: 'success',
+          result: 'ok',
+          newSessionId: 'rotated-to-Y',
+        } as ContainerOutput);
+        return {
+          status: 'success',
+          result: 'ok',
+          newSessionId: 'rotated-to-Y',
+        };
+      },
+    );
+
+    const { containerInput, wipeSpy } = await fireOnce();
+
+    // Started with X (passed as resume:).
+    expect(containerInput.sessionId).toBe('rotated-from-X');
+    // Row ends at Y (last-write-wins).
+    expect(getTaskById('heartbeat-task')?.session_id).toBe('rotated-to-Y');
+    // X's orphan transcript got wiped.
+    expect(wipeSpy).toHaveBeenCalledWith(
+      'main',
+      MAINTENANCE_SESSION_NAME,
+      'rotated-from-X',
+    );
+    // Y is alive — never wiped.
+    const wipeArgs = wipeSpy.mock.calls.map((c) => c[2]);
+    expect(wipeArgs).not.toContain('rotated-to-Y');
+  });
+
+  it('cron-task gets the same reuse contract as interval-task', async () => {
+    // Cron and interval are both "recurring" per #336 — neither is the
+    // out-of-scope `once`. This test pins that the gating is on
+    // `schedule_type !== 'once'`, not on `interval` specifically.
+    createTask({
+      id: 'cron-task',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'Skill(skill: "tessl__nightly-housekeeping")',
+      schedule_type: 'cron',
+      schedule_value: '0 3 * * *',
+      schedule_timezone: 'UTC',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result: 'ok',
+          newSessionId: 'cron-issued-id',
+        } as ContainerOutput);
+        return {
+          status: 'success',
+          result: 'ok',
+          newSessionId: 'cron-issued-id',
+        };
+      },
+    );
+
+    await fireOnce();
+
+    expect(getTaskById('cron-task')?.session_id).toBe('cron-issued-id');
+  });
+
+  it('different recurring tasks in the same group keep independent session_ids (no #193 bleed)', async () => {
+    // The #193 cross-task bleed was: a lunch reminder picked up a
+    // heartbeat-loop's terminal message because they shared the slot
+    // cache. #336's design explicitly avoids reintroducing this — each
+    // task's `session_id` is keyed on the row's id, so two distinct
+    // recurring tasks in the same group end up with two distinct SDK
+    // sessions on disk.
+    createTask({
+      id: 'task-A',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'Skill(skill: "tessl__heartbeat")',
+      schedule_type: 'interval',
+      schedule_value: '1800000',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    createTask({
+      id: 'task-B',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'Skill(skill: "tessl__morning-brief")',
+      schedule_type: 'cron',
+      schedule_value: '0 7 * * *',
+      schedule_timezone: 'UTC',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    let callCount = 0;
+    mockRunContainerAgent.mockImplementation(
+      async (_group, input, _onProc, onOutput) => {
+        callCount++;
+        // Each task's fire emits a distinct id; assert the test mock
+        // stays consistent so a regression where one task gets the
+        // other's id surfaces here rather than as a quiet bleed.
+        const issuedId = input.prompt.includes('heartbeat')
+          ? 'id-for-task-A'
+          : 'id-for-task-B';
+        await onOutput({
+          status: 'success',
+          result: 'ok',
+          newSessionId: issuedId,
+        } as ContainerOutput);
+        return { status: 'success', result: 'ok', newSessionId: issuedId };
+      },
+    );
+
+    const enqueueTask = vi.fn(
+      (_jid: string, _id: string, _name: string, fn: () => Promise<void>) => {
+        void fn();
+      },
+    );
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
+      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(callCount).toBe(2);
+    expect(getTaskById('task-A')?.session_id).toBe('id-for-task-A');
+    expect(getTaskById('task-B')?.session_id).toBe('id-for-task-B');
+  });
+
+  it('clearTaskSessionIdsForGroup wipes all rows under one group, leaves other groups untouched', async () => {
+    // The nuke-side helper that `nukeSession('maintenance' | 'all')`
+    // calls. Direct DB-level test — doesn't drive the scheduler.
+    createTask({
+      id: 'main-task-1',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'p',
+      schedule_type: 'interval',
+      schedule_value: '1800000',
+      context_mode: 'isolated',
+      next_run: new Date().toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    createTask({
+      id: 'main-task-2',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'p',
+      schedule_type: 'cron',
+      schedule_value: '0 7 * * *',
+      schedule_timezone: 'UTC',
+      context_mode: 'isolated',
+      next_run: new Date().toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    createTask({
+      id: 'other-task',
+      group_folder: 'other',
+      chat_jid: 'other@g.us',
+      prompt: 'p',
+      schedule_type: 'interval',
+      schedule_value: '1800000',
+      context_mode: 'isolated',
+      next_run: new Date().toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    setTaskSessionId('main-task-1', 'id-1');
+    setTaskSessionId('main-task-2', 'id-2');
+    setTaskSessionId('other-task', 'id-other');
+
+    const cleared = clearTaskSessionIdsForGroup('main');
+
+    expect(cleared).toBe(2);
+    expect(getTaskById('main-task-1')?.session_id ?? null).toBeNull();
+    expect(getTaskById('main-task-2')?.session_id ?? null).toBeNull();
+    // Other group untouched — a maintenance nuke on `main` doesn't
+    // bleed into `other`.
+    expect(getTaskById('other-task')?.session_id).toBe('id-other');
+  });
+
+  it('clearTaskSessionIdsForGroup is idempotent — no rows touched on second call', async () => {
+    createTask({
+      id: 'task',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'p',
+      schedule_type: 'interval',
+      schedule_value: '1800000',
+      context_mode: 'isolated',
+      next_run: new Date().toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    setTaskSessionId('task', 'id-1');
+
+    expect(clearTaskSessionIdsForGroup('main')).toBe(1);
+    // Second call: nothing to clear, returns 0 (the WHERE filters
+    // already-NULL rows).
+    expect(clearTaskSessionIdsForGroup('main')).toBe(0);
   });
 });

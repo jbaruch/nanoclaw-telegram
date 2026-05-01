@@ -146,6 +146,18 @@ export interface ScheduledTask {
    * fails closed instead of silently bypassing the two-phase lock.
    */
   continuation_cycle_id?: string | null;
+  /**
+   * Per-task SDK session id for #336. NULL/undefined for tasks that
+   * have never fired, for once-tasks (out of scope), and for recurring
+   * tasks immediately after a `nukeSession` clear. Populated by
+   * `runTask` on first fire of a recurring task and reused as
+   * `resume:` on subsequent fires so the API caches the per-session
+   * message-history prefix across the (otherwise expiring) prompt-
+   * cache window. The #193 cross-task bleed concern doesn't apply —
+   * persistence is keyed on `task_id`, so different tasks have
+   * different rows hence different sessions hence no bleed.
+   */
+  session_id?: string | null;
 }
 
 export interface TaskRunLog {

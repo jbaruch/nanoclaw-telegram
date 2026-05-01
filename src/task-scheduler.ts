@@ -1,4 +1,5 @@
 import { ChildProcess } from 'child_process';
+import { SqliteError } from 'better-sqlite3';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
 
@@ -24,6 +25,7 @@ import {
   getTaskById,
   logTaskRun,
   pruneCompletedTasks,
+  setTaskSessionId,
   storeChatMetadata,
   storeMessage,
   updateTask,
@@ -430,24 +432,36 @@ async function runTask(
   const thresholds = computeThresholds(MODEL_CONTEXT_WINDOW);
   const taskSkill = parseTaskSkill(task.prompt);
 
-  // #193: scheduled tasks NEVER resume the SDK session. Every run starts
-  // a fresh turn. Two distinct tasks (a lunch reminder firing minutes
-  // after a heartbeat) used to share `sessions[group][maintenance]` and
-  // the prior turn's terminal message bled into the next run's stream,
-  // cross-attributing `last_result`. Containers still mount the
-  // per-session `.claude/` dir under `MAINTENANCE_SESSION_NAME` (parallel
-  // slot, won't block default), but no `resume: sessionId` is passed and
-  // no `newSessionId` is persisted on completion. `context_mode` is
-  // retained on the schema for future use; it no longer gates SDK resume.
+  // Per-task SDK session reuse (#336, evolves #193). Recurring tasks
+  // (cron / interval) keep their own `session_id` across fires so the
+  // API can cache the per-session message-history prefix even though
+  // the prompt-cache TTL (5 min) expires between heartbeat fires (15-
+  // 30 min cadence). One-shot tasks (`schedule_type === 'once'`) stay
+  // fresh-per-fire — they're out of scope per #336.
   //
-  // Disk hygiene: every fresh SDK turn writes a new JSONL transcript
+  // The #193 cross-task bleed concern doesn't apply: the original
+  // bleed came from a single id shared via `sessions[group]
+  // [maintenance]` across DIFFERENT tasks (a lunch reminder picking up
+  // a heartbeat-loop's terminal message). Persistence here is keyed on
+  // `task_id`, so two distinct tasks land in two distinct DB rows
+  // hence two distinct SDK sessions — no slot-cache aliasing
+  // possible. The `MAINTENANCE_SESSION_NAME` slot still routes maint
+  // work into the parallel queue; the SDK session loaded inside that
+  // slot is now per-task. `context_mode` stays inert on the schema.
+  //
+  // Disk hygiene: the SDK writes one JSONL transcript per session id
   // under `data/sessions/<group>/maintenance/.claude/projects/<slug>/`.
-  // Because the sessionId is no longer persisted, neither `nukeSession`
-  // nor the time-based `cleanup-sessions.sh` script can find these
-  // transcripts to wipe later. Collect every newSessionId observed
-  // during the run (streaming events plus the terminal runContainerAgent
-  // return) and pass them to `deps.wipeSessionJsonl` from the post-run
-  // finally block — see `SchedulerDependencies` JSDoc.
+  // For reusable tasks the LATEST persisted id is alive (next fire
+  // resumes it) — skip its wipe in the finally block. Any other id we
+  // saw this fire is either pre-existing-and-rotated or
+  // SDK-rotated-mid-run, and its transcript is now orphan — wipe.
+  // For once-tasks (not reusable) every observed id is wiped exactly
+  // as #193 always did.
+  const isReusable = task.schedule_type !== 'once';
+  const startingSessionId: string | undefined = isReusable
+    ? (task.session_id ?? undefined)
+    : undefined;
+  let persistedSessionId: string | undefined = startingSessionId;
   const observedSessionIds = new Set<string>();
 
   // After the task produces a result, close the container promptly.
@@ -470,6 +484,14 @@ async function runTask(
       group,
       {
         prompt: task.prompt,
+        // Per-task session reuse for recurring fires (#336). When the
+        // task already has a persisted `session_id`, pass it as
+        // `resume:` so the SDK reloads the prior message history (and
+        // the API caches the prefix). For once-tasks and for the
+        // first fire of a recurring task, this is undefined and the
+        // SDK creates a fresh session — the streaming/terminal
+        // newSessionId callbacks below persist it for the next fire.
+        sessionId: startingSessionId,
         groupFolder: task.group_folder,
         chatJid: task.chat_jid,
         isMain,
@@ -505,12 +527,56 @@ async function runTask(
           task.group_folder,
         ),
       async (streamedOutput: ContainerOutput) => {
-        // #193: do not persist newSessionId. Each scheduled run is a
-        // standalone turn; persisting would re-introduce the cross-task
-        // bleed via the next run's resume. Collect for post-run wipe so
-        // the orphan JSONL doesn't accumulate under the maintenance slot.
+        // Per-task session reuse (#336): persist `newSessionId` for
+        // recurring tasks. The SDK can re-issue the id mid-run (e.g.
+        // when a resumed session rotates to a fresh transcript), and
+        // we want last-write-wins semantics — the LATEST id is the
+        // one whose JSONL is alive on disk. Once-tasks stay
+        // fresh-per-fire (#336 out-of-scope) so we just collect the
+        // id for post-run wipe without persisting. Every observed id
+        // also goes into `observedSessionIds` so the finally block
+        // can wipe rotated/orphan transcripts; the alive id is
+        // skipped there.
         if (streamedOutput.newSessionId) {
           observedSessionIds.add(streamedOutput.newSessionId);
+          if (
+            isReusable &&
+            streamedOutput.newSessionId !== persistedSessionId
+          ) {
+            const newId = streamedOutput.newSessionId;
+            // Catch only the recoverable case (SQLite-level failure:
+            // busy / disk full / schema mid-migration / FK constraint)
+            // and let any other throw propagate per
+            // `jbaruch/coding-policy: error-handling`. The narrow
+            // catch matters because `runContainerAgent` chains
+            // `onOutput` via `.then(...)` with no `.catch(...)`, so a
+            // SQLite-class error here would otherwise reject the run
+            // promise and wedge the scheduler loop; for a transient
+            // DB hiccup the right behaviour is "next fire starts a
+            // fresh session" (recoverable). A non-`SqliteError` throw
+            // (TypeError, ReferenceError, programming bug) bubbles up
+            // to the outer try/catch, which logs `Task failed` and
+            // marks the run 'error' — exactly what we want for a real
+            // bug. The in-memory `persistedSessionId` advances only
+            // after the write succeeds, so the post-run wipe-skip
+            // logic can't preserve a transcript whose DB pointer
+            // never landed.
+            try {
+              setTaskSessionId(task.id, newId);
+              persistedSessionId = newId;
+            } catch (dbErr) {
+              if (!(dbErr instanceof SqliteError)) throw dbErr;
+              logger.error(
+                {
+                  taskId: task.id,
+                  newSessionId: newId,
+                  sqliteCode: dbErr.code,
+                  err: dbErr,
+                },
+                '[task-scheduler] setTaskSessionId failed during streaming — continuing, next fire will start a fresh SDK session (#336)',
+              );
+            }
+          }
         }
         // Kill-auto-compaction telemetry on the scheduled-task path
         // (#349). Same `session_tokens` log key + state classification
@@ -650,12 +716,40 @@ async function runTask(
 
     if (closeTimer) clearTimeout(closeTimer);
 
-    // #193: terminal `output.newSessionId` is also discarded — see the
-    // streaming-path comment above. Same fresh-turn invariant. Also
-    // collected so the post-run wipe catches it even if no streaming
-    // event delivered the same id.
+    // Terminal `output.newSessionId` mirrors the streaming-path
+    // persistence (#336): same last-write-wins semantic. Recurring
+    // tasks get the id written through to `task.session_id` so the
+    // next fire can `resume:`; once-tasks just collect it for the
+    // post-run wipe. DB write is wrapped — see the streaming-path
+    // comment above for the rationale (a throw here would reach the
+    // outer catch and mis-classify a successful run as `'error'`,
+    // even though the run itself completed).
     if (output.newSessionId) {
       observedSessionIds.add(output.newSessionId);
+      if (isReusable && output.newSessionId !== persistedSessionId) {
+        const newId = output.newSessionId;
+        // Same narrow catch as the streaming-path above — see that
+        // comment for the rationale. Here the propagation target is
+        // the outer try/catch (rather than the streaming-chain
+        // rejection), so a non-`SqliteError` throw still propagates
+        // and gets surfaced as `Task failed`; only recoverable DB
+        // hiccups are swallowed.
+        try {
+          setTaskSessionId(task.id, newId);
+          persistedSessionId = newId;
+        } catch (dbErr) {
+          if (!(dbErr instanceof SqliteError)) throw dbErr;
+          logger.error(
+            {
+              taskId: task.id,
+              newSessionId: newId,
+              sqliteCode: dbErr.code,
+              err: dbErr,
+            },
+            '[task-scheduler] setTaskSessionId failed at terminal — continuing, next fire will start a fresh SDK session (#336)',
+          );
+        }
+      }
     }
 
     if (output.status === 'error') {
@@ -722,16 +816,26 @@ async function runTask(
         : 'Completed';
     updateTaskAfterRun(fresh.id, computed.nextRun, resultSummary);
   } finally {
-    // #193: wipe the JSONL transcripts created by this run. The
-    // sessionId is never persisted (no resume, no DB row), so without
-    // this wipe the file accumulates forever under the maintenance
-    // slot. Multiple ids are possible if the SDK re-issued
-    // newSessionId mid-run — wipe all of them. No try/catch wrapper:
-    // `wipeSessionJsonl` already swallows ENOENT and other expected
-    // fs errors internally; anything that escapes is a programming
-    // bug per `jbaruch/coding-policy: error-handling`, and propagation
-    // is caught by the scheduler loop's terminal safety net.
-    for (const sid of observedSessionIds) {
+    // Wipe orphan JSONL transcripts (#193 disk-hygiene + #336 session
+    // reuse). For once-tasks every observed id is orphan — wipe all.
+    // For recurring tasks the LATEST persisted id is alive on disk so
+    // the next fire can resume; wipe everything else (any id the SDK
+    // rotated through mid-run plus the pre-existing `task.session_id`
+    // if it differs from the final persisted one — that latter case
+    // catches rotations where the SDK didn't re-emit the starting id).
+    // No try/catch wrapper: `wipeSessionJsonl` already swallows ENOENT
+    // and other expected fs errors internally; anything that escapes
+    // is a programming bug per `jbaruch/coding-policy: error-handling`,
+    // and propagation is caught by the scheduler loop's terminal
+    // safety net.
+    const idsToWipe = new Set(observedSessionIds);
+    if (startingSessionId && startingSessionId !== persistedSessionId) {
+      idsToWipe.add(startingSessionId);
+    }
+    if (isReusable && persistedSessionId) {
+      idsToWipe.delete(persistedSessionId);
+    }
+    for (const sid of idsToWipe) {
       deps.wipeSessionJsonl(task.group_folder, MAINTENANCE_SESSION_NAME, sid);
     }
   }

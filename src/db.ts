@@ -182,7 +182,22 @@ function createSchema(database: Database.Database): void {
       -- itself the "fresh invocation" signal the calling skill checks for;
       -- mismatch between the prompt prefix and these env vars fails closed
       -- to fresh, never silently takes the lock-skip branch.
-      continuation_cycle_id TEXT
+      continuation_cycle_id TEXT,
+      -- Per-task SDK session id for #336. Recurring tasks (cron / interval)
+      -- persist the SDK's newSessionId here on first fire and pass it as
+      -- the resume id on every subsequent fire — the API caches the
+      -- per-session message-history prefix across the (otherwise expiring)
+      -- prompt-cache window, so each fire's cache_create is incremental
+      -- rather than full-prefix. NULL for tasks that haven't fired yet, for
+      -- once-tasks (out of scope per #336), and for recurring tasks
+      -- immediately after a session wipe (nuke_session clears this column
+      -- for every scheduled task in the affected group; the next fire
+      -- starts fresh). The #193 cross-task bleed concern does NOT apply
+      -- here — that bug came from a single id shared via
+      -- sessions[group][maintenance] across DIFFERENT tasks. Persistence
+      -- here is keyed on task_id, so different tasks have different rows
+      -- hence different sessions hence no bleed.
+      session_id TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
     CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
@@ -306,6 +321,18 @@ function createSchema(database: Database.Database): void {
     database.exec(
       `ALTER TABLE scheduled_tasks ADD COLUMN continuation_cycle_id TEXT`,
     );
+  }
+
+  // Add session_id column for #336 — per-task SDK session reuse across
+  // recurring fires. NULL on existing rows; populated on first
+  // post-deploy fire for cron/interval tasks (once-tasks stay NULL by
+  // design). PRAGMA-gated rather than try/catch per the
+  // no-error-suppression rule.
+  const sessionIdCols = database
+    .prepare('PRAGMA table_info(scheduled_tasks)')
+    .all() as Array<{ name: string }>;
+  if (!sessionIdCols.some((c) => c.name === 'session_id')) {
+    database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN session_id TEXT`);
   }
 
   // Add is_bot_message column if it doesn't exist (migration for existing DBs)
@@ -1124,6 +1151,60 @@ export function deleteTask(id: string): void {
   // Delete child records first (FK constraint)
   db.prepare('DELETE FROM task_run_logs WHERE task_id = ?').run(id);
   db.prepare('DELETE FROM scheduled_tasks WHERE id = ?').run(id);
+}
+
+/**
+ * Persist the per-task SDK session id (#336). Called from `runTask`
+ * when the SDK reports `newSessionId` on a recurring task fire so the
+ * next fire can pass it as `resume:` and avoid rebuilding the
+ * message-history prefix from scratch.
+ *
+ * Idempotent: re-writing the same id is a no-op at the row level
+ * (UPDATE matching the existing value). The caller doesn't have to
+ * de-duplicate streamed `newSessionId` events — the SDK can re-issue
+ * the id mid-run, in which case "last write wins" is the right
+ * semantic (the latest id is the live transcript on disk).
+ *
+ * No status guard: the caller decides eligibility (recurring vs
+ * once-task, paused vs active). This helper only writes.
+ */
+export function setTaskSessionId(id: string, sessionId: string): void {
+  db.prepare('UPDATE scheduled_tasks SET session_id = ? WHERE id = ?').run(
+    sessionId,
+    id,
+  );
+}
+
+/**
+ * Clear the per-task SDK session id (#336). Used when the SDK-reported
+ * id rotated mid-run (the previous id's transcript is now stale and
+ * gets wiped from disk separately) or when the caller wants to force
+ * the next fire to start fresh without nuking the whole maintenance
+ * slot.
+ */
+export function clearTaskSessionId(id: string): void {
+  db.prepare('UPDATE scheduled_tasks SET session_id = NULL WHERE id = ?').run(
+    id,
+  );
+}
+
+/**
+ * Clear the per-task SDK session id for every scheduled task in a
+ * group (#336). Called from `nukeSession` when the maintenance (or
+ * 'all') slot for a group is wiped so the on-disk JSONL transcripts
+ * disappear — without this the next fire would try to `resume:` an id
+ * whose transcript no longer exists and the SDK would 404 / start
+ * fresh anyway, just noisily. Returns the number of rows touched so
+ * the caller can log the wipe scope alongside the JSONL count.
+ */
+export function clearTaskSessionIdsForGroup(groupFolder: string): number {
+  const result = db
+    .prepare(
+      `UPDATE scheduled_tasks SET session_id = NULL
+       WHERE group_folder = ? AND session_id IS NOT NULL`,
+    )
+    .run(groupFolder);
+  return result.changes;
 }
 
 /**
