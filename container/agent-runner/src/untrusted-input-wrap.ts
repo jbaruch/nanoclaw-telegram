@@ -55,13 +55,25 @@ const READ_TOOL_PATTERNS: ReadonlyArray<{
     pattern: /^mcp__composio__github_(get|list|search|read|find|fetch)\w*$/i,
     prefix: 'github',
   },
+  {
+    // Tessl registry MCP — `search` (registry tile search), `outdated`
+    // (remote version check), `query_library_docs` (external library
+    // docs). Mutating verbs (`install`, `login`, `update`, `uninstall`,
+    // `new_tile`) and the local-only `status` are excluded by omission.
+    pattern: /^mcp__tessl__(search|outdated|query_library_docs)\w*$/i,
+    prefix: 'tessl',
+  },
 ];
 
 export function inferReadSource(toolName: string): ReadSource | null {
   if (typeof toolName !== 'string' || toolName.length === 0) return null;
   for (const { pattern, prefix } of READ_TOOL_PATTERNS) {
     if (pattern.test(toolName)) {
-      const value = toolName.replace(/^mcp__composio__/, '');
+      // Strip the `mcp__<server>__` prefix so the value is just the
+      // remaining action/tool suffix — `gmail_fetch_emails`, `search`,
+      // etc. Walk-back never sees the redundant server segment, but the
+      // action stays for human-readable provenance traces.
+      const value = toolName.replace(/^mcp__[^_]+__/, '');
       return { prefix, value };
     }
   }

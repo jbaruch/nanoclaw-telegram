@@ -16,6 +16,9 @@
  *
  * Coverage:
  *   - `WebFetch`               → `web:<url>`
+ *   - `WebSearch`              → `web:<query>` (search results are external
+ *                                 web bytes; same prefix as WebFetch so the
+ *                                 ACL applies the same sink restrictions)
  *   - `Read` on external paths → `file:<path>` (any path NOT under
  *                                 /workspace/{group,state,trusted,
  *                                 global,store,ipc}/)
@@ -75,6 +78,12 @@ export function inferSentinelSource(
     const url = (toolInput as { url?: unknown }).url;
     if (typeof url !== 'string' || url.length === 0) return null;
     return { prefix: 'web', value: url };
+  }
+
+  if (toolName === 'WebSearch') {
+    const query = (toolInput as { query?: unknown }).query;
+    if (typeof query !== 'string' || query.length === 0) return null;
+    return { prefix: 'web', value: query };
   }
 
   if (toolName === 'Read') {
