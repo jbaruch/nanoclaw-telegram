@@ -61,6 +61,20 @@ import { SourcePrefix } from './untrusted-input-sources.js';
 const READ_ONLY_COMPOSIO = /^mcp__composio__\w+?_(fetch|get|list|search|find|read|history)\w*$/i;
 
 /**
+ * Outbound sinks that #320's egress allowlist gates at destination
+ * level. They appear in #322's allow set so the chain is permitted to
+ * REACH them; #320 then verifies the destination against
+ * `/workspace/trusted/egress_allowlist.json`. Without this, #322 would
+ * blanket-deny outbound under untrusted-provenance and the egress
+ * allowlist could never grant exceptions for legitimate destinations.
+ */
+const EGRESS_SINKS: ReadonlyArray<RegExp | string> = [
+  /^mcp__composio__gmail_(send|reply)\w*$/i,
+  /^mcp__composio__slack_(post|send)\w*$/i,
+  'mcp__nanoclaw__send_message_to_chat',
+];
+
+/**
  * Sinks every source row allows in addition to its own — read-only
  * informational tools that have no side effects on outbound state.
  * Centralised so adding a new "harmless" tool flows through one line.
@@ -95,6 +109,7 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
     'Task',
     'TaskOutput',
     'TaskStop',
+    ...EGRESS_SINKS,
   ],
 
   // Cross-group user message — content arriving from another group's
@@ -104,6 +119,7 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
     'mcp__nanoclaw__send_message',
     'mcp__nanoclaw__react_to_message',
     READ_ONLY_COMPOSIO,
+    ...EGRESS_SINKS,
   ],
 
   // Web content via WebFetch or agent-browser. The injection vector
@@ -115,6 +131,7 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
     'Write',
     'Edit',
     READ_ONLY_COMPOSIO,
+    ...EGRESS_SINKS,
   ],
   'agent-browser': [
     ...COMMON_INERT_SINKS,
@@ -122,6 +139,7 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
     'Write',
     'Edit',
     READ_ONLY_COMPOSIO,
+    ...EGRESS_SINKS,
   ],
 
   // Email/calendar/Slack/GitHub/Tessl read content. Same posture as
@@ -132,6 +150,7 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
     'Write',
     'Edit',
     READ_ONLY_COMPOSIO,
+    ...EGRESS_SINKS,
   ],
   'calendar': [
     ...COMMON_INERT_SINKS,
@@ -139,6 +158,7 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
     'Write',
     'Edit',
     READ_ONLY_COMPOSIO,
+    ...EGRESS_SINKS,
   ],
   'slack': [
     ...COMMON_INERT_SINKS,
@@ -146,6 +166,7 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
     'Write',
     'Edit',
     READ_ONLY_COMPOSIO,
+    ...EGRESS_SINKS,
   ],
   'github': [
     ...COMMON_INERT_SINKS,
@@ -153,11 +174,19 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
     'Write',
     'Edit',
     READ_ONLY_COMPOSIO,
+    ...EGRESS_SINKS,
   ],
   'tessl': [
     ...COMMON_INERT_SINKS,
     'mcp__nanoclaw__send_message',
     READ_ONLY_COMPOSIO,
+    // Tessl tool results are external bytes (curated, but still
+    // outside the operator's typed input). Same posture as web/gmail/
+    // etc.: outbound is structurally allowed so the destination filter
+    // (#320) takes over. Keeps the egress gate consistent across
+    // every external-source row except `file:` (which has no
+    // outbound at all on purpose).
+    ...EGRESS_SINKS,
   ],
 
   // External file `Read` — bytes from outside the workspace mounts.
