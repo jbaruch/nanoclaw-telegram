@@ -38,8 +38,17 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 GROUPS_DIR="$PROJECT_ROOT/groups"
 
 DRY_RUN=0
-if [ "${1:-}" = "--dry-run" ]; then
-  DRY_RUN=1
+case "${1:-}" in
+  "")        ;;
+  --dry-run) DRY_RUN=1 ;;
+  *)
+    echo "clean-backup-repo-origins: unknown argument '$1' — only --dry-run is accepted" >&2
+    exit 2
+    ;;
+esac
+if [ "$#" -gt 1 ]; then
+  echo "clean-backup-repo-origins: too many arguments — only --dry-run is accepted" >&2
+  exit 2
 fi
 
 if [ ! -d "$GROUPS_DIR" ]; then
@@ -53,10 +62,21 @@ redact_url() {
   echo "$1" | sed -E 's,(://[^:/]+:)[^@]+(@),\1<redacted>\2,'
 }
 
+# Match `<scheme>://<user>:<password>@` — the userinfo component that
+# carries the embedded PAT. Narrow on purpose: a non-credential URL
+# that happens to be different from CLEAN_URL (e.g. an operator-set
+# SSH remote `git@github.com:jbaruch/nanoclaw.git`, or a fork mirror)
+# is left ALONE — the script's intent is to scrub embedded
+# credentials, not to enforce CLEAN_URL as a hard policy. Such cases
+# are reported as `unexpected_non_clean` so the operator can decide
+# whether they were intentional.
+HAS_CREDENTIAL_RE='://[^/@]+:[^/@]+@'
+
 count_changed=0
 count_already_clean=0
 count_no_remote=0
 count_no_repo=0
+count_unexpected_non_clean=0
 
 shopt -s nullglob
 for backup_repo in "$GROUPS_DIR"/*/backup-repo; do
@@ -76,6 +96,13 @@ for backup_repo in "$GROUPS_DIR"/*/backup-repo; do
     continue
   fi
 
+  if [[ ! "$current" =~ $HAS_CREDENTIAL_RE ]]; then
+    redacted=$(redact_url "$current")
+    echo "unexpected non-clean origin (no embedded credentials, left alone): $backup_repo: $redacted" >&2
+    count_unexpected_non_clean=$((count_unexpected_non_clean + 1))
+    continue
+  fi
+
   redacted=$(redact_url "$current")
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "DRY-RUN: $backup_repo: $redacted -> $CLEAN_URL"
@@ -87,4 +114,7 @@ for backup_repo in "$GROUPS_DIR"/*/backup-repo; do
 done
 shopt -u nullglob
 
-echo "Summary: changed=$count_changed already_clean=$count_already_clean no_remote=$count_no_remote no_repo=$count_no_repo"
+echo "Summary: changed=$count_changed already_clean=$count_already_clean no_remote=$count_no_remote no_repo=$count_no_repo unexpected_non_clean=$count_unexpected_non_clean"
+if [ "$count_unexpected_non_clean" -gt 0 ]; then
+  echo "Note: $count_unexpected_non_clean backup-repo(s) have a non-default origin without embedded credentials — review and reset manually if needed." >&2
+fi
