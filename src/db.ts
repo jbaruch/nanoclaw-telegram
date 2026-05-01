@@ -1995,6 +1995,11 @@ function migrateJsonState(): void {
   // email_seen_ids set, resumable_cycles per-skill rows (#297).
   // UPSERT throughout — never INSERT OR REPLACE.
   migrateNanoclawStateJsonFiles();
+
+  // Migrate per-group scheduled-reminders.json files into the
+  // scheduled_reminders table created by state-004 (#296). Append-only
+  // INSERT with ON CONFLICT(event_id) DO NOTHING.
+  migrateScheduledRemindersJsonFiles();
 }
 
 interface OrdersDbJsonRecord {
@@ -3721,5 +3726,165 @@ function migrateNanoclawStateJsonFiles(): void {
       'nanoclaw-state.json',
       counts,
     );
+  }
+}
+
+interface ScheduledReminderJson {
+  event_id: string;
+  title: string;
+  utc_time: string;
+  reminder_offset_min: number;
+  task_id: string;
+}
+
+/**
+ * Per-group import of `scheduled-reminders.json` into the
+ * `scheduled_reminders` table created by state-004 (#296). The JSON-era
+ * shape is the wrapped form `{ "reminders": [...] }` written by the
+ * pre-MCP `append-scheduled-reminders.py` skill; a bare top-level array
+ * is also accepted as the legacy fallback the same skill emitted in
+ * earlier revisions. Anything else (object without `reminders`, primitive
+ * payload, malformed JSON) is warn-and-skipped — the source file stays
+ * in place for triage so an operator can fix it without losing data.
+ *
+ * `event_id` is the PK on the table and the natural dedup key on the
+ * source side (each reminder corresponds to exactly one calendar event).
+ * The INSERT uses `ON CONFLICT(event_id) DO NOTHING` so a re-run with
+ * leftover rows (e.g. operator copied a partial DB back over an already-
+ * imported one) is a silent no-op on the PK conflict, while NOT NULL
+ * violations still throw and surface via the constraint-class catch
+ * helper. Per-file work is wrapped in a single transaction so a
+ * mid-import crash can't leave the table half-populated.
+ */
+function migrateScheduledRemindersJsonFiles(): void {
+  const groupFolders = listGroupFoldersForMigration();
+
+  const insertReminder = db.prepare(
+    `INSERT INTO scheduled_reminders
+       (event_id, title, utc_time, reminder_offset_min, task_id)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(event_id) DO NOTHING`,
+  );
+
+  const stamp = migrationDateStamp();
+  const fileLabel = 'scheduled-reminders.json';
+
+  for (const folder of groupFolders) {
+    const filePath = path.join(GROUPS_DIR, folder, 'scheduled-reminders.json');
+    if (!fs.existsSync(filePath)) continue;
+
+    let raw: string;
+    try {
+      raw = fs.readFileSync(filePath, 'utf-8');
+    } catch (err) {
+      // TOCTOU race: existsSync above is best-effort; the file may
+      // disappear between the check and the read (concurrent migration
+      // run, manual cleanup). Treat ENOENT as an idempotent no-op and
+      // propagate every other errno per `coding-policy: error-handling`.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        logger.info(
+          { folder, filePath },
+          `${fileLabel} migration: file disappeared between existsSync and readFileSync, skipping`,
+        );
+        continue;
+      }
+      throw err;
+    }
+
+    // Accept two shapes: the wrapped `{ "reminders": [...] }` form
+    // (preferred — the form `append-scheduled-reminders.py` settled on)
+    // and a bare top-level array (legacy fallback emitted by earlier
+    // revisions of the same skill). For the wrapped shape we delegate
+    // to `parseJsonObjectOrWarn` so the malformed-JSON / non-object
+    // warn shapes match every other per-group migration. For the bare-
+    // array shape we parse inline because the helper (correctly) treats
+    // top-level arrays as "not an object" and rejects them — here a
+    // bare array is a documented legacy form we still consume.
+    //
+    // Malformed JSON, primitive payloads, and objects without a
+    // `reminders` array are all warn-and-skipped (file left in place
+    // for triage) per `coding-policy: error-handling`.
+    let reminders: unknown[];
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        // Re-route through the helper for the malformed-JSON warn so
+        // log shape stays consistent across all per-group migrations.
+        // Helper detects SyntaxError, emits the standard warn, returns
+        // null; skip the folder.
+        parseJsonObjectOrWarn(raw, folder, fileLabel);
+        continue;
+      }
+      // `JSON.parse` only throws SyntaxError on string input;
+      // anything else is a programming bug. Propagate per
+      // `coding-policy: error-handling`.
+      throw err;
+    }
+    if (Array.isArray(parsed)) {
+      reminders = parsed;
+    } else if (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      Array.isArray((parsed as Record<string, unknown>).reminders)
+    ) {
+      reminders = (parsed as { reminders: unknown[] }).reminders;
+    } else if (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed)
+    ) {
+      logger.warn(
+        { folder },
+        `${fileLabel} migration: missing "reminders" array, skipping (file left in place)`,
+      );
+      continue;
+    } else {
+      // Primitive payload (null / number / string / boolean). Use the
+      // helper so the warn carries the same `parsedType` field shape as
+      // every other per-group migration.
+      parseJsonObjectOrWarn(raw, folder, fileLabel);
+      continue;
+    }
+
+    // Single transaction per file so a mid-import crash can't leave the
+    // table half-populated. Per-row object guard skips stale primitives
+    // (null/string/number) before the bind throws a TypeError that the
+    // narrowed catch would otherwise propagate as "unexpected".
+    const counts = { inserted: 0, skipped: 0, total: reminders.length };
+    try {
+      const importFile = db.transaction(() => {
+        for (const reminder of reminders) {
+          if (!isObjectRow(reminder)) {
+            logger.warn(
+              { folder },
+              `${fileLabel} migration: skipping non-object row`,
+            );
+            counts.skipped++;
+            continue;
+          }
+          const row = reminder as unknown as ScheduledReminderJson;
+          const result = insertReminder.run(
+            row.event_id,
+            row.title,
+            row.utc_time,
+            row.reminder_offset_min,
+            row.task_id,
+          );
+          if (result.changes > 0) counts.inserted++;
+          else counts.skipped++;
+        }
+      });
+      importFile();
+    } catch (err) {
+      if (handleConstraintViolationOrRethrow(err, folder, fileLabel)) continue;
+    }
+
+    renameMigratedSource(filePath, stamp, folder, fileLabel, {
+      inserted: counts.inserted,
+      skipped: counts.skipped,
+      total: counts.total,
+    });
   }
 }
