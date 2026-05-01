@@ -1697,7 +1697,7 @@ skillName options:
 
 server.tool(
   'chat_status',
-  'Report host-side state for one or all registered chats: which tile owns each chat (admin/trusted/untrusted), trigger config, container status (running/idle/cooling-down/crashed/not-spawned) per session slot (default + maintenance), and the latest is_from_me=1 message recorded for the chat. Use this to diagnose silent containers — when a chat went quiet you can see whether the container is running, cooling down after an error, or never spawned. Provide chat_id (JID) OR chat_name (display name) to filter to one chat; omit both for all chats. Main group only.',
+  'Report host-side state for one or all registered chats: which tile owns each chat (admin/trusted/untrusted), trigger config, container status (running/idle/cooling-down/crashed/not-spawned) per session slot (default + maintenance), the effective AGENT_MODEL the group will run on at next spawn (per-group override resolved against the orchestrator default — useful for cost attribution / model-rollout audits without grepping spawn logs), and the latest is_from_me=1 message recorded for the chat. Use this to diagnose silent containers — when a chat went quiet you can see whether the container is running, cooling down after an error, or never spawned. Provide chat_id (JID) OR chat_name (display name) to filter to one chat; omit both for all chats. Main group only.',
   {
     chat_id: z
       .string()

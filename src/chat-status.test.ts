@@ -553,6 +553,101 @@ describe('chat_status payload', () => {
   });
 });
 
+// --- chat_status effective_agent_model surface ---
+//
+// Verifies the #395 follow-up: the per-group AGENT_MODEL override is
+// surfaced on chat_status so operators can audit which groups run on
+// which model without grepping spawn logs. Mirrors the resolver
+// contract in container-runner.ts (#395 / #396): override wins when
+// it has a known prefix, falls back to the global default for
+// undefined / empty / unknown-prefix values.
+describe('chat_status effective_agent_model', () => {
+  const ORIG_AGENT_MODEL = process.env.AGENT_MODEL;
+
+  afterEach(() => {
+    if (ORIG_AGENT_MODEL === undefined) {
+      delete process.env.AGENT_MODEL;
+    } else {
+      process.env.AGENT_MODEL = ORIG_AGENT_MODEL;
+    }
+  });
+
+  it('reports the global default when no per-group override is set', async () => {
+    process.env.AGENT_MODEL = 'sonnet';
+
+    await processTaskIpc(
+      {
+        type: 'chat_status',
+        requestId: 'model-1',
+        chat_id: 'random@g.us',
+      },
+      MAIN_GROUP.folder,
+      true,
+      deps,
+    );
+
+    const body = readResult(MAIN_GROUP.folder, 'model-1') as {
+      stdout: string;
+    };
+    const payload = JSON.parse(body.stdout);
+    expect(payload.chats[0].effective_agent_model).toBe('sonnet');
+  });
+
+  it('reports the per-group override when one is set', async () => {
+    process.env.AGENT_MODEL = 'sonnet';
+    groups['random@g.us'] = {
+      ...UNTRUSTED_GROUP,
+      containerConfig: { agentModel: 'haiku' },
+    };
+
+    await processTaskIpc(
+      {
+        type: 'chat_status',
+        requestId: 'model-2',
+        chat_id: 'random@g.us',
+      },
+      MAIN_GROUP.folder,
+      true,
+      deps,
+    );
+
+    const body = readResult(MAIN_GROUP.folder, 'model-2') as {
+      stdout: string;
+    };
+    const payload = JSON.parse(body.stdout);
+    expect(payload.chats[0].effective_agent_model).toBe('haiku');
+  });
+
+  it('falls back to the global default when the override has an unknown prefix', async () => {
+    // Mirror resolvePerGroupAgentModel: bad prefix → global default,
+    // not the typo'd value. Surfacing the resolved value (not the raw
+    // override) keeps chat_status honest about what the next spawn
+    // will actually use.
+    process.env.AGENT_MODEL = 'sonnet';
+    groups['random@g.us'] = {
+      ...UNTRUSTED_GROUP,
+      containerConfig: { agentModel: 'garbage-model' },
+    };
+
+    await processTaskIpc(
+      {
+        type: 'chat_status',
+        requestId: 'model-3',
+        chat_id: 'random@g.us',
+      },
+      MAIN_GROUP.folder,
+      true,
+      deps,
+    );
+
+    const body = readResult(MAIN_GROUP.folder, 'model-3') as {
+      stdout: string;
+    };
+    const payload = JSON.parse(body.stdout);
+    expect(payload.chats[0].effective_agent_model).toBe('sonnet');
+  });
+});
+
 // --- nuke_chat authorization & validation ---
 
 describe('nuke_chat authorization', () => {
