@@ -224,7 +224,15 @@ describe('isToolAllowed', () => {
 // ---- decideCapabilityAcl — acceptance scenarios from #322 ----
 
 describe('decideCapabilityAcl — acceptance scenarios', () => {
-  it('webpage instructing send_message_to_chat is DENIED (Encoding B sentinel)', () => {
+  // After #320 added EGRESS_SINKS to most untrusted-source rows, #322
+  // STRUCTURALLY ALLOWS outbound tools (gmail.send, slack.post,
+  // send_message_to_chat) under web/gmail/calendar/etc. provenance —
+  // because #320's egress-allowlist hook does the destination-level
+  // filter that used to be #322's blanket deny. Tests that previously
+  // expected #322 to deny those calls now expect ALLOW from #322 and
+  // verify the destination filter belongs to egress-allowlist.test.ts.
+
+  it('webpage chain reaches send_message_to_chat at #322 (egress filter takes over)', () => {
     const msgs: WalkBackMessage[] = [
       userText('summarize https://example.com'),
       assistantText('fetching'),
@@ -237,14 +245,10 @@ describe('decideCapabilityAcl — acceptance scenarios', () => {
       'mcp__nanoclaw__send_message_to_chat',
       msgs,
     );
-    expect(decision.kind).toBe('deny');
-    if (decision.kind === 'deny') {
-      expect(decision.prefixes).toContain('web');
-      expect(decision.reason).toContain('send_message_to_chat');
-    }
+    expect(decision.kind).toBe('allow');
   });
 
-  it('webpage from agent-browser instructing send_message_to_chat is DENIED (Encoding A wrap)', () => {
+  it('webpage from agent-browser reaches send_message_to_chat at #322 (egress filter takes over)', () => {
     const msgs: WalkBackMessage[] = [
       userText('check the docs'),
       assistantText('opening agent-browser'),
@@ -254,7 +258,7 @@ describe('decideCapabilityAcl — acceptance scenarios', () => {
       'mcp__nanoclaw__send_message_to_chat',
       msgs,
     );
-    expect(decision.kind).toBe('deny');
+    expect(decision.kind).toBe('allow');
   });
 
   it('operator direct request to send_message_to_chat is ALLOWED', () => {
@@ -271,13 +275,16 @@ describe('decideCapabilityAcl — acceptance scenarios', () => {
     expect(decision.kind).toBe('allow');
   });
 
-  it('intersection: web + gmail in span denies sink not in either ACL', () => {
+  it('intersection: web + file in span denies outbound (file: has no egress sinks)', () => {
+    // `file:` (external Read) is the strictest row — no outbound at
+    // all. Mixed with `web:` (which has outbound), the intersection
+    // collapses outbound away and denies.
     const msgs: WalkBackMessage[] = [
-      userText('cross-reference the page and the email'),
+      userText('cross-reference the page and the file'),
       assistantText('reading page'),
       systemReminder(sentinel('web', 'https://x.io')),
-      assistantText('reading email'),
-      toolResult(wrap('gmail', 'msg=2', 'email body')),
+      assistantText('reading file'),
+      systemReminder(sentinel('file', '/etc/hosts')),
     ];
     const decision = decideCapabilityAcl(
       'mcp__nanoclaw__send_message_to_chat',
@@ -286,7 +293,7 @@ describe('decideCapabilityAcl — acceptance scenarios', () => {
     expect(decision.kind).toBe('deny');
     if (decision.kind === 'deny') {
       expect(decision.prefixes).toContain('web');
-      expect(decision.prefixes).toContain('gmail');
+      expect(decision.prefixes).toContain('file');
     }
   });
 
@@ -320,17 +327,18 @@ describe('decideCapabilityAcl — acceptance scenarios', () => {
     expect(decision.kind).toBe('allow');
   });
 
-  it('untrusted-container prompt restricts gmail.send (the boundary itself is wrapped)', () => {
+  it('untrusted-container prompt reaches gmail.send at #322 (egress filter takes over)', () => {
     const msgs: WalkBackMessage[] = [
       // Boundary IS the wrap — the orchestrator wrapped the prompt.
       userText(wrap('untrusted-container', 'news-group', 'do something')),
       assistantText('processing'),
     ];
+    // After #320, gmail.send is in untrusted-container's allow set so
+    // the destination filter can take over. The structural ACL no
+    // longer denies; egress-allowlist.test.ts verifies the destination
+    // gate fires under the same chain.
     const decision = decideCapabilityAcl('mcp__composio__gmail_send_email', msgs);
-    expect(decision.kind).toBe('deny');
-    if (decision.kind === 'deny') {
-      expect(decision.prefixes).toContain('untrusted-container');
-    }
+    expect(decision.kind).toBe('allow');
   });
 
   it('unknown source prefix fails closed — denies all non-inert sinks', () => {

@@ -69,8 +69,16 @@ import {
 } from './provenance-sentinel.js';
 import {
   decideCapabilityAclIterable,
+  walkBackIterableForProvenance,
   WalkBackMessage,
 } from './capability-acl.js';
+import {
+  bashTargetsAllowlist,
+  classifySink,
+  decideEgress,
+  loadEgressAllowlist,
+  pathTargetsAllowlist,
+} from './egress-allowlist.js';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -666,6 +674,78 @@ function isExpectedTranscriptUnavailable(err: unknown): boolean {
   return code === 'ENOENT';
 }
 
+/**
+ * Predicate for the narrow fail-open path in
+ * `createEgressAllowlistHook`. Same shape as
+ * `isExpectedTranscriptUnavailable`: only `SyntaxError` (parse mid-flush
+ * or operator typo) and `ENOENT` (TOCTOU between `existsSync` and
+ * `readFileSync`) qualify. Permission errors, unexpected runtime
+ * errors, etc. propagate so they surface as real bugs.
+ */
+function isExpectedAllowlistLoadError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err instanceof SyntaxError) return true;
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === 'ENOENT';
+}
+
+/**
+ * Block agent-side mutations to the egress allowlist file. The
+ * operator owns this file (host-side direct edit, or the future
+ * #324-token-gated agent flow); a poisoned chain in a trusted/main
+ * container could otherwise call Write / Edit / Bash to add an
+ * attacker-controlled destination before sending. This gate denies
+ * those calls structurally.
+ *
+ * The matcher is `Write|Edit|Bash`; classification inside the hook is
+ * the source of truth. A future #324-token-aware variant could let
+ * the operator unblock by minting a `egress_allowlist_mutation` token,
+ * but v1 of the egress allowlist keeps it strictly host-only.
+ */
+function createEgressAllowlistWriteGate(): HookCallback {
+  const safeRealpath = (p: string): string | null => {
+    try {
+      return fs.realpathSync(p);
+    } catch (_err) {
+      return null;
+    }
+  };
+  return async (input, _toolUseId, _context) => {
+    const pre = input as PreToolUseHookInput;
+    const targetsAllowlistFile = (() => {
+      if (pre.tool_name === 'Write' || pre.tool_name === 'Edit') {
+        const fp = (pre.tool_input as { file_path?: unknown })?.file_path;
+        return (
+          typeof fp === 'string' &&
+          pathTargetsAllowlist(fp, EGRESS_ALLOWLIST_PATH, safeRealpath)
+        );
+      }
+      if (pre.tool_name === 'Bash') {
+        const cmd = (pre.tool_input as { command?: unknown })?.command;
+        return (
+          typeof cmd === 'string' &&
+          bashTargetsAllowlist(cmd, EGRESS_ALLOWLIST_PATH)
+        );
+      }
+      return false;
+    })();
+    if (!targetsAllowlistFile) return {};
+    log(
+      `egress_allowlist_write_gate: DENY tool=${pre.tool_name} — agent cannot mutate ${EGRESS_ALLOWLIST_PATH}`,
+    );
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: 'deny' as const,
+        permissionDecisionReason:
+          `${EGRESS_ALLOWLIST_PATH} is operator-managed — the agent ` +
+          `cannot mutate it directly. To add a destination, the operator ` +
+          `edits the file from a host-side terminal.`,
+      },
+    };
+  };
+}
+
 function* lazyReverseWalkBack(
   session: ReadonlyArray<SessionMessage>,
 ): IterableIterator<WalkBackMessage> {
@@ -673,6 +753,112 @@ function* lazyReverseWalkBack(
     const wb = sessionMessageToWalkBack(session[i]);
     if (wb !== null) yield wb;
   }
+}
+
+/**
+ * Path of the egress allowlist file. Mounted RW into trusted/main
+ * containers only (untrusted containers don't have this mount), so a
+ * compromised untrusted-container session can't tamper with the file
+ * via Write — the only path that can edit it is the operator from main
+ * (per #324, mutations require the OOB confirmation token).
+ */
+const EGRESS_ALLOWLIST_PATH = '/workspace/trusted/egress_allowlist.json';
+
+/**
+ * #320 — Egress allowlist for outbound communication. Provenance-
+ * conditional gate complementing #322's structural ACL: where #322
+ * decides whether the chain can REACH an outbound tool at all, this
+ * hook decides — for tools that ARE reached — whether the destination
+ * is on the operator-managed allowlist.
+ *
+ * Default posture (per #318 design principle):
+ *   - Operator-originated trusted chain → allow without consulting the
+ *     allowlist. Operator may opt in via `enforce_for_operator: true`
+ *     in the allowlist file.
+ *   - Untrusted-provenance chain → enforce. Destination must match an
+ *     entry; unmatched destinations deny with a structured reason
+ *     pointing the operator at #324's `aye-confirm` flow.
+ *
+ * Tools NOT in the gated-sink list are passed through untouched —
+ * #322's ACL is the other line of defense.
+ *
+ * Fail-open posture matches the capability-acl hook: only the narrowly-
+ * expected `ENOENT` / `SyntaxError` failures get an allow + log;
+ * everything else propagates (per `error-handling` policy).
+ */
+function createEgressAllowlistHook(fs: typeof import('fs')): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const pre = input as PreToolUseHookInput;
+    if (classifySink(pre.tool_name) === null) return {};
+
+    let session: SessionMessage[];
+    try {
+      session = await getSessionMessages(pre.session_id);
+    } catch (err) {
+      if (!isExpectedTranscriptUnavailable(err)) throw err;
+      log(
+        `egress_allowlist: transcript not yet readable, allowing tool=${pre.tool_name} reason=${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return {};
+    }
+
+    const prefixes = walkBackIterableForProvenance(
+      lazyReverseWalkBack(session),
+    );
+    const hasUntrustedProvenance = prefixes.size > 0;
+
+    let allowlist;
+    try {
+      allowlist = loadEgressAllowlist(fs, EGRESS_ALLOWLIST_PATH);
+    } catch (err) {
+      // Narrow the catch to the two operationally-recoverable shapes
+      // (`error-handling` policy: catch specific exception types, let
+      // unexpected exceptions propagate). Anything else (EACCES,
+      // unexpected runtime errors, etc.) surfaces as a real bug.
+      if (!isExpectedAllowlistLoadError(err)) throw err;
+      log(
+        `egress_allowlist: load failed at ${EGRESS_ALLOWLIST_PATH} — ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      // Under operator-trusted, log and pass (the operator will see
+      // the error from their own diagnostics). Under untrusted
+      // provenance, FAIL CLOSED — better to deny outbound than to
+      // silently widen the gate because someone fat-fingered the JSON.
+      if (!hasUntrustedProvenance) return {};
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse' as const,
+          permissionDecision: 'deny' as const,
+          permissionDecisionReason:
+            `egress_allowlist: ${EGRESS_ALLOWLIST_PATH} could not be loaded ` +
+            `and the call chain has untrusted-provenance content. The gate ` +
+            `is failing closed. Operator: fix the allowlist JSON, then retry.`,
+        },
+      };
+    }
+
+    const decision = decideEgress({
+      toolName: pre.tool_name,
+      toolInput: pre.tool_input,
+      hasUntrustedProvenance,
+      allowlist,
+    });
+
+    if (decision.kind !== 'deny') return {};
+    log(
+      `egress_allowlist: DENY tool=${pre.tool_name} sink=${decision.sink} provenance_prefixes=[${[...prefixes].join(',')}]`,
+    );
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: 'deny' as const,
+        permissionDecisionReason: decision.reason,
+      },
+    };
+  };
 }
 
 /**
@@ -2190,6 +2376,28 @@ async function runQuery(
           {
             matcher: 'mcp__nanoclaw__(react_to_message|send_message)',
             hooks: [createSilentTurnTrackingHook(silentTurnState)],
+          },
+          // #320 — egress allowlist. Destination-level filter for
+          // outbound tools (Composio gmail.send, slack.post,
+          // send_message_to_chat). Reads /workspace/trusted/
+          // egress_allowlist.json. Operator-originated chains bypass
+          // by default; under untrusted-provenance, destination must
+          // match an entry. Anchored alternation matcher to fire only
+          // on the gated sinks — the sink classification inside the
+          // hook is the source of truth, the matcher is a perf hint.
+          {
+            matcher:
+              '^(mcp__composio__(gmail_(send|reply)|slack_(post|send))\\w*|mcp__nanoclaw__send_message_to_chat)$',
+            hooks: [createEgressAllowlistHook(fs)],
+          },
+          // #320 — block agent-side mutations to the allowlist file.
+          // Without this, an injection-driven chain in a trusted/main
+          // container could call Write/Edit/Bash to add an attacker-
+          // controlled destination before sending, undermining the
+          // egress gate.
+          {
+            matcher: '^(Write|Edit|Bash)$',
+            hooks: [createEgressAllowlistWriteGate()],
           },
           // #322 — capability ACL. Walks the transcript back to the
           // most recent operator user-turn boundary, collects every
