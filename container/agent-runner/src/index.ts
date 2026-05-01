@@ -883,26 +883,39 @@ function loadRateLimitCounters(
   fsModule: typeof import('fs'),
 ): RateLimitCounters {
   const filePath = path.join(RATE_LIMIT_STATE_DIR, COUNTERS_FILENAME);
-  if (!fsModule.existsSync(filePath)) return emptyCounters();
+  let raw: string;
   try {
-    const raw = fsModule.readFileSync(filePath, 'utf8');
-    const parsed = parseCounters(JSON.parse(raw));
-    if (parsed === null) {
-      log(
-        `rate_limits: counters file at ${filePath} failed validation — starting fresh window`,
-      );
+    raw = fsModule.readFileSync(filePath, 'utf8');
+  } catch (err) {
+    // Distinguish "file doesn't exist yet" (legitimate cold start)
+    // from real I/O errors (EACCES, EIO, EBUSY). `existsSync` would
+    // mask the latter as "missing", silently resetting counters
+    // every fire. Treat ENOENT as cold start; let everything else
+    // propagate so a real misconfiguration surfaces.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       return emptyCounters();
     }
-    return parsed;
+    throw err;
+  }
+  let parsed: RateLimitCounters | null;
+  try {
+    parsed = parseCounters(JSON.parse(raw));
   } catch (err) {
-    if (!isExpectedAllowlistLoadError(err)) throw err;
+    if (!(err instanceof SyntaxError)) throw err;
     log(
-      `rate_limits: counters file at ${filePath} unreadable (${
-        err instanceof Error ? err.message : String(err)
+      `rate_limits: counters file at ${filePath} unparseable (${
+        err.message
       }) — starting fresh window`,
     );
     return emptyCounters();
   }
+  if (parsed === null) {
+    log(
+      `rate_limits: counters file at ${filePath} failed validation — starting fresh window`,
+    );
+    return emptyCounters();
+  }
+  return parsed;
 }
 
 function saveRateLimitCounters(
@@ -921,22 +934,39 @@ function saveRateLimitCounters(
 }
 
 function loadRateLimitMatrix(fsModule: typeof import('fs')) {
-  if (!fsModule.existsSync(RATE_LIMIT_OVERRIDES_PATH)) {
-    return DEFAULT_CAP_MATRIX;
-  }
+  let raw: string;
   try {
-    const raw = fsModule.readFileSync(RATE_LIMIT_OVERRIDES_PATH, 'utf8');
-    const overrides = parseOverrides(JSON.parse(raw));
-    return applyOverrides(DEFAULT_CAP_MATRIX, overrides);
+    raw = fsModule.readFileSync(RATE_LIMIT_OVERRIDES_PATH, 'utf8');
   } catch (err) {
-    if (!isExpectedAllowlistLoadError(err)) throw err;
+    // ENOENT = file genuinely absent (operator hasn't customized
+    // the matrix); use defaults silently. Anything else (EACCES,
+    // EIO) propagates so a misconfiguration surfaces — same posture
+    // as `loadRateLimitCounters`.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return DEFAULT_CAP_MATRIX;
+    }
+    throw err;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     log(
-      `rate_limits: overrides at ${RATE_LIMIT_OVERRIDES_PATH} unreadable (${
-        err instanceof Error ? err.message : String(err)
+      `rate_limits: overrides at ${RATE_LIMIT_OVERRIDES_PATH} unparseable (${
+        err.message
       }) — using DEFAULT_CAP_MATRIX`,
     );
     return DEFAULT_CAP_MATRIX;
   }
+  const overrides = parseOverrides(parsed);
+  if (overrides === null) {
+    log(
+      `rate_limits: overrides at ${RATE_LIMIT_OVERRIDES_PATH} failed validation — using DEFAULT_CAP_MATRIX`,
+    );
+    return DEFAULT_CAP_MATRIX;
+  }
+  return applyOverrides(DEFAULT_CAP_MATRIX, overrides);
 }
 
 /**

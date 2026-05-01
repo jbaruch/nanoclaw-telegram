@@ -15,10 +15,12 @@
  * per-group (since `/workspace/state/` is the group-scoped state
  * mount), so an injection in one chat can't poison the counters
  * for another. The file is small (just two timestamp arrays),
- * loaded + written atomically (temp-file + rename) every hook
- * fire. Pruning is rolling-window: timestamps older than 1 hour
- * are dropped on every read, so the file size is bounded by the
- * highest cap value (operator-trusted row: 50 spawns/hr).
+ * loaded on each hook fire; when the hook allows and records an
+ * event, the updated counters are written atomically (temp-file +
+ * rename). Pruning is rolling-window: timestamps older than 1 hour
+ * are filtered during evaluation, and persisted pruning happens
+ * when the counters are saved, so the file size remains bounded by
+ * the highest cap value (operator-trusted row: 50 spawns/hr).
  *
  * Operator opt-in tightening: an optional file at
  * `/workspace/trusted/rate-limit-overrides.json` overrides any row's
