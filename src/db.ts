@@ -2000,6 +2000,13 @@ function migrateJsonState(): void {
   // scheduled_reminders table created by state-004 (#296). Append-only
   // INSERT with ON CONFLICT(event_id) DO NOTHING.
   migrateScheduledRemindersJsonFiles();
+
+  // Migrate per-group email-feedback.json files into the email_feedback
+  // table created by state-002 (#295). Append-only INSERT (id is
+  // AUTOINCREMENT; no natural-key dedup). Idempotency gated by source-
+  // file rename. Accepts both wrapped {feedback:[...]} and bare-array
+  // shapes per the issue body.
+  migrateEmailFeedbackJsonFiles();
 }
 
 interface OrdersDbJsonRecord {
@@ -3886,5 +3893,213 @@ function migrateScheduledRemindersJsonFiles(): void {
       skipped: counts.skipped,
       total: counts.total,
     });
+  }
+}
+
+// --- email-feedback.json → email_feedback (#295) ---
+
+/**
+ * Per-group migration: read each group's `email-feedback.json` and
+ * append every well-formed row into the `email_feedback` SQLite table
+ * created by state-002 (+ state-003 added the per-record
+ * `schema_version` column). The JSON-era shape carried by
+ * `nanoclaw-admin/skills/brief-cleanup` evolved across two forms:
+ *
+ *   - **Wrapped (preferred):** `{"feedback": [ { pattern, label,
+ *     source, date }, ... ]}` — what the SKILL Step 6 helper
+ *     `append-feedback.py` writes today.
+ *   - **Bare array (legacy):** `[ { pattern, label, source, date },
+ *     ... ]` — observed in production where earlier writers omitted
+ *     the wrapper. Issue #295's body documents this shape verbatim.
+ *
+ * Both shapes are accepted; bare arrays are treated as if they were
+ * `{feedback: <array>}`. Anything else (null, number, string, plain
+ * object missing the `feedback` key, malformed JSON) is warned-and-
+ * skipped per `coding-policy: error-handling` ("try alternatives
+ * before failing"); the source file stays in place for human triage.
+ *
+ * Append-only contract: the schema's `id INTEGER PRIMARY KEY
+ * AUTOINCREMENT` is assigned by SQLite, the writer never supplies it,
+ * and there is no natural-key uniqueness to deduplicate on. So no
+ * `ON CONFLICT` clause — every well-formed row inserts. Idempotency
+ * comes from the rename: once the source becomes
+ * `email-feedback.json.migrated-<YYYY-MM-DD>`, the existsSync gate at
+ * the top of the loop skips it on subsequent boots. Re-running after
+ * a fresh JSON has been dropped over an already-imported DB would
+ * double-insert; that's the operator's problem, documented at the
+ * dispatch site in `migrateJsonState()`.
+ *
+ * Per-row missing-required handling: rows lacking `pattern`, `label`,
+ * or `date` are skipped with a warn rather than letting the schema's
+ * NOT NULL throw — the warn carries the field name so triage can
+ * grep for the specific failure class. The schema's
+ * `CHECK(label IN ('actionable', 'noise'))` violation still throws as
+ * a `SqliteError` with a `SQLITE_CONSTRAINT_CHECK` code; that's
+ * caught by `handleConstraintViolationOrRethrow` so the per-file
+ * transaction rolls back and the source file stays put.
+ *
+ * The `source` column has a DDL DEFAULT of `'baruch-response'`. When
+ * a JSON-era row omits `source`, we omit that column from the INSERT
+ * (rather than passing `null`, which the NOT NULL constraint would
+ * reject) so the schema default fires. Matches the morning-brief
+ * migration's `added`/CURRENT_TIMESTAMP pattern.
+ *
+ * The `schema_version` column (added by state-003) has a DDL DEFAULT
+ * of `1`. Every JSON-era row was written under contract v1, so we
+ * always omit the column from the INSERT and let the default fire —
+ * no per-row stamping needed at migration time.
+ */
+function migrateEmailFeedbackJsonFiles(): void {
+  const groupFolders = listGroupFoldersForMigration();
+  if (groupFolders.length === 0) return;
+
+  // Two prepared statements: one with `source`, one without, so the
+  // schema default fires when the JSON-era row omitted the field.
+  // Same pattern as the morning-brief migration's
+  // `withAdded`/`DefaultAdded` split.
+  const insertWithSource = db.prepare(
+    `INSERT INTO email_feedback (pattern, label, source, date)
+     VALUES (?, ?, ?, ?)`,
+  );
+  const insertDefaultSource = db.prepare(
+    `INSERT INTO email_feedback (pattern, label, date)
+     VALUES (?, ?, ?)`,
+  );
+
+  const stamp = migrationDateStamp();
+
+  for (const folder of groupFolders) {
+    const filePath = path.join(GROUPS_DIR, folder, 'email-feedback.json');
+    if (!fs.existsSync(filePath)) continue;
+
+    let raw: string;
+    try {
+      raw = fs.readFileSync(filePath, 'utf-8');
+    } catch (err) {
+      // TOCTOU race between existsSync and readFileSync — file
+      // disappeared. Idempotent no-op; every other errno propagates
+      // per `coding-policy: error-handling`.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        logger.info(
+          { folder, filePath },
+          'email-feedback.json migration: file disappeared between existsSync and readFileSync, skipping',
+        );
+        continue;
+      }
+      throw err;
+    }
+
+    // Two-shape parse: bare array (legacy) and `{feedback: [...]}`
+    // (preferred). The shared `parseJsonObjectOrWarn` helper would
+    // reject bare arrays with a warn, so do the parse + dispatch
+    // inline. Same warn vocabulary as the helper so triage greps
+    // (`'invalid JSON'`, `'payload is not'`) match either path.
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        logger.warn(
+          { folder, errName: err.name },
+          'email-feedback.json migration: invalid JSON, skipping (file left in place)',
+        );
+        continue;
+      }
+      throw err;
+    }
+
+    let feedback: unknown[];
+    if (Array.isArray(parsed)) {
+      feedback = parsed;
+    } else if (parsed !== null && typeof parsed === 'object') {
+      const wrapper = parsed as Record<string, unknown>;
+      if (!Array.isArray(wrapper.feedback)) {
+        logger.warn(
+          { folder },
+          'email-feedback.json migration: payload is an object but `feedback` is not an array, skipping (file left in place)',
+        );
+        continue;
+      }
+      feedback = wrapper.feedback;
+    } else {
+      logger.warn(
+        {
+          folder,
+          parsedType: parsed === null ? 'null' : typeof parsed,
+        },
+        'email-feedback.json migration: payload is not an object or array, skipping (file left in place)',
+      );
+      continue;
+    }
+
+    const counts = { inserted: 0, skipped: 0, total: feedback.length };
+    try {
+      const importFile = db.transaction(() => {
+        for (const row of feedback) {
+          if (!isObjectRow(row)) {
+            logger.warn(
+              { folder },
+              'email-feedback.json migration: skipping non-object row',
+            );
+            counts.skipped++;
+            continue;
+          }
+          // Required-field guard: the schema's NOT NULL on pattern /
+          // label / date would throw on missing values, rolling back
+          // the entire per-file transaction. Skip the row with a
+          // warn instead so a single malformed entry doesn't
+          // poison-pill the whole file.
+          const pattern = row.pattern;
+          const label = row.label;
+          const date = row.date;
+          if (
+            typeof pattern !== 'string' ||
+            typeof label !== 'string' ||
+            typeof date !== 'string'
+          ) {
+            const missing: string[] = [];
+            if (typeof pattern !== 'string') missing.push('pattern');
+            if (typeof label !== 'string') missing.push('label');
+            if (typeof date !== 'string') missing.push('date');
+            logger.warn(
+              { folder, missing },
+              'email-feedback.json migration: skipping row missing required fields',
+            );
+            counts.skipped++;
+            continue;
+          }
+          // Omit `source` from the INSERT when the JSON-era row
+          // didn't set it, so the schema's
+          // `DEFAULT 'baruch-response'` fires. Mirrors the morning-
+          // brief migration's `withAdded`/`DefaultAdded` split.
+          if (typeof row.source === 'string') {
+            insertWithSource.run(pattern, label, row.source, date);
+          } else {
+            insertDefaultSource.run(pattern, label, date);
+          }
+          counts.inserted++;
+        }
+      });
+      importFile();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- the helper rethrows non-constraint errors via `throw err` (see `handleConstraintViolationOrRethrow` JSDoc); the lint rule can't see through the call.
+    } catch (err) {
+      // Constraint-class SqliteError (CHECK on label, NOT NULL we
+      // didn't pre-guard, etc.) → warn-and-continue, source file
+      // stays put for triage. Anything else (programming bug,
+      // SQLITE_CORRUPT, SQLITE_BUSY) propagates via the helper.
+      if (
+        handleConstraintViolationOrRethrow(err, folder, 'email-feedback.json')
+      ) {
+        continue;
+      }
+    }
+
+    renameMigratedSource(
+      filePath,
+      stamp,
+      folder,
+      'email-feedback.json',
+      counts,
+    );
   }
 }
