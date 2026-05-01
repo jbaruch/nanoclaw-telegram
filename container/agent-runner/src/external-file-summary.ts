@@ -36,11 +36,30 @@ import {
   classifyReadPath,
   formatSentinel,
 } from './provenance-sentinel.js';
+import { escapeAttr } from './untrusted-input-sources.js';
 import {
   extractStructuredSummary,
   type ExtractResult,
 } from './structured-summary.js';
 import type Anthropic from '@anthropic-ai/sdk';
+
+/**
+ * Subset of the `fs` module this hook actually uses. Exported so the
+ * full hook surface is overridable in tests and the type stays in
+ * lockstep with the call sites — every fs call below MUST go through
+ * `fsImpl`, not the top-level `fs` import. Per Copilot review on
+ * #392: a partial-injection surface (where some fs calls used `fs`
+ * directly while others used the injected impl) leaves a hidden
+ * dependency that surprised tests / alternative fs implementations
+ * relying on the override.
+ */
+export interface FsModule {
+  statSync: typeof fs.statSync;
+  readFileSync: typeof fs.readFileSync;
+  openSync: typeof fs.openSync;
+  readSync: typeof fs.readSync;
+  closeSync: typeof fs.closeSync;
+}
 
 /**
  * Default cap on bytes pulled from disk before passing to the
@@ -169,7 +188,7 @@ export interface RunSummaryOptions {
   /** Override the byte cap on the file read. */
   maxInputBytes?: number;
   /** Filesystem module — overridable for tests. */
-  fsModule?: Pick<typeof fs, 'readFileSync' | 'statSync'>;
+  fsModule?: FsModule;
 }
 
 export type RunSummaryResult =
@@ -236,19 +255,36 @@ export async function runExternalFileSummary(
   let buf: Buffer;
   let truncated = false;
   try {
-    // statSync first so we can detect oversize files and read only
-    // the cap, instead of slurping a 4 GiB log file into memory.
+    // statSync first so we can (a) reject non-regular files (per
+    // Copilot review on #392: many special files report `size=0` —
+    // `/proc/*`, character devices like `/dev/zero` / `/dev/random` —
+    // so a `size`-only check leaves a DoS-shaped path where
+    // `readFileSync` can block indefinitely or slurp unbounded data),
+    // and (b) detect oversize regular files so we can read only the
+    // cap instead of slurping a 4 GiB log file into memory. The
+    // `isFile()` rejection passes through, letting the SDK Read
+    // produce its canonical error for special files — same posture
+    // as a missing/unreadable file.
     const st = fsImpl.statSync(opts.resolved);
+    if (!st.isFile()) {
+      return {
+        kind: 'pass-through',
+        reason: 'file_read_error',
+        detail: `not a regular file (mode=${st.mode.toString(8)})`,
+      };
+    }
     if (st.size > cap) {
       // readFileSync doesn't take a length arg; for the oversize case,
-      // open + read the cap bytes via low-level fs.
-      const fd = fs.openSync(opts.resolved, 'r');
+      // open + read the cap bytes via low-level fs (routed through
+      // the injected `fsImpl` so the dependency-injection surface is
+      // complete — see the FsModule interface).
+      const fd = fsImpl.openSync(opts.resolved, 'r');
       try {
         buf = Buffer.alloc(cap);
-        fs.readSync(fd, buf, 0, cap, 0);
+        fsImpl.readSync(fd, buf, 0, cap, 0);
         truncated = true;
       } finally {
-        fs.closeSync(fd);
+        fsImpl.closeSync(fd);
       }
     } else {
       const result = fsImpl.readFileSync(opts.resolved);
@@ -325,15 +361,24 @@ interface BuildDenyReasonInput {
  * happened (so it doesn't mistake the deny for a "the file is
  * unreadable" error and try alternate paths) and the truncation flag
  * surfaces visibly when the body was clipped at the cap.
+ *
+ * `resolved` is interpolated via `escapeAttr` because POSIX permits
+ * `\r`/`\n` (and other control chars) in filenames; an unsanitized
+ * model-controlled path could carry a synthetic `PROVENANCE_MARKER:`
+ * line that #322's walk-back would parse as a real source claim. The
+ * shared escape helper collapses CR/LF and HTML-escapes attribute
+ * chars so the framing line stays single-line and the walk-back
+ * grep can't be fooled.
  */
 function buildDenyReason(input: BuildDenyReasonInput): string {
   const truncationNote = input.truncated
     ? ' (file was larger than the byte cap; only the first chunk was summarised)'
     : '';
+  const safePath = escapeAttr(input.resolved);
   return [
     input.sourceMarker,
     '',
-    `external_file_summary: Read of ${input.resolved} was routed ` +
+    `external_file_summary: Read of ${safePath} was routed ` +
       `through a structured-summary sub-agent (per ` +
       `\`SUMMARISE_EXTERNAL_FILES=1\`) instead of returning raw bytes. ` +
       `The raw bytes never entered this agent's context — only the ` +

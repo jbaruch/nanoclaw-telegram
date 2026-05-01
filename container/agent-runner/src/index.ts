@@ -756,6 +756,13 @@ function createExternalFileSummaryHook(): HookCallback {
       sourceMarker: decision.sourceMarker,
       client: getAnthropicClient(),
     });
+    // Filenames are POSIX-legal carriers of `\r`/`\n`; collapse them
+    // out of the log basename so a model-controlled path can't forge
+    // additional log lines (fake "deploy succeeded" / "auth bypass"
+    // entries that downstream log scanners would treat as real).
+    const safeBasename = path
+      .basename(decision.resolved)
+      .replace(/[\r\n]+/g, ' ');
     if (result.kind === 'pass-through') {
       // file_read_error: fall through and let the SDK Read produce
       // the canonical error.
@@ -766,13 +773,13 @@ function createExternalFileSummaryHook(): HookCallback {
       // summariser is unavailable.
       log(
         `PreToolUse: external_file_summary PASS_THROUGH ` +
-          `reason=${result.reason} path=${path.basename(decision.resolved)}`,
+          `reason=${result.reason} path=${safeBasename}`,
       );
       return {};
     }
     log(
       `PreToolUse: external_file_summary DENY-WITH-DIGEST ` +
-        `path=${path.basename(decision.resolved)} ` +
+        `path=${safeBasename} ` +
         `latency_ms=${result.latencyMs} truncated=${result.truncated}`,
     );
     return {
