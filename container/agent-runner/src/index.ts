@@ -36,6 +36,10 @@ import {
 } from './poison-defense.js';
 import { detectAuthoritativeLookup } from './authoritative-source.js';
 import { evaluateBashCommand } from './bash-safety-net.js';
+import {
+  buildStalenessReminder,
+  classifyTrustedRead,
+} from './memory-staleness-reminder.js';
 import { validateComposioArgs } from './composio-arg-validator.js';
 import { detectComposioFidelity } from './composio-fidelity.js';
 import {
@@ -516,6 +520,47 @@ function createUntrustedInputWrapHook(): HookCallback {
  * shape and emits the marker when the source-inference yields a non-
  * null result.
  */
+/**
+ * #387 — Memory read-time staleness reminder. PostToolUse on
+ * `Read` for paths under `/workspace/trusted/` (excluding the
+ * quarantine subtree). Injects a `systemMessage` via
+ * `additionalContext` reminding the model that the bytes are a
+ * snapshot, not ground truth, and any state-mutating decision based
+ * on them needs verification against the live source.
+ *
+ * Complementary to #325 (write-time quarantine): #325 prevents a
+ * session that touched external content from laundering injected
+ * data INTO trusted/; #387 prevents the model from acting on a
+ * trusted/ snapshot AS IF it were authoritative when it reads it.
+ *
+ * Path classification mirrors #321's traversal-defeated
+ * normalization so `/workspace/trusted/../../etc/x` doesn't trip
+ * the gate (path falls outside trusted/ after normalize).
+ *
+ * Logged: tool name + path basename (no full content). The
+ * reminder text includes the full resolved path; the log is
+ * metadata-only per `no-secrets`.
+ */
+function createMemoryStalenessReminderHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const post = input as PostToolUseHookInput;
+    if (post.tool_name !== 'Read') return {};
+    const filePath = (post.tool_input as { file_path?: unknown })?.file_path;
+    if (typeof filePath !== 'string' || filePath.length === 0) return {};
+    const decision = classifyTrustedRead(filePath);
+    if (!decision.isTrustedMemoryRead) return {};
+    log(
+      `PostToolUse: memory_staleness_reminder injected on Read of ${path.basename(decision.resolvedPath)}`,
+    );
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PostToolUse' as const,
+        additionalContext: buildStalenessReminder(decision.resolvedPath),
+      },
+    };
+  };
+}
+
 function createProvenanceSentinelHook(): HookCallback {
   return async (input, _toolUseId, _context) => {
     const post = input as PostToolUseHookInput;
@@ -3226,6 +3271,12 @@ async function runQuery(
               // Same dispatch as the wrap branch; one of the two
               // classifiers fires per tool family.
               createQuarantineFlagFlipPostHook(quarantineFlagState),
+              // #387 — memory read-time staleness reminder. Fires
+              // on Read of paths under /workspace/trusted/ (excluding
+              // the quarantine subtree). The hook itself filters
+              // tool name + path; matcher is a perf hint shared
+              // with the sentinel.
+              createMemoryStalenessReminderHook(),
             ],
           },
         ],
