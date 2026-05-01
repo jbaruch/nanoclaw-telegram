@@ -1982,6 +1982,13 @@ function migrateJsonState(): void {
   // `schema_version` (a column the writer's UPSERT doesn't name) on
   // every re-run.
   migrateTaskTzStateJsonFiles();
+
+  // Migrate per-group session-state.json files (the multi-writer
+  // trusted-memory state) into trusted_sessions + trusted_session_singleton
+  // (#298). The state-006 schema landed in PR #340; this pass populates
+  // both tables from the JSON-era envelope. UPSERT semantics on both
+  // tables — never INSERT OR REPLACE.
+  migrateTrustedSessionStateJsonFiles();
 }
 
 interface OrdersDbJsonRecord {
@@ -3133,6 +3140,218 @@ function migrateTaskTzStateJsonFiles(): void {
       follow_me_upserted: counts.follow_me_upserted,
       skipped: counts.skipped,
       total: followMeTasks.length,
+    });
+  }
+}
+
+/**
+ * #298 — Migrate per-group `session-state.json` (the multi-writer
+ * trusted-memory state file) into `trusted_sessions` +
+ * `trusted_session_singleton`. Owner skill: `tessl__trusted-memory`.
+ *
+ * Source shape (documented on the state-006 doc-header):
+ *
+ *   {
+ *     "schema_version": 1,
+ *     "sessions": {"<NANOCLAW_SESSION_NAME>": {
+ *        "started", "epoch", "session_id", "last_seen"
+ *     }, ...},
+ *     "active_session_id": "<top-level back-compat>",
+ *     "seen_email_ids": [...],     // NOT migrated here — see below.
+ *     "pending_response": {...} | "<string>",
+ *     "muted_threads": [...]
+ *   }
+ *
+ * The JSON-era top-level `seen_email_ids` field intentionally does
+ * NOT migrate here — that field relocates to the `email_seen_ids`
+ * table created by state-005 (#297) where both check-email writers
+ * can target it without the old two-file consolidate dance. Don't
+ * touch it from this migration; #297's own data-import PR owns that
+ * row backfill.
+ *
+ * Per-named-session entries become `trusted_sessions` rows (UPSERT
+ * by `session_name` so a re-run with a moved file in some other
+ * group folder won't clobber per-session metadata). The singleton
+ * fields become a single `trusted_session_singleton` row at id=1
+ * (UPSERT, not INSERT OR REPLACE — REPLACE deletes the existing
+ * row and re-inserts, which would reset `schema_version` to its
+ * column DEFAULT and mask future migrations).
+ *
+ * `pending_response` and `muted_threads` are stored as TEXT in the
+ * schema; the owner skill treats them as opaque JSON blobs. Stringify
+ * here so a structured object/array on disk round-trips through the
+ * column without losing shape.
+ */
+function migrateTrustedSessionStateJsonFiles(): void {
+  const groupFolders = listGroupFoldersForMigration();
+
+  // UPSERT, not INSERT OR REPLACE: REPLACE deletes the conflicting
+  // row and re-inserts, which would reset `schema_version` to its
+  // column DEFAULT(=1). When we later bump trusted_sessions'
+  // `schema_version` for a shape change, REPLACE-on-import would
+  // silently roll back any post-migration upgrade the owner skill
+  // had performed. ON CONFLICT(session_name) DO UPDATE preserves the
+  // existing `schema_version` while letting the four data fields
+  // refresh.
+  const upsertSession = db.prepare(
+    `INSERT INTO trusted_sessions
+       (session_name, session_id, started, epoch, last_seen)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(session_name) DO UPDATE SET
+       session_id = excluded.session_id,
+       started    = excluded.started,
+       epoch      = excluded.epoch,
+       last_seen  = excluded.last_seen`,
+  );
+
+  // Same UPSERT-not-REPLACE rationale for the singleton: re-run with
+  // a second group's file (multi-host migration order) UPSERTs the
+  // existing id=1 row in place, so the row count stays at 1 and the
+  // existing `schema_version` is preserved across re-runs.
+  const upsertSingleton = db.prepare(
+    `INSERT INTO trusted_session_singleton
+       (id, active_session_id, pending_response, muted_threads)
+     VALUES (1, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       active_session_id = excluded.active_session_id,
+       pending_response  = excluded.pending_response,
+       muted_threads     = excluded.muted_threads`,
+  );
+
+  const stamp = migrationDateStamp();
+  const fileLabel = 'session-state.json';
+
+  for (const folder of groupFolders) {
+    const filePath = path.join(GROUPS_DIR, folder, 'session-state.json');
+    if (!fs.existsSync(filePath)) continue;
+
+    let raw: string;
+    try {
+      raw = fs.readFileSync(filePath, 'utf-8');
+    } catch (err) {
+      // TOCTOU race: existsSync above is best-effort; the file may
+      // disappear before readFileSync. Treat ENOENT here the same as
+      // ENOENT at rename time — idempotent no-op, log info, continue.
+      // Every other errno propagates per `coding-policy: error-handling`.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        logger.info(
+          { folder, filePath },
+          `${fileLabel} migration: file disappeared between existsSync and readFileSync, skipping`,
+        );
+        continue;
+      }
+      throw err;
+    }
+
+    const parsed = parseJsonObjectOrWarn(raw, folder, fileLabel);
+    if (!parsed) continue;
+
+    const sessionsField = parsed.sessions;
+    const hasSessions =
+      sessionsField !== null &&
+      typeof sessionsField === 'object' &&
+      !Array.isArray(sessionsField);
+    const hasSingleton =
+      'active_session_id' in parsed ||
+      'pending_response' in parsed ||
+      'muted_threads' in parsed;
+
+    if (!hasSessions && !hasSingleton) {
+      logger.warn(
+        { folder },
+        `${fileLabel} migration: no recognised fields (sessions / active_session_id / pending_response / muted_threads), skipping`,
+      );
+      continue;
+    }
+
+    const sessionCounts = { upserted: 0, skipped: 0, total: 0 };
+    let singletonUpserted = false;
+    try {
+      const importFile = db.transaction(() => {
+        if (hasSessions) {
+          const sessions = sessionsField as Record<string, unknown>;
+          const entries = Object.entries(sessions);
+          sessionCounts.total = entries.length;
+          for (const [sessionName, entry] of entries) {
+            if (!isObjectRow(entry)) {
+              logger.warn(
+                { folder, session_name: sessionName },
+                `${fileLabel} migration: skipping non-object session entry`,
+              );
+              sessionCounts.skipped++;
+              continue;
+            }
+            // `started` / `epoch` / `last_seen` are NOT NULL in the
+            // schema. A JSON-era row that pre-dates the field — e.g.
+            // an old back-compat shape that only tracked `session_id`
+            // — would otherwise throw NOT NULL inside the transaction
+            // and abort the whole file's import. Skip-with-warn so the
+            // remaining session entries (and the singleton) still
+            // import. `session_id` is nullable per the state-006
+            // schema (sqlite-error fallback path) so its absence is
+            // valid.
+            if (
+              typeof entry.started !== 'string' ||
+              typeof entry.epoch !== 'number' ||
+              typeof entry.last_seen !== 'string'
+            ) {
+              logger.warn(
+                {
+                  folder,
+                  session_name: sessionName,
+                  has_started: typeof entry.started === 'string',
+                  has_epoch: typeof entry.epoch === 'number',
+                  has_last_seen: typeof entry.last_seen === 'string',
+                },
+                `${fileLabel} migration: session entry missing required fields (started/epoch/last_seen), skipping`,
+              );
+              sessionCounts.skipped++;
+              continue;
+            }
+            upsertSession.run(
+              sessionName,
+              typeof entry.session_id === 'string' ? entry.session_id : null,
+              entry.started,
+              entry.epoch,
+              entry.last_seen,
+            );
+            sessionCounts.upserted++;
+          }
+        }
+        if (hasSingleton) {
+          const activeSessionId =
+            typeof parsed.active_session_id === 'string'
+              ? parsed.active_session_id
+              : null;
+          // pending_response and muted_threads are TEXT in the schema
+          // (opaque JSON blobs per the owner-skill contract). Stringify
+          // structured shapes; pass strings through verbatim; treat
+          // missing/null as NULL.
+          const pendingResponse =
+            parsed.pending_response === undefined ||
+            parsed.pending_response === null
+              ? null
+              : typeof parsed.pending_response === 'string'
+                ? parsed.pending_response
+                : JSON.stringify(parsed.pending_response);
+          const mutedThreads =
+            parsed.muted_threads === undefined || parsed.muted_threads === null
+              ? null
+              : typeof parsed.muted_threads === 'string'
+                ? parsed.muted_threads
+                : JSON.stringify(parsed.muted_threads);
+          upsertSingleton.run(activeSessionId, pendingResponse, mutedThreads);
+          singletonUpserted = true;
+        }
+      });
+      importFile();
+    } catch (err) {
+      if (handleConstraintViolationOrRethrow(err, folder, fileLabel)) continue;
+    }
+
+    renameMigratedSource(filePath, stamp, folder, fileLabel, {
+      sessions: sessionCounts,
+      singleton: singletonUpserted,
     });
   }
 }
