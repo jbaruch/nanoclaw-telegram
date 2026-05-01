@@ -595,12 +595,20 @@ function extractBlockText(block: unknown): string {
  * the call if its sink is not in the intersection of allowed-sinks for
  * every source seen.
  *
- * Fail-open: if transcript reading throws, log a WARN and ALLOW. The
- * failure mode is "we couldn't determine provenance" — denying every
- * tool call until the transcript is readable would brick the harness
- * on transient I/O issues. Real injection attempts produce stable
- * markers in the transcript, so a transient miss does not unlock a
- * persistent attack vector.
+ * Fail-open ONLY for narrowly-expected transcript-unavailable failures
+ * (ENOENT — file not written yet; SyntaxError — caught mid-flush during
+ * a partial JSON write). Anything else propagates per
+ * `jbaruch/coding-policy: error-handling` ("Catch specific exception
+ * types, never bare catch-all handlers" + "Let unexpected exceptions
+ * propagate — they indicate bugs that need fixing, not hiding").
+ *
+ * Why fail-open at all: pre-init and first-message sessions can fire
+ * tool calls before the SDK has flushed the transcript file. Denying
+ * every tool until the file is readable would brick fresh sessions.
+ * Real injection attempts ride on stable markers that survive any
+ * transient miss — the operationally-recoverable race doesn't unlock a
+ * persistent attack vector. Unexpected errors (permissions misconfig,
+ * SDK regression, OOM) ARE bugs and should surface, not silently allow.
  */
 function createCapabilityAclHook(): HookCallback {
   return async (input, _toolUseId, _context) => {
@@ -609,8 +617,9 @@ function createCapabilityAclHook(): HookCallback {
     try {
       session = await getSessionMessages(pre.session_id);
     } catch (err) {
+      if (!isExpectedTranscriptUnavailable(err)) throw err;
       log(
-        `capability_acl: transcript read failed, allowing tool=${pre.tool_name} reason=${
+        `capability_acl: transcript not yet readable, allowing tool=${pre.tool_name} reason=${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -637,6 +646,24 @@ function createCapabilityAclHook(): HookCallback {
       },
     };
   };
+}
+
+/**
+ * Predicate for the narrow fail-open path in `createCapabilityAclHook`.
+ * Only two failure shapes are operationally recoverable:
+ *   - `ENOENT` — the SDK hasn't created the transcript file yet
+ *     (fresh / pre-init session). Denying every call until the file
+ *     exists would brick new sessions.
+ *   - `SyntaxError` — the SDK is mid-flush and `getSessionMessages`
+ *     read a partial JSONL line. Resolves on the next call.
+ * Everything else (permission errors, SDK regressions, OOM, unknown)
+ * is a bug or misconfiguration and propagates.
+ */
+function isExpectedTranscriptUnavailable(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err instanceof SyntaxError) return true;
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === 'ENOENT';
 }
 
 function* lazyReverseWalkBack(
