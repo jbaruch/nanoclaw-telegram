@@ -2668,9 +2668,9 @@ async function runQuery(
         // bytes first, fidelity inspects raw text before the envelope
         // is added, wrap runs last and only mutates the final form.
         // #321 PR 4 — sidecar provenance sentinel for built-in tools
-        // (WebFetch / Read external / Bash agent-browser). Separate
-        // matcher because `WebFetch | Read | Bash` is the built-in
-        // family and shares no other PostToolUse hooks.
+        // (WebFetch / WebSearch / Read external / Bash agent-browser).
+        // Separate matcher because `WebFetch | WebSearch | Read | Bash`
+        // is the built-in family and shares no other PostToolUse hooks.
         PostToolUse: [
           {
             matcher: 'mcp__.*',
@@ -2685,7 +2685,7 @@ async function runQuery(
             // would also match e.g. a third-party tool literally named
             // `MyBash` or `ReadMore`. Match only the exact built-in
             // tool names.
-            matcher: '^(WebFetch|Read|Bash)$',
+            matcher: '^(WebFetch|WebSearch|Read|Bash)$',
             hooks: [createProvenanceSentinelHook()],
           },
         ],

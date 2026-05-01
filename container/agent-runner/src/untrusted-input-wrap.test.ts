@@ -51,6 +51,21 @@ describe('inferReadSource', () => {
     ).toEqual({ prefix: 'github', value: 'github_list_pull_requests' });
   });
 
+  it('identifies Tessl registry read tools', () => {
+    expect(inferReadSource('mcp__tessl__search')).toEqual({
+      prefix: 'tessl',
+      value: 'search',
+    });
+    expect(inferReadSource('mcp__tessl__query_library_docs')).toEqual({
+      prefix: 'tessl',
+      value: 'query_library_docs',
+    });
+    expect(inferReadSource('mcp__tessl__outdated')).toEqual({
+      prefix: 'tessl',
+      value: 'outdated',
+    });
+  });
+
   it('returns null for write/mutating tools', () => {
     expect(inferReadSource('mcp__composio__gmail_send_email')).toBeNull();
     expect(inferReadSource('mcp__composio__slack_post_message')).toBeNull();
@@ -59,12 +74,20 @@ describe('inferReadSource', () => {
     ).toBeNull();
     expect(inferReadSource('mcp__composio__github_create_issue')).toBeNull();
     expect(inferReadSource('mcp__composio__gmail_delete_message')).toBeNull();
+    expect(inferReadSource('mcp__tessl__install')).toBeNull();
+    expect(inferReadSource('mcp__tessl__login')).toBeNull();
+    expect(inferReadSource('mcp__tessl__update')).toBeNull();
+    expect(inferReadSource('mcp__tessl__uninstall')).toBeNull();
+    expect(inferReadSource('mcp__tessl__new_tile')).toBeNull();
+    // `status` is local-only (no remote registry call), excluded by
+    // omission so its output isn't framed as external content.
+    expect(inferReadSource('mcp__tessl__status')).toBeNull();
   });
 
   it('returns null for unrelated MCP tools', () => {
     expect(inferReadSource('mcp__nanoclaw__send_message')).toBeNull();
     expect(inferReadSource('mcp__nanoclaw__schedule_task')).toBeNull();
-    expect(inferReadSource('mcp__tessl__search_skills')).toBeNull();
+    expect(inferReadSource('mcp__nanoclaw__list_tasks')).toBeNull();
   });
 
   it('returns null for built-in tool names', () => {
@@ -168,14 +191,27 @@ describe('wrapMcpToolResult', () => {
     expect(wrapped).toBe(response);
   });
 
-  it('returns the response untouched for nanoclaw / tessl tools', () => {
+  it('returns the response untouched for nanoclaw tools (internal harness state, not external)', () => {
     const response = { content: [{ type: 'text', text: 'ok' }] };
     expect(
       wrapMcpToolResult('mcp__nanoclaw__send_message', response),
     ).toEqual({ wrapped: response, mutated: false });
     expect(
-      wrapMcpToolResult('mcp__tessl__search_skills', response),
+      wrapMcpToolResult('mcp__nanoclaw__list_tasks', response),
     ).toEqual({ wrapped: response, mutated: false });
+  });
+
+  it('wraps tessl registry read-tool results with tessl: source', () => {
+    const tool = 'mcp__tessl__search';
+    const response = {
+      content: [{ type: 'text', text: 'tile: jbaruch/coding-policy v0.4.2' }],
+    };
+    const { wrapped, mutated } = wrapMcpToolResult(tool, response);
+    expect(mutated).toBe(true);
+    const wrappedTyped = wrapped as { content: { type: string; text: string }[] };
+    expect(wrappedTyped.content[0].text).toBe(
+      '<untrusted-input source="tessl:search">\ntile: jbaruch/coding-policy v0.4.2\n</untrusted-input>',
+    );
   });
 
   it('handles non-object response (string, number, null) without mutation', () => {
