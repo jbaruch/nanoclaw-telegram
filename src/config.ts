@@ -9,6 +9,7 @@ import { isValidTimezone } from './timezone.js';
 // by the credential proxy (credential-proxy.ts), never exposed to containers.
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
+  'ASSISTANT_USERNAME',
   'ASSISTANT_HAS_OWN_NUMBER',
   'TZ',
   'TELEGRAM_BOT_POOL',
@@ -23,6 +24,17 @@ const envConfig = readEnvFile([
 
 export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
+// Telegram @-handle without leading `@`. Lowercased ASSISTANT_NAME is
+// the safe default — most deployments mirror the display name in the
+// handle. Override via ASSISTANT_USERNAME when the bot's handle differs
+// (e.g. ASSISTANT_NAME=AyeAye + ASSISTANT_USERNAME=AyeAyeSureBot for the
+// dual-handle pattern). Read by container-runner.ts and forwarded into
+// every agent container so agent-runner can prepend the authoritative
+// identity preamble (#407 / ligolnik/nanoclaw-public#90).
+export const ASSISTANT_USERNAME =
+  process.env.ASSISTANT_USERNAME ||
+  envConfig.ASSISTANT_USERNAME ||
+  ASSISTANT_NAME.toLowerCase();
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER ||
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
