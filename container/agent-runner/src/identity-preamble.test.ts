@@ -56,6 +56,19 @@ describe('buildIdentityPreamble', () => {
     const out = buildIdentityPreamble('LoMBot', 'limlombot');
     expect(out).toMatch(/or any other\s+bot name/i);
   });
+
+  // The agent container is reused across Telegram / WhatsApp / Slack /
+  // Discord / Gmail. The preamble wording must NOT bind to any one
+  // channel's vocabulary — anchoring "Telegram" in the prompt would
+  // be misleading on a Slack-hosted deployment. Channel-neutral framing
+  // ("display name" / "@-handle") replaces the original
+  // Telegram-specific wording.
+  it('uses channel-neutral wording (no "Telegram" binding)', () => {
+    const out = buildIdentityPreamble('LoMBot', 'limlombot');
+    expect(out).not.toContain('Telegram');
+    expect(out).toContain('display name');
+    expect(out).toContain('@-handle');
+  });
 });
 
 // resolveIdentityPreamble — the env-var-aware wrapper used by the agent
@@ -90,5 +103,50 @@ describe('resolveIdentityPreamble', () => {
 
   it('returns undefined when ASSISTANT_USERNAME is the empty string', () => {
     expect(resolveIdentityPreamble('LoMBot', '')).toBeUndefined();
+  });
+
+  // Defensive normalization (Copilot review on #408). The orchestrator
+  // sets ASSISTANT_NAME / ASSISTANT_USERNAME via `-e` from .env, so the
+  // values aren't attacker-controlled in practice — but an operator
+  // typo (e.g. a multi-line paste) would otherwise break the markdown
+  // structure of the preamble or smuggle stray heading lines into the
+  // top-of-context system prompt. Whitespace-only after normalization
+  // is treated as missing so a `.env` line like `ASSISTANT_NAME=  `
+  // skips rather than rendering "You are **    **".
+  it('treats whitespace-only ASSISTANT_NAME as missing after trim', () => {
+    expect(resolveIdentityPreamble('   ', 'limlombot')).toBeUndefined();
+  });
+
+  it('treats whitespace-only ASSISTANT_USERNAME as missing after trim', () => {
+    expect(resolveIdentityPreamble('LoMBot', '\t\n  ')).toBeUndefined();
+  });
+
+  it('strips raw newlines from name/username so preamble structure stays intact', () => {
+    const out = resolveIdentityPreamble(
+      'LoMBot\n# rogue heading',
+      'limlombot\nfoo',
+    );
+    expect(out).toBeDefined();
+    expect(out).not.toMatch(/\n# rogue heading/);
+    // Newlines collapse to spaces, so the name renders as a single line
+    // even when the operator's .env value spanned multiple.
+    expect(out).toContain('You are **LoMBot # rogue heading**');
+    expect(out).toContain('**@limlombot foo**');
+  });
+
+  it('trims surrounding whitespace from both fields', () => {
+    const out = resolveIdentityPreamble('  LoMBot  ', '  limlombot  ');
+    expect(out).toContain('You are **LoMBot**');
+    expect(out).toContain('**@limlombot**');
+  });
+
+  it('length-caps each field at 256 characters', () => {
+    const longName = 'A'.repeat(500);
+    const out = resolveIdentityPreamble(longName, 'limlombot');
+    expect(out).toBeDefined();
+    // Bolded form would be `**` + name + `**` = 4 + 256 = 260 chars at
+    // most. Probe the boundary directly.
+    expect(out).toContain(`**${'A'.repeat(256)}**`);
+    expect(out).not.toContain(`**${'A'.repeat(257)}**`);
   });
 });
