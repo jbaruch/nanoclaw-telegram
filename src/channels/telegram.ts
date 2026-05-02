@@ -1,7 +1,7 @@
 import fs from 'fs';
 import https from 'https';
 import path from 'path';
-import { Api, Bot, InputFile } from 'grammy';
+import { Api, Bot, GrammyError, InputFile } from 'grammy';
 import OpenAI from 'openai';
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
@@ -88,6 +88,28 @@ async function sendTelegramMessage(
     );
     return msg.message_id;
   } catch (err) {
+    // Narrow the fallback to the specific Telegram-side HTML parse
+    // rejection (#414). Pre-#414, the catch swallowed every error —
+    // including `HttpError` (network: DNS hiccup, reset, timeout),
+    // 5xx `GrammyError`s, 429 rate-limits, and anything else from
+    // grammy's transport layer — and re-sent as plain text. For
+    // network failures the first send never reached Telegram, so a
+    // second send isn't a "fallback" but a fresh attempt that may
+    // duplicate, may also fail, and degrades the user-visible
+    // formatting unnecessarily; for rate-limits a retry from inside
+    // the catch hits the same 429 and burns the limit faster. Re-
+    // throw everything except the specific 400 + "can't parse
+    // entities" case the plain-text fallback was actually built for,
+    // and let the caller's outer error handling decide.
+    if (
+      !(
+        err instanceof GrammyError &&
+        err.error_code === 400 &&
+        /can't parse entities/i.test(err.description)
+      )
+    ) {
+      throw err;
+    }
     // Fallback: HTML parsing failed. The user-facing send ships a
     // marked-degraded version (raw text prefixed with a visible warning)
     // so the user knows the formatting they're seeing is a fallback,
@@ -1690,6 +1712,21 @@ export class TelegramChannel implements Channel {
         // API traffic on transient/network failures. Let the error
         // bubble to the outer catch/logger instead.
         if (options.parse_mode !== 'HTML') throw err;
+        // Narrow the fallback to the specific Telegram-side HTML
+        // parse rejection (#414) — same reasoning as
+        // `sendTelegramMessage`'s catch above. `HttpError` /
+        // 5xx / 429 / anything not a 400 "can't parse entities"
+        // re-throws to the outer handler instead of producing a
+        // duplicate caption send on transport-layer failures.
+        if (
+          !(
+            err instanceof GrammyError &&
+            err.error_code === 400 &&
+            /can't parse entities/i.test(err.description)
+          )
+        ) {
+          throw err;
+        }
         // Mirror sendTelegramMessage's fallback hardening (#278).
         // Metadata only — no caption content reaches the log sink:
         // captions are user input, `jbaruch/coding-policy:
