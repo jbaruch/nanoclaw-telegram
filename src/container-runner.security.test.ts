@@ -69,6 +69,7 @@ import {
   createFilteredDb,
   buildVolumeMounts,
   SECRET_FILES,
+  atomicPublishDir,
 } from './container-runner.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import type { RegisteredGroup } from './types.js';
@@ -323,6 +324,491 @@ describe('createFilteredDb (untrusted DB isolation)', () => {
     // existence is the visible symptom of WAL mode.
     expect(fs.existsSync(`${filtered}-wal`)).toBe(false);
     expect(fs.existsSync(`${filtered}-shm`)).toBe(false);
+  });
+
+  // Regression guard for #93 — prior to the atomic temp+rename pattern, any
+  // interruption between `new Database(finalPath)` and the schema exec calls
+  // would leave a 0-byte file at the canonical path. Subsequent spawns then
+  // hit "disk I/O error" on every retry, the circuit breaker tripped, and
+  // the group was permanently wedged until an operator manually rm'd it.
+  describe('atomic creation (regression #93)', () => {
+    it('happy path leaves no .tmp-* leftovers next to the final file', () => {
+      seedMessagesDb();
+      const filtered = createFilteredDb('chatA@g.us', 'folder-atomic-happy');
+      expect(filtered).not.toBe(null);
+      expect(fs.existsSync(filtered!)).toBe(true);
+      // No half-written temp file should survive a successful run.
+      const dir = path.dirname(filtered!);
+      const leftovers = fs
+        .readdirSync(dir)
+        .filter((f) => f.startsWith('messages.db.tmp-'));
+      expect(leftovers).toEqual([]);
+    });
+
+    it('idempotent re-run produces a valid file with no temp leaks', () => {
+      seedMessagesDb();
+      const first = createFilteredDb('chatA@g.us', 'folder-atomic-idem');
+      const second = createFilteredDb('chatA@g.us', 'folder-atomic-idem');
+      expect(second).toBe(first);
+      expect(fs.existsSync(second!)).toBe(true);
+      const stat = fs.statSync(second!);
+      expect(stat.size).toBeGreaterThan(0);
+      const dir = path.dirname(second!);
+      const leftovers = fs
+        .readdirSync(dir)
+        .filter((f) => f.startsWith('messages.db.tmp-'));
+      expect(leftovers).toEqual([]);
+    });
+
+    it('failure during creation does NOT leak a 0-byte file at the canonical path', () => {
+      // Seed a valid messages.db, then corrupt it so `ATTACH DATABASE` throws
+      // partway through createFilteredDb. This simulates the real-world
+      // failure mode (transient SQLite I/O error) that originally wedged
+      // the group at 17:12 UTC.
+      const dbPath = seedMessagesDb();
+      // Overwrite the source with garbage — ATTACH will reject it as
+      // "not a database" / disk I/O error, throwing inside the try block.
+      fs.writeFileSync(dbPath, Buffer.from('not a sqlite database at all'));
+
+      expect(() =>
+        createFilteredDb('chatA@g.us', 'folder-atomic-fail'),
+      ).toThrow();
+
+      // The canonical path must NOT exist — that's the whole point of the
+      // atomic temp+rename pattern. If the legacy in-place write were still
+      // in effect, this would be a 0-byte (or partial-header) file.
+      const finalPath = path.join(
+        DATA_DIR,
+        'filtered-db',
+        'folder-atomic-fail',
+        'messages.db',
+      );
+      expect(fs.existsSync(finalPath)).toBe(false);
+
+      // And no temp file should be left lying around either — the catch
+      // block cleans it up before rethrowing.
+      const dir = path.dirname(finalPath);
+      if (fs.existsSync(dir)) {
+        const leftovers = fs
+          .readdirSync(dir)
+          .filter((f) => f.startsWith('messages.db.tmp-'));
+        expect(leftovers).toEqual([]);
+      }
+    });
+  });
+
+  // Regression guard for #100 — when the source `messages.db` had a degraded
+  // WAL/SHM state (e.g. -shm file evicted by Docker bind-mount on macOS),
+  // the ATTACH inside createFilteredDb threw `SqliteError: disk I/O error`
+  // even though both the canonical filtered-db and the source database file
+  // itself were healthy. The recovery: catch the disk-I/O error, run
+  // `PRAGMA wal_checkpoint(TRUNCATE)` on the source via a fresh connection
+  // (which re-establishes -shm coordination), and retry the ATTACH+CTAS
+  // exactly once.
+  describe('WAL recovery on disk I/O error (regression #100)', () => {
+    /**
+     * Stub `Database.prototype.exec` so that the FIRST `ATTACH DATABASE`
+     * call throws a SqliteError-shaped "disk I/O error", and all subsequent
+     * calls (including the retry's ATTACH and every CTAS) execute the real
+     * implementation. Calls through for non-ATTACH statements so recovery
+     * and retry stay realistic.
+     *
+     * Returns a counter that records how many times the stub matched the
+     * ATTACH path so tests can assert exactly-one-throw semantics.
+     */
+    function failFirstAttach(): {
+      attachCalls: { count: number };
+      restore: () => void;
+    } {
+      const real = Database.prototype.exec;
+      const attachCalls = { count: 0 };
+      let firstAttachThrown = false;
+      const spy = vi
+        .spyOn(Database.prototype, 'exec')
+        .mockImplementation(function (this: Database.Database, sql: string) {
+          const isAttach = /^\s*ATTACH\s+DATABASE/i.test(sql);
+          if (isAttach) {
+            attachCalls.count++;
+            if (!firstAttachThrown) {
+              firstAttachThrown = true;
+              // Match better-sqlite3's actual SqliteError shape so the
+              // production code's `instanceof SqliteError` branch fires.
+              const SqliteErrorCtor = (
+                Database as unknown as { SqliteError: typeof Error }
+              ).SqliteError;
+              // SqliteError(message, code) — code is the SQLite error
+              // identifier; SQLITE_IOERR is what disk-I/O failures carry.
+              const err = new (SqliteErrorCtor as unknown as new (
+                m: string,
+                c: string,
+              ) => Error)('disk I/O error', 'SQLITE_IOERR');
+              throw err;
+            }
+          }
+          return real.call(this, sql) as unknown as Database.Database;
+        });
+      return {
+        attachCalls,
+        restore: () => spy.mockRestore(),
+      };
+    }
+
+    /**
+     * Stub `Database.prototype.exec` so EVERY `ATTACH DATABASE` call throws
+     * disk-I/O. Used for the "retry also fails" case.
+     */
+    function failAllAttach(): {
+      attachCalls: { count: number };
+      restore: () => void;
+    } {
+      const real = Database.prototype.exec;
+      const attachCalls = { count: 0 };
+      const spy = vi
+        .spyOn(Database.prototype, 'exec')
+        .mockImplementation(function (this: Database.Database, sql: string) {
+          if (/^\s*ATTACH\s+DATABASE/i.test(sql)) {
+            attachCalls.count++;
+            const SqliteErrorCtor = (
+              Database as unknown as { SqliteError: typeof Error }
+            ).SqliteError;
+            throw new (SqliteErrorCtor as unknown as new (
+              m: string,
+              c: string,
+            ) => Error)('disk I/O error', 'SQLITE_IOERR');
+          }
+          return real.call(this, sql) as unknown as Database.Database;
+        });
+      return {
+        attachCalls,
+        restore: () => spy.mockRestore(),
+      };
+    }
+
+    /**
+     * Stub `Database.prototype.exec` so the FIRST `ATTACH DATABASE` throws
+     * a SqliteError that is NOT disk-I/O (e.g. "no such table"). The
+     * production code must propagate this immediately without invoking
+     * recovery — non-disk-I/O errors aren't the SHM-degradation signal.
+     */
+    function failFirstAttachWithNonIoError(): {
+      attachCalls: { count: number };
+      restore: () => void;
+    } {
+      const real = Database.prototype.exec;
+      const attachCalls = { count: 0 };
+      let firstAttachThrown = false;
+      const spy = vi
+        .spyOn(Database.prototype, 'exec')
+        .mockImplementation(function (this: Database.Database, sql: string) {
+          if (/^\s*ATTACH\s+DATABASE/i.test(sql)) {
+            attachCalls.count++;
+            if (!firstAttachThrown) {
+              firstAttachThrown = true;
+              const SqliteErrorCtor = (
+                Database as unknown as { SqliteError: typeof Error }
+              ).SqliteError;
+              throw new (SqliteErrorCtor as unknown as new (
+                m: string,
+                c: string,
+              ) => Error)('no such table: src.chats', 'SQLITE_ERROR');
+            }
+          }
+          return real.call(this, sql) as unknown as Database.Database;
+        });
+      return {
+        attachCalls,
+        restore: () => spy.mockRestore(),
+      };
+    }
+
+    /**
+     * Spy on `Database.prototype.pragma` so we can detect whether
+     * `recoverSourceWalState` actually ran. The recovery path is the only
+     * site that calls `pragma('wal_checkpoint(TRUNCATE)')` from the
+     * orchestrator process — a hit on that argument is a positive signal.
+     */
+    function trackRecoveryCalls(): {
+      checkpointCalls: { count: number };
+      restore: () => void;
+    } {
+      const checkpointCalls = { count: 0 };
+      const real = Database.prototype.pragma;
+      const spy = vi
+        .spyOn(Database.prototype, 'pragma')
+        .mockImplementation(function (
+          this: Database.Database,
+          source: string,
+          options?: Database.PragmaOptions,
+        ) {
+          if (typeof source === 'string' && /wal_checkpoint/i.test(source)) {
+            checkpointCalls.count++;
+          }
+          return real.call(this, source, options as Database.PragmaOptions);
+        });
+      return {
+        checkpointCalls,
+        restore: () => spy.mockRestore(),
+      };
+    }
+
+    it('happy path: no recovery invoked when ATTACH succeeds', () => {
+      seedMessagesDb();
+      const recovery = trackRecoveryCalls();
+      try {
+        const filtered = createFilteredDb('chatA@g.us', 'folder-no-recovery');
+        expect(filtered).not.toBe(null);
+        // No wal_checkpoint(TRUNCATE) call should have happened — the only
+        // checkpoints called by the production code are the recovery path.
+        expect(recovery.checkpointCalls.count).toBe(0);
+      } finally {
+        recovery.restore();
+      }
+    });
+
+    it('disk I/O on ATTACH triggers recovery and the retry succeeds', () => {
+      seedMessagesDb();
+      const attachStub = failFirstAttach();
+      const recovery = trackRecoveryCalls();
+      try {
+        const filtered = createFilteredDb('chatA@g.us', 'folder-recover');
+        // Retry succeeded — file exists at the canonical path.
+        expect(filtered).not.toBe(null);
+        expect(fs.existsSync(filtered!)).toBe(true);
+        // Recovery ran exactly once.
+        expect(recovery.checkpointCalls.count).toBe(1);
+        // ATTACH was called twice: once that threw, once that succeeded.
+        expect(attachStub.attachCalls.count).toBe(2);
+        // Retry actually populated the filtered DB — open and verify.
+        const db = new Database(filtered!, { readonly: true });
+        try {
+          const chats = db.prepare('SELECT jid FROM chats').all() as {
+            jid: string;
+          }[];
+          expect(chats).toEqual([{ jid: 'chatA@g.us' }]);
+        } finally {
+          db.close();
+        }
+        // No temp leftovers from either the failed first attempt or the
+        // successful retry.
+        const dir = path.dirname(filtered!);
+        const leftovers = fs
+          .readdirSync(dir)
+          .filter((f) => f.startsWith('messages.db.tmp-'));
+        expect(leftovers).toEqual([]);
+      } finally {
+        attachStub.restore();
+        recovery.restore();
+      }
+    });
+
+    it('disk I/O on retry too: original error propagates, no further attempts', () => {
+      seedMessagesDb();
+      const attachStub = failAllAttach();
+      const recovery = trackRecoveryCalls();
+      try {
+        expect(() =>
+          createFilteredDb('chatA@g.us', 'folder-retry-fails'),
+        ).toThrow(/disk I\/O error/);
+        // Recovery ran exactly once between attempts (loop guard).
+        expect(recovery.checkpointCalls.count).toBe(1);
+        // ATTACH was attempted exactly twice — the original and the retry.
+        // A third attempt would mean we're looping, which violates the
+        // "retry once" contract.
+        expect(attachStub.attachCalls.count).toBe(2);
+        // Canonical path must NOT exist — both attempts failed before rename.
+        const finalPath = path.join(
+          DATA_DIR,
+          'filtered-db',
+          'folder-retry-fails',
+          'messages.db',
+        );
+        expect(fs.existsSync(finalPath)).toBe(false);
+        // No temp leftovers from either failed attempt.
+        const dir = path.dirname(finalPath);
+        if (fs.existsSync(dir)) {
+          const leftovers = fs
+            .readdirSync(dir)
+            .filter((f) => f.startsWith('messages.db.tmp-'));
+          expect(leftovers).toEqual([]);
+        }
+      } finally {
+        attachStub.restore();
+        recovery.restore();
+      }
+    });
+
+    it('non-disk-I/O SqliteError propagates immediately without recovery', () => {
+      seedMessagesDb();
+      const attachStub = failFirstAttachWithNonIoError();
+      const recovery = trackRecoveryCalls();
+      try {
+        expect(() =>
+          createFilteredDb('chatA@g.us', 'folder-no-such-table'),
+        ).toThrow(/no such table/);
+        // Recovery must NOT have been invoked — only disk-I/O errors
+        // should trigger the wal_checkpoint(TRUNCATE) recovery path.
+        expect(recovery.checkpointCalls.count).toBe(0);
+        // ATTACH was attempted exactly once (no retry for non-disk-I/O).
+        expect(attachStub.attachCalls.count).toBe(1);
+      } finally {
+        attachStub.restore();
+        recovery.restore();
+      }
+    });
+  });
+});
+
+// -----------------------------------------------------------------------------
+// atomicPublishDir — regression guard for #95.
+//
+// Prior to this fix, the .tessl publish in buildVolumeMounts was a non-atomic
+// rmSync(groupTesslDir) + cpSync(dstTessl, groupTesslDir). Two scheduled
+// tasks (heartbeat + task-watchdog) firing within the same millisecond on the
+// same group both ran that block, with one's rm walk colliding with the
+// other's cp into already-walked subdirs — yielding ENOTEMPTY on rmdir and
+// wedging both tasks. The fix uses temp+swap-rename so dstDir is always a
+// fully-populated directory at any instant.
+// -----------------------------------------------------------------------------
+describe('atomicPublishDir (regression #95)', () => {
+  function seedSrc(name: string): string {
+    const dir = path.join(TEST_ROOT, name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'RULES.md'), 'rules');
+    const sub = path.join(
+      dir,
+      'tiles',
+      'jbaruch',
+      'nanoclaw-core',
+      'skills',
+      'check-unanswered',
+      'scripts',
+    );
+    fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(sub, 'check.sh'), 'echo hi');
+    fs.writeFileSync(path.join(sub, 'helper.py'), 'print(1)');
+    return dir;
+  }
+
+  function listSiblings(dst: string): string[] {
+    const parent = path.dirname(dst);
+    const base = path.basename(dst);
+    if (!fs.existsSync(parent)) return [];
+    return fs
+      .readdirSync(parent)
+      .filter((f) => f !== base && f.startsWith(`${base}.`));
+  }
+
+  it('happy path publishes content with no temp/backup leftovers', () => {
+    const src = seedSrc('src-happy');
+    const dst = path.join(TEST_ROOT, 'dst-happy');
+    atomicPublishDir(src, dst);
+
+    expect(fs.existsSync(dst)).toBe(true);
+    expect(fs.readFileSync(path.join(dst, 'RULES.md'), 'utf8')).toBe('rules');
+    expect(
+      fs.existsSync(
+        path.join(
+          dst,
+          'tiles',
+          'jbaruch',
+          'nanoclaw-core',
+          'skills',
+          'check-unanswered',
+          'scripts',
+          'check.sh',
+        ),
+      ),
+    ).toBe(true);
+    expect(listSiblings(dst)).toEqual([]);
+  });
+
+  it('idempotent re-run replaces content cleanly with no leftovers', () => {
+    const src1 = seedSrc('src-idem-1');
+    const dst = path.join(TEST_ROOT, 'dst-idem');
+    atomicPublishDir(src1, dst);
+
+    // Mutate src — second publish must overwrite the dst content.
+    fs.writeFileSync(path.join(src1, 'RULES.md'), 'rules-v2');
+    atomicPublishDir(src1, dst);
+
+    expect(fs.readFileSync(path.join(dst, 'RULES.md'), 'utf8')).toBe(
+      'rules-v2',
+    );
+    expect(listSiblings(dst)).toEqual([]);
+  });
+
+  it('concurrent publishes both complete; dst is valid; no leftovers', async () => {
+    const src = seedSrc('src-concurrent');
+    const dst = path.join(TEST_ROOT, 'dst-concurrent');
+
+    // Pre-seed dst so both calls hit the swap path (the bug's hot path).
+    atomicPublishDir(src, dst);
+
+    // Two near-simultaneous publishes, simulating heartbeat + task-watchdog.
+    // Wrap each in a Promise that lets failures escape so the test reports
+    // the actual ENOTEMPTY if the bug regresses, instead of a generic
+    // Promise.all rejection.
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() => atomicPublishDir(src, dst)),
+      Promise.resolve().then(() => atomicPublishDir(src, dst)),
+    ]);
+
+    // Every call must succeed — race losers swallow EEXIST/ENOTEMPTY/EPERM.
+    for (const r of results) {
+      if (r.status === 'rejected') {
+        throw new Error(
+          `atomicPublishDir threw under concurrency: ${String(r.reason)}`,
+        );
+      }
+    }
+
+    // dst must be valid (fully populated, not half-walked).
+    expect(fs.existsSync(dst)).toBe(true);
+    expect(fs.readFileSync(path.join(dst, 'RULES.md'), 'utf8')).toBe('rules');
+    expect(
+      fs.existsSync(
+        path.join(
+          dst,
+          'tiles',
+          'jbaruch',
+          'nanoclaw-core',
+          'skills',
+          'check-unanswered',
+          'scripts',
+          'check.sh',
+        ),
+      ),
+    ).toBe(true);
+
+    // No temp / swap siblings left behind.
+    expect(listSiblings(dst)).toEqual([]);
+  });
+
+  it('cpSync failure cleans up tmp and leaves existing dst untouched', () => {
+    const src = seedSrc('src-fail');
+    const dst = path.join(TEST_ROOT, 'dst-fail');
+    // Pre-seed dst so we can verify it's untouched after a mid-publish throw.
+    atomicPublishDir(src, dst);
+    const originalContent = fs.readFileSync(path.join(dst, 'RULES.md'), 'utf8');
+
+    const cpSpy = vi.spyOn(fs, 'cpSync').mockImplementation(() => {
+      throw new Error('synthetic cpSync failure');
+    });
+    try {
+      expect(() => atomicPublishDir(src, dst)).toThrow(
+        'synthetic cpSync failure',
+      );
+    } finally {
+      cpSpy.mockRestore();
+    }
+
+    // Existing dst preserved (we never got to the rename swap).
+    expect(fs.existsSync(dst)).toBe(true);
+    expect(fs.readFileSync(path.join(dst, 'RULES.md'), 'utf8')).toBe(
+      originalContent,
+    );
+    // No tmp / swap leftovers.
+    expect(listSiblings(dst)).toEqual([]);
   });
 });
 

@@ -3,7 +3,7 @@
  * Spawns agent execution in containers and handles IPC
  */
 import { ChildProcess, spawn, spawnSync } from 'child_process';
-import Database from 'better-sqlite3';
+import Database, { SqliteError } from 'better-sqlite3';
 import { randomBytes } from 'crypto';
 import fs from 'fs';
 import os from 'os';
@@ -67,6 +67,169 @@ export function selectTiles(isMain: boolean, isTrusted: boolean): string[] {
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+
+/**
+ * Filesystem error codes that indicate a concurrent caller won the race for
+ * the same target path. Treat these as benign — the winner produced a valid
+ * result, our work is just redundant. Any other errno is a real failure and
+ * must propagate.
+ *
+ * - EEXIST: rename target already exists
+ * - ENOTEMPTY: rmdir on a directory that another caller refilled
+ * - EPERM / EACCES: rare, but seen on macOS when two processes contend for
+ *   a directory rename across the same filesystem under load
+ */
+// Benign errno codes returned by concurrent atomic-publish callers
+// racing on `renameSync(dstDir, backupDir)` and `renameSync(tmpDir,
+// dstDir)`. Any of these means another caller already won the swap;
+// the loser's copy is equivalent because both built `tmpDir` from the
+// same source. NOTE: `ENOENT` is intentionally NOT in this global set —
+// `cpSync(srcDir, ...)` throws `ENOENT` when `srcDir` is genuinely
+// missing, which is a real publish failure, not a race. The rename
+// race-window for ENOENT is handled phase-locally inside
+// `atomicPublishDir` (only after `cpSync` has succeeded).
+const RACE_CODES = new Set(['EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES']);
+// Cleanup-time errno codes that are SAFE to swallow without logging:
+// the artefact has either already been removed by another caller, or
+// never existed (e.g. step 2 didn't run because dstDir was absent).
+const CLEANUP_BENIGN_CODES = new Set(['ENOENT']);
+
+/**
+ * Best-effort recursive remove. Used for cleaning up temp / backup artefacts
+ * in atomic-publish flows where leaking a sibling dir is preferable to
+ * shadowing the original error (or to throwing during error recovery and
+ * hiding the real failure from logs).
+ */
+function rmBestEffort(target: string): void {
+  try {
+    fs.rmSync(target, { recursive: true, force: true });
+  } catch (err: unknown) {
+    // Per `coding-policy: error-handling`: narrow to typed errno
+    // shape first, rethrow anything else. Benign codes (e.g.
+    // ENOENT — target already gone) swallow silently; real
+    // filesystem drift (permissions, disk full, fs corruption)
+    // WARN-logs so an operator can see it. A non-errno throw shape
+    // (e.g. a synchronous instrumentation error) propagates so a
+    // genuine bug in fs.rmSync isn't silently downgraded to
+    // "orphaned artefact."
+    if (!(err instanceof Error) || !('code' in err)) throw err;
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code && CLEANUP_BENIGN_CODES.has(code)) return;
+    logger.warn(
+      { err, target },
+      'rmBestEffort: unexpected cleanup failure (orphaned artefact)',
+    );
+  }
+}
+
+/**
+ * Atomically publish `srcDir` (a fully-built directory) to `dstDir`,
+ * replacing any existing content at `dstDir` with no observable
+ * partial-write window.
+ *
+ * Pattern (mirrors createFilteredDb's atomic temp+rename in #93/#94 and
+ * the groupScriptsDir symlink-flip below):
+ *   1. cpSync(srcDir, tmp) — build a complete sibling
+ *   2. rename(dstDir, backup) if it exists
+ *   3. rename(tmp, dstDir)
+ *   4. rmBestEffort(backup)
+ *
+ * Concurrent callers race on step 2/3 — the loser hits ENOTEMPTY/EEXIST/
+ * EPERM/EACCES, which we swallow as a debug log because the winner's copy
+ * is equivalent. Any other error propagates.
+ *
+ * Why temp+swap-rename instead of rmSync+cpSync (the bug in #95):
+ * `fs.rmSync` walks the tree and unlinks children one at a time. While
+ * it's mid-walk, a concurrent caller's `fs.cpSync` can re-create files
+ * inside subdirs that the walk hasn't reached yet, so the eventual
+ * `rmdir` on those subdirs fails ENOTEMPTY. Swap-rename is atomic — at
+ * any instant `dstDir` resolves to a fully-populated directory.
+ *
+ * Both `tmp` and `backup` MUST be on the same filesystem as `dstDir` for
+ * rename atomicity. Putting them in the same parent satisfies this.
+ */
+export function atomicPublishDir(srcDir: string, dstDir: string): void {
+  const swapId = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const tmpDir = `${dstDir}.tmp-${swapId}`;
+  const backupDir = `${dstDir}.swap-${swapId}`;
+  let backupCreated = false;
+  // Phase tracker: `cpSync` is phase 'build'; the two renames are
+  // phase 'rename'. ENOENT during `build` means `srcDir` is missing
+  // (a real publish failure). ENOENT during `rename` is a benign
+  // race with a concurrent caller. The catch block uses this to
+  // gate which errno codes count as benign.
+  let phase: 'build' | 'rename' = 'build';
+  try {
+    fs.cpSync(srcDir, tmpDir, { recursive: true });
+    phase = 'rename';
+    if (fs.existsSync(dstDir)) {
+      fs.renameSync(dstDir, backupDir);
+      backupCreated = true;
+    }
+    fs.renameSync(tmpDir, dstDir);
+    if (backupCreated) rmBestEffort(backupDir);
+  } catch (err: unknown) {
+    // Always drop our publish artefacts before deciding what to do with
+    // the error. If the race winner placed correct content at dstDir our
+    // tmp is redundant; on a real error we can't trust our partial build.
+    rmBestEffort(tmpDir);
+    if (backupCreated) {
+      // Try to restore the backup so dstDir isn't left absent — best
+      // effort, since the failure may be the rename itself. If the
+      // restore fails, leave the backup in place and rethrow; an
+      // operator can recover from a sibling dir but not from missing
+      // content.
+      if (!fs.existsSync(dstDir)) {
+        try {
+          fs.renameSync(backupDir, dstDir);
+        } catch (restoreErr: unknown) {
+          // Per `coding-policy: error-handling`: narrow to typed
+          // errno; let other shapes propagate via the swallowing
+          // log here (we don't rethrow because the original publish
+          // error is the primary signal).
+          if (!(restoreErr instanceof Error) || !('code' in restoreErr)) {
+            logger.warn(
+              { err: restoreErr, dstDir, backupDir },
+              'atomic dir publish: restore from backup failed (non-errno); ' +
+                'backup sibling left for operator recovery',
+            );
+          } else {
+            const restoreCode = (restoreErr as NodeJS.ErrnoException).code;
+            logger.warn(
+              { err: restoreErr, code: restoreCode, dstDir, backupDir },
+              'atomic dir publish: restore from backup failed; ' +
+                'backup sibling left for operator recovery',
+            );
+          }
+        }
+      } else {
+        rmBestEffort(backupDir);
+      }
+    }
+    // Per `coding-policy: error-handling`: narrow to typed errno
+    // before classifying. A non-errno throw (e.g. a synchronous
+    // instrumentation error from inside fs.renameSync) propagates so
+    // a real defect surfaces instead of being silently swallowed as
+    // a race-loser.
+    if (!(err instanceof Error) || !('code' in err)) throw err;
+    const code = (err as NodeJS.ErrnoException).code;
+    // ENOENT is benign ONLY in the `rename` phase: the winner moved
+    // the destination directory away after our `existsSync` check
+    // saw it, so our own rename hits ENOENT. During `build`, ENOENT
+    // means `srcDir` is missing — that's a real failure, not a race.
+    const isRaceLoss =
+      code &&
+      (RACE_CODES.has(code) || (phase === 'rename' && code === 'ENOENT'));
+    if (isRaceLoss) {
+      logger.debug(
+        { err, dstDir, phase },
+        'atomic dir publish raced with concurrent caller; keeping winning copy',
+      );
+      return;
+    }
+    throw err;
+  }
+}
 
 /**
  * Container env vars whose VALUES are real secrets and must never appear
@@ -327,6 +490,55 @@ const AGENT_MODEL = resolveAgentModel(process.env.AGENT_MODEL);
 const AGENT_EFFORT = process.env.AGENT_EFFORT || 'xhigh';
 
 /**
+ * Try to repair the source `messages.db` WAL/SHM state by running a
+ * TRUNCATE checkpoint via a short-lived dedicated connection. Used as
+ * a recovery path when `createFilteredDb`'s ATTACH throws "disk I/O error"
+ * — most commonly when the source's `-shm` file has been evicted (Docker
+ * bind-mount on macOS, OS resource pressure, or partial writer crash) and
+ * SQLite can no longer establish WAL read coordination.
+ *
+ * After this call returns, the next ATTACH attempt should succeed
+ * assuming the underlying filesystem is healthy. Idempotent and safe to
+ * call when state is already clean.
+ *
+ * Logged loudly because hitting this path indicates an environment
+ * problem (Docker bind-mount eviction, OS resource pressure, partial
+ * writer crash); the operator should know it ran. See issue #100.
+ */
+function recoverSourceWalState(srcDb: string): void {
+  logger.warn(
+    { srcDb },
+    'createFilteredDb: source WAL/SHM state appears degraded, running checkpoint(TRUNCATE) recovery',
+  );
+  const recovery = new Database(srcDb);
+  try {
+    recovery.pragma('busy_timeout = 5000');
+    // TRUNCATE checkpoint forces all -wal content into the main db
+    // and zero-truncates -wal. As a side effect the writer connection
+    // re-establishes -shm coordination. PASSIVE/RESTART would also
+    // work, but TRUNCATE is the most aggressive and most likely to
+    // un-stick a bad state.
+    recovery.pragma('wal_checkpoint(TRUNCATE)');
+  } finally {
+    recovery.close();
+  }
+}
+
+/**
+ * Per `coding-policy: error-handling`: narrow to the specific exception
+ * type we expect, rethrow everything else. The retry path only triggers
+ * when better-sqlite3 throws a typed `SqliteError` carrying the "disk
+ * I/O error" substring (the symptom of degraded source WAL/SHM
+ * coordination per `ligolnik#100`). Anything else — a wrapped error, a
+ * mocked error in tests, a totally unrelated `Error` whose message
+ * happens to mention disk I/O — gates `false` so the call site rethrows
+ * instead of running a recovery that doesn't apply.
+ */
+function isDiskIoError(err: unknown): err is SqliteError {
+  return err instanceof SqliteError && err.message.includes('disk I/O error');
+}
+
+/**
  * Create a filtered copy of messages.db containing only one group's messages.
  * Returns the path to the filtered DB, or null if the source DB doesn't exist.
  *
@@ -360,75 +572,154 @@ export function createFilteredDb(
     fs.rmSync(`${filteredPath}${suffix}`, { force: true });
   }
 
-  // Use ATTACH to copy schema-agnostically — picks up new columns automatically
-  const dst = new Database(filteredPath);
-  // Source `messages.db` is WAL-mode and actively written by the orchestrator.
-  // Without busy_timeout this connection would fail immediately on any lock
-  // contention against the source (e.g. during a checkpoint), defeating the
-  // whole point of the orchestrator-side WAL setup. Match the orchestrator
-  // value (5000ms) so contention smoothing is symmetric across readers.
-  dst.pragma('busy_timeout = 5000');
-  // Force rollback-journal mode on the snapshot. better-sqlite3 defaults to
-  // WAL, which requires the SQLite reader to write `-wal`/`-shm` sidecar
-  // files even on opens that are logically read-only. The filtered DB is
-  // mounted read-only into untrusted containers (via `fakeowner ro`); a
-  // default `sqlite3.connect(path)` from inside the container then fails
-  // with `unable to open database file` because the sidecars can't be
-  // created. DELETE-journal makes the file self-contained — every reader's
-  // default open works without per-script `?mode=ro&immutable=1` plumbing.
-  // The filtered DB is a single-writer one-shot snapshot, so WAL gives it
-  // nothing anyway. See issue #287.
-  dst.pragma('journal_mode = DELETE');
-  try {
-    dst.exec(`ATTACH DATABASE '${srcDb.replace(/'/g, "''")}' AS src`);
-    dst.exec(
-      `CREATE TABLE chats AS SELECT * FROM src.chats WHERE jid = '${chatJid.replace(/'/g, "''")}'`,
+  /**
+   * One full ATTACH + CTAS + atomic-rename attempt. Captured as a
+   * closure so we can retry it once after `recoverSourceWalState`
+   * (see #100). Each call regenerates its own temp path so a retry
+   * never reuses a stale file from the failed first attempt.
+   */
+  const attemptCreate = (): void => {
+    // Atomic temp-file + rename, see #93. Writing the schema directly to the
+    // canonical path means any interruption (SIGTERM, OOM, fs hiccup, throw mid
+    // ATTACH/CTAS) leaves a 0-byte or partial-header file there. Subsequent
+    // spawns then hit "disk I/O error" the moment SQLite tries to read the
+    // (missing) header, and the group is permanently wedged behind the circuit
+    // breaker. Writing to a sibling temp path and renaming on success keeps the
+    // canonical path either healthy or absent — never half-written. The temp
+    // file MUST live in the same directory so the rename stays atomic on POSIX.
+    // The trailing randomBytes(4) suffix defeats retry-collision: if the first
+    // attempt failed mid-flight and the second attempt fires within the same
+    // millisecond, pid+Date.now() alone could collide with the prior temp path.
+    const tempPath = path.join(
+      filteredDir,
+      `messages.db.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString('hex')}`,
     );
-    dst.exec(
-      `CREATE TABLE messages AS SELECT * FROM src.messages WHERE chat_jid = '${chatJid.replace(/'/g, "''")}'`,
-    );
-    dst.exec('CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp)');
-    // Reactions scoped to this chat only. check-unanswered.py joins on this
-    // table to skip messages the bot already 👀-reacted to; without it, the
-    // join hits "no such table: reactions" and the whole script aborts.
-    // Created unconditionally so untrusted containers don't depend on
-    // whether the host happens to have any reactions yet — even an empty
-    // table satisfies the join. CTAS can't run if src.reactions doesn't
-    // exist (fresh install before migrations), so check `src.sqlite_master`
-    // explicitly and fall back to an empty table with the known schema in
-    // that one case. Bare try/catch would also swallow corruption, lock,
-    // and permission errors — a missing table is the only fallback case
-    // we want to absorb.
-    const srcHasReactions = dst
-      .prepare(
-        "SELECT 1 FROM src.sqlite_master WHERE type = 'table' AND name = 'reactions' LIMIT 1",
-      )
-      .get();
-    if (srcHasReactions) {
-      dst.exec(`
-        CREATE TABLE reactions AS
-          SELECT r.* FROM src.reactions r
-          WHERE r.message_chat_jid = '${chatJid.replace(/'/g, "''")}'
-      `);
-    } else {
-      dst.exec(`
-        CREATE TABLE reactions (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          message_id TEXT NOT NULL,
-          message_chat_jid TEXT NOT NULL,
-          reactor_jid TEXT NOT NULL,
-          reactor_name TEXT NOT NULL,
-          emoji TEXT NOT NULL,
-          timestamp TEXT NOT NULL
-        )
-      `);
+    // Stale temp from a previously crashed run — unlink so `new Database` opens
+    // a fresh file rather than reattaching to a corrupt one.
+    if (fs.existsSync(tempPath)) {
+      fs.unlinkSync(tempPath);
     }
-    dst.exec(
-      'CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id, message_chat_jid)',
+
+    // Use ATTACH to copy schema-agnostically — picks up new columns automatically
+    const dst = new Database(tempPath);
+    // Source `messages.db` is WAL-mode and actively written by the orchestrator.
+    // Without busy_timeout this connection would fail immediately on any lock
+    // contention against the source (e.g. during a checkpoint), defeating the
+    // whole point of the orchestrator-side WAL setup. Match the orchestrator
+    // value (5000ms) so contention smoothing is symmetric across readers.
+    dst.pragma('busy_timeout = 5000');
+    // Force rollback-journal mode on the snapshot. better-sqlite3 defaults to
+    // WAL, which requires the SQLite reader to write `-wal`/`-shm` sidecar
+    // files even on opens that are logically read-only. The filtered DB is
+    // mounted read-only into untrusted containers (via `fakeowner ro`); a
+    // default `sqlite3.connect(path)` from inside the container then fails
+    // with `unable to open database file` because the sidecars can't be
+    // created. DELETE-journal makes the file self-contained — every reader's
+    // default open works without per-script `?mode=ro&immutable=1` plumbing.
+    // The filtered DB is a single-writer one-shot snapshot, so WAL gives it
+    // nothing anyway. See issue #287.
+    dst.pragma('journal_mode = DELETE');
+    dst.pragma('synchronous = NORMAL');
+    try {
+      try {
+        dst.exec(`ATTACH DATABASE '${srcDb.replace(/'/g, "''")}' AS src`);
+        dst.exec(
+          `CREATE TABLE chats AS SELECT * FROM src.chats WHERE jid = '${chatJid.replace(/'/g, "''")}'`,
+        );
+        dst.exec(
+          `CREATE TABLE messages AS SELECT * FROM src.messages WHERE chat_jid = '${chatJid.replace(/'/g, "''")}'`,
+        );
+        dst.exec(
+          'CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp)',
+        );
+        // Reactions scoped to this chat only. check-unanswered.py joins on this
+        // table to skip messages the bot already 👀-reacted to; without it, the
+        // join hits "no such table: reactions" and the whole script aborts.
+        // Created unconditionally so untrusted containers don't depend on
+        // whether the host happens to have any reactions yet — even an empty
+        // table satisfies the join. CTAS can't run if src.reactions doesn't
+        // exist (fresh install before migrations), so check `src.sqlite_master`
+        // explicitly and fall back to an empty table with the known schema in
+        // that one case. Bare try/catch would also swallow corruption, lock,
+        // and permission errors — a missing table is the only fallback case
+        // we want to absorb.
+        const srcHasReactions = dst
+          .prepare(
+            "SELECT 1 FROM src.sqlite_master WHERE type = 'table' AND name = 'reactions' LIMIT 1",
+          )
+          .get();
+        if (srcHasReactions) {
+          dst.exec(`
+            CREATE TABLE reactions AS
+              SELECT r.* FROM src.reactions r
+              WHERE r.message_chat_jid = '${chatJid.replace(/'/g, "''")}'
+          `);
+        } else {
+          dst.exec(`
+            CREATE TABLE reactions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              message_id TEXT NOT NULL,
+              message_chat_jid TEXT NOT NULL,
+              reactor_jid TEXT NOT NULL,
+              reactor_name TEXT NOT NULL,
+              emoji TEXT NOT NULL,
+              timestamp TEXT NOT NULL
+            )
+          `);
+        }
+        dst.exec(
+          'CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id, message_chat_jid)',
+        );
+        dst.exec('DETACH src');
+      } finally {
+        dst.close();
+      }
+      // Atomic rename — temp file is now a fully-formed SQLite database. On
+      // POSIX this is atomic within the same filesystem, so the canonical path
+      // flips from "absent or stale" to "complete" with no observable midpoint.
+      fs.renameSync(tempPath, filteredPath);
+    } catch (err) {
+      // Cleanup the partial temp file before rethrowing. Best-effort — if the
+      // unlink itself fails for anything other than ENOENT (file already gone),
+      // log it so we know about latent disk/permission issues, but don't
+      // shadow the original error. The temp path lives next to the canonical
+      // path, so leaving it around would also leak disk space across retries.
+      try {
+        fs.unlinkSync(tempPath);
+      } catch (cleanupErr) {
+        const code = (cleanupErr as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT') {
+          logger.warn(
+            { err: cleanupErr, tempPath },
+            'Failed to clean up partial filtered-db temp file',
+          );
+        }
+      }
+      throw err;
+    }
+  };
+
+  // Outer try with a single retry on "disk I/O error" — the symptom of
+  // a degraded source WAL/SHM state (issue #100). Recovery runs a
+  // wal_checkpoint(TRUNCATE) on the source via a fresh connection, which
+  // re-establishes the -shm region; the retry then attempts the full
+  // ATTACH+CTAS again. Retry happens EXACTLY ONCE — if it also fails the
+  // error propagates and the circuit breaker can do its job (the FS or
+  // data is genuinely broken at that point, not transient SHM eviction).
+  //
+  // Errors that are NOT disk-I/O (e.g. "no such table", schema bugs,
+  // unparseable source) propagate immediately without recovery — there's
+  // nothing a checkpoint can fix for those.
+  try {
+    attemptCreate();
+  } catch (err) {
+    if (!isDiskIoError(err)) throw err;
+    recoverSourceWalState(srcDb);
+    attemptCreate(); // retry once; any error here propagates
+    logger.info(
+      { srcDb, groupFolder },
+      'createFilteredDb: succeeded after WAL/SHM recovery + retry',
     );
-    dst.exec('DETACH src');
-  } finally {
-    dst.close();
   }
 
   // Chown so container user can read
@@ -1180,19 +1471,13 @@ export function buildVolumeMounts(
     // non-empty directory with a symlink. For that one-time transition we
     // do `rm -rf <dir>` + `symlink` — has a brief window, but runs exactly
     // once per group, ever, and is bounded.
-    const RACE_CODES = new Set(['EEXIST', 'ENOTEMPTY']);
+    // RACE_CODES and rmBestEffort are defined at module scope — see the top
+    // of this file. Both atomic-publish flows (this scripts/ symlink-flip
+    // and the .tessl/ swap-rename below) share the same race-code semantics.
     const swapId = `${Date.now()}.${process.pid}.${Math.random().toString(36).slice(2, 10)}`;
     const newVersionDir = `${groupScriptsDir}.version.${swapId}`;
     const tmpLink = `${groupScriptsDir}.link.${swapId}`;
     let previousVersionDir: string | null = null;
-
-    const rmBestEffort = (target: string): void => {
-      try {
-        fs.rmSync(target, { recursive: true, force: true });
-      } catch {
-        /* ignore — orphaned artefacts don't affect correctness */
-      }
-    };
 
     try {
       // 1. Publish our tmp build as a versioned sibling.
@@ -1294,10 +1579,14 @@ export function buildVolumeMounts(
         fs.readFileSync(srcRules, 'utf-8') !==
           fs.readFileSync(dstRules, 'utf-8'));
     if (needsCopy) {
-      if (fs.existsSync(groupTesslDir)) {
-        fs.rmSync(groupTesslDir, { recursive: true, force: true });
-      }
-      fs.cpSync(dstTessl, groupTesslDir, { recursive: true });
+      // Atomic publish (see #95). The previous rm+cp was vulnerable to a
+      // race when two scheduled tasks (heartbeat + task-watchdog) fired in
+      // the same millisecond — the rmSync walk would hit ENOTEMPTY because
+      // the concurrent cpSync had refilled subdirs the walk hadn't reached
+      // yet. atomicPublishDir uses temp+swap-rename so dstDir is always a
+      // fully-populated directory at any instant; the loser's work is
+      // discarded benignly.
+      atomicPublishDir(dstTessl, groupTesslDir);
     }
   }
 
