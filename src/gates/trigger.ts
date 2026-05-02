@@ -12,12 +12,14 @@
  *   - `mention`: matches `@<pattern>` substring in message text OR an
  *     exact entry in `ctx.message.mentions[]` (channel-native list,
  *     when present).
- *   - `reply`: `replyToMessageId` is set. The "reply to BOT" check is
- *     not done inside the gate — the gate is pure, has no DB
- *     reference, and the call site is responsible for already having
- *     consulted `isReplyToBot` when building `replyToMessageId`. See
- *     the wiring in src/index.ts: only bot-replies are surfaced into
- *     the GateContext as a non-empty `replyToMessageId`.
+ *   - `reply`: matches when the inbound message is a reply to a
+ *     message the assistant itself sent. The gate consults
+ *     `ctx.message.replyTo.isAssistant` (structured reply metadata
+ *     populated by the call site). Replies to PEER bots or to humans
+ *     do NOT match — the trigger semantic is specifically "reply to
+ *     this assistant" (#107). Legacy `replyToMessageId` is also
+ *     accepted for backward compat with callers that haven't been
+ *     migrated to the structured form.
  *
  * `kind: 'sender_tier'` and `kind: 'regex'` are *unevaluatable* in v1
  * (reserved for #82 — sandboxed regex evaluator and the sender-tier
@@ -36,8 +38,9 @@
  * `keyword`) evaluate the implemented kinds normally — only the
  * evaluatable kinds count toward the deny accumulator.
  */
-import type { GateContext, GateDecision, GateFn } from './index.js';
+import type { GateContext, GateDecision } from './index.js';
 import type { TriggerPattern } from '../types.js';
+import { ASSISTANT_NAME, ASSISTANT_USERNAME } from '../config.js';
 
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -93,8 +96,15 @@ function matchPattern(p: TriggerPattern, ctx: GateContext): MatchResult {
         ? 'match'
         : 'no-match';
     case 'reply':
-      // The call site only populates replyToMessageId when the reply
-      // points at a bot-emitted message — see src/index.ts wiring.
+      // Match iff the reply target was sent by THIS assistant.
+      // Replies to peer bots / humans don't fire this kind — that
+      // would let any reply-prefix in a busy multi-bot group light up
+      // the trigger gate (#107). Legacy `replyToMessageId` is accepted
+      // for backward compat: the v1 wiring populated it only when the
+      // reply pointed at a bot-emitted message of THIS assistant.
+      if (ctx.message.replyTo) {
+        return ctx.message.replyTo.isAssistant ? 'match' : 'no-match';
+      }
       return ctx.message.replyToMessageId ? 'match' : 'no-match';
     case 'regex':
       // TODO(#82?): evaluate once a sandboxed runner exists. Today
@@ -116,14 +126,88 @@ function matchPattern(p: TriggerPattern, ctx: GateContext): MatchResult {
   }
 }
 
-export const triggerGate: GateFn = (ctx: GateContext): GateDecision => {
+/**
+ * Build the synthetic identity patterns evaluated before any
+ * operator-configured patterns. These are derived on every gate
+ * invocation from `ASSISTANT_NAME` and `ASSISTANT_USERNAME` and are
+ * NOT stored in the DB — they exist purely to short-circuit
+ * direct-identity references at Stage 1 (microseconds, zero API
+ * cost) instead of letting them fall through to Stage 2 Haiku.
+ *
+ * Operator-configured identity patterns (e.g. `@LoMBot`) remain in
+ * the DB for backward compatibility. They match alongside the
+ * synthetic identity patterns; the duplicate is harmless. Future
+ * cleanup can strip operator-set identity patterns from group
+ * configs once we're confident the auto-injection is bulletproof.
+ */
+function buildSyntheticIdentityPatterns(): TriggerPattern[] {
+  const now: TriggerPattern[] = [];
+  if (ASSISTANT_USERNAME && ASSISTANT_USERNAME.trim()) {
+    now.push({
+      pattern: ASSISTANT_USERNAME,
+      kind: 'mention',
+      source: 'owner-set',
+      precision: 0,
+      sample_count: 0,
+      last_matched_at: null,
+      last_updated_at: null,
+    });
+  }
+  if (ASSISTANT_NAME && ASSISTANT_NAME.trim()) {
+    now.push({
+      pattern: ASSISTANT_NAME,
+      kind: 'keyword',
+      source: 'owner-set',
+      precision: 0,
+      sample_count: 0,
+      last_matched_at: null,
+      last_updated_at: null,
+    });
+  }
+  return now;
+}
+
+// Annotated with the concrete sync return type rather than the broader
+// `GateFn` (which widened to `GateDecision | Promise<GateDecision>` for
+// Stage 2 async gates). Tests call `triggerGate(ctx)` directly and
+// expect a sync `GateDecision`. Assigning into the registry via
+// `registerGate('trigger', triggerGate)` still satisfies `GateFn` —
+// the narrower sync signature is a subtype of the union.
+export const triggerGate = (ctx: GateContext): GateDecision => {
   const cfg = ctx.triggerPatterns;
-  if (!cfg || !cfg.patterns || cfg.patterns.length === 0) {
+  const operatorPatterns = cfg?.patterns ?? [];
+
+  // Synthetic identity patterns evaluated FIRST. Built per-call so
+  // they pick up any test-time override of ASSISTANT_NAME /
+  // ASSISTANT_USERNAME (the constants are imported once at module
+  // load — but in practice the env is fixed for the host process
+  // lifetime, so the perf cost is negligible).
+  const syntheticPatterns = buildSyntheticIdentityPatterns();
+
+  // Synthetic patterns short-circuit on match but are intentionally
+  // NOT counted toward the deny accumulator on no-match. They're
+  // auxiliary positive triggers — a non-match here must leave the
+  // operator-pattern semantics (including the "all unevaluatable →
+  // pass" rule) untouched.
+  for (const p of syntheticPatterns) {
+    const r = matchPattern(p, ctx);
+    if (r === 'match') {
+      return {
+        decision: 'allow',
+        reason: `assistant identity match (auto): kind=${p.kind} pattern=${p.pattern}`,
+      };
+    }
+  }
+
+  // No operator config AND no synthetic match — preserve the
+  // pre-existing pass-through semantics for groups that opted out of
+  // trigger patterns entirely.
+  if (operatorPatterns.length === 0) {
     return { decision: 'pass', reason: 'no trigger patterns configured' };
   }
 
   let sawEvaluatable = false;
-  for (const p of cfg.patterns) {
+  for (const p of operatorPatterns) {
     const r = matchPattern(p, ctx);
     if (r === 'match') {
       return {

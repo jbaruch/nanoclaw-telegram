@@ -848,7 +848,7 @@ export function getMessageById(
 ): NewMessage | null {
   const row = db
     .prepare(
-      `SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+      `SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message
        FROM messages
        WHERE id = ? AND chat_jid = ?`,
     )
@@ -861,6 +861,7 @@ export function getMessageById(
         content: string;
         timestamp: string;
         is_from_me: number;
+        is_bot_message: number | null;
       }
     | undefined;
   if (!row) return null;
@@ -872,6 +873,7 @@ export function getMessageById(
     content: row.content,
     timestamp: row.timestamp,
     is_from_me: row.is_from_me === 1,
+    is_bot_message: row.is_bot_message === 1,
   };
 }
 
@@ -971,6 +973,34 @@ export function getBotMessageByTelegramId(
     reply_to_sender_name: row.reply_to_sender_name,
     telegram_message_id: row.telegram_message_id,
   } as NewMessage;
+}
+
+/**
+ * Best-effort reverse lookup: given a (sender_jid, chat_jid), return
+ * the most recent non-empty `sender_name` we have on file for that
+ * sender in that chat. Returns null when nothing is on file (e.g.
+ * brand-new sender with no prior message yet).
+ *
+ * Used by the Stage 2 Haiku classifier (#83) to feed a human-readable
+ * display name into the prompt — the GateContext only carries
+ * `senderJid`, but Anthropic-grade few-shot prompting works far
+ * better with display names than with raw JIDs/numeric ids. Bounded
+ * by `chat_jid` so the query stays cheap (no global scan), and
+ * ordered by timestamp DESC so display-name renames are picked up.
+ */
+export function getRecentSenderName(
+  senderJid: string,
+  chatJid: string,
+): string | null {
+  const row = db
+    .prepare(
+      `SELECT sender_name FROM messages
+       WHERE sender = ? AND chat_jid = ?
+         AND sender_name IS NOT NULL AND LENGTH(sender_name) > 0
+       ORDER BY timestamp DESC LIMIT 1`,
+    )
+    .get(senderJid, chatJid) as { sender_name: string } | undefined;
+  return row?.sender_name ?? null;
 }
 
 export function storeReaction(reaction: {

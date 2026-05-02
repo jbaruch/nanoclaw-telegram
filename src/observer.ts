@@ -102,6 +102,10 @@ export async function initObserver(
 // the observer started parsing `target_message_id` from every Query
 // input log line — for channel-routed inbounds, the agent-runner
 // always emits one, so the host fallback was strictly redundant.
+// #104's intent (only emit 👀 after gate chain returns allow) is
+// satisfied structurally in canonical: the agent-runner's react-first
+// hook only fires when the container is alive, which only happens
+// after the gate chain has already returned allow.
 const lastReactionEmoji = new Map<string, string>(); // `${chatJid}:${msgId}` -> emoji
 
 // Reverse map cache for folderToChatJid. Rebuilt only when the

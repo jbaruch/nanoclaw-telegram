@@ -155,12 +155,34 @@ function isAddressedToUs(
  *
  * Migration path A (locked in spec): groups with no `gates` configured
  * AND `requiresTrigger !== false` get the implicit `['trigger']` chain
- * so they keep their pre-#80 behaviour bit-for-bit. Main groups and
- * groups with `requiresTrigger === false` get an empty chain (= always
- * allow), matching pre-#80 semantics.
+ * so they keep their pre-#80 behaviour bit-for-bit. Main groups get an
+ * empty chain (= always allow), matching pre-#80 semantics.
+ *
+ * Even when `requiresTrigger === false`, the deterministic `'trigger'`
+ * gate is included whenever the group has trigger patterns configured
+ * — running it is free (microseconds, $0) and short-circuits expensive
+ * Stage 2 LLM calls when a deterministic match exists. The
+ * `requires_trigger=false` semantic ("respond to all messages") is
+ * preserved because (a) when no patterns match the trigger gate
+ * returns `pass` and the chain falls through to whatever's next
+ * (Stage 2 if enabled, fail-open default otherwise), and (b) groups
+ * with no patterns at all still get an empty implicit chain — UNLESS
+ * Stage 2 is enabled (see Stage 2 paragraph below), in which case the
+ * appended `haiku-classifier` is the entire chain. Main groups with
+ * Stage 2 enabled also pick up `haiku-classifier`; if you don't want
+ * the classifier on a main group, set `stage2Enabled: false`
+ * explicitly.
  *
  * Path B (one-shot DB migration to set `containerConfig.gates =
  * ['trigger']`) is a future cleanup — the column stays for now.
+ *
+ * Stage 2 (#83): when `containerConfig.stage2Enabled === true`
+ * AND `requiresTrigger !== true` (#98), `'haiku-classifier'` is
+ * APPENDED LAST so deterministic gates short-circuit before any API
+ * call. New groups default `stage2Enabled` to `true` via
+ * `applyNewGroupContainerConfigDefaults`; existing groups keep
+ * whatever was previously persisted, and an explicit `false` always
+ * disables.
  */
 export function resolveGatesForGroup(group: RegisteredGroup): string[] {
   // `containerConfig` is JSON-parsed but not field-validated at the DB
@@ -169,35 +191,132 @@ export function resolveGatesForGroup(group: RegisteredGroup): string[] {
   // `gateNames.length` throw at every call site downstream. Validate
   // shape here and treat anything malformed as "no opinion" — falls
   // through to the implicit-chain branch so the row keeps working.
-  const gates = group.containerConfig?.gates;
-  if (Array.isArray(gates) && gates.every((g) => typeof g === 'string')) {
-    return gates;
+  let chain: string[];
+  const explicitGates = group.containerConfig?.gates;
+  if (
+    Array.isArray(explicitGates) &&
+    explicitGates.every((g) => typeof g === 'string')
+  ) {
+    chain = [...explicitGates];
+  } else {
+    const isMainGroup = group.isMain === true;
+    if (isMainGroup) {
+      chain = [];
+    } else if (group.requiresTrigger !== false) {
+      chain = ['trigger'];
+    } else {
+      // requiresTrigger=false: still run the free deterministic
+      // trigger gate when patterns exist, so a match short-circuits
+      // any downstream paid gate. No patterns → empty chain (preserves
+      // the "respond to all" semantic for brand-new groups).
+      const hasPatterns = (group.triggerPatterns?.patterns?.length ?? 0) > 0;
+      chain = hasPatterns ? ['trigger'] : [];
+    }
   }
-  const isMainGroup = group.isMain === true;
-  if (!isMainGroup && group.requiresTrigger !== false) {
-    return ['trigger'];
+  // Stage 2 only adds value for permissive (non-strict) groups.
+  // requiresTrigger=true means "respond only to deterministic matches" —
+  // there's no grey zone for Haiku to adjudicate, and with the
+  // last-gate-wins combinator (in-flight), putting Haiku after a
+  // strict-trigger gate would cause a Stage 1 deny to fall through to
+  // Haiku, silently breaking the strict-gating contract.
+  //
+  // The check is `requiresTrigger !== true` so that explicit-`false` and
+  // unset-or-undefined both qualify as permissive. Existing groups with
+  // requiresTrigger left at its DB default get Stage 2 if stage2Enabled
+  // is true; only groups that have explicitly opted into strict-trigger
+  // gating skip Stage 2.
+  //
+  // Explicit `containerConfig.gates` bypasses this predicate by virtue
+  // of resolving the chain through the explicit branch above — an
+  // operator who pins `gates: ['trigger', 'haiku-classifier']` knows
+  // what they're asking for.
+  if (
+    group.containerConfig?.stage2Enabled === true &&
+    group.requiresTrigger !== true &&
+    !chain.includes('haiku-classifier')
+  ) {
+    chain.push('haiku-classifier');
   }
-  return [];
+  return chain;
 }
 
 /**
- * Build a per-message GateContext. The `replyToMessageId` slot is only
- * populated when the reply points at a bot-emitted message — the
- * trigger gate's `kind: 'reply'` matcher is intentionally pure and
- * relies on the call site to do this DB lookup.
+ * Strip the inline `[Replying to <sender>: "<preview>"]\n` quote prefix
+ * from a stored message's `content` to recover the user's actual body.
+ * Returns the input unchanged when no prefix is detected.
+ *
+ * The Telegram channel bakes this prefix into `content` for the agent
+ * prompt path (router.ts and the agent's /workspace/ipc/input view).
+ * The gate-evaluation path needs a clean view so Stage 1's keyword /
+ * mention / synthetic-identity matchers don't false-positive on
+ * tokens inside the quoted preview (#107).
+ *
+ * Detection is structural: a leading `[Replying to <sender>: "..."]`
+ * followed by a newline. We do NOT rely on matching the exact
+ * `reply_to_sender_name` / `reply_to_message_content` because the
+ * preview is truncated and may include re-escaped quotes.
+ */
+function stripReplyQuotePrefix(content: string): string {
+  // Anchored at start. `[Replying to <name>: "<preview>"]\n` —
+  // greedy-but-line-bounded so a stray `]\n` inside the quoted body
+  // cannot prematurely terminate the prefix. Use `[\s\S]` for the
+  // preview body so multi-line previews (rare but possible) are
+  // captured. Single match, single newline terminator.
+  const re = /^\[Replying to [^\n]+?: "[\s\S]*?"\]\n/;
+  return content.replace(re, '');
+}
+
+/**
+ * Build a per-message GateContext.
+ *
+ * `text` is the user's CLEAN body — the inline `[Replying to ...]`
+ * quote prefix that the Telegram channel bakes into `content` is
+ * stripped here so Stage 1 matchers (#107) see only the user's actual
+ * message. Reply context, when present, is exposed structurally via
+ * `replyTo` so Stage 2's Haiku classifier still gets the positive
+ * signal it relies on for short reply-messages.
  */
 function buildGateContext(
   group: RegisteredGroup,
   groupJid: string,
   msg: NewMessage,
 ): GateContext {
+  const cleanText = stripReplyQuotePrefix(msg.content).trim();
+
+  let replyTo: GateContext['message']['replyTo'];
+  if (msg.reply_to_message_id) {
+    const original = getMessageById(msg.reply_to_message_id, msg.chat_jid);
+    const isAssistant = original?.is_from_me === true;
+    const isBot = original?.is_bot_message === true || isAssistant;
+    const senderName =
+      original?.sender_name ?? msg.reply_to_sender_name ?? 'Unknown';
+    const contentPreview =
+      msg.reply_to_message_content ??
+      (original?.content
+        ? original.content.length > 200
+          ? original.content.slice(0, 200) + '...'
+          : original.content
+        : '');
+    replyTo = {
+      messageId: msg.reply_to_message_id,
+      senderName,
+      isBot,
+      isAssistant,
+      contentPreview,
+    };
+  }
+
   return {
     groupJid,
     groupFolder: group.folder,
     message: {
-      text: msg.content.trim(),
+      text: cleanText,
       senderJid: msg.sender,
-      replyToMessageId: isReplyToBot(msg) ? msg.reply_to_message_id : undefined,
+      // Legacy field kept for tests that pin the old behaviour. Only
+      // populated when the reply target is the assistant — same
+      // semantic as before. New code should read `replyTo.isAssistant`.
+      replyToMessageId: replyTo?.isAssistant ? replyTo.messageId : undefined,
+      replyTo,
       isFromMe: msg.is_from_me === true,
     },
     triggerPatterns: group.triggerPatterns ?? null,
@@ -212,21 +331,51 @@ function buildGateContext(
  * see every message in the batch and the trigger gate's pattern
  * match decides on its own.
  *
- * Returns true when the spawn should proceed.
+ * Returns `{ allowed, allowedMessageId }` — `allowedMessageId` is the
+ * id of the message that produced the `allow` verdict (or, when
+ * `gateNames` is empty and the chain short-circuits, the last
+ * candidate's id). Used by #108's reply-context strip and other
+ * downstream consumers that need to know which message produced the
+ * verdict; canonical's #289 design keeps the 👀 emit at the
+ * agent-runner (not the host).
  */
-export function gateAllowsSpawn(
+export async function evaluateGateChain(
   group: RegisteredGroup,
   groupJid: string,
   candidateMessages: NewMessage[],
   gateNames: string[],
-): boolean {
-  if (gateNames.length === 0) return true;
+): Promise<{ allowed: boolean; allowedMessageId?: string }> {
+  if (gateNames.length === 0) {
+    const last = candidateMessages[candidateMessages.length - 1];
+    return { allowed: true, allowedMessageId: last?.id };
+  }
   for (const m of candidateMessages) {
     const ctx = buildGateContext(group, groupJid, m);
-    const result = runGateChain(gateNames, ctx);
-    if (result.finalDecision === 'allow') return true;
+    const result = await runGateChain(gateNames, ctx);
+    if (result.finalDecision === 'allow') {
+      return { allowed: true, allowedMessageId: m.id };
+    }
   }
-  return false;
+  return { allowed: false };
+}
+
+/**
+ * Boolean wrapper around {@link evaluateGateChain} for callers that
+ * only need the spawn decision.
+ */
+export async function gateAllowsSpawn(
+  group: RegisteredGroup,
+  groupJid: string,
+  candidateMessages: NewMessage[],
+  gateNames: string[],
+): Promise<boolean> {
+  const { allowed } = await evaluateGateChain(
+    group,
+    groupJid,
+    candidateMessages,
+    gateNames,
+  );
+  return allowed;
 }
 
 let lastTimestamp = '';
@@ -1119,6 +1268,29 @@ export function wipeSessionJsonl(
   return deleted;
 }
 
+/**
+ * Apply registration-time defaults to a group's containerConfig. New
+ * groups get `stage2Enabled: true` unless the caller explicitly pinned
+ * a value — caller-pinned (including `false`) wins. Existing groups
+ * pass through unchanged so we never auto-flip a stored config.
+ *
+ * Exported for unit testing; callers should use `registerGroup`.
+ */
+export function applyNewGroupContainerConfigDefaults(
+  group: RegisteredGroup,
+  isNew: boolean,
+): RegisteredGroup {
+  if (!isNew) return group;
+  if (group.containerConfig?.stage2Enabled !== undefined) return group;
+  return {
+    ...group,
+    containerConfig: {
+      ...(group.containerConfig ?? {}),
+      stage2Enabled: true,
+    },
+  };
+}
+
 function registerGroup(jid: string, group: RegisteredGroup): void {
   let groupDir: string;
   try {
@@ -1130,6 +1302,11 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     );
     return;
   }
+
+  // Stage 2 default for NEW groups only: opt them into the Haiku
+  // classifier unless the caller explicitly pinned `stage2Enabled`.
+  // Existing groups keep whatever they already have on disk.
+  group = applyNewGroupContainerConfigDefaults(group, !registeredGroups[jid]);
 
   registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
@@ -1362,16 +1539,35 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // every message in the batch; skip the spawn entirely if no message
   // clears the chain. Per #145, no pre-filter on sender — the gates
   // (specifically the trigger gate) decide pattern-match-only.
+  //
+  // `allowedMessageId` tracks which message produced the gate verdict —
+  // structural support for downstream features (#108 reply context).
+  // Post-gate 👀 emit (#104) is satisfied structurally by canonical's
+  // #289 design: the agent-runner's react-first hook only fires when
+  // a container is alive, which only happens after gates returned allow.
   const gateNames = resolveGatesForGroup(group);
+  let allowedMessageId: string | undefined;
   if (gateNames.length > 0) {
-    if (!gateAllowsSpawn(group, chatJid, missedMessages, gateNames)) {
+    const gateResult = await evaluateGateChain(
+      group,
+      chatJid,
+      missedMessages,
+      gateNames,
+    );
+    if (!gateResult.allowed) {
       logger.info(
         { group: group.name, chatJid, gates: gateNames },
         'gate chain skipped spawn',
       );
       return true;
     }
+    allowedMessageId = gateResult.allowedMessageId;
+  } else {
+    // Empty chain (typically main groups) — every message trivially
+    // clears gating; latest message id is the implicit verdict target.
+    allowedMessageId = missedMessages[missedMessages.length - 1]?.id;
   }
+  void allowedMessageId;
 
   const prompt = formatMessages(missedMessages, TIMEZONE);
 
@@ -1944,16 +2140,32 @@ async function startMessageLoop(): Promise<void> {
           // chain. Non-trigger messages still accumulate in DB and get
           // pulled as context when a trigger eventually arrives. Per
           // #145, no pre-filter on sender — gates decide pattern-only.
+          // `allowedMessageId` tracks which message produced the gate
+          // verdict (structural support for #108 reply context).
           const gateNames = resolveGatesForGroup(group);
+          let allowedMessageId: string | undefined;
           if (gateNames.length > 0) {
-            if (!gateAllowsSpawn(group, chatJid, groupMessages, gateNames)) {
+            const gateResult = await evaluateGateChain(
+              group,
+              chatJid,
+              groupMessages,
+              gateNames,
+            );
+            if (!gateResult.allowed) {
               logger.info(
                 { group: group.name, chatJid, gates: gateNames },
                 'gate chain skipped spawn',
               );
               continue;
             }
+            allowedMessageId = gateResult.allowedMessageId;
+          } else {
+            // Empty chain (typically main groups) — every message
+            // trivially clears gating; latest message id is the
+            // implicit verdict target.
+            allowedMessageId = groupMessages[groupMessages.length - 1]?.id;
           }
+          void allowedMessageId;
 
           // Pull all messages since lastAgentTimestamp so non-trigger
           // context that accumulated between triggers is included.

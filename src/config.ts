@@ -11,6 +11,8 @@ const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_USERNAME',
   'ASSISTANT_HAS_OWN_NUMBER',
+  'ASSISTANT_OWNER_NAME',
+  'ASSISTANT_OWNER_HANDLE',
   'TZ',
   'TELEGRAM_BOT_POOL',
   'TILE_OWNER',
@@ -38,6 +40,24 @@ export const ASSISTANT_USERNAME =
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER ||
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
+
+// Owner identity — used by the Stage 2 classifier so it can recognise
+// the bot's owner when they write ambiguous-but-plausibly-bot-directed
+// messages ("my bot are you here?"). Both vars are OPTIONAL: when
+// either is unset the static-group-context strategy suppresses the
+// owner line entirely and the classifier prompt's owner-aware rule
+// is a no-op (zero behaviour change for installs that don't configure
+// owner identity). Owner handle is the Telegram username WITHOUT the
+// leading `@` (matches `ASSISTANT_USERNAME` convention).
+export const ASSISTANT_OWNER_NAME =
+  process.env.ASSISTANT_OWNER_NAME ||
+  envConfig.ASSISTANT_OWNER_NAME ||
+  undefined;
+export const ASSISTANT_OWNER_HANDLE =
+  process.env.ASSISTANT_OWNER_HANDLE ||
+  envConfig.ASSISTANT_OWNER_HANDLE ||
+  undefined;
+
 export const TELEGRAM_BOT_POOL = (
   process.env.TELEGRAM_BOT_POOL ||
   envConfig.TELEGRAM_BOT_POOL ||

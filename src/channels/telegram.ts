@@ -1257,11 +1257,36 @@ export class TelegramChannel implements Channel {
         return;
       }
 
-      // Resolve reply context — include quoted message content for the agent
+      // Resolve reply context — include quoted message content for the agent.
+      // We capture STRUCTURED reply metadata (reply_to_message_id /
+      // reply_to_message_content / reply_to_sender_name) IN ADDITION TO baking
+      // the inline `[Replying to ...]` prefix into content. The structured
+      // fields are what the gate-evaluation path reads (#107) so Stage 1
+      // matchers don't false-positive on tokens INSIDE the quote prefix.
+      // The inline prefix stays in `content` for backward compat with the
+      // agent prompt path (router.ts and the agent's /workspace/ipc/input view).
       const replyTo = ctx.message.reply_to_message;
+      let replyToMessageId: string | undefined;
+      let replyToMessageContent: string | undefined;
+      let replyToSenderName: string | undefined;
       if (replyTo) {
         const prefix = resolveReply(replyTo, chatJid);
         if (prefix) content = prefix + content;
+        // Resolve structured fields the same way `resolveReply` resolves the
+        // inline prefix: DB lookup first (so bot-emitted messages with the
+        // canonical sender_name are picked up), Telegram payload as fallback.
+        replyToMessageId = replyTo.message_id.toString();
+        const original = getMessageById(replyToMessageId, chatJid);
+        if (original) {
+          replyToMessageContent = truncate(original.content, 200);
+          replyToSenderName = original.sender_name;
+        } else {
+          const text = replyTo.text || replyTo.caption;
+          if (text) {
+            replyToMessageContent = truncate(text, 200);
+            replyToSenderName = replyTo.from?.first_name || 'Unknown';
+          }
+        }
       }
 
       // Handle Telegram's quote feature (selected text excerpt)
@@ -1282,6 +1307,9 @@ export class TelegramChannel implements Channel {
         timestamp,
         is_from_me: false,
         thread_id: threadId ? threadId.toString() : undefined,
+        reply_to_message_id: replyToMessageId,
+        reply_to_message_content: replyToMessageContent,
+        reply_to_sender_name: replyToSenderName,
       });
 
       logger.info(
@@ -1294,7 +1322,9 @@ export class TelegramChannel implements Channel {
       // hook (only when the container is genuinely alive); the
       // observer's progress emojis pin to `target_message_id` from
       // the agent-runner's Query input log line and gate themselves
-      // on that line's `addressed=true|false` field.
+      // on that line's `addressed=true|false` field. #104's
+      // gate-allow-then-react design is satisfied structurally:
+      // gates deny → no spawn → no agent → no 👀.
     });
 
     // Handle non-text messages with placeholders so the agent knows something was sent

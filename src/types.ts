@@ -57,13 +57,42 @@ export interface ContainerConfig {
   agentModel?: string;
   /**
    * Host-side Stage 1 gate chain (#80). Names of gates from
-   * `src/gates/index.ts` registry, evaluated in order with AND-only
-   * semantics: first `deny` wins, all `pass` falls open to allow.
-   * Empty/undefined preserves pre-#80 behaviour (no gating beyond the
-   * legacy `requiresTrigger` boolean — see backwards-compat shim in
+   * `src/gates/index.ts` registry, evaluated in `gateNames` order
+   * (the per-group config order, not registration order). Combinator
+   * is last-gate-wins with allow short-circuit (#99): an `allow`
+   * exits the chain; intermediate `deny` is advisory unless it's the
+   * final verdict; all-`pass` falls open to allow. Empty/undefined
+   * preserves pre-#80 behaviour (no gating beyond the legacy
+   * `requiresTrigger` boolean — see backwards-compat shim in
    * `src/index.ts`).
    */
   gates?: string[];
+  /**
+   * Stage 2 Haiku classifier (#83). Opt-out: when undefined, the
+   * orchestrator defaults new groups to `true` via
+   * `applyNewGroupContainerConfigDefaults` so #82-style grey-zone
+   * messages route through the classifier; existing groups keep
+   * whatever was previously persisted. Set explicitly to `false`
+   * to disable the classifier on a specific group. When effectively
+   * true, `haiku-classifier` is appended to the resolved gate chain
+   * so deterministic gates short-circuit before any API call. Skipped
+   * for `requires_trigger=true` groups (deterministic chain only —
+   * see #98).
+   */
+  stage2Enabled?: boolean;
+  /**
+   * Override the Haiku classifier model. Defaults to
+   * `claude-haiku-4-5-20251001` when unset. Pin to a dated snapshot
+   * if you need cache-stability across model rolls.
+   */
+  stage2ModelId?: string;
+  /**
+   * Selects a registered `ContextStrategy` (see
+   * `src/gates/context-strategy.ts`) for building the volatile suffix
+   * of the classifier prompt. Defaults to `static-group-context` when
+   * unset. Unknown values fall back to the default with an ERROR log.
+   */
+  stage2ContextStrategy?: string;
 }
 
 /**
