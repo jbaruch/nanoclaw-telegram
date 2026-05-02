@@ -78,7 +78,7 @@ import {
 } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { initBotPool } from './channels/telegram.js';
-import { startIpcWatcher } from './ipc.js';
+import { shouldStoreBotMessage, startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { ChannelType } from './text-styles.js';
 import {
@@ -1641,23 +1641,42 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           // persist a telegram_message_id when we actually got one.
           const sentMsgId =
             typeof sendResult === 'string' ? sendResult : undefined;
-          // Store bot response in DB so heartbeat can track answered messages.
-          // Stamp `telegram_message_id` (last chunk's Telegram ID on multi-
-          // chunk sends) so post-hoc "which bot send corresponds to Telegram
-          // message X" queries work — the synthetic `bot-*` id alone makes
-          // that a logs-grep exercise.
-          storeMessage({
-            id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            chat_jid: chatJid,
-            sender: ASSISTANT_NAME,
-            sender_name: ASSISTANT_NAME,
-            content: text,
-            timestamp: new Date().toISOString(),
-            is_from_me: true,
-            is_bot_message: true,
-            reply_to_message_id: replyId,
-            telegram_message_id: sentMsgId,
-          });
+          // Gate `storeMessage` on actual delivery (#428). Pre-#428,
+          // we wrote a `bot-*` row even when `sendMessage` returned
+          // undefined (transport-layer failure surfaced via the
+          // outer Channel catch and #414's narrowed gate). Heartbeat
+          // counts a `bot-*` row as evidence that the user message
+          // was answered — recording one for a send that never
+          // reached Telegram makes the user go silent-and-unanswered
+          // with no operator-visible signal. The channel's outer
+          // catch already logs `[send] Failed to send Telegram
+          // message`, so the operator-visible signal is preserved
+          // either way. Reuses the same `shouldStoreBotMessage`
+          // predicate as the IPC `send_message` and
+          // `send_message_to_chat` paths (`src/ipc.ts:686, 2254`)
+          // so all four bot-row write sites apply the same gate.
+          if (shouldStoreBotMessage(chatJid, sentMsgId)) {
+            storeMessage({
+              id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+              chat_jid: chatJid,
+              sender: ASSISTANT_NAME,
+              sender_name: ASSISTANT_NAME,
+              content: text,
+              timestamp: new Date().toISOString(),
+              is_from_me: true,
+              is_bot_message: true,
+              reply_to_message_id: replyId,
+              telegram_message_id: sentMsgId,
+            });
+          } else {
+            logger.warn(
+              {
+                chatJid,
+                contentLen: text.length,
+              },
+              '[send] Skipping bot-message storeMessage — channel returned no message id (delivery failed)',
+            );
+          }
           // Consume after first reply — prevents replying to the wrong message
           // when user sends follow-ups while background agent is working.
           pendingReplyTo[chatJid] = undefined;
@@ -2536,8 +2555,8 @@ async function main(): Promise<void> {
     },
     sendFile: async (jid, filePath, caption, replyToMessageId) => {
       const channel = findChannel(channels, jid);
-      if (!channel) return;
-      await channel.sendFile?.(jid, filePath, caption, replyToMessageId);
+      if (!channel) return undefined;
+      return channel.sendFile?.(jid, filePath, caption, replyToMessageId);
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

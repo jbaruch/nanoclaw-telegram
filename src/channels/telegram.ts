@@ -1719,8 +1719,16 @@ export class TelegramChannel implements Channel {
     filePath: string,
     caption?: string,
     replyToMessageId?: string,
-  ): Promise<void> {
-    if (!this.bot) return;
+  ): Promise<string | undefined> {
+    // Returns the Telegram message id (as string) on success so the
+    // IPC `send_file` handler can gate the post-send caption-row
+    // `storeMessage` on actual delivery (#428). Pre-#428, sendFile
+    // returned `Promise<void>` and the IPC handler stored the
+    // caption row regardless of whether the send reached Telegram —
+    // a transport-layer failure produced a phantom "answered" row
+    // in `messages.db` that hid the delivery gap from heartbeat's
+    // unanswered-message check.
+    if (!this.bot) return undefined;
     try {
       const numericId = jid.replace(/^tg:/, '');
       // Sanitize the caption same as `sendTelegramMessage` does for text:
@@ -1746,8 +1754,9 @@ export class TelegramChannel implements Channel {
           message_id: parseInt(replyToMessageId, 10),
         };
       }
+      let sentMsg: { message_id: number } | undefined;
       try {
-        await this.bot.api.sendDocument(
+        sentMsg = await this.bot.api.sendDocument(
           numericId,
           new InputFile(filePath),
           options,
@@ -1815,15 +1824,17 @@ export class TelegramChannel implements Channel {
             message_id: parseInt(replyToMessageId, 10),
           };
         }
-        await this.bot.api.sendDocument(
+        sentMsg = await this.bot.api.sendDocument(
           numericId,
           new InputFile(filePath),
           plainOptions,
         );
       }
       logger.info({ jid, filePath, caption }, 'Telegram file sent');
+      return sentMsg?.message_id?.toString();
     } catch (err) {
       logger.error({ jid, filePath, err }, 'Failed to send Telegram file');
+      return undefined;
     }
   }
 
