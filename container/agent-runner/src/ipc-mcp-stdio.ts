@@ -12,6 +12,10 @@ import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
 import { STABLE_TASK_ID_REGEX } from './stable-task-id.js';
+import {
+  buildRegisterGroupContainerConfig,
+  describeOverlayUpdate,
+} from './overlay-tiles.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -822,6 +826,7 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       containerPath: z.string().optional().describe('Optional mount name inside /workspace/extra/. When omitted, the host derives it from basename(hostPath).'),
       readonly: z.boolean().optional().describe('Mount as read-only (default). Set to false to request read-write access.'),
     })).optional().describe('Extra volume mounts for the container, passed through to the host.'),
+    additionalTiles: z.array(z.string().trim().min(1)).optional().describe("Per-chat additive tile overlay (#305): tile names from the local Tessl registry that load IN ADDITION to the trust-tier baseline (`nanoclaw-core`, `nanoclaw-trusted`/`nanoclaw-untrusted`, plus `nanoclaw-admin` for main). Use `list_installed_tiles` first to see what overlay tiles are available. The host validates every entry against the registry — registration is rejected if any tile name is not installed. Empty / omitted = baseline tiles only."),
   },
   async (args) => {
     if (!isMain) {
@@ -836,13 +841,7 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       };
     }
 
-    const containerConfig = (args.trusted !== undefined || args.enableHeartbeat !== undefined || args.additionalMounts)
-      ? {
-          ...(args.trusted !== undefined ? { trusted: args.trusted } : {}),
-          ...(args.enableHeartbeat !== undefined ? { enableHeartbeat: args.enableHeartbeat } : {}),
-          ...(args.additionalMounts ? { additionalMounts: args.additionalMounts } : {}),
-        }
-      : undefined;
+    const containerConfig = buildRegisterGroupContainerConfig(args);
 
     const data = {
       type: 'register_group',
@@ -1042,6 +1041,46 @@ Use this when renaming the assistant in a chat or switching between always-respo
             args.requiresTrigger === undefined
               ? `Trigger update requested for ${args.jid} → "${args.trigger}". (No-op if the JID isn't registered — call register_group first.)`
               : `Trigger update requested for ${args.jid} → "${args.trigger}" (requiresTrigger=${args.requiresTrigger}). (No-op if the JID isn't registered — call register_group first.)`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  'set_additional_tiles',
+  `Set the per-chat additive tile overlay (#305) on a registered group — tile names that load IN ADDITION TO the trust-tier baseline (\`nanoclaw-core\`, \`nanoclaw-trusted\`/\`nanoclaw-untrusted\`, plus \`nanoclaw-admin\` for main). Main group only.
+
+Use this to give a chat extra capabilities (e.g. a coding chat with \`nanoclaw-coding\`) without changing its trust tier. Call \`list_installed_tiles\` first to see what overlay tiles are available — the host rejects the whole write if any entry isn't installed in the registry, so a typo blocks the change at write time rather than silently dropping a capability at next spawn. Pass \`additionalTiles: []\` (or null) to clear the overlay back to baseline tiles only. Other \`containerConfig\` fields (trusted, agentModel, enableHeartbeat, additionalMounts, gates) are preserved verbatim.`,
+  {
+    groupFolder: z.string().trim().min(1).describe('The folder name of an already-registered group (e.g., "telegram_family-chat", "whatsapp_main"). Whitespace-only rejected.'),
+    additionalTiles: z.array(z.string().trim().min(1)).nullable().describe('Tile names to overlay on top of the trust-tier baseline. `null` or `[]` clears the overlay. Every entry must resolve to an installed tile in the local registry — call `list_installed_tiles` to enumerate. Reserved baseline names (`nanoclaw-core`, `nanoclaw-trusted`, `nanoclaw-untrusted`, `nanoclaw-admin`) are deduped against the baseline at spawn time and have no effect when listed here.'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          { type: 'text' as const, text: 'Only the main group can change tile overlays.' },
+        ],
+        isError: true,
+      };
+    }
+    const data = {
+      type: 'set_additional_tiles',
+      groupFolder: args.groupFolder,
+      additionalTiles: args.additionalTiles,
+      timestamp: new Date().toISOString(),
+    };
+    writeIpcFile(TASKS_DIR, data);
+    const desc = describeOverlayUpdate(args.additionalTiles);
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          // "requested" rather than "applied" — host applies the IPC asynchronously and may
+          // reject the whole write if any tile isn't installed. Agent should follow up with
+          // chat_status (or read available_groups.json) to confirm the new overlay landed.
+          text: `Tile overlay update requested for ${args.groupFolder} → ${desc}. (No-op if the groupFolder isn't registered, or if any tile isn't installed in the registry — call list_installed_tiles to verify names first.)`,
         },
       ],
     };
@@ -1813,6 +1852,23 @@ server.tool(
       message_id: args.message_id,
       limit: args.limit,
     });
+  },
+);
+
+server.tool(
+  'list_installed_tiles',
+  `List every tile installed in the local Tessl registry — the same set \`set_additional_tiles\` and \`register_group\`'s \`additionalTiles\` validate against. Use this BEFORE proposing a per-chat overlay change so the operator picks from valid names; a typo would otherwise fail at the host with no good way to recover from inside the conversation. Returns a JSON object with \`tiles\` (sorted name list) and \`registryAbsent\` (true on cold-start when \`tessl install\` has never run — operator should run \`tessl_update\` first). Includes the trust-tier baseline names too (\`nanoclaw-core\`, \`nanoclaw-trusted\`, \`nanoclaw-untrusted\`, \`nanoclaw-admin\`); those are valid tile names but configuring one as an overlay is a no-op (the tile is already loaded by the trust-tier baseline). Read-only; never mutates the registry. Main group only.`,
+  {},
+  async () => {
+    if (!isMain) {
+      return {
+        content: [
+          { type: 'text' as const, text: 'list_installed_tiles is admin-tile only.' },
+        ],
+        isError: true,
+      };
+    }
+    return runHostOperation('list_installed_tiles');
   },
 );
 
