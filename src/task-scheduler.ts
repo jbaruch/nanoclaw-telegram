@@ -1021,22 +1021,38 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         // state set by the remediation. See #102 round-4 review.
 
         dispatchedTaskIds.add(currentTask.id);
-        deps.queue.enqueueTask(
-          currentTask.chat_jid,
-          currentTask.id,
-          MAINTENANCE_SESSION_NAME,
-          () => {
-            // Pair the dispatched-set cleanup with the dispatch itself
-            // so it runs regardless of how runTask resolves (success,
-            // throw, early-return on invalid group folder). Putting
-            // the cleanup here rather than inside runTask's existing
-            // `finally` keeps the runTask body unaware of the
-            // bookkeeping the loop owns.
-            return runTask(currentTask, deps).finally(() => {
-              dispatchedTaskIds.delete(currentTask.id);
-            });
-          },
-        );
+        try {
+          deps.queue.enqueueTask(
+            currentTask.chat_jid,
+            currentTask.id,
+            MAINTENANCE_SESSION_NAME,
+            () => {
+              // Pair the dispatched-set cleanup with the dispatch itself
+              // so it runs regardless of how runTask resolves (success,
+              // throw, early-return on invalid group folder). Putting
+              // the cleanup here rather than inside runTask's existing
+              // `finally` keeps the runTask body unaware of the
+              // bookkeeping the loop owns.
+              return runTask(currentTask, deps).finally(() => {
+                dispatchedTaskIds.delete(currentTask.id);
+              });
+            },
+          );
+        } catch (err) {
+          // enqueueTask threw synchronously before the runTask wrapper
+          // got invoked → the wrapper's `.finally` never runs → the
+          // dispatched-set cleanup never happens. Without this catch
+          // the row would be wedged in `dispatchedTaskIds` forever and
+          // the dueTasks loop would skip it on every subsequent tick.
+          // Clear the bookkeeping and re-throw so the outer terminal
+          // catch logs the underlying enqueue failure, per
+          // `jbaruch/coding-policy: error-handling` (graceful recovery
+          // from infrastructure faults — don't fail into a stuck
+          // state). Verified by the dispatched-leak regression test
+          // in `task-scheduler.test.ts`.
+          dispatchedTaskIds.delete(currentTask.id);
+          throw err;
+        }
       }
     } catch (err) {
       // Terminal safety net for the scheduler loop. Inner code paths

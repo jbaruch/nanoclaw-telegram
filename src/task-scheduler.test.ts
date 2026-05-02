@@ -2295,4 +2295,76 @@ describe('interval cadence end-to-end (#438)', () => {
     releaseContainer();
     await vi.advanceTimersByTimeAsync(10);
   });
+
+  it('clears dispatchedTaskIds when enqueueTask throws synchronously (does not wedge the row)', async () => {
+    // OpenAI policy review on PR #446: if `deps.queue.enqueueTask`
+    // throws synchronously, the runTask wrapper's `.finally` never
+    // runs and the row stays in `dispatchedTaskIds` forever — the
+    // scheduler would skip it on every subsequent tick. The fix
+    // wraps the enqueue call in try/catch and clears the bookkeeping
+    // before re-throwing so the next tick can retry. This test
+    // exercises that path: first tick throws on enqueue, second tick
+    // (with enqueue restored) successfully dispatches.
+    const ms = 1_800_000;
+    const t0 = Date.now() - 1000;
+    createTask({
+      id: 'interval-enqueue-throws',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      schedule_type: 'interval',
+      schedule_value: String(ms),
+      context_mode: 'isolated',
+      next_run: new Date(t0).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    mockRunContainerAgent.mockImplementation(async () => ({
+      status: 'success',
+      result: 'ok',
+      newSessionId: 'sid',
+    }));
+
+    let firstTickEnqueueCalled = false;
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        if (!firstTickEnqueueCalled) {
+          firstTickEnqueueCalled = true;
+          throw new Error('queue saturation simulation');
+        }
+        void fn();
+      },
+    );
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
+      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+      wipeSessionJsonl: vi.fn(() => 1),
+    });
+
+    // First tick — enqueue throws. The terminal scheduler catch
+    // swallows the throw and the loop survives; importantly, the
+    // dispatched-set cleanup must have run BEFORE re-throw so the
+    // row isn't wedged.
+    await vi.advanceTimersByTimeAsync(10);
+    expect(enqueueTask).toHaveBeenCalledTimes(1);
+
+    // Second tick — enqueue is healthy now; the row must still be
+    // due (we never advanced `next_run` because we never completed),
+    // and dispatchedTaskIds must NOT contain the id, so the loop
+    // picks it up and dispatches it. Without the catch+cleanup the
+    // row would stay skipped forever.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(enqueueTask).toHaveBeenCalledTimes(2);
+
+    // Drain the run so the test doesn't leave open promises.
+    await vi.advanceTimersByTimeAsync(10);
+  });
 });
