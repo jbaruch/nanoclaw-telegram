@@ -1432,17 +1432,33 @@ export function buildVolumeMounts(
   // returns `null` when the registry directory itself doesn't exist
   // — treated as "all additionalTiles missing" so the spawn refuses
   // with the same diagnostic.
-  const configuredOverlay = group.containerConfig?.additionalTiles ?? [];
-  if (configuredOverlay.length > 0) {
+  //
+  // We validate the NORMALIZED overlay (post-`selectTiles` filtering:
+  // trimmed, baseline-deduped, within-overlay-deduped, whitespace
+  // skipped) rather than the raw config. The IPC handler enforces
+  // these invariants at write time, but a config that bypassed IPC
+  // (manual DB edit, migration, future IPC variant) might still carry
+  // whitespace-padded or duplicate entries; validating raw entries
+  // against `installed` would falsely flag "  nanoclaw-coding" as
+  // missing while `selectTiles` would happily install the trimmed
+  // form. Slicing `tilesToInstall` past the baseline length keeps the
+  // guard checking exactly the names that will be installed.
+  const baselineLength = selectTiles(
+    isMain,
+    !!group.containerConfig?.trusted,
+  ).length;
+  const overlay = tilesToInstall.slice(baselineLength);
+  if (overlay.length > 0) {
     const installed = new Set(getInstalledTiles() ?? []);
-    const missing = configuredOverlay.filter((t) => !installed.has(t));
+    const missing = overlay.filter((t) => !installed.has(t));
     if (missing.length > 0) {
       const detail = `additionalTiles missing from registry: ${missing.join(', ')} (registry=${registryTiles}). Run \`tessl update\` in the orchestrator or remove the entries via \`set_additional_tiles\`.`;
       logger.error(
         {
           groupFolder: group.folder,
           missing,
-          configuredOverlay,
+          configuredOverlay: group.containerConfig?.additionalTiles,
+          normalizedOverlay: overlay,
           registryTiles,
         },
         `Refusing to spawn container: ${detail}`,
