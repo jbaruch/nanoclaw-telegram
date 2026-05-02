@@ -123,30 +123,14 @@ beforeEach(() => {
       groups[jid] = group;
       setRegisteredGroup(jid, group);
 
-      // Mirror src/index.ts registerGroup heartbeat creation: only fires
-      // when `containerConfig.enableHeartbeat` is explicitly opted in
-      // (#158 — auto-create on `requiresTrigger` was removed because no
-      // group ever had that flag set). Strict `=== true` and
-      // `context_mode: 'isolated'` to match production exactly so a
-      // regression on either dimension trips these tests.
-      if (group.containerConfig?.enableHeartbeat === true && !group.isMain) {
-        const heartbeatId = `heartbeat-${group.folder}`;
-        if (!getTaskById(heartbeatId)) {
-          createTask({
-            id: heartbeatId,
-            group_folder: group.folder,
-            chat_jid: jid,
-            prompt: 'mock-heartbeat-prompt',
-            schedule_type: 'cron',
-            schedule_value: '*/15 * * * *',
-            context_mode: 'isolated',
-            next_run: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-            status: 'active',
-            created_at: new Date().toISOString(),
-            created_by_role: 'owner',
-          });
-        }
-      }
+      // Production registerGroup no longer creates a non-main
+      // `heartbeat-<folder>` row — the non-main heartbeat task was
+      // retired in #453 along with the `tessl__check-unanswered` skill
+      // it drove (`jbaruch/nanoclaw-core#38`). The mock matches: no
+      // task creation here for non-main groups regardless of
+      // `containerConfig.enableHeartbeat`. Main-group heartbeat is
+      // created inline in production but isn't exercised by these IPC
+      // auth tests, so it stays out of this mock.
     },
     unregisterGroup: (jid) => {
       // Mirror src/index.ts unregisterGroup: in-memory + DB delete in
@@ -1139,14 +1123,15 @@ describe('register_group success', () => {
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
   });
 
-  it('register_group does NOT auto-create a heartbeat for a non-main group with requiresTrigger=true (#158)', async () => {
-    // Pre-#158, the `requiresTrigger !== false` branch in registerGroup
-    // would surprise-create a heartbeat for any non-main group whose
-    // trigger flag was on. The IPC handler defaults `requiresTrigger`
-    // to false when omitted (which would skip the old branch anyway),
-    // so we explicitly set `requiresTrigger: true` here to exercise the
-    // exact pre-#158 condition. With the auto-rule removed, heartbeat
-    // creation now requires `containerConfig.enableHeartbeat === true`.
+  it('register_group does NOT create a heartbeat for a non-main group, regardless of requiresTrigger or enableHeartbeat (#158, #453)', async () => {
+    // Pre-#158, a `requiresTrigger !== false` non-main group got an
+    // auto-created heartbeat. Pre-#453, an explicit
+    // `containerConfig.enableHeartbeat: true` opt-in created a
+    // `tessl__check-unanswered`-driven heartbeat. With check-unanswered
+    // retired in `jbaruch/nanoclaw-core#38`, both code paths are gone:
+    // non-main groups never get a `heartbeat-<folder>` row from
+    // registerGroup. The flag stays in the schema for backwards
+    // compatibility but is a no-op there.
     await processTaskIpc(
       {
         type: 'register_group',
@@ -1164,12 +1149,10 @@ describe('register_group success', () => {
     expect(getRegisteredGroup('silent@g.us')).toBeDefined();
     expect(getRegisteredGroup('silent@g.us')?.requiresTrigger).toBe(true);
     expect(getTaskById('heartbeat-silent-group')).toBeUndefined();
-  });
 
-  it('register_group with enableHeartbeat creates the non-main heartbeat (#158)', async () => {
-    // Explicit opt-in is the only path that creates a non-main
-    // heartbeat after #158. Verify the row appears with a 15-minute
-    // cron schedule.
+    // Explicit opt-in via `enableHeartbeat: true` is also a no-op
+    // post-#453. Flag value is preserved on the registered group; no
+    // heartbeat task row gets created.
     await processTaskIpc(
       {
         type: 'register_group',
@@ -1187,11 +1170,7 @@ describe('register_group success', () => {
     expect(getRegisteredGroup('beating@g.us')?.containerConfig).toEqual({
       enableHeartbeat: true,
     });
-    const heartbeat = getTaskById('heartbeat-beating-group');
-    expect(heartbeat).toBeDefined();
-    expect(heartbeat?.group_folder).toBe('beating-group');
-    expect(heartbeat?.schedule_type).toBe('cron');
-    expect(heartbeat?.schedule_value).toBe('*/15 * * * *');
+    expect(getTaskById('heartbeat-beating-group')).toBeUndefined();
   });
 });
 

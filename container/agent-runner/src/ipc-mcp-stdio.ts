@@ -1701,7 +1701,7 @@ server.tool(
 
 skillName options:
 - omit → push everything currently in staging
-- specific skill (e.g. "tessl__check-unanswered") → push only that skill
+- specific skill (e.g. "tessl__heartbeat") → push only that skill
 - "--rules-only" → push only rules`,
   {
     tileName: z
@@ -1717,7 +1717,7 @@ skillName options:
       .string()
       .min(1)
       .describe(
-        'Short commit message describing the fixup (e.g. "fix: address Copilot comment on unanswered-precheck.py").',
+        'Short commit message describing the fixup (e.g. "fix: address Copilot comment on heartbeat-precheck.py").',
       ),
     skillName: z
       .string()

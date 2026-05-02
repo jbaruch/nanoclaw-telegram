@@ -178,8 +178,8 @@ describe('createFilteredDb (untrusted DB isolation)', () => {
       expect(messages.find((m) => m.id === 'b1')).toBeUndefined();
       expect(messages.find((m) => m.id === 'b2')).toBeUndefined();
 
-      // Reactions must exist (check-unanswered.py joins on this) and be
-      // scoped to the target chat — chatB reactions must not leak.
+      // Reactions table must be present (filtered-DB consumers query it)
+      // and scoped to the target chat — chatB reactions must not leak.
       const reactionsTable = db
         .prepare(
           "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -202,7 +202,7 @@ describe('createFilteredDb (untrusted DB isolation)', () => {
   it('filtered DB has empty reactions table when source DB has no reactions table (pre-migration)', () => {
     // Source DB without reactions — simulates a fresh install before the
     // reactions migration ran. The filtered DB must still expose an empty
-    // reactions table so check-unanswered.py's join doesn't abort with
+    // reactions table so consumers that JOIN on it don't abort with
     // "no such table: reactions". Specific existence check on
     // src.sqlite_master replaced an earlier bare try/catch that would
     // have masked corruption / lock errors as "no reactions".
@@ -680,7 +680,7 @@ describe('atomicPublishDir (regression #95)', () => {
       'jbaruch',
       'nanoclaw-core',
       'skills',
-      'check-unanswered',
+      'status',
       'scripts',
     );
     fs.mkdirSync(sub, { recursive: true });
@@ -713,7 +713,7 @@ describe('atomicPublishDir (regression #95)', () => {
           'jbaruch',
           'nanoclaw-core',
           'skills',
-          'check-unanswered',
+          'status',
           'scripts',
           'check.sh',
         ),
@@ -773,7 +773,7 @@ describe('atomicPublishDir (regression #95)', () => {
           'jbaruch',
           'nanoclaw-core',
           'skills',
-          'check-unanswered',
+          'status',
           'scripts',
           'check.sh',
         ),

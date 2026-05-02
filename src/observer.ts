@@ -514,7 +514,7 @@ export function onAgentLine(source: string, raw: string): void {
     // event below will swap to 🤔/⚡ via the engagement-gated path.
     //
     // Don't arm the watchdog for scheduled tasks. Cron-driven queries
-    // (SmartThings refresh, check-unanswered, heartbeat, etc.) run in
+    // (SmartThings refresh, heartbeat, etc.) run in
     // maintenance containers but share the source folder with the user's
     // default container. Without this gate, a long cron task crossing 120s
     // fires "Still working — 120s in" into the user's chat — looking like

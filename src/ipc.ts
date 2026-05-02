@@ -252,10 +252,10 @@ function scriptResultPath(
 // Prefix for outbound text emitted by the maintenance-session AyeAye.
 // Without the prefix, a scheduled-task reply looks identical to a
 // user-facing reply in the chat, which confused Baruch when he
-// responded to `[check-unanswered heartbeat from maintenance]` messages
-// as if they were live conversation. The prefix is applied BOTH to
-// Telegram-bound text AND to the messages.db copy so the full trail
-// shows provenance — heartbeat accounting, future message recap, etc.
+// responded to `[heartbeat from maintenance]` messages as if they were
+// live conversation. The prefix is applied BOTH to Telegram-bound text
+// AND to the messages.db copy so the full trail shows provenance —
+// heartbeat accounting, future message recap, etc.
 const MAINTENANCE_MESSAGE_PREFIX = '[M] ';
 
 /**

@@ -710,13 +710,13 @@ export function createFilteredDb(
         dst.exec(
           'CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp)',
         );
-        // Reactions scoped to this chat only. check-unanswered.py joins on this
-        // table to skip messages the bot already 👀-reacted to; without it, the
-        // join hits "no such table: reactions" and the whole script aborts.
-        // Created unconditionally so untrusted containers don't depend on
-        // whether the host happens to have any reactions yet — even an empty
-        // table satisfies the join. CTAS can't run if src.reactions doesn't
-        // exist (fresh install before migrations), so check `src.sqlite_master`
+        // Reactions scoped to this chat only. Filtered-DB consumers JOIN
+        // on this table; without it, those joins hit "no such table:
+        // reactions" and abort. Created unconditionally so containers
+        // don't depend on whether the host happens to have any reactions
+        // yet — even an empty table satisfies the join. CTAS can't run
+        // if src.reactions doesn't exist (fresh install before
+        // migrations), so check `src.sqlite_master`
         // explicitly and fall back to an empty table with the known schema in
         // that one case. Bare try/catch would also swallow corruption, lock,
         // and permission errors — a missing table is the only fallback case
@@ -1275,10 +1275,9 @@ export function buildVolumeMounts(
   // failure mode for skills that need to persist state across runs:
   // `/workspace/group/` is read-only for untrusted, so any skill that
   // wrote there worked for trusted/main but silently broke for
-  // untrusted (the audit's "strictly worse than no precheck" case
-  // that `unanswered-precheck.py` worked around by routing through
-  // `/home/node/.claude/nanoclaw-state/`). With this mount, every tier
-  // has a single canonical writable location to write to.
+  // untrusted (the audit's "strictly worse than no precheck" case).
+  // With this mount, every tier has a single canonical writable
+  // location to write to.
   //
   // Per-group (not per-session): matches the established mental model
   // where skills think in terms of "this group's state". A scheduled
