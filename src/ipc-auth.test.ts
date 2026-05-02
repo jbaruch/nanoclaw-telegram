@@ -39,6 +39,27 @@ vi.mock('./config.js', async () => {
   };
 });
 
+// `set_additional_tiles` (#305) validates every entry against the local
+// Tessl registry by calling `getInstalledTiles()` from container-runner.
+// In the test environment there's no real registry on disk, so the
+// real implementation would always return `null` and reject every
+// write — including the happy-path tests. Stub it here so tests
+// control the "installed" set per scenario. Other container-runner
+// exports (`DEFAULT_SESSION_NAME`, `resolveAgentModel`, …) are
+// preserved so unrelated tests in this file aren't disturbed.
+const { mockGetInstalledTiles } = vi.hoisted(() => ({
+  mockGetInstalledTiles: vi.fn<() => string[] | null>(() => []),
+}));
+vi.mock('./container-runner.js', async () => {
+  const actual = await vi.importActual<typeof import('./container-runner.js')>(
+    './container-runner.js',
+  );
+  return {
+    ...actual,
+    getInstalledTiles: mockGetInstalledTiles,
+  };
+});
+
 import path from 'path';
 
 import {
@@ -1850,6 +1871,290 @@ describe('set_agent_model', () => {
     );
 
     // No new registration created.
+    const allFolders = Object.values(groups).map((g) => g.folder);
+    expect(allFolders).not.toContain('never-registered-folder');
+  });
+});
+
+// --- set_additional_tiles (#305) ---
+//
+// Per-chat additive tile overlay. Authorisation: main-only — overlay
+// tiles add capabilities, so a non-main agent can't grant itself
+// extra skills/rules. Validation is fail-closed against the live
+// registry: every entry must resolve to an installed tile or the
+// whole write is rejected. Sibling containerConfig fields must
+// survive untouched (regression-bait — set_trusted clobbered them
+// pre-#105 and #305 must not regress that).
+
+describe('set_additional_tiles', () => {
+  beforeEach(() => {
+    // Default to a registry that has a couple of overlay tiles
+    // installed; individual tests override per-scenario.
+    mockGetInstalledTiles.mockReturnValue([
+      'nanoclaw-coding',
+      'nanoclaw-family',
+      'nanoclaw-core',
+      'nanoclaw-trusted',
+      'nanoclaw-untrusted',
+      'nanoclaw-admin',
+    ]);
+  });
+
+  it('main can set additionalTiles when every entry is installed', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_additional_tiles',
+        groupFolder: 'other-group',
+        additionalTiles: ['nanoclaw-coding', 'nanoclaw-family'],
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.additionalTiles,
+    ).toEqual(['nanoclaw-coding', 'nanoclaw-family']);
+  });
+
+  it('non-main groups cannot set additionalTiles even on their own folder', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_additional_tiles',
+        groupFolder: 'other-group',
+        additionalTiles: ['nanoclaw-coding'],
+      },
+      'other-group',
+      false,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.additionalTiles,
+    ).toBeUndefined();
+  });
+
+  it('rejects the whole write if any tile is not in the registry', async () => {
+    mockGetInstalledTiles.mockReturnValue(['nanoclaw-coding']);
+    await processTaskIpc(
+      {
+        type: 'set_additional_tiles',
+        groupFolder: 'other-group',
+        additionalTiles: ['nanoclaw-coding', 'nanoclaw-typo'],
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // No partial acceptance — `nanoclaw-coding` must NOT have been
+    // persisted just because it happened to validate. The whole
+    // payload is rejected so the operator notices the typo.
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.additionalTiles,
+    ).toBeUndefined();
+  });
+
+  it('rejects when the registry directory does not exist', async () => {
+    mockGetInstalledTiles.mockReturnValue(null);
+    await processTaskIpc(
+      {
+        type: 'set_additional_tiles',
+        groupFolder: 'other-group',
+        additionalTiles: ['nanoclaw-coding'],
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.additionalTiles,
+    ).toBeUndefined();
+  });
+
+  it('clears additionalTiles when payload is null', async () => {
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      containerConfig: { additionalTiles: ['nanoclaw-coding'] },
+    });
+    groups['other@g.us'] = getRegisteredGroup('other@g.us')!;
+
+    await processTaskIpc(
+      {
+        type: 'set_additional_tiles',
+        groupFolder: 'other-group',
+        additionalTiles: null,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.additionalTiles,
+    ).toBeUndefined();
+  });
+
+  it('treats empty array as a clear (drops the field rather than persisting [])', async () => {
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      containerConfig: { additionalTiles: ['nanoclaw-coding'] },
+    });
+    groups['other@g.us'] = getRegisteredGroup('other@g.us')!;
+
+    await processTaskIpc(
+      {
+        type: 'set_additional_tiles',
+        groupFolder: 'other-group',
+        additionalTiles: [],
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.additionalTiles,
+    ).toBeUndefined();
+  });
+
+  it('de-duplicates repeated entries at write time', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_additional_tiles',
+        groupFolder: 'other-group',
+        additionalTiles: [
+          'nanoclaw-coding',
+          'nanoclaw-coding',
+          'nanoclaw-family',
+        ],
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.additionalTiles,
+    ).toEqual(['nanoclaw-coding', 'nanoclaw-family']);
+  });
+
+  it('rejects whitespace-only entries (defensive — selectTiles also skips them)', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_additional_tiles',
+        groupFolder: 'other-group',
+        additionalTiles: ['nanoclaw-coding', '   '],
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.additionalTiles,
+    ).toBeUndefined();
+  });
+
+  it('rejects non-string entries', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_additional_tiles',
+        groupFolder: 'other-group',
+        // 42 violates the string-only contract.
+        additionalTiles: ['nanoclaw-coding', 42] as unknown as string[],
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.additionalTiles,
+    ).toBeUndefined();
+  });
+
+  it('rejects non-array non-null payload (e.g. a single string)', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_additional_tiles',
+        groupFolder: 'other-group',
+        additionalTiles: 'nanoclaw-coding' as unknown as string[],
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.additionalTiles,
+    ).toBeUndefined();
+  });
+
+  it('rejects missing groupFolder', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_additional_tiles',
+        additionalTiles: ['nanoclaw-coding'],
+      } as Parameters<typeof processTaskIpc>[0],
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.additionalTiles,
+    ).toBeUndefined();
+  });
+
+  it('preserves sibling containerConfig fields on update', async () => {
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      containerConfig: {
+        trusted: true,
+        agentModel: 'opus',
+        enableHeartbeat: true,
+        additionalMounts: [
+          { hostPath: '/tmp/extra', containerPath: 'extra', readonly: true },
+        ],
+      },
+    });
+    groups['other@g.us'] = getRegisteredGroup('other@g.us')!;
+
+    await processTaskIpc(
+      {
+        type: 'set_additional_tiles',
+        groupFolder: 'other-group',
+        additionalTiles: ['nanoclaw-coding'],
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const cfg = getRegisteredGroup('other@g.us')?.containerConfig;
+    expect(cfg?.additionalTiles).toEqual(['nanoclaw-coding']);
+    expect(cfg?.trusted).toBe(true);
+    expect(cfg?.agentModel).toBe('opus');
+    expect(cfg?.enableHeartbeat).toBe(true);
+    expect(cfg?.additionalMounts).toEqual([
+      { hostPath: '/tmp/extra', containerPath: 'extra', readonly: true },
+    ]);
+  });
+
+  it('set_additional_tiles on unregistered groupFolder is a no-op', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_additional_tiles',
+        groupFolder: 'never-registered-folder',
+        additionalTiles: ['nanoclaw-coding'],
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
     const allFolders = Object.values(groups).map((g) => g.folder);
     expect(allFolders).not.toContain('never-registered-folder');
   });

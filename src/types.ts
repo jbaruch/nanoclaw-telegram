@@ -93,6 +93,26 @@ export interface ContainerConfig {
    * unset. Unknown values fall back to the default with an ERROR log.
    */
   stage2ContextStrategy?: string;
+  /**
+   * Per-chat additive tile overlay (#305). Tile names from the local
+   * registry under `tessl-workspace/.tessl/tiles/<TILE_OWNER>/` that
+   * load IN ADDITION TO the trust-tier baseline (`selectTiles`),
+   * never as a replacement. Empty / undefined → tier-tiles only.
+   *
+   * Validation is fail-closed at both ends:
+   *  - Write-time (`set_additional_tiles` IPC): every entry must
+   *    resolve to an installed tile or the write is rejected with a
+   *    diagnostic log line.
+   *  - Spawn-time (`startContainerSession`): if any entry fails to
+   *    resolve at spawn (e.g. a registry rebuild dropped it after the
+   *    write), the container refuses to spawn rather than silently
+   *    losing capabilities.
+   *
+   * Order is preserved; duplicates against the baseline are dropped so
+   * `selectTiles` returns a stable de-duplicated install order
+   * (baseline first, additions appended).
+   */
+  additionalTiles?: string[];
 }
 
 /**
