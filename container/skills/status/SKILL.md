@@ -19,7 +19,19 @@ Run the checks below and compile results into the report format.
 echo "Timestamp: $(date)"
 echo "Working dir: $(pwd)"
 echo "Channel: main"
+echo "Agent model: ${AGENT_MODEL:-opus[1m]}"
 ```
+
+`AGENT_MODEL` is the *effective* agent model for this container — the
+per-group override (if `containerConfig.agentModel` was set via
+`set_agent_model`) or the orchestrator's global default otherwise. Surfaced
+here so operators can audit which groups run on which model without
+grepping spawn logs (per-group override added by NanoClaw#395). The
+`${AGENT_MODEL:-opus[1m]}` fallback mirrors the agent-runner's own
+`process.env.AGENT_MODEL || 'opus[1m]'` default in
+`container/agent-runner/src/index.ts` so the printed value matches the
+model actually in use when the env var is unset (rare in practice — the
+orchestrator's container-runner sets it on every spawn).
 
 ### 2. Workspace and mount visibility
 
@@ -72,6 +84,7 @@ Present as a clean, readable message:
 • Channel: main
 • Time: 2026-03-14 09:30 UTC
 • Working dir: /workspace/group
+• Agent model: claude-sonnet-4-6[1m]
 
 *Workspace:*
 • Group folder: ✓ (N files)
