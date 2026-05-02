@@ -79,12 +79,23 @@ function insertTask(
   db.close();
 }
 
-function insertRun(taskId: string, runAtIso: string, durationMs: number): void {
+function insertRun(
+  taskId: string,
+  runAtIso: string,
+  durationMs: number,
+  opts: { status?: string; result?: string | null } = {},
+): void {
   const db = new Database(dbPath);
   db.prepare(
     `INSERT INTO task_run_logs (task_id, run_at, duration_ms, status, result)
-     VALUES (?, ?, ?, 'success', NULL)`,
-  ).run(taskId, runAtIso, durationMs);
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(
+    taskId,
+    runAtIso,
+    durationMs,
+    opts.status ?? 'success',
+    opts.result === undefined ? null : opts.result,
+  );
   db.close();
 }
 
@@ -225,6 +236,45 @@ describe('runAuditSnapshot', () => {
     expect(() => runAuditSnapshot({ dbPath, windowDays: 1.5 })).toThrow(
       /windowDays must be a positive integer/,
     );
+  });
+
+  it("counts only `status='success' AND result IS NULL` short runs as gated_likely (#375 review)", () => {
+    // Per the audit doc's "How the gate actually works" section, the
+    // canonical gate signature is `result=null` + short duration on a
+    // success row. Fast errors (status='error') share the short
+    // duration but aren't gates; counting them in `gated_likely`
+    // would inflate the heuristic.
+    makeFixtureDb();
+    insertTask('t1', 'g1', 'cron', '0 7 * * *', 'active', 'precheck.py');
+
+    const now = new Date('2026-05-01T00:00:00Z');
+    // Genuine gate-out: success + null result + short duration → counts.
+    insertRun('t1', '2026-04-15T07:00:00Z', 3_000, {
+      status: 'success',
+      result: null,
+    });
+    // Fast error: status='error' → does NOT count (was conflated pre-fix).
+    insertRun('t1', '2026-04-16T07:00:00Z', 4_000, {
+      status: 'error',
+      result: null,
+    });
+    // Short success WITH result body: agent woke briefly, did work →
+    // does NOT count as a gate.
+    insertRun('t1', '2026-04-17T07:00:00Z', 5_000, {
+      status: 'success',
+      result: '{"answered": true}',
+    });
+    // Long success: full agent run → does NOT count.
+    insertRun('t1', '2026-04-18T07:00:00Z', 60_000, {
+      status: 'success',
+      result: null,
+    });
+
+    const snap = runAuditSnapshot({ dbPath, now });
+
+    const t = snap.tasks.find((tt) => tt.task_id === 't1')!;
+    expect(t.fires).toBe(4);
+    expect(t.gated_likely).toBe(1); // only the genuine gate-out
   });
 
   it('orders tasks deterministically by group_folder then schedule_type then id', () => {

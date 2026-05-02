@@ -97,12 +97,22 @@ export function runAuditSnapshot(args: {
       )
       .all() as TaskRow[];
 
+    // `gated_likely` is conditioned on `status='success' AND result
+    // IS NULL` — the canonical precheck-gate signature per the audit
+    // doc's "How the gate actually works" section. Counting every
+    // short run would conflate fast failures (status='error') with
+    // genuine gate-outs and inflate the heuristic.
     const statsStmt = db.prepare(
-      `SELECT COUNT(*)                                          AS fires,
-              SUM(CASE WHEN duration_ms < ? THEN 1 ELSE 0 END)  AS gated_likely,
-              AVG(duration_ms)                                  AS avg_ms,
-              MIN(duration_ms)                                  AS min_ms,
-              MAX(duration_ms)                                  AS max_ms
+      `SELECT COUNT(*) AS fires,
+              SUM(CASE
+                    WHEN duration_ms < ?
+                     AND status = 'success'
+                     AND result IS NULL
+                    THEN 1 ELSE 0
+                  END) AS gated_likely,
+              AVG(duration_ms) AS avg_ms,
+              MIN(duration_ms) AS min_ms,
+              MAX(duration_ms) AS max_ms
          FROM task_run_logs
         WHERE task_id = ?
           AND run_at >= ?
