@@ -55,6 +55,15 @@ export interface ContainerConfig {
    * in). Cleared via the `set_agent_model` IPC with `agentModel: null`.
    */
   agentModel?: string;
+  /**
+   * Host-side Stage 1 gate chain (#80). Names of gates from
+   * `src/gates/index.ts` registry, evaluated in order with AND-only
+   * semantics: first `deny` wins, all `pass` falls open to allow.
+   * Empty/undefined preserves pre-#80 behaviour (no gating beyond the
+   * legacy `requiresTrigger` boolean — see backwards-compat shim in
+   * `src/index.ts`).
+   */
+  gates?: string[];
 }
 
 /**

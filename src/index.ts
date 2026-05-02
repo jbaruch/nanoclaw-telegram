@@ -102,6 +102,7 @@ import { installTelegramOutboundTap } from './telegram-outbound-tap.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 import { initObserver } from './observer.js';
+import { runGateChain, GateContext } from './gates/index.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -147,6 +148,85 @@ function isAddressedToUs(
   return messages.some(
     (m) => triggerPattern.test(m.content.trim()) || isReplyToBot(m),
   );
+}
+
+/**
+ * Resolve which gates apply to a group for inbound-message gating (#80).
+ *
+ * Migration path A (locked in spec): groups with no `gates` configured
+ * AND `requiresTrigger !== false` get the implicit `['trigger']` chain
+ * so they keep their pre-#80 behaviour bit-for-bit. Main groups and
+ * groups with `requiresTrigger === false` get an empty chain (= always
+ * allow), matching pre-#80 semantics.
+ *
+ * Path B (one-shot DB migration to set `containerConfig.gates =
+ * ['trigger']`) is a future cleanup — the column stays for now.
+ */
+export function resolveGatesForGroup(group: RegisteredGroup): string[] {
+  // `containerConfig` is JSON-parsed but not field-validated at the DB
+  // layer (see db.ts), so a hand-edited row could carry
+  // `gates: null` or `gates: 'trigger'` (string) and trigger a
+  // `gateNames.length` throw at every call site downstream. Validate
+  // shape here and treat anything malformed as "no opinion" — falls
+  // through to the implicit-chain branch so the row keeps working.
+  const gates = group.containerConfig?.gates;
+  if (Array.isArray(gates) && gates.every((g) => typeof g === 'string')) {
+    return gates;
+  }
+  const isMainGroup = group.isMain === true;
+  if (!isMainGroup && group.requiresTrigger !== false) {
+    return ['trigger'];
+  }
+  return [];
+}
+
+/**
+ * Build a per-message GateContext. The `replyToMessageId` slot is only
+ * populated when the reply points at a bot-emitted message — the
+ * trigger gate's `kind: 'reply'` matcher is intentionally pure and
+ * relies on the call site to do this DB lookup.
+ */
+function buildGateContext(
+  group: RegisteredGroup,
+  groupJid: string,
+  msg: NewMessage,
+): GateContext {
+  return {
+    groupJid,
+    groupFolder: group.folder,
+    message: {
+      text: msg.content.trim(),
+      senderJid: msg.sender,
+      replyToMessageId: isReplyToBot(msg) ? msg.reply_to_message_id : undefined,
+      isFromMe: msg.is_from_me === true,
+    },
+    triggerPatterns: group.triggerPatterns ?? null,
+  };
+}
+
+/**
+ * Spawn-decision: run the gate chain over the candidate messages. The
+ * chain is evaluated per-message and the first `allow` flips the
+ * group-level decision to "spawn"; `deny` on every message means
+ * skip. Per #145 there is no sender-allowlist pre-filter — gates
+ * see every message in the batch and the trigger gate's pattern
+ * match decides on its own.
+ *
+ * Returns true when the spawn should proceed.
+ */
+export function gateAllowsSpawn(
+  group: RegisteredGroup,
+  groupJid: string,
+  candidateMessages: NewMessage[],
+  gateNames: string[],
+): boolean {
+  if (gateNames.length === 0) return true;
+  for (const m of candidateMessages) {
+    const ctx = buildGateContext(group, groupJid, m);
+    const result = runGateChain(gateNames, ctx);
+    if (result.finalDecision === 'allow') return true;
+  }
+  return false;
 }
 
 let lastTimestamp = '';
@@ -1278,24 +1358,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (cmdResult.handled) return cmdResult.success;
   // --- End session command interception ---
 
-  // For non-main groups, check if trigger is required and present.
-  // Per #145: trigger-gate is pattern-match-only (or reply-to-bot).
-  // The sender-allowlist clause that used to AND with this check was
-  // removed — see the dropped-block comment near the session-command
-  // gate above for rationale.
-  if (!isMainGroup && group.requiresTrigger !== false) {
-    // Coerce null → undefined → global default @<assistant>. The
-    // legacy gate keeps mentions of the global handle alive even on
-    // groups whose triggerPatterns config holds only regex/
-    // sender_tier entries (no per-group keyword or mention).
-    // Per #145: pattern-match-only trigger gate (see comments at
-    // the two prior trigger gates in this file for the full rationale
-    // on dropping the sender-allowlist clause).
-    const triggerPattern = getTriggerPattern(group.trigger ?? undefined);
-    const hasTrigger = missedMessages.some(
-      (m) => triggerPattern.test(m.content.trim()) || isReplyToBot(m),
-    );
-    if (!hasTrigger) {
+  // Host-side Stage 1 gates (#80). Run the configured gate chain over
+  // every message in the batch; skip the spawn entirely if no message
+  // clears the chain. Per #145, no pre-filter on sender — the gates
+  // (specifically the trigger gate) decide pattern-match-only.
+  const gateNames = resolveGatesForGroup(group);
+  if (gateNames.length > 0) {
+    if (!gateAllowsSpawn(group, chatJid, missedMessages, gateNames)) {
+      logger.info(
+        { group: group.name, chatJid, gates: gateNames },
+        'gate chain skipped spawn',
+      );
       return true;
     }
   }
@@ -1866,24 +1939,20 @@ async function startMessageLoop(): Promise<void> {
           }
           // --- End session command interception ---
 
-          const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
-
-          // For non-main groups, only act on trigger messages.
-          // Non-trigger messages accumulate in DB and get pulled as
-          // context when a trigger eventually arrives.
-          if (needsTrigger) {
-            // Coerce null → undefined → global default. See parallel
-            // call in processGroupMessages above for rationale.
-            // Per #145: pattern-match-only trigger gate (see comments
-            // at the two prior trigger gates in this file for the full
-            // rationale on dropping the sender-allowlist clause).
-            const triggerPattern = getTriggerPattern(
-              group.trigger ?? undefined,
-            );
-            const hasTrigger = groupMessages.some(
-              (m) => triggerPattern.test(m.content.trim()) || isReplyToBot(m),
-            );
-            if (!hasTrigger) continue;
+          // Host-side Stage 1 gates (#80). For non-main groups, only
+          // wake the bot on messages that clear the configured gate
+          // chain. Non-trigger messages still accumulate in DB and get
+          // pulled as context when a trigger eventually arrives. Per
+          // #145, no pre-filter on sender — gates decide pattern-only.
+          const gateNames = resolveGatesForGroup(group);
+          if (gateNames.length > 0) {
+            if (!gateAllowsSpawn(group, chatJid, groupMessages, gateNames)) {
+              logger.info(
+                { group: group.name, chatJid, gates: gateNames },
+                'gate chain skipped spawn',
+              );
+              continue;
+            }
           }
 
           // Pull all messages since lastAgentTimestamp so non-trigger
