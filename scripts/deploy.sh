@@ -250,6 +250,65 @@ done
 echo "  cleaned $OVERRIDE_COUNT group(s) with overrides"
 echo ""
 
+# 4b. #305 Plan B — clean up legacy schedule-task rows for skills that
+#     migrated to declarative `cadence:` frontmatter on the admin tile.
+#
+# The cadence-registry from #305 Phase 2a writes
+# `source = 'cadence-registry'` rows on every container spawn from the
+# installed tile content. For skills that previously fired via
+# operator-bootstrapped `schedule-task`-IPC rows (`source =
+# 'schedule-task'`), the legacy row continues firing in parallel with
+# the registry's row after the admin tile lands the new cadence
+# frontmatter — that's a double-fire bug. This step DELETEs the
+# specific legacy rows whose prompt invokes one of the migrated skills.
+#
+# Predicate is narrow to protect against false positives:
+#   1. `source = 'schedule-task'` — never touches cadence-registry
+#      rows that this script's later container restart will manage.
+#   2. `schedule_type = 'interval'` — both heartbeat and composio-fetch
+#      are 30-min interval-shape legacy rows; the cadence-registry
+#      writes `cron`, and any owner-scheduled cron row that happens to
+#      invoke one of these skills (rare but legal) stays untouched.
+#   3. `prompt LIKE '%MANDATORY FIRST ACTION: Call Skill(skill:
+#      "tessl__<name>")%'` — matches the specific prompt shape the
+#      `schedule-task` IPC formats for operator bootstraps, not just
+#      any prompt that mentions the skill. An ad-hoc owner reminder
+#      ("remind me to check heartbeat") doesn't match. A future
+#      orchestrator-auto-created `heartbeat-<groupFolder>` row that
+#      uses a different prompt template doesn't match either.
+#
+# Idempotent + safe-to-ship-before-the-admin-PR-lands: when no row
+# matches, `result.changes === 0` and nothing happens; when a row
+# matches but the admin tile hasn't yet shipped the new cadence, the
+# skill simply doesn't fire until the next deploy after the admin
+# PR lands (bounded by the cadence-registry's first rebuild after
+# next agent spawn).
+echo "4b. Cleaning legacy schedule-task rows for cadence-migrated skills (#305 Plan B)..."
+docker exec nanoclaw node -e '
+const Database = require("better-sqlite3");
+const db = new Database("/app/store/messages.db");
+const MIGRATED = ["tessl__heartbeat", "tessl__composio-fetch"];
+let total = 0;
+for (const skill of MIGRATED) {
+    const result = db.prepare(`
+        DELETE FROM scheduled_tasks
+         WHERE source = ?
+           AND schedule_type = ?
+           AND prompt LIKE ?
+    `).run(
+        "schedule-task",
+        "interval",
+        `%MANDATORY FIRST ACTION: Call Skill(skill: "${skill}")%`,
+    );
+    if (result.changes > 0) {
+        console.log(`  removed ${result.changes} legacy row(s) for ${skill}`);
+    }
+    total += result.changes;
+}
+console.log(`  total: ${total} legacy row(s) cleaned`);
+'
+echo ""
+
 # 5. Gracefully close agent containers (#221).
 #
 # Pre-#221 this step ran `docker kill` on every nanoclaw-* container
