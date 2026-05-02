@@ -203,7 +203,7 @@ describe('inverse drift invariant — every allowed Telegram reaction has at lea
       const shortcodes = reverseIndex.get(unicode);
       expect(
         shortcodes,
-        `'${unicode}' is in TELEGRAM_ALLOWED_REACTIONS but no shortcode in EMOJI_SHORTCODE_TO_UNICODE maps to it — agents emitting shortcode form cannot reach this reaction. Add a shortcode entry for it.`,
+        `'${unicode}' is in TELEGRAM_ALLOWED_REACTIONS but no shortcode in EMOJI_SHORTCODE_TO_UNICODE maps to it — agents emitting shortcode form cannot reach this reaction. Add a shortcode entry for it in src/channels/telegram.ts (EMOJI_SHORTCODE_TO_UNICODE).`,
       ).toBeDefined();
       expect(shortcodes!.length).toBeGreaterThan(0);
     });
