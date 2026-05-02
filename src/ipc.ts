@@ -23,6 +23,8 @@ import {
   sessionInputDirName,
 } from './container-runner.js';
 import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
+import { hostLogsOrchestratorFile } from './host-logs.js';
+import { findGateDecisions, readHostLog } from './host-log-parser.js';
 import {
   createTask,
   deleteAllSessions,
@@ -887,10 +889,13 @@ export async function processTaskIpc(
     command?: string;
     payload?: string | Record<string, unknown>;
     confirm?: boolean;
-    // chat_status / nuke_chat / send_message_to_chat
+    // chat_status / nuke_chat / send_message_to_chat / inspect_gate_decisions
     chat_id?: string;
     chat_name?: string;
     session?: 'default' | 'maintenance' | 'all';
+    // inspect_gate_decisions (#443)
+    message_id?: string;
+    limit?: number;
     // send_message_to_chat
     text?: string;
     pin?: boolean;
@@ -2064,6 +2069,92 @@ export async function processTaskIpc(
       fs.writeFileSync(
         resultPath,
         JSON.stringify({ stdout: JSON.stringify({ chats: rows }) }),
+      );
+      break;
+    }
+
+    case 'inspect_gate_decisions': {
+      // Admin tile only. Returns the most-recent gate-decision records
+      // for a chat — one row per `evaluateGateChain` per-message call,
+      // captured from the canonical INFO line `'gate decision'` in
+      // `data/host-logs/orchestrator.log` (#443). Logs are the
+      // non-purgeable substrate the design landed on after rejecting a
+      // SQLite table (every-message persistence on durable media isn't
+      // worth the retention cost when logs already rotate via
+      // `scripts/logrotate.sh`); the file is bind-mounted RO into the
+      // admin agent container so the response payload is the same data
+      // the agent could grep for itself, just structured.
+      const resultPath = scriptResultPath(sourceGroup, data);
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized inspect_gate_decisions attempt blocked',
+        );
+        fs.writeFileSync(
+          resultPath,
+          JSON.stringify({
+            error: 'inspect_gate_decisions is admin-tile only',
+          }),
+        );
+        break;
+      }
+      // chat_id is required — the canonical use case is "tell me about
+      // chat X"; an unbounded scan over every chat is not what this
+      // tool is for. Listing across chats would also require a much
+      // larger limit and risk exposing cross-chat traffic in a single
+      // response.
+      const chatId =
+        typeof data.chat_id === 'string' ? data.chat_id.trim() : '';
+      if (chatId.length === 0) {
+        fs.writeFileSync(
+          resultPath,
+          JSON.stringify({
+            error: 'inspect_gate_decisions requires chat_id',
+          }),
+        );
+        break;
+      }
+      // `limit` defaults to 10 — small enough that the response fits
+      // comfortably in an MCP-tool text reply, large enough to cover
+      // a recent burst when the user asks "what did the gate think
+      // about the last few messages". Cap at 100 so a typo can't
+      // request a multi-megabyte payload.
+      let limit = 10;
+      if (typeof data.limit === 'number' && Number.isInteger(data.limit)) {
+        if (data.limit < 1) {
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({
+              error: 'limit must be a positive integer (1–100)',
+            }),
+          );
+          break;
+        }
+        limit = Math.min(data.limit, 100);
+      }
+      const messageId =
+        typeof data.message_id === 'string' && data.message_id.length > 0
+          ? data.message_id
+          : undefined;
+      const records = readHostLog(hostLogsOrchestratorFile());
+      const hits = findGateDecisions(records, {
+        chatJid: chatId,
+        messageId,
+        limit,
+      });
+      logger.info(
+        {
+          sourceGroup,
+          chatId,
+          messageId,
+          limit,
+          hitCount: hits.length,
+        },
+        'inspect_gate_decisions served via IPC',
+      );
+      fs.writeFileSync(
+        resultPath,
+        JSON.stringify({ stdout: JSON.stringify({ decisions: hits }) }),
       );
       break;
     }

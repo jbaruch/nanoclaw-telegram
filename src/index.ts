@@ -352,6 +352,47 @@ export async function evaluateGateChain(
   for (const m of candidateMessages) {
     const ctx = buildGateContext(group, groupJid, m);
     const result = await runGateChain(gateNames, ctx);
+    // #443 — emit a single INFO line per per-message gate evaluation so
+    // `inspect_gate_decisions` can answer "why didn't bot respond to
+    // message X" without grepping the debug-tier per-gate trace
+    // `runGateChain` already produces. The host log file is the
+    // non-purgeable substrate (a SQLite table would re-introduce
+    // retention concerns this design explicitly rejected); the
+    // logger's `formatData` JSON-stringifies every value so `chain`
+    // round-trips as a parseable array per the format pinned in
+    // `src/host-log-parser.ts`.
+    //
+    // Log-volume tradeoff: one INFO line per inbound message (Stage 1
+    // always runs; the line fires regardless of which gate decides).
+    // The existing per-gate trace at `src/gates/index.ts` stays
+    // debug-only to keep the hot path clean; this new chain-level
+    // summary is the minimum producer surface
+    // `inspect_gate_decisions` needs. `orchestrator.log` is rotation-
+    // capped via `ORCHESTRATOR_LOG_MAX_BYTES` (10 MB) so the line's
+    // contribution is bounded by the rotation, not unbounded growth.
+    // If volume becomes a problem on a very high-traffic group a
+    // future PR can sample by `finalDecision === 'deny'` only — the
+    // diagnostic question is almost always about denies, never about
+    // already-allowed traffic — without changing the parser
+    // contract. The exact field set + message text below is the
+    // contract `findGateDecisions` greps for; a producer-side
+    // regression test in `src/inspect-gate-decisions.test.ts` pins
+    // it so a silent rename here fails CI, not production triage.
+    logger.info(
+      {
+        chatJid: groupJid,
+        messageId: m.id,
+        groupFolder: group.folder,
+        finalDecision: result.finalDecision,
+        reason: result.reason,
+        chain: result.chain.map((r) => ({
+          gate: r.gateName,
+          decision: r.decision,
+          reason: r.reason,
+        })),
+      },
+      'gate decision',
+    );
     if (result.finalDecision === 'allow') {
       return { allowed: true, allowedMessageId: m.id };
     }

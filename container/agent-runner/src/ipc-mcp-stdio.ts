@@ -1771,6 +1771,52 @@ server.tool(
 );
 
 server.tool(
+  'inspect_gate_decisions',
+  "Look up the host-side gate-chain verdicts for recent messages in a chat — the same Stage 1 (trigger) + Stage 2 (Haiku classifier) decisions that determined whether the agent was woken up. Use this to answer 'why didn't AyeAye respond to message X' or 'what did the gate think about the last 10 messages'. Returns most-recent first. Backed by a tail-and-parse over the orchestrator's host log; stale records age out via log rotation rather than DB pruning. Main group only.",
+  {
+    chat_id: z
+      .string()
+      .min(1)
+      .describe(
+        'Required. Chat JID to inspect, e.g. tg:-1003869886477. Cross-chat scans are not supported by this tool (one chat at a time keeps responses bounded and avoids leaking other chats\' traffic into a single reply).',
+      ),
+    message_id: z
+      .string()
+      .optional()
+      .describe(
+        'Optional. Narrow to a single message id (e.g. the channel-native id from a reply or quote). When omitted, the tool returns the most-recent N decisions in the chat.',
+      ),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe(
+        'Optional. Max records to return, most-recent first. Default 10. Capped at 100 so a typo can\'t request a multi-megabyte response.',
+      ),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'inspect_gate_decisions is admin-tile only.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    return runHostOperation('inspect_gate_decisions', {
+      chat_id: args.chat_id,
+      message_id: args.message_id,
+      limit: args.limit,
+    });
+  },
+);
+
+server.tool(
   'nuke_chat',
   "Forcibly nuke another chat's session(s) cross-chat — wipes JSONL transcripts, kills the container, and clears DB session rows. Use when a foreign chat's container is hung, in a corrupted state, or stuck on a poisoned plan and the only way back is a clean restart. Requires chat_id OR chat_name (admin always operates cross-chat — to nuke your own chat use nuke_session). Main group only.",
   {
