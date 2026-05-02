@@ -851,6 +851,32 @@ let schedulerRunning = false;
  */
 let lastPruneAt = 0;
 
+/**
+ * In-flight task IDs the scheduler has dispatched but not yet observed
+ * completing. The dueTasks loop filters against this so the same task
+ * isn't picked up twice while a previous dispatch is still running, and
+ * runTask's wrapper deletes the entry once the run resolves (success
+ * OR throw) — the cleanup is paired with dispatch, not with DB
+ * bookkeeping.
+ *
+ * Replaces a pre-#438 pre-advance write to `next_run` that double-counted
+ * for interval tasks: the post-completion `updateTaskAfterRun` re-fetched
+ * the row (now at `N + ms`), `computeNextRunDetailed`'s interval branch
+ * anchored on `task.next_run + ms` → `N + 2·ms`, and every fire silently
+ * advanced the cadence by `2·ms`. Today the in-memory set is the only
+ * gate that prevents the dueTasks loop from re-dispatching during a
+ * fire; `next_run` only advances post-completion via runTask, so the
+ * compute step always reads the same anchor and drifts by `0` on the
+ * happy path.
+ *
+ * Crash mid-fire: the set is lost with the process. On restart,
+ * `getDueTasks` may re-dispatch the in-flight task once. That is
+ * strictly less harmful than the silent halving the pre-advance was
+ * masking, and matches the once-task crash-safety contract that
+ * `resurrectZombieTasks` was already built for.
+ */
+const dispatchedTaskIds = new Set<string>();
+
 export function startSchedulerLoop(deps: SchedulerDependencies): void {
   if (schedulerRunning) {
     logger.debug('Scheduler loop already running, skipping duplicate start');
@@ -945,7 +971,23 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
-        // Pre-advance next_run before dispatch to prevent double-fire on crash.
+        // Skip tasks already dispatched and not yet completed. Without
+        // this gate the dueTasks loop would re-pick interval/cron rows
+        // every tick while runTask is still running, since `next_run`
+        // no longer pre-advances post-#438. See `dispatchedTaskIds`
+        // module-level docstring for the full rationale.
+        if (dispatchedTaskIds.has(currentTask.id)) {
+          continue;
+        }
+
+        // Compute remediation hints (broken cron/tz) eagerly so the
+        // apply-against-fresh-row helper can pause/clear before
+        // dispatch. Distinct from advancing `next_run` — the
+        // remediation path treats `nextRun: null` as "this row is
+        // structurally unable to schedule itself", whereas the
+        // pre-advance write was a separate (and bug-prone) attempt at
+        // crash-safety. Removing the pre-advance leaves remediation
+        // intact.
         const computed = computeNextRunDetailed(currentTask);
         if (computed.remediation) {
           // Apply remediation against the FRESH DB row — if a user
@@ -958,11 +1000,27 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
             currentTask.schedule_value,
             currentTask.schedule_timezone,
           );
+          // Short-circuit on pause-broken-cron: the helper just
+          // flipped the row to status='paused' (intent: stop running
+          // a structurally broken schedule), but `currentTask` in
+          // memory still says 'active' because we read it before the
+          // remediation. Without this skip we'd dispatch the very
+          // task we just paused — Copilot review on PR #446.
+          if (computed.remediation === 'pause-broken-cron') {
+            continue;
+          }
         }
-        if (computed.nextRun !== null) {
-          updateTask(currentTask.id, { next_run: computed.nextRun });
-        } else if (currentTask.schedule_type === 'once') {
-          // Genuine once-task completion — pre-mark as completed.
+        if (computed.nextRun === null && currentTask.schedule_type === 'once') {
+          // Genuine once-task completion — pre-mark as completed so
+          // `getDueTasks` doesn't return it again before
+          // `updateTaskAfterRun` runs. Load-bearing for
+          // `resurrectZombieTasks` (#37): rows pre-marked completed
+          // whose dispatch was dropped get flipped back to active at
+          // startup. Recurring tasks (interval/cron) deliberately do
+          // NOT pre-advance `next_run` here — `dispatchedTaskIds`
+          // covers the duplicate-dispatch concern in-memory, and the
+          // post-completion `updateTaskAfterRun` is the single writer
+          // that advances the column (#438).
           updateTask(currentTask.id, { status: 'completed' });
         }
         // else: cron/interval with nextRun=null means
@@ -971,12 +1029,39 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         // Do NOT flip to completed — that would lose the paused
         // state set by the remediation. See #102 round-4 review.
 
-        deps.queue.enqueueTask(
-          currentTask.chat_jid,
-          currentTask.id,
-          MAINTENANCE_SESSION_NAME,
-          () => runTask(currentTask, deps),
-        );
+        dispatchedTaskIds.add(currentTask.id);
+        try {
+          deps.queue.enqueueTask(
+            currentTask.chat_jid,
+            currentTask.id,
+            MAINTENANCE_SESSION_NAME,
+            () => {
+              // Pair the dispatched-set cleanup with the dispatch itself
+              // so it runs regardless of how runTask resolves (success,
+              // throw, early-return on invalid group folder). Putting
+              // the cleanup here rather than inside runTask's existing
+              // `finally` keeps the runTask body unaware of the
+              // bookkeeping the loop owns.
+              return runTask(currentTask, deps).finally(() => {
+                dispatchedTaskIds.delete(currentTask.id);
+              });
+            },
+          );
+        } catch (err) {
+          // enqueueTask threw synchronously before the runTask wrapper
+          // got invoked → the wrapper's `.finally` never runs → the
+          // dispatched-set cleanup never happens. Without this catch
+          // the row would be wedged in `dispatchedTaskIds` forever and
+          // the dueTasks loop would skip it on every subsequent tick.
+          // Clear the bookkeeping and re-throw so the outer terminal
+          // catch logs the underlying enqueue failure, per
+          // `jbaruch/coding-policy: error-handling` (graceful recovery
+          // from infrastructure faults — don't fail into a stuck
+          // state). Verified by the dispatched-leak regression test
+          // in `task-scheduler.test.ts`.
+          dispatchedTaskIds.delete(currentTask.id);
+          throw err;
+        }
       }
     } catch (err) {
       // Terminal safety net for the scheduler loop. Inner code paths
@@ -1008,4 +1093,5 @@ export function _resetSchedulerLoopForTests(): void {
   schedulerRunning = false;
   lastPruneAt = 0;
   lastDormantWarnAt.clear();
+  dispatchedTaskIds.clear();
 }

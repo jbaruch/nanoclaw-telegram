@@ -2139,3 +2139,284 @@ describe('per-task session_id reuse (#336)', () => {
     expect(clearTaskSessionIdsForGroup('main')).toBe(0);
   });
 });
+
+describe('interval cadence end-to-end (#438)', () => {
+  // Pre-#438 the scheduler advanced `next_run` twice per fire: once
+  // pre-dispatch in the loop, again post-completion in `runTask`. The
+  // post-completion compute step re-fetched the row (already at
+  // `N + ms`) and added another `ms`, so every interval task ran at
+  // half its configured cadence. Cron tasks were unaffected because
+  // their compute step parses the cron expression rather than
+  // anchoring on `task.next_run`.
+  //
+  // These tests drive the loop end-to-end through `startSchedulerLoop`
+  // + `fireOnce` and assert the delta between consecutive `next_run`
+  // values. Today the assertion is `delta === ms`; before the fix it
+  // was `delta === 2 * ms`.
+
+  const RECURRING_GROUP = {
+    name: 'Main',
+    folder: 'main',
+    trigger: 'always',
+    added_at: '2026-01-01T00:00:00.000Z',
+    isMain: true,
+  };
+
+  beforeEach(() => {
+    _initTestDatabase();
+    _resetSchedulerLoopForTests();
+    mockRunContainerAgent.mockClear();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function fireOnce(): Promise<void> {
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
+      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+      wipeSessionJsonl: vi.fn(() => 1),
+    });
+    await vi.advanceTimersByTimeAsync(10);
+  }
+
+  it('interval task advances next_run by exactly ms per fire (not 2 * ms)', async () => {
+    // Anchor `next_run` to a fixed timestamp 1 second in the past so
+    // the row is due. With ms = 1_800_000 (30 min), the post-fire
+    // `next_run` should land at `t0 + ms` — pre-#438 it landed at
+    // `t0 + 2 * ms` (60-min cadence on a 30-min schedule).
+    const ms = 1_800_000;
+    const t0 = Date.now() - 1000;
+    const initialNextRun = new Date(t0).toISOString();
+    createTask({
+      id: 'interval-cadence',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      schedule_type: 'interval',
+      schedule_value: String(ms),
+      context_mode: 'isolated',
+      next_run: initialNextRun,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    mockRunContainerAgent.mockImplementation(async () => ({
+      status: 'success',
+      result: 'ok',
+      newSessionId: 'sid',
+    }));
+
+    await fireOnce();
+
+    const after = getTaskById('interval-cadence');
+    expect(after).toBeDefined();
+    const delta =
+      new Date(after!.next_run!).getTime() - new Date(initialNextRun).getTime();
+    expect(delta).toBe(ms);
+  });
+
+  it('dispatchedTaskIds prevents the same interval task from being picked up twice mid-fire', async () => {
+    // The in-memory dispatched filter replaces the pre-advance write
+    // that pre-#438 prevented duplicate dispatches by mutating
+    // `next_run`. With the pre-advance gone, the row stays due until
+    // `runTask` finishes — without the filter, every scheduler tick
+    // during a long-running fire would re-enqueue. We hold the
+    // container call open so a second tick is guaranteed to land
+    // mid-fire, and assert exactly one dispatch happened.
+    const ms = 1_800_000;
+    const t0 = Date.now() - 1000;
+    createTask({
+      id: 'interval-no-dup',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      schedule_type: 'interval',
+      schedule_value: String(ms),
+      context_mode: 'isolated',
+      next_run: new Date(t0).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    let releaseContainer!: () => void;
+    const containerHeld = new Promise<void>((resolve) => {
+      releaseContainer = resolve;
+    });
+    mockRunContainerAgent.mockImplementation(async () => {
+      await containerHeld;
+      return { status: 'success', result: 'ok', newSessionId: 'sid' };
+    });
+
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
+      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+      wipeSessionJsonl: vi.fn(() => 1),
+    });
+
+    // First scheduler tick — picks up the due row, dispatches once.
+    await vi.advanceTimersByTimeAsync(10);
+    expect(enqueueTask).toHaveBeenCalledTimes(1);
+
+    // Second scheduler tick while the container is still held —
+    // without `dispatchedTaskIds` the row would be re-dispatched.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(enqueueTask).toHaveBeenCalledTimes(1);
+
+    // Release the container; finally clears the dispatched set so a
+    // future tick (after `next_run` advances) can dispatch again.
+    releaseContainer();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('skips dispatch when remediation paused the row mid-tick (cron with broken expression)', async () => {
+    // Copilot review on PR #446: a row with an unparseable cron
+    // expression returns `remediation: 'pause-broken-cron'` from
+    // `computeNextRunDetailed`; `applyComputeNextRunRemediation`
+    // flips the DB row to `status='paused'`, but `currentTask` in
+    // memory still says 'active' because we read it before the
+    // remediation. Without an explicit short-circuit the loop would
+    // dispatch the very task we just paused. This test sets up a
+    // broken-cron row and asserts `enqueueTask` never fires.
+    createTask({
+      id: 'broken-cron',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      schedule_type: 'cron',
+      schedule_value: 'totally not a cron expression',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
+      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+      wipeSessionJsonl: vi.fn(() => 1),
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    // No dispatch — the remediation-paused row was correctly
+    // skipped. Without the short-circuit the row would have been
+    // enqueued exactly once (and then mockRunContainerAgent would
+    // have run on a row whose DB status is 'paused').
+    expect(enqueueTask).not.toHaveBeenCalled();
+
+    // And the row is in fact paused on disk now.
+    expect(getTaskById('broken-cron')?.status).toBe('paused');
+  });
+
+  it('clears dispatchedTaskIds when enqueueTask throws synchronously (does not wedge the row)', async () => {
+    // OpenAI policy review on PR #446: if `deps.queue.enqueueTask`
+    // throws synchronously, the runTask wrapper's `.finally` never
+    // runs and the row stays in `dispatchedTaskIds` forever — the
+    // scheduler would skip it on every subsequent tick. The fix
+    // wraps the enqueue call in try/catch and clears the bookkeeping
+    // before re-throwing so the next tick can retry. This test
+    // exercises that path: first tick throws on enqueue, second tick
+    // (with enqueue restored) successfully dispatches.
+    const ms = 1_800_000;
+    const t0 = Date.now() - 1000;
+    createTask({
+      id: 'interval-enqueue-throws',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      schedule_type: 'interval',
+      schedule_value: String(ms),
+      context_mode: 'isolated',
+      next_run: new Date(t0).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    mockRunContainerAgent.mockImplementation(async () => ({
+      status: 'success',
+      result: 'ok',
+      newSessionId: 'sid',
+    }));
+
+    let firstTickEnqueueCalled = false;
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        if (!firstTickEnqueueCalled) {
+          firstTickEnqueueCalled = true;
+          throw new Error('queue saturation simulation');
+        }
+        void fn();
+      },
+    );
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
+      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+      wipeSessionJsonl: vi.fn(() => 1),
+    });
+
+    // First tick — enqueue throws. The terminal scheduler catch
+    // swallows the throw and the loop survives; importantly, the
+    // dispatched-set cleanup must have run BEFORE re-throw so the
+    // row isn't wedged.
+    await vi.advanceTimersByTimeAsync(10);
+    expect(enqueueTask).toHaveBeenCalledTimes(1);
+
+    // Second tick — enqueue is healthy now; the row must still be
+    // due (we never advanced `next_run` because we never completed),
+    // and dispatchedTaskIds must NOT contain the id, so the loop
+    // picks it up and dispatches it. Without the catch+cleanup the
+    // row would stay skipped forever.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(enqueueTask).toHaveBeenCalledTimes(2);
+
+    // Drain the run so the test doesn't leave open promises.
+    await vi.advanceTimersByTimeAsync(10);
+  });
+});
