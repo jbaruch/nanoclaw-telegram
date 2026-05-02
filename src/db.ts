@@ -3333,8 +3333,20 @@ function migrateHeartbeatStateJsonFiles(): void {
 
 interface TaskTzStateFollowMeTaskJson {
   name: string;
-  local_time: string;
-  schedule_value: string;
+  // Modern shape (matches the state-010 spec docstring): wall-clock as
+  // an `"HH:MM"` string and the cron expression duplicated on the row.
+  local_time?: string;
+  schedule_value?: string;
+  // Legacy shape — the pre-state-010 `task-tz-sync` writer split the
+  // wall-clock into integer hour/minute and never duplicated the cron
+  // (the cron lives on the sibling `scheduled_tasks` row keyed by
+  // `task_id`). When state-010 shipped, in-place JSONs hadn't been
+  // rewritten yet (the writer hasn't fired since 2026-04-25) so the
+  // migration has to translate this shape into the schema's required
+  // `local_time` / `schedule_value` columns. See #431.
+  task_id?: string;
+  local_hour?: number;
+  local_minute?: number;
   last_run_date?: string | null;
   pending_run_at?: string | null;
 }
@@ -3347,6 +3359,98 @@ interface TaskTzStateJsonShape {
 }
 
 const TASK_TZ_STATE_FILE_LABEL = 'task-tz-state.json';
+
+/**
+ * Resolve `local_time` and `schedule_value` for a follow_me row that
+ * may carry either the modern state-010 shape or the legacy
+ * `local_hour`/`local_minute` + `task_id`-keyed cron shape (#431).
+ *
+ * Returns null with a warn-log when neither shape supplies enough data
+ * to populate the NOT NULL columns; the caller then treats the row as
+ * skipped rather than letting the whole transaction roll back via a
+ * SQLite constraint violation.
+ *
+ * `lookupCron` takes a `task_id` and returns the matching
+ * `scheduled_tasks.schedule_value` (or undefined). Injected as a
+ * callback so the helper stays decoupled from the prepared-statement
+ * lifetime owned by `migrateTaskTzStateJsonFiles`.
+ */
+function resolveFollowMeTaskShape(
+  task: TaskTzStateFollowMeTaskJson,
+  folder: string,
+  lookupCron: (taskId: string) => { schedule_value?: string } | undefined,
+): { local_time: string; schedule_value: string } | null {
+  let resolvedLocalTime: string | null = null;
+  if (typeof task.local_time === 'string' && task.local_time.length > 0) {
+    resolvedLocalTime = task.local_time;
+  } else if (
+    typeof task.local_hour === 'number' &&
+    Number.isInteger(task.local_hour) &&
+    task.local_hour >= 0 &&
+    task.local_hour <= 23 &&
+    typeof task.local_minute === 'number' &&
+    Number.isInteger(task.local_minute) &&
+    task.local_minute >= 0 &&
+    task.local_minute <= 59
+  ) {
+    resolvedLocalTime = `${String(task.local_hour).padStart(2, '0')}:${String(task.local_minute).padStart(2, '0')}`;
+  }
+
+  let resolvedScheduleValue: string | null = null;
+  if (
+    typeof task.schedule_value === 'string' &&
+    task.schedule_value.length > 0
+  ) {
+    resolvedScheduleValue = task.schedule_value;
+  } else if (typeof task.task_id === 'string' && task.task_id.length > 0) {
+    const row = lookupCron(task.task_id);
+    if (
+      row &&
+      typeof row.schedule_value === 'string' &&
+      row.schedule_value.length > 0
+    ) {
+      resolvedScheduleValue = row.schedule_value;
+    }
+  }
+
+  if (resolvedLocalTime === null || resolvedScheduleValue === null) {
+    // Booleans report *usable* presence (non-empty string / valid integer)
+    // rather than just `typeof`-truthy, so a row that carried `local_time:
+    // ""` or `schedule_value: ""` doesn't surface as `hasLocalTime: true`
+    // when the resolver has effectively rejected it. Operators reading
+    // these warns during triage need "could the value actually be used?"
+    // not "does the JSON happen to contain that key?".
+    logger.warn(
+      {
+        folder,
+        taskName: task.name,
+        taskId: task.task_id,
+        hasLocalTime:
+          typeof task.local_time === 'string' && task.local_time.length > 0,
+        hasLocalHour:
+          typeof task.local_hour === 'number' &&
+          Number.isInteger(task.local_hour) &&
+          task.local_hour >= 0 &&
+          task.local_hour <= 23,
+        hasLocalMinute:
+          typeof task.local_minute === 'number' &&
+          Number.isInteger(task.local_minute) &&
+          task.local_minute >= 0 &&
+          task.local_minute <= 59,
+        hasScheduleValue:
+          typeof task.schedule_value === 'string' &&
+          task.schedule_value.length > 0,
+        scheduleLookupHit: resolvedScheduleValue !== null,
+      },
+      `${TASK_TZ_STATE_FILE_LABEL} migration: cannot resolve local_time / schedule_value for follow_me row, skipping row (the per-file rename still happens once the transaction commits — partial imports are normal)`,
+    );
+    return null;
+  }
+  return {
+    local_time: resolvedLocalTime,
+    schedule_value: resolvedScheduleValue,
+  };
+}
 
 /**
  * Migrate per-group `task-tz-state.json` files (#302, data-import
@@ -3416,6 +3520,15 @@ function migrateTaskTzStateJsonFiles(): void {
        last_run_date  = excluded.last_run_date,
        pending_run_at = excluded.pending_run_at,
        updated_at     = CURRENT_TIMESTAMP`,
+  );
+
+  // Legacy-shape fallback for `schedule_value`: pre-state-010 follow_me
+  // entries don't carry the cron string — it lives on the sibling
+  // `scheduled_tasks` row keyed by `task_id`. SELECT-by-PK on a tiny
+  // table per legacy row is cheap; the modern-shape path never reaches
+  // this query because it short-circuits on `task.schedule_value`.
+  const lookupScheduledTaskCron = db.prepare(
+    `SELECT schedule_value FROM scheduled_tasks WHERE id = ?`,
   );
 
   const stamp = migrationDateStamp();
@@ -3543,10 +3656,51 @@ function migrateTaskTzStateJsonFiles(): void {
             counts.skipped++;
             continue;
           }
+          // Validate `name` separately from the local_time / schedule_value
+          // resolver: PK on `follow_me_tasks` is `name TEXT PRIMARY KEY`, so
+          // a missing / non-string / empty `name` would constraint-violate
+          // at the upsert step and roll back the entire group's transaction
+          // — exactly the failure mode the per-row-skip path was added to
+          // avoid (#431). Skip-and-warn here keeps the per-row contract
+          // intact for siblings.
+          if (typeof task.name !== 'string' || task.name.length === 0) {
+            logger.warn(
+              {
+                folder,
+                taskId: (task as TaskTzStateFollowMeTaskJson).task_id,
+                nameType:
+                  task.name === null
+                    ? 'null'
+                    : typeof (task as { name?: unknown }).name,
+              },
+              `${TASK_TZ_STATE_FILE_LABEL} migration: skipping follow_me row with missing or non-string name (PK)`,
+            );
+            counts.skipped++;
+            continue;
+          }
+          // Resolve `local_time` and `schedule_value` from either the
+          // modern shape (state-010 spec) or the legacy shape
+          // (`local_hour`/`local_minute` integers + `task_id` keying
+          // the cron on the sibling `scheduled_tasks` row). Per-row
+          // skip-and-warn rather than a transaction-wide rollback so
+          // one malformed row doesn't strand the whole group's import
+          // — that was the failure mode #431 hit on the live deployment.
+          const resolved = resolveFollowMeTaskShape(
+            task as TaskTzStateFollowMeTaskJson,
+            folder,
+            (taskId) =>
+              lookupScheduledTaskCron.get(taskId) as
+                | { schedule_value?: string }
+                | undefined,
+          );
+          if (resolved === null) {
+            counts.skipped++;
+            continue;
+          }
           const result = upsertFollowMeTask.run(
             task.name as string,
-            task.local_time as string,
-            task.schedule_value as string,
+            resolved.local_time,
+            resolved.schedule_value,
             // Both nullable cursor fields use `?? null` so an
             // explicit `null` and a missing key both round-trip as
             // SQL NULL. The reader contract on state-010 explicitly

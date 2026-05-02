@@ -13,6 +13,10 @@ interface TaskTzStateFollowMeTaskJson {
   name?: unknown;
   local_time?: unknown;
   schedule_value?: unknown;
+  // Legacy fields per #431 — pre-state-010 writer shape.
+  task_id?: unknown;
+  local_hour?: unknown;
+  local_minute?: unknown;
   last_run_date?: unknown;
   pending_run_at?: unknown;
 }
@@ -672,5 +676,372 @@ describe('task-tz-state.json → SQLite migration (#302)', () => {
         }
       });
     }
+  });
+
+  // #431 — Legacy follow_me shape: pre-state-010 task-tz-sync writer
+  // emitted `local_hour: N, local_minute: N` integers and keyed the
+  // cron via `task_id` on the sibling `scheduled_tasks` row instead of
+  // duplicating it on the follow_me entry. The migration must
+  // synthesize `local_time = "HH:MM"` and look the cron up by task_id;
+  // otherwise the file silently fails the constraint and stays in
+  // place every boot.
+  it('synthesizes local_time from local_hour/local_minute and looks up schedule_value by task_id (legacy shape, #431)', async () => {
+    await runWithTempDir(async (tempDir) => {
+      // Pass 1: prime the DB so scheduled_tasks rows exist before the
+      // JSON migration runs. initDatabase creates schema and runs
+      // state migrations; we close, drop the JSON, and re-init in
+      // pass 2 to actually exercise the legacy-shape lookup.
+      vi.resetModules();
+      {
+        const { initDatabase, _closeDatabase } = await import('./db.js');
+        initDatabase();
+        try {
+          const db = new Database(path.join(tempDir, 'store', 'messages.db'));
+          try {
+            const insertCron = db.prepare(
+              `INSERT INTO scheduled_tasks
+                 (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, created_at, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            );
+            insertCron.run(
+              'task-1776347641153-dexq4p',
+              'telegram_main',
+              'tg:1',
+              'morning-brief',
+              'cron',
+              '0 7 * * *',
+              '2026-04-25T00:00:00Z',
+              'active',
+            );
+            insertCron.run(
+              'task-1776347643027-tlz3uc',
+              'telegram_main',
+              'tg:1',
+              'nightly-housekeeping',
+              'cron',
+              '0 3 * * *',
+              '2026-04-25T00:00:00Z',
+              'active',
+            );
+          } finally {
+            db.close();
+          }
+        } finally {
+          _closeDatabase();
+        }
+      }
+
+      const filePath = writeTaskTzStateFile(tempDir, 'telegram_main', {
+        current_tz: 'America/Chicago',
+        home_tz: 'America/Chicago',
+        scheduler_tz: 'America/Chicago',
+        follow_me_tasks: [
+          {
+            task_id: 'task-1776347641153-dexq4p',
+            name: 'morning-brief',
+            local_hour: 7,
+            local_minute: 0,
+            last_run_date: '2026-05-01',
+            pending_run_at: null,
+          },
+          {
+            task_id: 'task-1776347643027-tlz3uc',
+            name: 'nightly-housekeeping',
+            local_hour: 3,
+            local_minute: 0,
+            last_run_date: '2026-05-01',
+            pending_run_at: null,
+          },
+        ],
+      });
+
+      vi.resetModules();
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      initDatabase();
+      try {
+        const db = new Database(path.join(tempDir, 'store', 'messages.db'));
+        try {
+          const tasks = db
+            .prepare(
+              'SELECT name, local_time, schedule_value, last_run_date FROM follow_me_tasks ORDER BY name',
+            )
+            .all() as Array<Record<string, unknown>>;
+          expect(tasks).toEqual([
+            {
+              name: 'morning-brief',
+              local_time: '07:00',
+              schedule_value: '0 7 * * *',
+              last_run_date: '2026-05-01',
+            },
+            {
+              name: 'nightly-housekeeping',
+              local_time: '03:00',
+              schedule_value: '0 3 * * *',
+              last_run_date: '2026-05-01',
+            },
+          ]);
+        } finally {
+          db.close();
+        }
+        // Source renamed — the constraint failure that #431 was about
+        // is gone; subsequent boots are no-op idempotent.
+        expect(fs.existsSync(filePath)).toBe(false);
+        const renamed = fs
+          .readdirSync(path.dirname(filePath))
+          .filter((f) => f.startsWith('task-tz-state.json.migrated-'));
+        expect(renamed).toHaveLength(1);
+      } finally {
+        _closeDatabase();
+      }
+    });
+  });
+
+  it('zero-pads single-digit local_hour / local_minute correctly (boundary: 00:00, 09:05)', async () => {
+    await runWithTempDir(async (tempDir) => {
+      // First-pass init to create scheduled_tasks rows the legacy
+      // lookup needs.
+      vi.resetModules();
+      {
+        const { initDatabase, _closeDatabase } = await import('./db.js');
+        initDatabase();
+        try {
+          const db = new Database(path.join(tempDir, 'store', 'messages.db'));
+          try {
+            const insertCron = db.prepare(
+              `INSERT INTO scheduled_tasks
+                 (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, created_at, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            );
+            insertCron.run(
+              'task-zero',
+              'telegram_main',
+              'tg:1',
+              'midnight',
+              'cron',
+              '0 0 * * *',
+              '2026-04-25T00:00:00Z',
+              'active',
+            );
+            insertCron.run(
+              'task-single-digit',
+              'telegram_main',
+              'tg:1',
+              'morning',
+              'cron',
+              '5 9 * * *',
+              '2026-04-25T00:00:00Z',
+              'active',
+            );
+          } finally {
+            db.close();
+          }
+        } finally {
+          _closeDatabase();
+        }
+      }
+
+      writeTaskTzStateFile(tempDir, 'telegram_main', {
+        current_tz: 'America/Chicago',
+        home_tz: 'America/Chicago',
+        follow_me_tasks: [
+          {
+            task_id: 'task-zero',
+            name: 'midnight',
+            local_hour: 0,
+            local_minute: 0,
+          },
+          {
+            task_id: 'task-single-digit',
+            name: 'morning',
+            local_hour: 9,
+            local_minute: 5,
+          },
+        ],
+      });
+
+      vi.resetModules();
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      initDatabase();
+      try {
+        const db = new Database(path.join(tempDir, 'store', 'messages.db'));
+        try {
+          const tasks = db
+            .prepare(
+              'SELECT name, local_time FROM follow_me_tasks ORDER BY name',
+            )
+            .all() as Array<Record<string, unknown>>;
+          expect(tasks).toEqual([
+            { name: 'midnight', local_time: '00:00' },
+            { name: 'morning', local_time: '09:05' },
+          ]);
+        } finally {
+          db.close();
+        }
+      } finally {
+        _closeDatabase();
+      }
+    });
+  });
+
+  // PR #434 review feedback (Copilot): a follow_me row with a missing
+  // or non-string `name` would otherwise hit the `name TEXT PRIMARY KEY`
+  // constraint at upsert and roll back the entire group's transaction
+  // — defeating the per-row-skip purpose of the rest of the fix. The
+  // `name` validator runs before the local_time / schedule_value
+  // resolver and produces a distinct warn message so triage can tell
+  // the two skip paths apart.
+  it('skips a follow_me row with missing or non-string name (PK); sibling rows still land; file renamed', async () => {
+    await runWithTempDir(async (tempDir) => {
+      writeTaskTzStateFile(tempDir, 'telegram_main', {
+        current_tz: 'America/Chicago',
+        home_tz: 'America/Chicago',
+        follow_me_tasks: [
+          // name is missing entirely — would fail `name TEXT PRIMARY KEY`
+          // and roll back the whole group's transaction without the
+          // pre-upsert validator.
+          {
+            local_time: '08:00',
+            schedule_value: '0 13 * * *',
+          },
+          // name is the wrong type (number) — JSON.stringify would
+          // happily emit this and the unchecked cast would coerce.
+          {
+            name: 42,
+            local_time: '09:00',
+            schedule_value: '0 14 * * *',
+          },
+          // name is the empty string — satisfies `typeof === 'string'`
+          // but not the not-empty contract.
+          {
+            name: '',
+            local_time: '10:00',
+            schedule_value: '0 15 * * *',
+          },
+          // Healthy sibling row; must still land despite the three above.
+          {
+            name: 'healthy-sibling',
+            local_time: '06:00',
+            schedule_value: '0 11 * * *',
+          },
+        ],
+      });
+
+      const filePath = path.join(
+        tempDir,
+        'groups',
+        'telegram_main',
+        'task-tz-state.json',
+      );
+
+      vi.resetModules();
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      const { logger } = await import('./logger.js');
+      const warnSpy = vi.spyOn(logger, 'warn');
+      try {
+        initDatabase();
+        const db = new Database(path.join(tempDir, 'store', 'messages.db'));
+        try {
+          const tasks = db
+            .prepare('SELECT name FROM follow_me_tasks ORDER BY name')
+            .all() as Array<Record<string, unknown>>;
+          expect(tasks).toEqual([{ name: 'healthy-sibling' }]);
+        } finally {
+          db.close();
+        }
+        const nameSkipWarns = warnSpy.mock.calls.filter((call) => {
+          const msg = call.find((arg) => typeof arg === 'string') as
+            | string
+            | undefined;
+          return Boolean(
+            msg &&
+            msg.includes(
+              'skipping follow_me row with missing or non-string name',
+            ),
+          );
+        });
+        // One warn per malformed row (3 total).
+        expect(nameSkipWarns.length).toBe(3);
+        expect(fs.existsSync(filePath)).toBe(false);
+        const renamed = fs
+          .readdirSync(path.dirname(filePath))
+          .filter((f) => f.startsWith('task-tz-state.json.migrated-'));
+        expect(renamed).toHaveLength(1);
+      } finally {
+        warnSpy.mockRestore();
+        _closeDatabase();
+      }
+    });
+  });
+
+  it('skips a legacy follow_me row whose task_id has no matching scheduled_tasks row; sibling modern row still lands; file renamed', async () => {
+    await runWithTempDir(async (tempDir) => {
+      // Don't pre-populate scheduled_tasks. The legacy entry with
+      // an unresolvable task_id should skip-and-warn while the
+      // sibling modern-shape row imports normally and the source
+      // file gets renamed (per-row skip, not per-file rollback).
+      writeTaskTzStateFile(tempDir, 'telegram_main', {
+        current_tz: 'America/Chicago',
+        home_tz: 'America/Chicago',
+        follow_me_tasks: [
+          {
+            task_id: 'task-orphan',
+            name: 'orphan-legacy',
+            local_hour: 5,
+            local_minute: 30,
+          },
+          {
+            name: 'modern-sibling',
+            local_time: '06:00',
+            schedule_value: '0 11 * * *',
+          },
+        ],
+      });
+
+      const filePath = path.join(
+        tempDir,
+        'groups',
+        'telegram_main',
+        'task-tz-state.json',
+      );
+
+      vi.resetModules();
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      const { logger } = await import('./logger.js');
+      const warnSpy = vi.spyOn(logger, 'warn');
+      try {
+        initDatabase();
+        const db = new Database(path.join(tempDir, 'store', 'messages.db'));
+        try {
+          const tasks = db
+            .prepare('SELECT name FROM follow_me_tasks ORDER BY name')
+            .all() as Array<Record<string, unknown>>;
+          expect(tasks).toEqual([{ name: 'modern-sibling' }]);
+        } finally {
+          db.close();
+        }
+        const skipWarnFired = warnSpy.mock.calls.some((call) => {
+          const msg = call.find((arg) => typeof arg === 'string') as
+            | string
+            | undefined;
+          return Boolean(
+            msg &&
+            msg.includes(
+              'cannot resolve local_time / schedule_value for follow_me row',
+            ),
+          );
+        });
+        expect(skipWarnFired).toBe(true);
+        // File still renamed — sibling row succeeded so the per-file
+        // import counts as a partial success rather than a full skip.
+        expect(fs.existsSync(filePath)).toBe(false);
+        const renamed = fs
+          .readdirSync(path.dirname(filePath))
+          .filter((f) => f.startsWith('task-tz-state.json.migrated-'));
+        expect(renamed).toHaveLength(1);
+      } finally {
+        warnSpy.mockRestore();
+        _closeDatabase();
+      }
+    });
   });
 });
