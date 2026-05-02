@@ -1275,6 +1275,57 @@ describe('buildVolumeMounts — untrusted group isolation', () => {
     }
   });
 
+  it('creates an empty CLAUDE.md placeholder on the host when the group folder lacks one (fixes #442 readonly mount target)', () => {
+    // Symptom of #442: the /workspace/group bind-mount is readonly for
+    // untrusted groups, so runc cannot create a missing target file
+    // when overlaying the CLAUDE.md bind on top — Docker exits 125
+    // with `read-only file system`. The fix is to ensure the host-side
+    // target exists before the mount layer hands the spec to Docker.
+    const originalCwd = process.cwd();
+    process.chdir(PROJECT_DIR);
+    try {
+      const groupDir = path.join(GROUPS_DIR, 'untrusted-group');
+      const placeholderTarget = path.join(groupDir, 'CLAUDE.md');
+      // Pre-condition: file does NOT exist on the host (mirrors the
+      // post-#164 state for groups whose vanilla CLAUDE.md was removed
+      // by the migration).
+      if (fs.existsSync(placeholderTarget)) {
+        fs.unlinkSync(placeholderTarget);
+      }
+      expect(fs.existsSync(placeholderTarget)).toBe(false);
+
+      buildVolumeMounts(makeUntrustedGroup(), false, 'chatA@g.us');
+
+      // Post-condition: an empty placeholder exists so runc has
+      // something to overlay the CLAUDE.md bind onto.
+      expect(fs.existsSync(placeholderTarget)).toBe(true);
+      expect(fs.readFileSync(placeholderTarget, 'utf8')).toBe('');
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('does not overwrite an existing CLAUDE.md placeholder (idempotent)', () => {
+    // Defence against the placeholder being touched repeatedly on every
+    // spawn. If a prior spawn left content behind (e.g. from a pre-#164
+    // per-group CLAUDE.md the migration didn't match), keep it — the
+    // bind-mount shadows it from the container's view anyway.
+    const originalCwd = process.cwd();
+    process.chdir(PROJECT_DIR);
+    try {
+      const groupDir = path.join(GROUPS_DIR, 'untrusted-group');
+      const placeholderTarget = path.join(groupDir, 'CLAUDE.md');
+      const sentinel = '# pre-existing per-group CLAUDE.md\n';
+      fs.writeFileSync(placeholderTarget, sentinel);
+
+      buildVolumeMounts(makeUntrustedGroup(), false, 'chatA@g.us');
+
+      expect(fs.readFileSync(placeholderTarget, 'utf8')).toBe(sentinel);
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
   it('untrusted groups get SOUL-untrusted.md, not the full global dir', () => {
     const originalCwd = process.cwd();
     process.chdir(PROJECT_DIR);
@@ -1385,6 +1436,34 @@ describe('buildVolumeMounts — trusted group CLAUDE.md mount', () => {
       expect(folderIdx).toBeGreaterThanOrEqual(0);
       expect(fileIdx).toBeGreaterThanOrEqual(0);
       expect(fileIdx).toBeGreaterThan(folderIdx);
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('does NOT write a host-side CLAUDE.md placeholder for trusted groups (#442 review)', () => {
+    // Trusted groups have a RW parent mount so runc creates the
+    // bind-mount target itself — no host-side placeholder needed.
+    // Writing one anyway would pollute `scripts/migrate-thin-claude-md.ts`,
+    // which classifies any present non-vanilla `CLAUDE.md` as
+    // customized and refuses to migrate it. Gate the placeholder write
+    // narrowly to the actual failing condition (untrusted non-main).
+    const originalCwd = process.cwd();
+    process.chdir(PROJECT_DIR);
+    try {
+      const groupDir = path.join(GROUPS_DIR, 'trusted-group');
+      const placeholderTarget = path.join(groupDir, 'CLAUDE.md');
+      if (fs.existsSync(placeholderTarget)) {
+        fs.unlinkSync(placeholderTarget);
+      }
+      expect(fs.existsSync(placeholderTarget)).toBe(false);
+
+      buildVolumeMounts(makeTrustedGroup(), false, 'chatT@g.us');
+
+      // Post-condition: no host-side placeholder was created. Docker
+      // creates the target inside the RW container overlay at spawn
+      // time without polluting the host's group folder.
+      expect(fs.existsSync(placeholderTarget)).toBe(false);
     } finally {
       process.chdir(originalCwd);
     }
