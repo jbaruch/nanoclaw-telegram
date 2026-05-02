@@ -1451,10 +1451,7 @@ describe('TelegramChannel', () => {
       ).toBe(true);
     });
 
-    it("does NOT fall back caption on rate-limit / 5xx / non-parse 400 / network errors — only `400 + can't parse entities` qualifies (#414)", async () => {
-      // Same narrowing as the text-send path: a network or rate-limit
-      // failure on sendDocument is NOT a parse rejection, so retrying
-      // with a plain caption just doubles the doomed call.
+    it('does NOT fall back caption on rate-limit (429) — re-throws to outer catch (#414)', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
@@ -1463,8 +1460,63 @@ describe('TelegramChannel', () => {
         error_code: number,
         description: string,
       ) => GrammyError)(429, 'Too Many Requests');
-
       currentBot().api.sendDocument.mockRejectedValueOnce(rateLimit);
+
+      await channel.sendFile(
+        'tg:100200300',
+        '/tmp/nanoclaw-test.png',
+        'cap _x_',
+      );
+      expect(currentBot().api.sendDocument).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT fall back caption on Telegram 5xx — re-throws (#414)', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const serverErr = new (GrammyError as unknown as new (
+        error_code: number,
+        description: string,
+      ) => GrammyError)(502, 'Bad Gateway');
+      currentBot().api.sendDocument.mockRejectedValueOnce(serverErr);
+
+      await channel.sendFile(
+        'tg:100200300',
+        '/tmp/nanoclaw-test.png',
+        'cap _x_',
+      );
+      expect(currentBot().api.sendDocument).toHaveBeenCalledTimes(1);
+    });
+
+    it("does NOT fall back caption on a 400 with non-parse description — only `can't parse entities` qualifies (#414)", async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const otherFourHundred = new (GrammyError as unknown as new (
+        error_code: number,
+        description: string,
+      ) => GrammyError)(400, 'Bad Request: file too large');
+      currentBot().api.sendDocument.mockRejectedValueOnce(otherFourHundred);
+
+      await channel.sendFile(
+        'tg:100200300',
+        '/tmp/nanoclaw-test.png',
+        'cap _x_',
+      );
+      expect(currentBot().api.sendDocument).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT fall back caption on non-GrammyError transport throws (network) — re-throws (#414)', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      currentBot().api.sendDocument.mockRejectedValueOnce(
+        new Error('ECONNRESET'),
+      );
+
       await channel.sendFile(
         'tg:100200300',
         '/tmp/nanoclaw-test.png',
