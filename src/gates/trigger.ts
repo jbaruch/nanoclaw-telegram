@@ -208,6 +208,14 @@ export const triggerGate = (ctx: GateContext): GateDecision => {
 
   let sawEvaluatable = false;
   for (const p of operatorPatterns) {
+    // Self-improvement loop (#82) safety: skip rows the learner
+    // demoted (`disabled: true`) or proposals the owner hasn't
+    // promoted yet (`enabled: false`). Both are reader-side
+    // suppressions; the row stays in the column so the owner can
+    // inspect / revive it. Owner-set / universal patterns leave
+    // both fields unset and pass through unchanged.
+    if (p.disabled === true) continue;
+    if (p.enabled === false) continue;
     const r = matchPattern(p, ctx);
     if (r === 'match') {
       return {

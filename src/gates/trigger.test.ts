@@ -489,3 +489,46 @@ describe('triggerGate — first-match wins', () => {
     expect(result.reason).not.toContain('(auto)');
   });
 });
+
+describe('triggerGate — learner suppression flags (#82)', () => {
+  // The self-improvement loop writes proposals as `enabled: false`
+  // (pure proposal, owner promotes via admin path) and demotes
+  // bad-precision rows by flipping `disabled: true`. The matcher
+  // skips both. These tests pin that contract so a future refactor
+  // that drops the skip can't silently start matching on un-promoted
+  // proposals.
+  it('skips a learned pattern with enabled: false (pure proposal)', () => {
+    const proposal = pattern('keyword', 'deploy', 'learned');
+    proposal.enabled = false;
+    const result = triggerGate(ctx('please deploy now', {}, cfg(proposal)));
+    // Only-pattern was suppressed → no evaluatable patterns →
+    // pass-through (NOT deny — there was nothing to evaluate).
+    expect(result.decision).toBe('pass');
+  });
+
+  it('skips a learned pattern with disabled: true (auto-rolled-back)', () => {
+    const demoted = pattern('keyword', 'deploy', 'learned');
+    demoted.disabled = true;
+    demoted.enabled = true; // even if owner had promoted it, disabled wins
+    const result = triggerGate(ctx('please deploy now', {}, cfg(demoted)));
+    expect(result.decision).toBe('pass');
+  });
+
+  it('matches a learned pattern with enabled: true and disabled: false', () => {
+    const promoted = pattern('keyword', 'deploy', 'learned');
+    promoted.enabled = true;
+    promoted.disabled = false;
+    const result = triggerGate(ctx('please deploy now', {}, cfg(promoted)));
+    expect(result.decision).toBe('allow');
+  });
+
+  it('owner-set patterns that leave the new flags unset still match', () => {
+    // Backward compat: legacy rows have neither `enabled` nor
+    // `disabled` set. They must match exactly as before.
+    const ownerSet = pattern('keyword', 'deploy'); // default source 'owner-set'
+    expect(ownerSet.enabled).toBeUndefined();
+    expect(ownerSet.disabled).toBeUndefined();
+    const result = triggerGate(ctx('please deploy now', {}, cfg(ownerSet)));
+    expect(result.decision).toBe('allow');
+  });
+});

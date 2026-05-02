@@ -1044,14 +1044,20 @@ export function storeReaction(reaction: {
 export function getReactionsForMessage(
   messageId: string,
   chatJid: string,
-): Array<{ reactor_name: string; emoji: string; timestamp: string }> {
+): Array<{
+  reactor_jid: string;
+  reactor_name: string;
+  emoji: string;
+  timestamp: string;
+}> {
   return db
     .prepare(
-      `SELECT reactor_name, emoji, timestamp FROM reactions
+      `SELECT reactor_jid, reactor_name, emoji, timestamp FROM reactions
        WHERE message_id = ? AND message_chat_jid = ?
        ORDER BY timestamp`,
     )
     .all(messageId, chatJid) as Array<{
+    reactor_jid: string;
     reactor_name: string;
     emoji: string;
     timestamp: string;

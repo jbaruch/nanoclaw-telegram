@@ -172,6 +172,47 @@ export interface TriggerPattern {
   last_matched_at: string | null;
   /** ISO timestamp of the most recent metric update, or null. */
   last_updated_at: string | null;
+  /**
+   * Self-improvement loop fields (#82). All optional so legacy rows
+   * without them remain valid `TriggerPattern` instances. Owner/universal
+   * patterns may also leave them unset — they only matter for `source:
+   * 'learned'` rows the loop manages. See `src/gates/trigger-learner-schema.md`
+   * for the full writer/reader contract.
+   */
+  /**
+   * Pattern lineage version. Starts at 1 on first proposal, increments
+   * each time the learner supersedes the same logical pattern (e.g. body
+   * stays the same, precision metrics refresh). The owner can revert by
+   * picking an older `prior_versions` entry. Optional / unset for
+   * non-learned rows.
+   */
+  pattern_version?: number;
+  /** ISO timestamp the learner first proposed this pattern. */
+  proposed_at?: string;
+  /**
+   * `false` (default / unset) means active per the gate matcher; `true`
+   * means demoted by auto-rollback (precision dropped below threshold).
+   * Demoted rows stay in the array — the owner may re-enable manually
+   * after inspecting why the loop demoted them.
+   */
+  disabled?: boolean;
+  /**
+   * Owner-controlled gate: when `true`, learned proposals start active
+   * and the matcher consumes them on the next gate run. When `false` /
+   * unset, learned proposals are inert (pure proposals; the owner
+   * promotes via the existing admin path). The trigger gate skips any
+   * pattern with `enabled: false`.
+   */
+  enabled?: boolean;
+  /**
+   * Snapshot of the immediately-prior version of THIS pattern, kept so
+   * the owner can revert without losing the metrics. Capped at one
+   * level deep (older history is dropped — keeping a full chain
+   * unbounded would let the column grow without limit). Recursive type
+   * is fine because the inner record is always the prior state, never
+   * a forward-pointer.
+   */
+  prior_versions?: TriggerPattern[];
 }
 
 /**

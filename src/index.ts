@@ -110,6 +110,7 @@ import {
   stopHubitatListener,
 } from './hubitat-listener.js';
 import { startSchedulerLoop } from './task-scheduler.js';
+import { startTriggerLearner } from './gates/trigger-learner-runtime.js';
 import { installTelegramOutboundTap } from './telegram-outbound-tap.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
@@ -2634,6 +2635,15 @@ async function main(): Promise<void> {
     },
     wipeSessionJsonl,
   });
+  // Stage 1 trigger-pattern self-improvement loop (#82). Runs at a
+  // configurable cadence (default 24h via TRIGGER_LEARNER_INTERVAL_MS),
+  // emits PROPOSALS into `registered_groups.trigger_pattern` with
+  // `enabled: false` (the trigger gate skips those rows). The owner
+  // promotes via the existing admin path — there is no auto-apply.
+  // Safety rails: cold-start floor, sender-tier weighting, auto-rollback
+  // on FP-rate spike, and pattern versioning. See
+  // `src/gates/trigger-learner.ts` for the full design.
+  startTriggerLearner();
   startIpcWatcher({
     sendMessage: (jid, rawText, replyToMessageId) => {
       const channel = findChannel(channels, jid);
