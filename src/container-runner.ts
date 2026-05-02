@@ -1086,6 +1086,22 @@ export function buildVolumeMounts(
       ? path.join(GROUPS_DIR, 'global', 'CLAUDE.md')
       : path.join(GROUPS_DIR, 'global', 'CLAUDE-untrusted.md');
   if (fs.existsSync(claudeMdSource)) {
+    // The /workspace/group bind-mount above is readonly for untrusted
+    // groups, which means runc cannot create a missing target file when
+    // overlaying the CLAUDE.md bind on top — the spawn fails with
+    // `read-only file system` (see #442). Touch a placeholder on the
+    // host (where the group folder is RW from the orchestrator's side)
+    // so runc has a target to overlay onto. The placeholder content is
+    // irrelevant — the bind-mount shadows it. This was masked for
+    // trusted groups by their RW parent mount and for main by the
+    // mount source equalling the per-group file (which was always on
+    // disk pre-#164); only untrusted non-main hits the fault, but we
+    // ensure the target unconditionally so a future trust flip can't
+    // resurrect the symptom.
+    const placeholderTarget = path.join(groupDir, 'CLAUDE.md');
+    if (!fs.existsSync(placeholderTarget)) {
+      fs.writeFileSync(placeholderTarget, '');
+    }
     mounts.push({
       hostPath: toHostPath(claudeMdSource),
       containerPath: '/workspace/group/CLAUDE.md',
