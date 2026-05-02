@@ -47,6 +47,21 @@ vi.mock('grammy', () => ({
   InputFile: class MockInputFile {
     constructor(public source: string | Buffer) {}
   },
+  // Minimal stand-in for grammy's GrammyError. Production code at
+  // `src/channels/telegram.ts` narrows the HTML-fallback gate to
+  // `err instanceof GrammyError && err.error_code === 400 && /can't
+  // parse entities/i.test(err.description)` (#414); tests construct
+  // instances of this class to exercise the gate without pulling
+  // real grammy's API surface.
+  GrammyError: class MockGrammyError extends Error {
+    error_code: number;
+    description: string;
+    constructor(error_code: number, description: string) {
+      super(`Bad Request: ${description}`);
+      this.error_code = error_code;
+      this.description = description;
+    }
+  },
   Bot: class MockBot {
     token: string;
     commandHandlers = new Map<string, Handler>();
@@ -98,6 +113,8 @@ vi.mock('grammy', () => ({
   },
 }));
 
+import { GrammyError } from 'grammy';
+
 import {
   TelegramChannel,
   TelegramChannelOpts,
@@ -105,6 +122,20 @@ import {
 } from './telegram.js';
 import { logger } from '../logger.js';
 import { _initTestDatabase, storeChatMetadata, storeMessage } from '../db.js';
+
+// Constructs the specific Telegram-side HTML parse rejection
+// (`error_code: 400, description: "can't parse entities"`) — the only
+// shape that triggers the plain-text fallback after #414. Network /
+// rate-limit / 5xx errors should re-throw to the caller.
+function makeParseError(): GrammyError {
+  // Mock GrammyError takes (error_code, description) for test
+  // ergonomics; real grammy's takes (message, ApiError, method,
+  // payload).
+  return new (GrammyError as unknown as new (
+    error_code: number,
+    description: string,
+  ) => GrammyError)(400, "can't parse entities");
+}
 
 // --- Test helpers ---
 
@@ -936,9 +967,7 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       currentBot()
-        .api.sendMessage.mockRejectedValueOnce(
-          new Error("can't parse entities"),
-        )
+        .api.sendMessage.mockRejectedValueOnce(makeParseError())
         .mockResolvedValueOnce({ message_id: 9300 });
 
       await channel.sendMessage(
@@ -972,9 +1001,7 @@ describe('TelegramChannel', () => {
       // today`). Italic markup is lost in the fallback rendering;
       // the visible warning prefix tells the user formatting failed.
       currentBot()
-        .api.sendMessage.mockRejectedValueOnce(
-          new Error("can't parse entities"),
-        )
+        .api.sendMessage.mockRejectedValueOnce(makeParseError())
         .mockResolvedValueOnce({ message_id: 9001 });
 
       await channel.sendMessage('tg:100200300', 'feeling _great_ today');
@@ -994,6 +1021,89 @@ describe('TelegramChannel', () => {
       expect(fallbackArgs[2]?.preSanitized).toBeUndefined();
     });
 
+    it('does NOT fall back on rate-limit (429) errors — re-throws so the outer catch swallows without doubling traffic (#414)', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const rateLimit = new (GrammyError as unknown as new (
+        error_code: number,
+        description: string,
+      ) => GrammyError)(429, 'Too Many Requests: retry after 30');
+      currentBot().api.sendMessage.mockRejectedValueOnce(rateLimit);
+
+      // Outer sendMessage swallows the throw and returns undefined —
+      // but the inner sendTelegramMessage must NOT issue a second
+      // send. Pre-#414, the catch fell through to a plain-text retry
+      // that hit the same 429, burning the limit faster.
+      await expect(
+        channel.sendMessage('tg:100200300', 'feeling _great_ today'),
+      ).resolves.toBeUndefined();
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT fall back on Telegram 5xx errors — re-throws (#414)', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const serverErr = new (GrammyError as unknown as new (
+        error_code: number,
+        description: string,
+      ) => GrammyError)(502, 'Bad Gateway');
+      currentBot().api.sendMessage.mockRejectedValueOnce(serverErr);
+
+      await expect(
+        channel.sendMessage('tg:100200300', 'feeling _great_ today'),
+      ).resolves.toBeUndefined();
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT fall back on a 400 with a different description — only "can\'t parse entities" qualifies (#414)', async () => {
+      // A 400 from Telegram for a reason OTHER than HTML parsing
+      // (e.g. "message is too long", "chat not found", "user is
+      // deactivated") was previously falling through to the
+      // plain-text retry that would hit the same 400 and waste an
+      // API call. The narrowed gate restricts the fallback to the
+      // single rejection class the plain-text path can actually
+      // recover.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const otherFourHundred = new (GrammyError as unknown as new (
+        error_code: number,
+        description: string,
+      ) => GrammyError)(400, 'Bad Request: chat not found');
+      currentBot().api.sendMessage.mockRejectedValueOnce(otherFourHundred);
+
+      await expect(
+        channel.sendMessage('tg:100200300', 'hello'),
+      ).resolves.toBeUndefined();
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT fall back on non-GrammyError throws (network/transport layer) — re-throws (#414)', async () => {
+      // Pre-#414 this was the canonical leak: a network failure
+      // (DNS hiccup, connection reset, fetch timeout) surfaced as
+      // a non-GrammyError throw, the catch swallowed it, and the
+      // plain-text retry shipped on top — duplicating sends and
+      // (pre-htmlToPlainText hardening) leaking literal HTML tags
+      // to chat. Now those errors re-throw to the outer catch.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      currentBot().api.sendMessage.mockRejectedValueOnce(
+        new Error('ECONNRESET'),
+      );
+
+      await expect(
+        channel.sendMessage('tg:100200300', 'hello'),
+      ).resolves.toBeUndefined();
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
     it('does not attempt plain-text fallback when DEV_NO_HTML_FALLBACK=1 (#278)', async () => {
       const prev = process.env.DEV_NO_HTML_FALLBACK;
       process.env.DEV_NO_HTML_FALLBACK = '1';
@@ -1002,9 +1112,7 @@ describe('TelegramChannel', () => {
         const channel = new TelegramChannel('test-token', opts);
         await channel.connect();
 
-        currentBot().api.sendMessage.mockRejectedValueOnce(
-          new Error("can't parse entities"),
-        );
+        currentBot().api.sendMessage.mockRejectedValueOnce(makeParseError());
 
         // Outer sendMessage swallows the throw, but the inner fallback
         // must NOT issue a second sendMessage when the dev flag is set
@@ -1031,9 +1139,7 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       currentBot()
-        .api.sendMessage.mockRejectedValueOnce(
-          new Error("can't parse entities"),
-        )
+        .api.sendMessage.mockRejectedValueOnce(makeParseError())
         .mockResolvedValueOnce({ message_id: 9100 });
 
       // Single chunk exactly at MAX_LENGTH (4096). No paragraph or
@@ -1067,9 +1173,7 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       currentBot()
-        .api.sendMessage.mockRejectedValueOnce(
-          new Error("can't parse entities"),
-        )
+        .api.sendMessage.mockRejectedValueOnce(makeParseError())
         .mockResolvedValueOnce({ message_id: 9101 });
 
       const sensitive = 'token=AKIA' + 'X'.repeat(300) + ' please format this';
@@ -1274,9 +1378,7 @@ describe('TelegramChannel', () => {
 
       // First call (HTML attempt) rejects; second call (plain fallback) resolves.
       currentBot()
-        .api.sendDocument.mockRejectedValueOnce(
-          new Error("can't parse entities"),
-        )
+        .api.sendDocument.mockRejectedValueOnce(makeParseError())
         .mockResolvedValueOnce({ message_id: 2002 });
 
       await channel.sendFile(
@@ -1306,9 +1408,7 @@ describe('TelegramChannel', () => {
         const channel = new TelegramChannel('test-token', opts);
         await channel.connect();
 
-        currentBot().api.sendDocument.mockRejectedValueOnce(
-          new Error("can't parse entities"),
-        );
+        currentBot().api.sendDocument.mockRejectedValueOnce(makeParseError());
 
         // The outer try/catch in sendFile still swallows so no throw at
         // the channel boundary, but the inner fallback must NOT issue a
@@ -1336,9 +1436,7 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       currentBot()
-        .api.sendDocument.mockRejectedValueOnce(
-          new Error("can't parse entities"),
-        )
+        .api.sendDocument.mockRejectedValueOnce(makeParseError())
         .mockResolvedValueOnce({ message_id: 9200 });
 
       const huge = 'q'.repeat(1024);
@@ -1351,6 +1449,28 @@ describe('TelegramChannel', () => {
           '⚠️ formatting failed; raw caption below\n\n',
         ),
       ).toBe(true);
+    });
+
+    it("does NOT fall back caption on rate-limit / 5xx / non-parse 400 / network errors — only `400 + can't parse entities` qualifies (#414)", async () => {
+      // Same narrowing as the text-send path: a network or rate-limit
+      // failure on sendDocument is NOT a parse rejection, so retrying
+      // with a plain caption just doubles the doomed call.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const rateLimit = new (GrammyError as unknown as new (
+        error_code: number,
+        description: string,
+      ) => GrammyError)(429, 'Too Many Requests');
+
+      currentBot().api.sendDocument.mockRejectedValueOnce(rateLimit);
+      await channel.sendFile(
+        'tg:100200300',
+        '/tmp/nanoclaw-test.png',
+        'cap _x_',
+      );
+      expect(currentBot().api.sendDocument).toHaveBeenCalledTimes(1);
     });
 
     it('does not retry sendDocument when no caption was provided', async () => {
