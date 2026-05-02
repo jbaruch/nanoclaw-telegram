@@ -520,6 +520,20 @@ const TELEGRAM_ALLOWED_REACTIONS = new Set([
 ]);
 
 /**
+ * The allowed-reactions set exposed for tests so the inverse drift
+ * invariant (every Telegram-allowed reaction has at least one
+ * shortcode pointing at it) can be asserted exhaustively. Catches
+ * the case where Telegram's allowed set grows but the shortcode map
+ * doesn't — those new emoji become unreachable from agents that
+ * emit shortcode form (every skill that calls `react_to_message`
+ * passes through `normalizeReactionEmoji`'s shortcode lookup).
+ *
+ * @internal
+ */
+export const _TELEGRAM_ALLOWED_REACTIONS: ReadonlySet<string> =
+  TELEGRAM_ALLOWED_REACTIONS;
+
+/**
  * Build a "safe to split before this index" map for HTML-aware
  * chunking. Position `i` is safe iff splitting `text` at `i`
  * produces two halves that are each well-formed Telegram HTML —
