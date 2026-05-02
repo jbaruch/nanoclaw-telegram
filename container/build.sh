@@ -13,23 +13,31 @@ CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 # --no-cache is needed when an upstream npm-from-github dep ships a new
 # version: BuildKit caches `RUN npm install -g <github-repo>` by Dockerfile
 # string, NOT by GitHub state, so without invalidation a "rebuild" silently
-# reinstalls the prior version.
-TAG="latest"
+# reinstalls the prior version. Reject any arg starting with `-` that we
+# don't explicitly recognize (catches typos like `-h` that would otherwise
+# silently override the tag); reject more than one positional TAG (catches
+# space-typos in image references).
+TAG=""
 BUILD_FLAGS=()
 for arg in "$@"; do
     case "$arg" in
         --no-cache)
             BUILD_FLAGS+=(--no-cache --pull)
             ;;
-        --*)
+        -*)
             echo "ERROR: unknown flag '$arg' (supported: --no-cache)" >&2
             exit 1
             ;;
         *)
+            if [[ -n "$TAG" ]]; then
+                echo "ERROR: multiple positional args ('$TAG' and '$arg'); only one TAG accepted." >&2
+                exit 1
+            fi
             TAG="$arg"
             ;;
     esac
 done
+TAG="${TAG:-latest}"
 
 echo "Building NanoClaw agent container image..."
 echo "Image: ${IMAGE_NAME}:${TAG}"
