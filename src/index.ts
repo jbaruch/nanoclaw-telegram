@@ -143,7 +143,7 @@ function isAddressedToUs(
   if (group.isMain === true) return true;
   const chat = getChatByJid(chatJid);
   if (chat && chat.is_group === 0) return true;
-  const triggerPattern = getTriggerPattern(group.trigger);
+  const triggerPattern = getTriggerPattern(group.trigger ?? undefined);
   return messages.some(
     (m) => triggerPattern.test(m.content.trim()) || isReplyToBot(m),
   );
@@ -1236,7 +1236,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     missedMessages,
     isMainGroup,
     groupName: group.name,
-    triggerPattern: getTriggerPattern(group.trigger),
+    // null group.trigger → undefined → global @<assistant> default.
+    // See deriveTriggerString in db.ts: null surfaces only for configs
+    // with no keyword/mention entries; we want session-command parsing
+    // to keep working in that case.
+    triggerPattern: getTriggerPattern(group.trigger ?? undefined),
     timezone: TIMEZONE,
     deps: {
       sendMessage: async (text) => {
@@ -1255,7 +1259,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       },
       formatMessages,
       canSenderInteract: (msg) => {
-        const hasTrigger = getTriggerPattern(group.trigger).test(
+        // Coerce null group.trigger → undefined so getTriggerPattern
+        // falls back to @<assistant>. Same rationale as the
+        // session-command call above.
+        const hasTrigger = getTriggerPattern(group.trigger ?? undefined).test(
           msg.content.trim(),
         );
         const reqTrigger = !isMainGroup && group.requiresTrigger !== false;
@@ -1277,7 +1284,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // removed — see the dropped-block comment near the session-command
   // gate above for rationale.
   if (!isMainGroup && group.requiresTrigger !== false) {
-    const triggerPattern = getTriggerPattern(group.trigger);
+    // Coerce null → undefined → global default @<assistant>. The
+    // legacy gate keeps mentions of the global handle alive even on
+    // groups whose triggerPatterns config holds only regex/
+    // sender_tier entries (no per-group keyword or mention).
+    // Per #145: pattern-match-only trigger gate (see comments at
+    // the two prior trigger gates in this file for the full rationale
+    // on dropping the sender-allowlist clause).
+    const triggerPattern = getTriggerPattern(group.trigger ?? undefined);
     const hasTrigger = missedMessages.some(
       (m) => triggerPattern.test(m.content.trim()) || isReplyToBot(m),
     );
@@ -1825,7 +1839,10 @@ async function startMessageLoop(): Promise<void> {
             (m) =>
               extractSessionCommand(
                 m.content,
-                getTriggerPattern(group.trigger),
+                // Coerce null → undefined: session commands are
+                // matched against the @<assistant> global default
+                // when the group has no keyword/mention pattern.
+                getTriggerPattern(group.trigger ?? undefined),
               ) !== null,
           );
 
@@ -1855,10 +1872,14 @@ async function startMessageLoop(): Promise<void> {
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
           if (needsTrigger) {
-            const triggerPattern = getTriggerPattern(group.trigger);
+            // Coerce null → undefined → global default. See parallel
+            // call in processGroupMessages above for rationale.
             // Per #145: pattern-match-only trigger gate (see comments
             // at the two prior trigger gates in this file for the full
             // rationale on dropping the sender-allowlist clause).
+            const triggerPattern = getTriggerPattern(
+              group.trigger ?? undefined,
+            );
             const hasTrigger = groupMessages.some(
               (m) => triggerPattern.test(m.content.trim()) || isReplyToBot(m),
             );

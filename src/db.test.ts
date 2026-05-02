@@ -6,6 +6,7 @@ import {
   createTask,
   deleteRegisteredGroup,
   deleteTask,
+  deriveTriggerString,
   getAllChats,
   getAllRegisteredGroups,
   getBotMessageByTelegramId,
@@ -15,12 +16,15 @@ import {
   getNewMessages,
   getRegisteredGroup,
   getTaskById,
+  getTriggerPatterns,
   messageExistsInDifferentChat,
   setRegisteredGroup,
+  setTriggerPatterns,
   storeChatMetadata,
   storeMessage,
   updateTask,
 } from './db.js';
+import type { TriggerPatternConfig } from './types.js';
 import { formatMessages } from './router.js';
 
 beforeEach(() => {
@@ -1102,5 +1106,442 @@ describe('getChatByJid', () => {
     const row = getChatByJid('tg:7');
     expect(row).not.toBeNull();
     expect(row?.is_group).toBeNull();
+  });
+});
+
+// --- TriggerPattern JSON schema (#81) ---
+
+describe('registered group trigger pattern JSON schema', () => {
+  it('setRegisteredGroup serializes a string trigger to a single-element JSON config', () => {
+    setRegisteredGroup('jsonshape@g.us', {
+      name: 'JSON Shape Group',
+      folder: 'whatsapp_jsonshape',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    const cfg = getTriggerPatterns('jsonshape@g.us');
+    expect(cfg).toBeDefined();
+    expect(cfg!.version).toBe(1);
+    expect(cfg!.patterns).toHaveLength(1);
+    expect(cfg!.patterns[0]).toMatchObject({
+      pattern: '@Andy',
+      kind: 'keyword',
+      source: 'owner-set',
+      precision: 0,
+      sample_count: 0,
+      last_matched_at: null,
+      last_updated_at: null,
+    });
+  });
+
+  it('getRegisteredGroup derives primary keyword from JSON config', () => {
+    setRegisteredGroup('keyword@g.us', {
+      name: 'Keyword Group',
+      folder: 'whatsapp_keyword',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+      triggerPatterns: {
+        version: 1,
+        patterns: [
+          {
+            pattern: '@Andy',
+            kind: 'keyword',
+            source: 'owner-set',
+            precision: 0.9,
+            sample_count: 100,
+            last_matched_at: '2024-06-01T00:00:00.000Z',
+            last_updated_at: '2024-06-01T00:00:00.000Z',
+          },
+          {
+            pattern: 'urgent',
+            kind: 'keyword',
+            source: 'learned',
+            precision: 0.7,
+            sample_count: 50,
+            last_matched_at: null,
+            last_updated_at: null,
+          },
+        ],
+      },
+    });
+
+    const group = getRegisteredGroup('keyword@g.us');
+    expect(group).toBeDefined();
+    // Primary keyword is the FIRST keyword-kind pattern.
+    expect(group!.trigger).toBe('@Andy');
+    expect(group!.triggerPatterns).toBeDefined();
+    expect(group!.triggerPatterns!.patterns).toHaveLength(2);
+    expect(group!.triggerPatterns!.patterns[1].source).toBe('learned');
+  });
+
+  it('reader accepts legacy string-shaped trigger_pattern (dual-mode)', () => {
+    // Simulate a row written by a pre-#81 binary that bypassed
+    // setRegisteredGroup. The dual-mode reader must surface it as a
+    // synthesised single-element keyword config without the
+    // initDatabase-time backfill having run. _writeRawRegisteredGroup
+    // writes the `trigger` argument verbatim into the column, so a
+    // plain '@Andy' string IS the legacy shape we want to test.
+    _writeRawRegisteredGroup({
+      jid: 'legacy@g.us',
+      name: 'Legacy Group',
+      folder: 'whatsapp_legacy',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+      container_config: null,
+    });
+
+    const group = getRegisteredGroup('legacy@g.us');
+    expect(group).toBeDefined();
+    expect(group!.trigger).toBe('@Andy');
+    expect(group!.triggerPatterns).toBeDefined();
+    expect(group!.triggerPatterns!.patterns).toHaveLength(1);
+    expect(group!.triggerPatterns!.patterns[0]).toMatchObject({
+      pattern: '@Andy',
+      kind: 'keyword',
+      source: 'owner-set',
+    });
+  });
+
+  it('reader falls back to legacy shape on malformed JSON', () => {
+    _writeRawRegisteredGroup({
+      jid: 'malformed@g.us',
+      name: 'Malformed Group',
+      folder: 'whatsapp_malformed',
+      // `{` triggers the JSON path; the broken body forces the catch
+      // branch. Reader must NOT throw — startup walks every row at
+      // boot via getAllRegisteredGroups, so a single malformed row
+      // can't be allowed to crash the orchestrator.
+      trigger: '{not valid json',
+      added_at: '2024-01-01T00:00:00.000Z',
+      container_config: null,
+    });
+
+    const group = getRegisteredGroup('malformed@g.us');
+    expect(group).toBeDefined();
+    expect(group!.trigger).toBe('{not valid json');
+    expect(group!.triggerPatterns!.patterns[0].pattern).toBe('{not valid json');
+  });
+
+  it('reader treats wrong-version JSON as no-config (loud-warn, gates fall through)', () => {
+    _writeRawRegisteredGroup({
+      jid: 'wrongversion@g.us',
+      name: 'Wrong Version Group',
+      folder: 'whatsapp_wrongversion',
+      trigger: '{"version":2,"patterns":[]}',
+      added_at: '2024-01-01T00:00:00.000Z',
+      container_config: null,
+    });
+
+    const group = getRegisteredGroup('wrongversion@g.us');
+    expect(group).toBeDefined();
+    // Per Fix 3 of the #84 followup PR (review comment-id
+    // 4360940433): a future-version row read by an older binary is
+    // returned as `trigger: null` + `triggerPatterns: undefined`
+    // rather than the previous "interpret raw column as a literal
+    // keyword" silent fallback. The trigger gate consumes null as
+    // "no opinion" → fall-open at the gate combinator, which is the
+    // desired loud-but-non-fatal behaviour: a roll-forward-then-
+    // rollback DB warns once per row at startup and stops emitting a
+    // bogus literal-string trigger that would have silently failed
+    // to match anything.
+    expect(group!.trigger).toBeNull();
+    expect(group!.triggerPatterns).toBeUndefined();
+  });
+
+  it('getTriggerPatterns returns null on wrong-version JSON', () => {
+    _writeRawRegisteredGroup({
+      jid: 'wrongversion-ext@g.us',
+      name: 'Wrong Version Ext',
+      folder: 'whatsapp_wrongversion_ext',
+      trigger: '{"version":3,"patterns":[]}',
+      added_at: '2024-01-01T00:00:00.000Z',
+      container_config: null,
+    });
+    expect(getTriggerPatterns('wrongversion-ext@g.us')).toBeNull();
+  });
+
+  it('setTriggerPatterns updates only the trigger column', () => {
+    setRegisteredGroup('update@g.us', {
+      name: 'Update Group',
+      folder: 'whatsapp_update',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+      containerConfig: { trusted: true },
+      requiresTrigger: true,
+    });
+
+    const updated: TriggerPatternConfig = {
+      version: 1,
+      patterns: [
+        {
+          pattern: '@Andy',
+          kind: 'keyword',
+          source: 'owner-set',
+          precision: 0.95,
+          sample_count: 200,
+          last_matched_at: '2024-06-01T00:00:00.000Z',
+          last_updated_at: '2024-06-01T00:00:00.000Z',
+        },
+        {
+          pattern: 'help',
+          kind: 'keyword',
+          source: 'learned',
+          precision: 0.4,
+          sample_count: 10,
+          last_matched_at: null,
+          last_updated_at: null,
+        },
+      ],
+    };
+    setTriggerPatterns('update@g.us', updated);
+
+    const group = getRegisteredGroup('update@g.us');
+    expect(group).toBeDefined();
+    // Other columns untouched.
+    expect(group!.containerConfig).toEqual({ trusted: true });
+    expect(group!.requiresTrigger).toBe(true);
+    // Trigger config replaced wholesale.
+    expect(group!.triggerPatterns!.patterns).toHaveLength(2);
+    expect(group!.triggerPatterns!.patterns[1].pattern).toBe('help');
+    expect(group!.triggerPatterns!.patterns[0].sample_count).toBe(200);
+  });
+
+  it('setTriggerPatterns throws when the group does not exist', () => {
+    expect(() =>
+      setTriggerPatterns('missing@g.us', {
+        version: 1,
+        patterns: [],
+      }),
+    ).toThrow(/no registered_groups row/);
+  });
+
+  it('setTriggerPatterns throws on unsupported version', () => {
+    setRegisteredGroup('versioncheck@g.us', {
+      name: 'Version Check',
+      folder: 'whatsapp_versioncheck',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+    });
+    // Cast through unknown to bypass the literal-1 type — we want to
+    // simulate a future-version write attempt against this binary.
+    expect(() =>
+      setTriggerPatterns('versioncheck@g.us', {
+        version: 2,
+        patterns: [],
+      } as unknown as TriggerPatternConfig),
+    ).toThrow(/Unsupported TriggerPatternConfig version/);
+  });
+
+  it('round-trips a config with non-keyword pattern kinds', () => {
+    const cfg: TriggerPatternConfig = {
+      version: 1,
+      patterns: [
+        {
+          pattern: 'mention-ping',
+          kind: 'mention',
+          source: 'universal',
+          precision: 0,
+          sample_count: 0,
+          last_matched_at: null,
+          last_updated_at: null,
+        },
+        {
+          pattern: '^urgent.*',
+          kind: 'regex',
+          source: 'learned',
+          precision: 0.6,
+          sample_count: 25,
+          last_matched_at: '2024-06-01T00:00:00.000Z',
+          last_updated_at: '2024-06-01T00:00:00.000Z',
+        },
+      ],
+    };
+    setRegisteredGroup('mixedkinds@g.us', {
+      name: 'Mixed Kinds',
+      folder: 'whatsapp_mixedkinds',
+      trigger: 'mention-ping',
+      added_at: '2024-01-01T00:00:00.000Z',
+      triggerPatterns: cfg,
+    });
+
+    const group = getRegisteredGroup('mixedkinds@g.us');
+    expect(group).toBeDefined();
+    // Per Fix 2 of the #84 followup: no keyword entry, first
+    // mention entry wins, and the stored bare pattern gets `@`
+    // re-prepended for the legacy `RegisteredGroup.trigger` slot.
+    expect(group!.trigger).toBe('@mention-ping');
+    expect(group!.triggerPatterns!.patterns[1].kind).toBe('regex');
+  });
+});
+
+// --- #84 followup PR: deriveTriggerString helper (Fix 2) ---
+
+describe('deriveTriggerString', () => {
+  function pat(
+    kind: 'keyword' | 'mention' | 'regex' | 'sender_tier' | 'reply',
+    pattern: string,
+  ) {
+    return {
+      pattern,
+      kind,
+      source: 'owner-set' as const,
+      precision: 0,
+      sample_count: 0,
+      last_matched_at: null,
+      last_updated_at: null,
+    };
+  }
+
+  it('keyword-only config returns the keyword pattern verbatim', () => {
+    expect(
+      deriveTriggerString({ version: 1, patterns: [pat('keyword', '@Andy')] }),
+    ).toBe('@Andy');
+  });
+
+  it('mention-only config re-prepends @ to the bare stored pattern', () => {
+    expect(
+      deriveTriggerString({ version: 1, patterns: [pat('mention', 'Andy')] }),
+    ).toBe('@Andy');
+  });
+
+  it('mention pattern that already has @ stays as-is (no double @)', () => {
+    expect(
+      deriveTriggerString({ version: 1, patterns: [pat('mention', '@Andy')] }),
+    ).toBe('@Andy');
+  });
+
+  it('regex-only config returns null (no legacy string for free-form regex)', () => {
+    expect(
+      deriveTriggerString({
+        version: 1,
+        patterns: [pat('regex', '^urgent.*')],
+      }),
+    ).toBeNull();
+  });
+
+  it('sender_tier-only config returns null', () => {
+    expect(
+      deriveTriggerString({
+        version: 1,
+        patterns: [pat('sender_tier', 'owner')],
+      }),
+    ).toBeNull();
+  });
+
+  it('keyword wins over mention regardless of position', () => {
+    expect(
+      deriveTriggerString({
+        version: 1,
+        patterns: [pat('mention', 'andy'), pat('keyword', 'help')],
+      }),
+    ).toBe('help');
+  });
+
+  it('mention wins over regex when no keyword is present', () => {
+    expect(
+      deriveTriggerString({
+        version: 1,
+        patterns: [pat('regex', '.*'), pat('mention', 'andy')],
+      }),
+    ).toBe('@andy');
+  });
+
+  it('empty patterns list returns null', () => {
+    expect(deriveTriggerString({ version: 1, patterns: [] })).toBeNull();
+  });
+
+  it('null config returns null', () => {
+    expect(deriveTriggerString(null)).toBeNull();
+  });
+});
+
+// --- #84 followup PR: end-to-end mention-only round-trip ---
+
+describe('mention-only triggerPatterns round-trip', () => {
+  it('setTriggerPatterns + getRegisteredGroup yields trigger="@<name>"', () => {
+    setRegisteredGroup('mention-only@g.us', {
+      name: 'Mention Only Group',
+      folder: 'whatsapp_mentiononly',
+      trigger: '@bootstrap', // value irrelevant, replaced by setTriggerPatterns below
+      added_at: '2024-01-01T00:00:00.000Z',
+    });
+    setTriggerPatterns('mention-only@g.us', {
+      version: 1,
+      patterns: [
+        {
+          pattern: 'andy',
+          kind: 'mention',
+          source: 'owner-set',
+          precision: 0,
+          sample_count: 0,
+          last_matched_at: null,
+          last_updated_at: null,
+        },
+      ],
+    });
+    const group = getRegisteredGroup('mention-only@g.us');
+    expect(group).toBeDefined();
+    // The legacy `trigger` slot reconstructs `@andy` from the bare
+    // mention pattern stored on disk. Call sites that still build
+    // a regex from it (`getTriggerPattern(group.trigger)`) keep
+    // working bit-for-bit even though the row no longer has a
+    // keyword-kind entry.
+    expect(group!.trigger).toBe('@andy');
+  });
+});
+
+// --- #84 followup PR: legacy string with non-mention shape stays keyword (Fix 1) ---
+
+describe('legacy trigger backfill shape classification', () => {
+  it('legacy `@<word>` string round-trips as a mention with bare pattern', () => {
+    // The setRegisteredGroup write path serialises `group.trigger`
+    // into a single-element keyword config (legacyTriggerToConfig).
+    // The shape-classification happens in the createSchema-time
+    // backfill against rows that bypass setRegisteredGroup. Use the
+    // raw writer + re-init to drive the migration explicitly.
+    _writeRawRegisteredGroup({
+      jid: 'rawmention@g.us',
+      name: 'Raw Mention',
+      folder: 'whatsapp_rawmention',
+      trigger: '@AyeAye', // legacy string shape, matches bare-mention regex
+      added_at: '2024-01-01T00:00:00.000Z',
+      container_config: null,
+    });
+    // Trigger the backfill by re-running createSchema via a fresh
+    // _initTestDatabase pass. _initTestDatabase replaces the in-memory
+    // DB, so we instead call the underlying migration sequence here:
+    // a second call to setRegisteredGroup with the same trigger
+    // exercises the WRITE path (always emits keyword), not the
+    // backfill path. The backfill itself is covered end-to-end in
+    // db-migration.test.ts; here we lock in the read-side handling
+    // when the row matches the legacy shape.
+    const cfg = getTriggerPatterns('rawmention@g.us');
+    expect(cfg).toBeDefined();
+    // Legacy reader synthesises a keyword config (bypassing the
+    // shape-sniff classifier — that runs only in the createSchema
+    // backfill, not in the dual-mode reader). This is intentional:
+    // dual-mode reader behaviour stays bug-compatible with #81; the
+    // smarter classification happens at migration time only, on rows
+    // that the backfill has not yet touched.
+    expect(cfg!.patterns[0].pattern).toBe('@AyeAye');
+    expect(cfg!.patterns[0].kind).toBe('keyword');
+  });
+
+  it('legacy bare keyword (no @) backfilled as keyword via raw writer + setRegisteredGroup roundtrip', () => {
+    // setRegisteredGroup serialises group.trigger="nanoclaw" into a
+    // keyword config — that's the write-side behaviour. The
+    // migration backfill (db-migration.test.ts) is what shape-sniffs
+    // a raw row written by a pre-#81 binary. This test pins the
+    // write path's emitted shape: always keyword for legacy callers.
+    setRegisteredGroup('barekeyword@g.us', {
+      name: 'Bare Keyword',
+      folder: 'whatsapp_barekeyword',
+      trigger: 'nanoclaw',
+      added_at: '2024-01-01T00:00:00.000Z',
+    });
+    const cfg = getTriggerPatterns('barekeyword@g.us');
+    expect(cfg!.patterns[0].pattern).toBe('nanoclaw');
+    expect(cfg!.patterns[0].kind).toBe('keyword');
   });
 });

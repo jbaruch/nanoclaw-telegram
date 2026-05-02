@@ -20,6 +20,8 @@ import {
   RegisteredGroup,
   ScheduledTask,
   TaskRunLog,
+  TriggerPattern,
+  TriggerPatternConfig,
 } from './types.js';
 
 let db: Database.Database;
@@ -426,6 +428,113 @@ function createSchema(database: Database.Database): void {
     `CREATE INDEX IF NOT EXISTS idx_messages_chat_telegram_id
        ON messages(chat_jid, telegram_message_id)`,
   );
+
+  // Backfill registered_groups.trigger_pattern from legacy string shape
+  // to the JSON `TriggerPatternConfig` shape (#81). Idempotent:
+  //   - rows that parse as a valid `TriggerPatternConfig` JSON object
+  //     are left alone
+  //   - everything else (legacy literal strings, malformed JSON,
+  //     corrupted rows, even legacy keywords that happen to start
+  //     with `{`) gets wrapped in a single-element config
+  //     `{version: 1, patterns: [{kind, source: "owner-set", pattern,
+  //     precision: 0, sample_count: 0, last_matched_at: null,
+  //     last_updated_at: null}]}` — `kind` is shape-classified per the
+  //     mention regex below.
+  //
+  // We can't ALTER the column type (SQLite is dynamic-typed anyway and
+  // `trigger_pattern` is already TEXT NOT NULL), so the migration is
+  // a row-by-row UPDATE. Wrapped in a transaction so a crash mid-update
+  // can't leave the table half-converted (mixed legacy + new shape is
+  // read-safe but makes incident triage harder). better-sqlite3
+  // implicitly rolls back on thrown exceptions.
+  //
+  // Two-pass classification: a cheap SQL prefilter excludes the common
+  // case (rows whose value starts with `{` after trim — almost certainly
+  // already-JSON), then `isTriggerPatternConfig` is the authoritative
+  // shape check on the survivors plus any rows whose value looked like
+  // JSON but didn't validate. The corner case the `LIKE '{%'` filter
+  // alone misses is a legacy keyword that legitimately starts with `{`,
+  // OR a corrupted row whose first char is `{` but body is broken
+  // — both would otherwise be silently skipped and never converted.
+  // Reading the column shape once at boot is cheap (one row per group);
+  // the transaction wrapper means a partial pass crashes back to all-or-
+  // nothing.
+  const allRows = database
+    .prepare(`SELECT jid, trigger_pattern FROM registered_groups`)
+    .all() as Array<{ jid: string; trigger_pattern: string }>;
+  const legacyTriggerRows = allRows.filter((row) => {
+    const trimmed = row.trigger_pattern.trim();
+    if (!trimmed.startsWith('{')) return true;
+    try {
+      const parsed = JSON.parse(trimmed);
+      return !isTriggerPatternConfig(parsed);
+    } catch (err) {
+      // Per `coding-policy: error-handling`: catch only the typed
+      // exception we expect (`SyntaxError` from JSON.parse on a
+      // legacy literal that happens to start with `{`). Any other
+      // throw shape — `TypeError`, OOM during parse of an absurd
+      // input, an instrumentation error — is a real defect and
+      // must propagate so a startup migration doesn't silently
+      // mark ALL rows as legacy and rewrite them.
+      if (err instanceof SyntaxError) return true;
+      throw err;
+    }
+  });
+  if (legacyTriggerRows.length > 0) {
+    const updateStmt = database.prepare(
+      `UPDATE registered_groups SET trigger_pattern = ? WHERE jid = ?`,
+    );
+    database.transaction(() => {
+      for (const row of legacyTriggerRows) {
+        // Shape-classify the legacy string so #82's per-`kind`
+        // self-improvement loop sees the right category from day one.
+        // `@<word>` (with bare ASCII identifier chars) is a `mention`,
+        // stored without the leading `@` to match the
+        // mention-matcher's bare-pattern convention. Everything else
+        // (loose strings like `nanoclaw`, oddly-formatted handles
+        // like `@bot-with-dash`, free-form keywords) stays as
+        // `keyword` and is stored trimmed (the `updateGroupTrigger`
+        // helper trims on write, so backfill matches that contract;
+        // surrounding whitespace would round-trip awkwardly).
+        const trimmed = row.trigger_pattern.trim();
+        const mentionMatch = /^@([a-zA-Z0-9_]+)$/.exec(trimmed);
+        const config: TriggerPatternConfig = mentionMatch
+          ? {
+              version: 1,
+              patterns: [
+                {
+                  pattern: mentionMatch[1],
+                  kind: 'mention',
+                  source: 'owner-set',
+                  precision: 0,
+                  sample_count: 0,
+                  last_matched_at: null,
+                  last_updated_at: null,
+                },
+              ],
+            }
+          : {
+              version: 1,
+              patterns: [
+                {
+                  pattern: trimmed,
+                  kind: 'keyword',
+                  source: 'owner-set',
+                  precision: 0,
+                  sample_count: 0,
+                  last_matched_at: null,
+                  last_updated_at: null,
+                },
+              ],
+            };
+        updateStmt.run(JSON.stringify(config), row.jid);
+      }
+    })();
+    logger.info(
+      { count: legacyTriggerRows.length },
+      'registered_groups: backfilled legacy trigger_pattern rows to JSON schema (#81)',
+    );
+  }
 
   // Migrate sessions table to per-session layout (parallel-maintenance).
   // Pre-PR-#55: PK was `(group_folder)` alone — one session per group.
@@ -1567,6 +1676,281 @@ function parseContainerConfig(
   return parsed as ContainerConfig;
 }
 
+// Dual-mode reader for `registered_groups.trigger_pattern` (#81).
+// Pre-#81 rows store a single string ("@Andy"). Post-#81 rows store a
+// JSON-encoded `TriggerPatternConfig`. The createSchema-time backfill
+// converts every legacy row to JSON on first boot, but we keep the
+// dual-mode read path for two reasons:
+//   1. A user rolling back to a pre-#81 binary then forward again must
+//      re-converge cleanly without manual intervention.
+//   2. The setup/register CLI and external tooling sometimes write
+//      raw strings directly via `_writeRawRegisteredGroup` for tests;
+//      we want those to keep working without forcing every test to
+//      know the JSON shape.
+//
+// Returns the canonical config (or null when the row is unreadable)
+// plus the derived trigger string used to populate
+// `RegisteredGroup.trigger`. Three failure modes are distinguished:
+//
+//   - Legacy string shape (no leading `{`) → wrap as a synthesised
+//     single-element keyword config. Reader-side compat for rollback
+//     and direct test writes.
+//   - JSON parse fails or shape doesn't validate → loud warn, fall
+//     back to a legacy keyword config so a single bad row can't
+//     crash boot. The trigger string surfaces the raw column so
+//     operators can still see what's there.
+//   - JSON parses, shape validates, BUT version > 1 (a future
+//     binary's row read by this older binary) → loud warn, return
+//     `null` config and `null` trigger. The gate framework treats
+//     null as "no opinion" and falls through to the next gate, so
+//     the failure is loud-but-non-fatal. See review of #84,
+//     comment-id 4360940433: silent fallback-to-keyword on a future
+//     row was too quiet.
+function parseTriggerPatternColumn(
+  raw: string,
+  jid: string,
+): { config: TriggerPatternConfig | null; trigger: string | null } {
+  const trimmed = raw.trim();
+  // Cheap shape sniff: JSON config always starts with `{`. Anything
+  // else is the legacy string shape (or corruption that we treat as
+  // legacy by best-effort).
+  if (!trimmed.startsWith('{')) {
+    const legacy = legacyTriggerToConfig(raw);
+    return {
+      config: legacy,
+      trigger: deriveTriggerString(legacy),
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
+    logger.warn(
+      { errName: err.name, jid, len: raw.length },
+      'registered_groups: invalid trigger_pattern JSON, falling back to legacy keyword shape',
+    );
+    const legacy = legacyTriggerToConfig(raw);
+    return {
+      config: legacy,
+      trigger: raw,
+    };
+  }
+  // Detect a future-version row BEFORE the strict-shape validator
+  // would also reject it: a `{version: 2, ...}` row read by a v1
+  // binary is a forward-compat scenario (rollback), not corruption.
+  // Surface it loudly so the operator notices, and return null so
+  // downstream gates treat the row as "no patterns configured"
+  // (== fail-open at the gate combinator) rather than silently
+  // re-interpreting the raw JSON as a literal keyword pattern.
+  if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const v = (parsed as Record<string, unknown>).version;
+    if (typeof v === 'number' && v > 1) {
+      logger.warn(
+        { jid, foundVersion: v, expectedVersion: 1, len: raw.length },
+        'registered_groups: trigger_pattern JSON has unsupported future version, treating as no-config (gates will fall through to fail-open)',
+      );
+      return { config: null, trigger: null };
+    }
+  }
+  if (!isTriggerPatternConfig(parsed)) {
+    logger.warn(
+      { jid, len: raw.length },
+      'registered_groups: trigger_pattern JSON is not a valid TriggerPatternConfig, falling back to legacy keyword shape',
+    );
+    const legacy = legacyTriggerToConfig(raw);
+    return {
+      config: legacy,
+      trigger: raw,
+    };
+  }
+  return {
+    config: parsed,
+    trigger: deriveTriggerString(parsed),
+  };
+}
+
+function legacyTriggerToConfig(raw: string): TriggerPatternConfig {
+  return {
+    version: 1,
+    patterns: [
+      {
+        pattern: raw,
+        kind: 'keyword',
+        source: 'owner-set',
+        precision: 0,
+        sample_count: 0,
+        last_matched_at: null,
+        last_updated_at: null,
+      },
+    ],
+  };
+}
+
+/**
+ * Derive the legacy `RegisteredGroup.trigger` string from a parsed
+ * config. Pinned-down replacement for the unspecified
+ * "first-keyword-or-empty" behaviour flagged on PR #84
+ * (comment-id 4360940433).
+ *
+ * Order of preference, locked down so #82 can write mention-only /
+ * regex-only configs without surprising any legacy reader:
+ *   1. First `keyword`-kind pattern → return its `pattern` verbatim.
+ *      This preserves the pre-#81 shape where `@Andy` was stored as
+ *      a literal `@Andy` keyword.
+ *   2. Else first `mention`-kind pattern → return `'@' + pattern`.
+ *      Mentions are stored bare per the migration backfill (Fix 1
+ *      above), so re-prepending the `@` keeps the legacy regex
+ *      `(?:^|\s)@Andy\b` alive for call sites that haven't migrated
+ *      to the new gate.
+ *   3. Else `null`. Downstream call sites coerce null → undefined
+ *      and let `getTriggerPattern` fall back to the global default
+ *      `@<assistant>` regex; this preserves message-loop wakeup for
+ *      the global mention even on a config with no per-group
+ *      keyword/mention. Returning `null` (vs the previous empty
+ *      string) is the type-system signal that "there is no
+ *      group-specific trigger string" — ambiguous before, explicit
+ *      now.
+ */
+export function deriveTriggerString(
+  config: TriggerPatternConfig | null,
+): string | null {
+  if (!config) return null;
+  const keyword = config.patterns.find((p) => p.kind === 'keyword');
+  if (keyword) return keyword.pattern;
+  const mention = config.patterns.find((p) => p.kind === 'mention');
+  if (mention) {
+    return mention.pattern.startsWith('@')
+      ? mention.pattern
+      : `@${mention.pattern}`;
+  }
+  return null;
+}
+
+// Allow-listed enums for `kind` / `source` per the TriggerPatternKind /
+// TriggerPatternSource union types in src/types.ts. Validation here means
+// a typo like `kind: "mentoin"` is caught at parse time and the row falls
+// through to the warn-log path in `parseTriggerPatternColumn`, instead of
+// silently being treated as "valid config" and then ignored downstream
+// because `deriveTriggerString` finds no `keyword`/`mention` it recognises.
+const TRIGGER_PATTERN_KINDS: ReadonlySet<string> = new Set([
+  'keyword',
+  'mention',
+  'reply',
+  'regex',
+  'sender_tier',
+]);
+const TRIGGER_PATTERN_SOURCES: ReadonlySet<string> = new Set([
+  'owner-set',
+  'learned',
+  'universal',
+]);
+
+function isTriggerPatternConfig(value: unknown): value is TriggerPatternConfig {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  if (v.version !== 1) return false;
+  if (!Array.isArray(v.patterns)) return false;
+  for (const p of v.patterns) {
+    if (p === null || typeof p !== 'object' || Array.isArray(p)) return false;
+    const pp = p as Record<string, unknown>;
+    if (typeof pp.pattern !== 'string') return false;
+    if (typeof pp.kind !== 'string' || !TRIGGER_PATTERN_KINDS.has(pp.kind)) {
+      return false;
+    }
+    if (
+      typeof pp.source !== 'string' ||
+      !TRIGGER_PATTERN_SOURCES.has(pp.source)
+    ) {
+      return false;
+    }
+    if (typeof pp.precision !== 'number') return false;
+    if (typeof pp.sample_count !== 'number') return false;
+    if (pp.last_matched_at !== null && typeof pp.last_matched_at !== 'string') {
+      return false;
+    }
+    if (pp.last_updated_at !== null && typeof pp.last_updated_at !== 'string') {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Serialise a `RegisteredGroup` into the column value for
+ * `trigger_pattern`. Always emits JSON (forward-only writes). When the
+ * caller already has a `triggerPatterns` config, it wins; otherwise
+ * we synthesise a single-element keyword config from `group.trigger`
+ * with `source: "owner-set"` so the row is observability-ready
+ * immediately. A null `group.trigger` with no `triggerPatterns`
+ * yields an empty-pattern config — readable by the gate framework as
+ * "no patterns configured" (== `pass`, fail-open).
+ */
+function serializeTriggerPatternForColumn(group: RegisteredGroup): string {
+  if (group.triggerPatterns) return JSON.stringify(group.triggerPatterns);
+  if (group.trigger === null || group.trigger === undefined) {
+    return JSON.stringify({ version: 1, patterns: [] });
+  }
+  return JSON.stringify(legacyTriggerToConfig(group.trigger));
+}
+
+/**
+ * Read the full trigger pattern config for a group.
+ *
+ * Returns:
+ *   - `undefined` — the group does not exist (no row).
+ *   - `null` — the row exists but is unreadable for the current
+ *     binary (e.g. JSON parse OK but `version > 1`, signalling a
+ *     forward-binary write read by an older binary). Loud-warned at
+ *     parse time. The trigger gate consumes null as "no opinion"
+ *     (decision: `pass`), which falls through the chain to default-
+ *     allow rather than silent-misinterpret. See review of #84,
+ *     comment-id 4360940433.
+ *   - `TriggerPatternConfig` otherwise. Legacy string rows surface as
+ *     a synthesised single-element config.
+ */
+export function getTriggerPatterns(
+  jid: string,
+): TriggerPatternConfig | null | undefined {
+  const row = db
+    .prepare('SELECT trigger_pattern FROM registered_groups WHERE jid = ?')
+    .get(jid) as { trigger_pattern: string } | undefined;
+  if (!row) return undefined;
+  return parseTriggerPatternColumn(row.trigger_pattern, jid).config;
+}
+
+/**
+ * Replace the trigger pattern config for an existing group. Throws
+ * if the group is not registered (callers should `setRegisteredGroup`
+ * first). Updates `trigger_pattern` only — other columns untouched.
+ */
+export function setTriggerPatterns(
+  jid: string,
+  config: TriggerPatternConfig,
+): void {
+  if (config.version !== 1) {
+    throw new Error(
+      `Unsupported TriggerPatternConfig version ${config.version} for jid ${jid}`,
+    );
+  }
+  const result = db
+    .prepare(`UPDATE registered_groups SET trigger_pattern = ? WHERE jid = ?`)
+    .run(JSON.stringify(config), jid);
+  if (result.changes === 0) {
+    throw new Error(
+      `setTriggerPatterns: no registered_groups row for jid ${jid}`,
+    );
+  }
+}
+
+/**
+ * Re-export the row-level `TriggerPattern` type so #82's self-improvement
+ * code can import its observability shape from a single place.
+ */
+export type { TriggerPattern, TriggerPatternConfig };
+
 export function getRegisteredGroup(
   jid: string,
 ): (RegisteredGroup & { jid: string }) | undefined {
@@ -1592,16 +1976,18 @@ export function getRegisteredGroup(
     );
     return undefined;
   }
+  const triggerParsed = parseTriggerPatternColumn(row.trigger_pattern, row.jid);
   return {
     jid: row.jid,
     name: row.name,
     folder: row.folder,
-    trigger: row.trigger_pattern,
+    trigger: triggerParsed.trigger,
     added_at: row.added_at,
     containerConfig: parseContainerConfig(row.container_config, row.jid),
     requiresTrigger:
       row.requires_trigger === null ? undefined : row.requires_trigger === 1,
     isMain: row.is_main === 1 ? true : undefined,
+    triggerPatterns: triggerParsed.config ?? undefined,
   };
 }
 
@@ -1616,7 +2002,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     jid,
     group.name,
     group.folder,
-    group.trigger,
+    serializeTriggerPatternForColumn(group),
     group.added_at,
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
     // Map TS `undefined` to SQL NULL (not 0). NULL and 0 are distinct
@@ -1706,8 +2092,13 @@ export function updateGroupTrigger(
   // Strip the DB-only `jid` field so it doesn't leak into the returned
   // RegisteredGroup or into the in-memory cache the orchestrator
   // mirrors into. Same rationale as updateGroupTrusted above.
-  const { jid: _existingJid, ...rest } = existing;
+  const {
+    jid: _existingJid,
+    triggerPatterns: _existingTriggerPatterns,
+    ...rest
+  } = existing;
   void _existingJid;
+  void _existingTriggerPatterns;
   const updated: RegisteredGroup = {
     ...rest,
     trigger: normalizedTrigger,
@@ -1759,15 +2150,20 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
       );
       continue;
     }
+    const triggerParsed = parseTriggerPatternColumn(
+      row.trigger_pattern,
+      row.jid,
+    );
     result[row.jid] = {
       name: row.name,
       folder: row.folder,
-      trigger: row.trigger_pattern,
+      trigger: triggerParsed.trigger,
       added_at: row.added_at,
       containerConfig: parseContainerConfig(row.container_config, row.jid),
       requiresTrigger:
         row.requires_trigger === null ? undefined : row.requires_trigger === 1,
       isMain: row.is_main === 1 ? true : undefined,
+      triggerPatterns: triggerParsed.config ?? undefined,
     };
   }
   return result;

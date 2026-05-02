@@ -57,14 +57,106 @@ export interface ContainerConfig {
   agentModel?: string;
 }
 
+/**
+ * Provenance of a single trigger pattern. Used by the self-improvement loop
+ * (#82) to decide whether a pattern is owner-locked, learned by the agent,
+ * or part of a universal default set.
+ *
+ * - `owner-set`: explicitly configured by the group owner (e.g. via
+ *   `setup/register.ts --trigger`). Never overwritten by automated updates.
+ * - `learned`: added by the self-improvement loop based on observed
+ *   precision. Subject to demotion / removal by the same loop.
+ * - `universal`: shipped defaults that apply to every group of a given
+ *   shape (e.g. the always-on `@<assistant>` keyword).
+ */
+export type TriggerPatternSource = 'owner-set' | 'learned' | 'universal';
+
+/**
+ * Kind of pattern. Loose taxonomy that matches how the orchestrator
+ * actually decides to wake up:
+ *
+ * - `keyword`: literal substring matched at word boundary
+ *   (current `buildTriggerPattern` behaviour).
+ * - `mention`: explicit @-mention or channel-native ping.
+ * - `reply`: triggered because the message replies to one of ours.
+ * - `regex`: free-form regex pattern (advanced).
+ * - `sender_tier`: triggered by sender belonging to a privileged tier
+ *   (reserved for #82; not consumed by the matcher today).
+ */
+export type TriggerPatternKind =
+  | 'keyword'
+  | 'mention'
+  | 'reply'
+  | 'regex'
+  | 'sender_tier';
+
+/**
+ * One trigger pattern entry. The observability fields (`precision`,
+ * `sample_count`, `last_matched_at`, `last_updated_at`) are written
+ * through helpers; #81 itself only stores them — the self-improvement
+ * loop in #82 is what populates them.
+ */
+export interface TriggerPattern {
+  /** Pattern body. Interpretation depends on `kind`. */
+  pattern: string;
+  kind: TriggerPatternKind;
+  source: TriggerPatternSource;
+  /**
+   * Running precision in [0, 1]. Initialised to 0 on insert. Re-computed
+   * by the self-improvement loop from `sample_count` and observed true
+   * positives. Default 0 means "no signal yet" — readers must treat
+   * absent / 0 as "no opinion", not "definitely bad".
+   */
+  precision: number;
+  /** Total number of triggers attributed to this pattern. */
+  sample_count: number;
+  /** ISO timestamp of the most recent match, or null if never matched. */
+  last_matched_at: string | null;
+  /** ISO timestamp of the most recent metric update, or null. */
+  last_updated_at: string | null;
+}
+
+/**
+ * Schema-versioned wrapper for the trigger pattern set on a registered
+ * group. Stored as JSON in `registered_groups.trigger_pattern`. Reads
+ * are dual-mode (legacy string also accepted) until the backfill
+ * migration has run on every install — see `parseTriggerPatternColumn`
+ * in db.ts.
+ */
+export interface TriggerPatternConfig {
+  version: 1;
+  patterns: TriggerPattern[];
+}
+
 export interface RegisteredGroup {
   name: string;
   folder: string;
-  trigger: string;
+  /**
+   * Derived legacy trigger string. Drives `getTriggerPattern(group.trigger)`
+   * for the existing matching code paths (orchestrator, telegram channel,
+   * session-commands). Derivation order (see `deriveTriggerString` in
+   * `db.ts`): first `keyword`-kind entry verbatim → first `mention`-kind
+   * entry with `@` re-prepended → `null`.
+   *
+   * `null` means "no group-specific trigger string" — call sites coerce
+   * to `undefined` and let `getTriggerPattern` fall back to the global
+   * default `@<assistant>` regex. The `null` sentinel replaces the
+   * earlier ambiguous empty-string return for #82-style configs that
+   * contain only non-keyword/non-mention patterns (e.g. regex,
+   * sender_tier). See review of #84, comment-id 4360940433.
+   */
+  trigger: string | null;
   added_at: string;
   containerConfig?: ContainerConfig;
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
   isMain?: boolean; // True for the main control group (no trigger, elevated privileges)
+  /**
+   * Full pattern set with provenance + observability. Optional during
+   * the dual-mode transition: legacy string-only rows surface here as
+   * an auto-derived single-element config (`{kind: "keyword", source:
+   * "owner-set"}`) to keep readers monomorphic.
+   */
+  triggerPatterns?: TriggerPatternConfig;
 }
 
 export interface NewMessage {
