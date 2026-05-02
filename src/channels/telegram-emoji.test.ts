@@ -4,6 +4,7 @@ import {
   normalizeReactionEmoji,
   _isAllowedReaction,
   _EMOJI_SHORTCODE_TO_UNICODE,
+  _TELEGRAM_ALLOWED_REACTIONS,
 } from './telegram.js';
 
 describe('normalizeReactionEmoji — passthrough for valid Unicode', () => {
@@ -169,4 +170,42 @@ describe('drift invariant — every shortcode maps to a Telegram-allowed reactio
       expect(normalizeReactionEmoji(unicode)).toBe(unicode);
     }
   });
+});
+
+// Inverse drift invariant (#285). The forward invariant above
+// catches "shortcode map outgrew the allowed set" — a shortcode
+// pointing at a Unicode value Telegram doesn't accept. This block
+// catches the *other* direction: "allowed set grew but the
+// shortcode map didn't" — Telegram added a new reaction (Bot API
+// 7.x → 7.y bump), nobody added a shortcode for it, and now every
+// agent that emits shortcode form can't reach it. The reaction
+// becomes unreachable from skills without anyone noticing because
+// the missing-shortcode path is silent (returns input unchanged,
+// then the allowed-reactions gate at sendReaction logs WARN and
+// falls back to 👍).
+
+describe('inverse drift invariant — every allowed Telegram reaction has at least one shortcode (#285)', () => {
+  // Build a reverse index once per test run: Unicode → list of
+  // shortcodes that map to it. Multiple shortcodes can share a
+  // Unicode value (`thumbs_up` + `+1` + `thumbsup` → 👍); the
+  // invariant is "at least one", not "exactly one."
+  const reverseIndex = new Map<string, string[]>();
+  for (const [shortcode, unicode] of Object.entries(
+    _EMOJI_SHORTCODE_TO_UNICODE,
+  )) {
+    const list = reverseIndex.get(unicode) ?? [];
+    list.push(shortcode);
+    reverseIndex.set(unicode, list);
+  }
+
+  for (const unicode of _TELEGRAM_ALLOWED_REACTIONS) {
+    it(`'${unicode}' is reachable from at least one shortcode`, () => {
+      const shortcodes = reverseIndex.get(unicode);
+      expect(
+        shortcodes,
+        `'${unicode}' is in TELEGRAM_ALLOWED_REACTIONS but no shortcode in EMOJI_SHORTCODE_TO_UNICODE maps to it — agents emitting shortcode form cannot reach this reaction. Add a shortcode entry for it in src/channels/telegram.ts (EMOJI_SHORTCODE_TO_UNICODE).`,
+      ).toBeDefined();
+      expect(shortcodes!.length).toBeGreaterThan(0);
+    });
+  }
 });

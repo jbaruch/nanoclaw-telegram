@@ -422,10 +422,14 @@ export function normalizeReactionEmoji(input: string): string {
 }
 
 /**
- * Predicate exposed for tests so the drift invariant between
- * EMOJI_SHORTCODE_TO_UNICODE and TELEGRAM_ALLOWED_REACTIONS can be
- * asserted without exporting the Set itself. Returns true iff the
- * given Unicode emoji is in Telegram's accepted reaction set.
+ * Predicate exposed for tests so the forward drift invariant
+ * (every value in `EMOJI_SHORTCODE_TO_UNICODE` is in
+ * `TELEGRAM_ALLOWED_REACTIONS`) can be asserted per-shortcode with
+ * an `it()` per row, producing readable test names. The Set itself
+ * is also exposed (`_TELEGRAM_ALLOWED_REACTIONS`) for the inverse
+ * direction (#285) where the test iterates the allowed set; use
+ * this predicate for the forward direction and the Set for the
+ * inverse.
  *
  * @internal
  */
@@ -518,6 +522,20 @@ const TELEGRAM_ALLOWED_REACTIONS = new Set([
   '🤷‍♀',
   '😡',
 ]);
+
+/**
+ * The allowed-reactions set exposed for tests so the inverse drift
+ * invariant (every Telegram-allowed reaction has at least one
+ * shortcode pointing at it) can be asserted exhaustively. Catches
+ * the case where Telegram's allowed set grows but the shortcode map
+ * doesn't — those new emoji become unreachable from agents that
+ * emit shortcode form (every skill that calls `react_to_message`
+ * passes through `normalizeReactionEmoji`'s shortcode lookup).
+ *
+ * @internal
+ */
+export const _TELEGRAM_ALLOWED_REACTIONS: ReadonlySet<string> =
+  TELEGRAM_ALLOWED_REACTIONS;
 
 /**
  * Build a "safe to split before this index" map for HTML-aware
