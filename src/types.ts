@@ -372,7 +372,9 @@ export interface Channel {
   // Optional: send a file to the chat. Returns the channel-specific
   // message id when the send succeeds, undefined otherwise. Callers
   // gate post-send persistence (e.g. `storeMessage` for caption
-  // accounting) on a truthy return value so a failed send doesn't
+  // accounting) on `result !== undefined` (NOT a truthy check —
+  // empty-string and `'0'` ids are forward-compat valid per the
+  // `shouldStoreBotMessage` contract) so a failed send doesn't
   // leave a phantom "answered" record in `messages.db` (#428).
   sendFile?(
     jid: string,

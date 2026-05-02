@@ -523,6 +523,15 @@ export function startIpcWatcher(deps: IpcDeps): void {
                         is_from_me: true,
                         is_bot_message: true,
                         reply_to_message_id: data.replyToMessageId,
+                        // Stamp the Telegram message id so post-hoc
+                        // "which bot send corresponds to Telegram
+                        // message X" queries match the orchestrator
+                        // text-reply path (`src/index.ts:1659`) and
+                        // the `send_message` handler. Pre-#428
+                        // sendFile returned void so this column was
+                        // unavailable; now that we have the id, no
+                        // reason not to record it.
+                        telegram_message_id: sentFileMsgId,
                       });
                     } else if (cleanCaption && !captionDelivered) {
                       logger.warn(
