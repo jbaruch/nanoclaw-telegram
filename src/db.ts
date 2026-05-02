@@ -2,6 +2,11 @@ import Database, { SqliteError } from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
+import {
+  rebuildCadenceRegistry,
+  type CadenceRegistryDeps,
+  type CadenceRegistryRebuildResult,
+} from './cadence-registry.js';
 import { ASSISTANT_NAME, DATA_DIR, GROUPS_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import {
@@ -207,7 +212,12 @@ function createSchema(database: Database.Database): void {
       -- sessions[group][maintenance] across DIFFERENT tasks. Persistence
       -- here is keyed on task_id, so different tasks have different rows
       -- hence different sessions hence no bleed.
-      session_id TEXT
+      session_id TEXT,
+      -- Row-creation provenance for #305 Phase 2 cadence-registry. See
+      -- the ALTER block below for the value set and ownership semantics.
+      -- 'schedule-task' is the default so unmigrated callers (the
+      -- existing schedule-task IPC path) keep their semantics unchanged.
+      source TEXT NOT NULL DEFAULT 'schedule-task'
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
     CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
@@ -343,6 +353,30 @@ function createSchema(database: Database.Database): void {
     .all() as Array<{ name: string }>;
   if (!sessionIdCols.some((c) => c.name === 'session_id')) {
     database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN session_id TEXT`);
+  }
+
+  // Add source column for #305 Phase 2 — provenance of a scheduled_tasks
+  // row's CREATION (distinct from `created_by_role`, which is the trust-
+  // boundary provenance for whether the agent-runner wraps the prompt in
+  // <untrusted-input> at fire time):
+  //   'schedule-task'    — created via the schedule-task IPC tool
+  //                        (admin shells, owner-initiated reminders,
+  //                        ad-hoc monitors). Default for back-compat.
+  //   'cadence-registry' — created by the per-spawn cadence-registry
+  //                        rebuild from a SKILL.md `cadence:` frontmatter
+  //                        declaration. Idempotently DELETEd + reinserted
+  //                        on each container spawn.
+  // The cadence-registry's idempotent rebuild ONLY touches rows where
+  // `source = 'cadence-registry'` so owner-scheduled tasks survive
+  // respawns. PRAGMA-gated rather than try/catch per the no-error-
+  // suppression rule.
+  const sourceCols = database
+    .prepare('PRAGMA table_info(scheduled_tasks)')
+    .all() as Array<{ name: string }>;
+  if (!sourceCols.some((c) => c.name === 'source')) {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'schedule-task'`,
+    );
   }
 
   // Add is_bot_message column if it doesn't exist (migration for existing DBs)
@@ -1240,6 +1274,46 @@ export function createTask(
     task.created_by_role,
     task.continuation_cycle_id || null,
   );
+}
+
+/**
+ * Phase 2 of #305 — idempotent rebuild of cadence-registry rows for one
+ * group, called from the container-spawn flow after the per-session
+ * skills tree has been published to disk. The cadence-registry module
+ * itself is db-handle-agnostic (it accepts the db as a dep, which keeps
+ * its unit tests free of singleton state); this wrapper plumbs the
+ * module-private `db` handle through so callers don't reach into
+ * internals just to invoke the rebuild.
+ *
+ * Upsert-shaped: a second call with the same SKILL.md frontmatter
+ * leaves existing rows alone (preserving `next_run`, `session_id`,
+ * `last_run`, `last_result`); only declarations whose cadence string
+ * or prompt changed are rewritten, only orphaned rows are deleted.
+ * Owner-scheduled rows (`source = 'schedule-task'`) are untouched —
+ * the rebuild keys on `source = 'cadence-registry'`.
+ *
+ * Throws explicitly when called before `initDatabase` so tests that
+ * simulate the spawn path without initialising the DB get an
+ * actionable error instead of `Cannot read properties of undefined
+ * (reading 'transaction')` deep inside the cadence-registry. Per
+ * `coding-policy: error-handling`, an unexpected initialisation
+ * failure must propagate, not be papered over with a synthetic
+ * success — production paths always init before spawn is reachable
+ * so this branch never fires there; a test that hits it should
+ * `vi.mock('./db.js', ...)` the wrapper alongside its other module
+ * mocks.
+ */
+export function rebuildCadenceRegistryForGroup(
+  opts: Omit<CadenceRegistryDeps, 'db'>,
+): CadenceRegistryRebuildResult {
+  if (!db) {
+    throw new Error(
+      `rebuildCadenceRegistryForGroup called before initDatabase (groupFolder=${opts.groupFolder}). ` +
+        `Production always invokes initDatabase() in src/index.ts startup before runContainerAgent is reachable; ` +
+        `if you're seeing this in a test, mock ./db.js's rebuildCadenceRegistryForGroup alongside the test's other module mocks.`,
+    );
+  }
+  return rebuildCadenceRegistry({ ...opts, db });
 }
 
 export function getTaskById(id: string): ScheduledTask | undefined {

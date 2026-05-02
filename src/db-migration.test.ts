@@ -254,6 +254,94 @@ describe('database migrations', () => {
     }
   });
 
+  // #305 Phase 2a — `source` column distinguishes cadence-registry-
+  // managed rows (rebuilt on every spawn) from rows created via the
+  // `schedule-task` IPC (owner-initiated, must survive respawns).
+  // Pre-existing scheduled_tasks tables (every install before this
+  // change) lack the column. The migration must add it without
+  // breaking any existing rows; legacy rows then read back with the
+  // backfill default `'schedule-task'`, so the cadence-registry's
+  // idempotent rebuild leaves them alone (the rebuild's
+  // identification predicate is `source = 'cadence-registry'`).
+  it('adds source column to a pre-existing scheduled_tasks table with schedule-task default', async () => {
+    const repoRoot = process.cwd();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-db-test-'));
+
+    try {
+      process.chdir(tempDir);
+      fs.mkdirSync(path.join(tempDir, 'store'), { recursive: true });
+
+      const dbPath = path.join(tempDir, 'store', 'messages.db');
+      const legacyDb = new Database(dbPath);
+      // Legacy shape: scheduled_tasks WITHOUT source. Mirrors the
+      // install before #305 Phase 2a lands. The column distinguishes
+      // cadence-registry-managed rows from owner-initiated tasks.
+      legacyDb.exec(`
+        CREATE TABLE scheduled_tasks (
+          id TEXT PRIMARY KEY,
+          group_folder TEXT NOT NULL,
+          chat_jid TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          schedule_type TEXT NOT NULL,
+          schedule_value TEXT NOT NULL,
+          next_run TEXT,
+          last_run TEXT,
+          last_result TEXT,
+          status TEXT DEFAULT 'active',
+          created_at TEXT NOT NULL,
+          created_by_role TEXT NOT NULL DEFAULT 'owner',
+          continuation_cycle_id TEXT,
+          session_id TEXT
+        );
+      `);
+      legacyDb
+        .prepare(
+          `INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, status, created_at, created_by_role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'pre-305-task',
+          'main',
+          'main@g.us',
+          'remind me at 14:00',
+          'once',
+          '2026-05-01T14:00:00.000Z',
+          'active',
+          '2026-04-30T00:00:00.000Z',
+          'owner',
+        );
+      legacyDb.close();
+
+      vi.resetModules();
+      const { initDatabase, getTaskById, _closeDatabase } =
+        await import('./db.js');
+
+      initDatabase();
+
+      const upgradedDb = new Database(dbPath);
+      const cols = upgradedDb
+        .prepare('PRAGMA table_info(scheduled_tasks)')
+        .all() as Array<{ name: string; dflt_value: unknown }>;
+      const sourceCol = cols.find((c) => c.name === 'source');
+      expect(sourceCol).toBeDefined();
+      // The DEFAULT clause keeps a pre-existing row's source = 'schedule-task'
+      // on read after the ALTER, so the cadence-registry rebuild's
+      // `WHERE source = 'cadence-registry'` predicate doesn't match it.
+      expect(String(sourceCol!.dflt_value)).toContain("'schedule-task'");
+      upgradedDb.close();
+
+      const legacyTask = getTaskById('pre-305-task') as
+        | { source?: string }
+        | undefined;
+      expect(legacyTask).toBeDefined();
+      expect(legacyTask!.source).toBe('schedule-task');
+
+      _closeDatabase();
+    } finally {
+      process.chdir(repoRoot);
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('drops the dormant tg:1698969 / telegram_main row on initDatabase (#159)', async () => {
     const repoRoot = process.cwd();
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-db-test-'));

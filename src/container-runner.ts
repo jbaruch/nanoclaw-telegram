@@ -46,7 +46,9 @@ import {
   readonlyMountArgs,
   stopContainer,
 } from './container-runtime.js';
+import { defaultComputeNextRun } from './cadence-registry.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { rebuildCadenceRegistryForGroup } from './db.js';
 import { isHandoffActive } from './handoff.js';
 import { sweepStaleInputs } from './ipc-input-sweep.js';
 import { validateAdditionalMounts } from './mount-security.js';
@@ -2495,6 +2497,71 @@ export async function runContainerAgent(
     input.chatJid,
     sessionName,
   );
+
+  // #305 Phase 2a — cadence-registry rebuild. Walks the per-session
+  // skills tree that `buildVolumeMounts` just published, parses each
+  // SKILL.md's `cadence:` / `priority:` frontmatter, and idempotently
+  // upserts declared schedules as `scheduled_tasks` rows with
+  // `source = 'cadence-registry'`. Owner-scheduled rows (`source =
+  // 'schedule-task'` from the existing `schedule-task` IPC path) are
+  // untouched.
+  //
+  // Gated to `DEFAULT_SESSION_NAME` only. The maintenance session has
+  // a filtered skill set (`MAINTENANCE_SKILL_BLOCKLIST` applied inside
+  // `buildVolumeMounts`), so a maintenance spawn would see fewer
+  // skills than the default session; running the rebuild from both
+  // would race on the same group_folder rows and the maintenance view
+  // would erase cadences declared by skills the default view installs
+  // fine. Maintenance is a transient, short-lived spawn for
+  // housekeeping — it should not claim authority over the registry.
+  if (sessionName === DEFAULT_SESSION_NAME) {
+    const skillsDir = path.join(
+      DATA_DIR,
+      'sessions',
+      group.folder,
+      sessionName,
+      '.claude',
+      'skills',
+    );
+    // Errors propagate by design: the rebuild's per-skill failures are
+    // already collected into the `errors` array (cron parse, IANA
+    // resolution, etc.) and don't throw; anything that throws past
+    // that point is a real fault (db corruption, fs walk fails on
+    // EACCES, etc.) and should fail the spawn loudly per the no-error
+    // -suppression rule.
+    const cadenceResult = rebuildCadenceRegistryForGroup({
+      groupFolder: group.folder,
+      chatJid: input.chatJid,
+      // Cadence-registry rows derive from tile content delivered via
+      // the staging→promote→publish→update pipeline (host-vetted,
+      // owner-trusted) rather than any in-container agent action — so
+      // they unwrap at fire time the same way legacy heartbeat seeders
+      // do. The trust-boundary semantics for fire-time wrapping live
+      // on `created_by_role`; the registry-vs-IPC provenance lives on
+      // the new `source` column. Two columns, two questions.
+      createdByRole: 'owner',
+      skillsDir,
+      computeNextRun: defaultComputeNextRun,
+      now: () => new Date(),
+    });
+    if (
+      cadenceResult.inserted > 0 ||
+      cadenceResult.updated > 0 ||
+      cadenceResult.deleted > 0 ||
+      cadenceResult.errors.length > 0
+    ) {
+      logger.info(
+        {
+          groupFolder: group.folder,
+          chatJid: input.chatJid,
+          sessionName,
+          ...cadenceResult,
+        },
+        'cadence-registry rebuilt',
+      );
+    }
+  }
+
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   // Suffix the container name with sessionName (when non-default) so that
   // `docker ps` makes it obvious which slot a running container occupies.
