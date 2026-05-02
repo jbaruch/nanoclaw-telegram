@@ -15,6 +15,8 @@ import {
   MAX_MESSAGES_PER_PROMPT,
   MODEL_CONTEXT_WINDOW,
   POLL_INTERVAL,
+  SESSION_TOKEN_CAP,
+  SESSION_TURN_CAP,
   TELEGRAM_BOT_POOL,
   TIMEZONE,
 } from './config.js';
@@ -45,6 +47,8 @@ import {
 } from './handoff.js';
 import {
   clearTaskSessionIdsForGroup,
+  clearSessionLengthStateForGroup,
+  consumeSessionReset,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -55,9 +59,12 @@ import {
   getAllTasks,
   getChatByJid,
   getLastBotMessageTimestamp,
+  getLastFromMeMessage,
   getMessageById,
   getMessagesSince,
   getTaskById,
+  markSessionForReset,
+  recordSessionTurn,
   createTask,
   deleteTask,
   getNewMessages,
@@ -71,6 +78,11 @@ import {
   storeChatMetadata,
   storeMessage,
 } from './db.js';
+import {
+  buildHandoffPrefix,
+  buildResetNotification,
+  shouldMarkForReset,
+} from './session-length-cap.js';
 import {
   DEFAULT_SESSION_NAME,
   GroupQueue,
@@ -1679,7 +1691,79 @@ async function runAgent(
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
   // User-facing path always uses the `default` slot's session chain.
-  const sessionId = sessions[group.folder]?.[DEFAULT_SESSION_NAME];
+  let sessionId: string | undefined =
+    sessions[group.folder]?.[DEFAULT_SESSION_NAME];
+
+  // Session-length cap reset path (#413). If the prior turn marked
+  // this slot for reset, consume the marker now — BEFORE the
+  // container spawn — so we drop the stale `sessionId`, prepend a
+  // brief context-handoff to the prompt, and queue an in-band user
+  // notification. The reset itself is "fire-and-forget for this
+  // turn"; the next assistant turn under a fresh `sessionId` will
+  // re-INSERT the cap-state row via `recordSessionTurn`.
+  //
+  // Why consume here (not at threshold-cross): we never want to yank
+  // a turn mid-flight. The threshold check that ran AFTER the prior
+  // turn's `usage` payload set `marked_for_reset = 1` on the row;
+  // the very next inbound (this call) is the safe boundary.
+  let resetNotification: string | null = null;
+  let handoffPrefix = '';
+  const pendingReset = consumeSessionReset(group.folder, DEFAULT_SESSION_NAME);
+  if (pendingReset) {
+    // Build the handoff prefix from the most recent assistant turn —
+    // continuity, not completeness, per the issue body. Using the
+    // last `is_from_me=1` message means we get verbatim text the
+    // agent already produced rather than synthesizing a summary
+    // (the synthesis would itself be a model call we want to avoid
+    // on the cap-trigger path). Last user instruction is omitted
+    // here because the current `prompt` already contains the
+    // user's just-arrived batch — duplicating it would burn budget.
+    const lastAssistant = getLastFromMeMessage(chatJid);
+    const built = buildHandoffPrefix({
+      lastAssistantText: lastAssistant?.content,
+      assistantName: ASSISTANT_NAME,
+    });
+    if (built) handoffPrefix = built;
+
+    // Drop the stale sessionId from BOTH the in-memory cache and the
+    // DB row so the container spawns a fresh SDK session. The
+    // assistant's first turn under the new session will write back
+    // its own `newSessionId` via the existing setSession path.
+    if (sessions[group.folder]) {
+      delete sessions[group.folder][DEFAULT_SESSION_NAME];
+    }
+    deleteSessionName(group.folder, DEFAULT_SESSION_NAME);
+    sessionId = undefined;
+
+    // Build the user-facing notification from the reason + cap that
+    // were persisted at mark-time (`markSessionForReset`). The
+    // value reflects the operator-configured cap at the moment the
+    // threshold actually tripped — env changes between mark and
+    // consume don't lie to the user.
+    resetNotification = buildResetNotification(
+      pendingReset.reason,
+      pendingReset.cap,
+    );
+    logger.warn(
+      {
+        group: group.name,
+        prevSessionId: pendingReset.sessionId,
+        handoffPrefixLen: handoffPrefix.length,
+        reason: pendingReset.reason,
+        cap: pendingReset.cap,
+      },
+      'session_length_cap_reset_consumed',
+    );
+  }
+
+  // Apply the handoff prefix to the prompt the container will see.
+  // Keep the original `prompt` parameter immutable — the caller's
+  // logging / error paths reference it by length, and rebinding the
+  // prefixed value into a new local lets a future reviewer trace the
+  // mutation in one diff.
+  const promptForContainer = handoffPrefix
+    ? `${handoffPrefix}${prompt}`
+    : prompt;
 
   // Capture the spawn-start wall clock BEFORE any container work
   // begins. The two `setSession` writes below (the streaming
@@ -1737,6 +1821,17 @@ async function runAgent(
   let lastUsedTokens = 0;
   let thresholdReached: 'warn' | 'nuke' | null = null;
 
+  // Session-length cap (#413) per-invocation latches. The handoff
+  // prefix (when consumed above) is written into the cap-state row
+  // on the FIRST turn of the new session; the latch is set to null
+  // after that write so subsequent turns don't re-stamp it. The
+  // mark-for-reset latch is set the moment the threshold check
+  // verdict says reset, so multiple assistant messages within one
+  // runQuery don't churn the row's reason/cap columns. Both reset
+  // automatically on the next runAgent invocation.
+  let snapshotHandoffPrefix: string | null = handoffPrefix || null;
+  let sessionLengthMarked = false;
+
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
@@ -1787,17 +1882,106 @@ async function runAgent(
           } else if (state === 'warn' && thresholdReached === null) {
             thresholdReached = 'warn';
           }
+
+          // Session-length cap (#413): cumulative accounting. Tracks
+          // SUM of input_tokens and turn count across the entire
+          // session — distinct from the per-turn nuke threshold
+          // above. Only proceed once we know the active sessionId
+          // (the very first turn of a fresh session emits `usage`
+          // alongside `newSessionId`; both fields appear on the same
+          // `output`, so reading `sessions[..][DEFAULT_SESSION_NAME]`
+          // AFTER the setSession write at the top of this callback
+          // is the right ordering).
+          //
+          // Skip when nuked-during-spawn — writing cap state for a
+          // session that was just wiped would resurrect the very
+          // accounting issue #144 fixed for the sessions table.
+          const activeSessionId =
+            sessions[group.folder]?.[DEFAULT_SESSION_NAME];
+          if (activeSessionId && !wasNukedDuringSpawn()) {
+            const snapshot = recordSessionTurn(
+              group.folder,
+              DEFAULT_SESSION_NAME,
+              activeSessionId,
+              output.usage.input_tokens,
+              // `last_handoff_summary`: write once per session, on
+              // the first turn after a reset. Subsequent turns pass
+              // null and the COALESCE in the UPDATE preserves the
+              // initial value.
+              snapshotHandoffPrefix,
+            );
+            // Clear the latch after the first write so subsequent
+            // turns of THIS session don't re-write the same prefix
+            // (paranoia — the COALESCE already handles it, but the
+            // latch keeps the diagnostic shape clean).
+            if (snapshotHandoffPrefix) snapshotHandoffPrefix = null;
+
+            const verdict = shouldMarkForReset(
+              {
+                totalInputTokens: snapshot.total_input_tokens,
+                turnCount: snapshot.turn_count,
+              },
+              { tokenCap: SESSION_TOKEN_CAP, turnCap: SESSION_TURN_CAP },
+            );
+            if (verdict.reset && !sessionLengthMarked) {
+              sessionLengthMarked = true;
+              const changed = markSessionForReset(
+                group.folder,
+                DEFAULT_SESSION_NAME,
+                verdict.reason,
+                verdict.cap,
+              );
+              logger.warn(
+                {
+                  group: group.name,
+                  session: activeSessionId,
+                  reason: verdict.reason,
+                  observed: verdict.observed,
+                  cap: verdict.cap,
+                  total_input_tokens: snapshot.total_input_tokens,
+                  turn_count: snapshot.turn_count,
+                  marked: changed === 1,
+                },
+                'session_length_cap_marked_for_reset',
+              );
+            }
+          }
         }
 
         await onOutput(output);
       }
     : undefined;
 
+  // Fire the in-band reset notification BEFORE the container spawn so
+  // the user sees "session reset" before the agent's first reply
+  // arrives. The Channel contract (`Promise<string | void>`) says
+  // sendMessage absorbs transport failures internally and returns
+  // void rather than throwing — Telegram's implementation logs
+  // `[send] Failed to send Telegram message` and returns undefined
+  // (see `src/channels/telegram.ts`). So a thrown exception here
+  // would indicate a programming bug, not a transport failure;
+  // per `rules/error-handling.md` we let it propagate rather than
+  // catch it under a bare handler. The reset itself has already
+  // happened (DB row deleted, sessionId cleared) — only the
+  // user-facing notification is at risk if the channel returns
+  // void, and the `[send] ...` error log already surfaces that.
+  if (resetNotification) {
+    const notifyChannel = findChannel(channels, chatJid);
+    if (notifyChannel) {
+      await notifyChannel.sendMessage(chatJid, resetNotification);
+    } else {
+      logger.warn(
+        { group: group.name, chatJid },
+        'session_length_cap_notification_no_channel',
+      );
+    }
+  }
+
   try {
     const output = await runContainerAgent(
       group,
       {
-        prompt,
+        prompt: promptForContainer,
         sessionId,
         groupFolder: group.folder,
         chatJid,
@@ -2642,6 +2826,23 @@ async function main(): Promise<void> {
             'Cleared per-task session_ids — next fire of each will start a fresh SDK session (#336)',
           );
         }
+      }
+
+      // Step 4c (#413): drop session-length-cap accounting for the
+      // nuked group. Without this, a stale row could carry a
+      // `marked_for_reset = 1` flag against a session_id that's
+      // already gone, and the next inbound spawn would consume the
+      // marker (harmless but noisy in logs). The cap state is
+      // group-level; an 'all' nuke clears every slot, while a
+      // single-slot nuke is rare enough that wiping both slots'
+      // accounting is fine — the surviving slot's next turn
+      // re-INSERTs cleanly.
+      const clearedCapRows = clearSessionLengthStateForGroup(groupFolder);
+      if (clearedCapRows > 0) {
+        logger.info(
+          { groupFolder, count: clearedCapRows },
+          'Cleared session_length_state rows on nuke (#413)',
+        );
       }
 
       // Step 5 (#127, optional): when `skipReentry` is set, also

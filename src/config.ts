@@ -225,6 +225,67 @@ function resolveAgentAutoCompactWindow(): number {
 }
 export const AGENT_AUTO_COMPACT_WINDOW = resolveAgentAutoCompactWindow();
 
+// Session-length cap (#413). Cumulative thresholds enforced by
+// `src/session-length-cap.ts` and applied in `src/index.ts` runAgent.
+//
+// Distinct from `ENABLE_THRESHOLD_NUKE` / `MODEL_CONTEXT_WINDOW`
+// (which fire on a single turn's `usage.input_tokens` crossing a
+// percentage of the context window). The session-length cap is
+// CUMULATIVE across turns — a session can stay below the per-turn
+// threshold for hours while accumulating past the session-cumulative
+// cap. When either threshold is crossed AFTER a turn completes, the
+// orchestrator marks the session for reset; the actual reset (new
+// `session_id` + brief context handoff) happens on the NEXT inbound
+// message so the current turn is never yanked mid-flight.
+//
+//   SESSION_TOKEN_CAP — sum of `usage.input_tokens` across all
+//     assistant turns in the session. Default 1,000,000 per the
+//     issue body's recommendation. Set <= 0 to disable.
+//   SESSION_TURN_CAP  — number of assistant turns observed in the
+//     session. Default 100 per the issue body. Set <= 0 to disable.
+//
+// Validation: only strictly integer-shaped strings parse. Junk like
+// "100abc" or "1.5" — which `parseInt` would silently coerce to 100 / 1
+// — fall back to the default with a stderr warning so operator typos
+// surface at startup rather than at first reset. A `<= 0` value
+// parses successfully and is the documented disable knob (see
+// `shouldMarkForReset` in `src/session-length-cap.ts`); only
+// non-integer / non-numeric junk triggers the fallback.
+//
+// Deferred (#413 sub-scope): the third proposed threshold —
+// "last summary-event was N turns ago" — requires an SDK summary-event
+// hook the orchestrator doesn't currently observe. Punted to a
+// follow-up; the two cumulative thresholds above are the solid pair.
+const DEFAULT_SESSION_TOKEN_CAP = 1_000_000;
+const DEFAULT_SESSION_TURN_CAP = 100;
+const STRICT_INT_RE = /^-?\d+$/;
+export function resolveIntEnv(name: string, defaultValue: number): number {
+  const raw = process.env[name];
+  if (!raw) return defaultValue;
+  if (!STRICT_INT_RE.test(raw)) {
+    process.stderr.write(
+      `[config] ${name}="${raw}" is not an integer — falling back to default ${defaultValue}.\n`,
+    );
+    return defaultValue;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
+    process.stderr.write(
+      `[config] ${name}="${raw}" is not an integer — falling back to default ${defaultValue}.\n`,
+    );
+    return defaultValue;
+  }
+  return parsed;
+}
+export const SESSION_TOKEN_CAP = resolveIntEnv(
+  'SESSION_TOKEN_CAP',
+  DEFAULT_SESSION_TOKEN_CAP,
+);
+export const SESSION_TURN_CAP = resolveIntEnv(
+  'SESSION_TURN_CAP',
+  DEFAULT_SESSION_TURN_CAP,
+);
+
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

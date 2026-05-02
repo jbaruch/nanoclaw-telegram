@@ -22,7 +22,7 @@ import {
   afterAll,
 } from 'vitest';
 
-import { parseHostId } from './config.js';
+import { parseHostId, resolveIntEnv } from './config.js';
 
 const ORIGINAL_HOST_UID = process.env.HOST_UID;
 const ORIGINAL_HOST_GID = process.env.HOST_GID;
@@ -152,5 +152,87 @@ describe('parseHostId', () => {
     const joined = stderrWrites.join('');
     expect(joined).toContain('HOST_UID="foo"');
     expect(joined).toContain('HOST_GID="-5"');
+  });
+});
+
+// `resolveIntEnv` powers SESSION_TOKEN_CAP / SESSION_TURN_CAP from
+// `src/config.ts` (#413). Direct-call pattern matches `parseHostId`
+// above to avoid `vi.resetModules()` + listener-leak hazard.
+const SCRATCH_ENV = '__NC_TEST_INT_ENV__';
+const ORIGINAL_SCRATCH = process.env[SCRATCH_ENV];
+
+afterAll(() => {
+  if (ORIGINAL_SCRATCH === undefined) {
+    delete process.env[SCRATCH_ENV];
+  } else {
+    process.env[SCRATCH_ENV] = ORIGINAL_SCRATCH;
+  }
+});
+
+describe('resolveIntEnv', () => {
+  beforeEach(() => {
+    delete process.env[SCRATCH_ENV];
+  });
+
+  it('returns the default and emits no warning when env is unset', () => {
+    expect(resolveIntEnv(SCRATCH_ENV, 42)).toBe(42);
+    expect(stderrWrites.join('')).toBe('');
+  });
+
+  it('parses a positive integer string', () => {
+    process.env[SCRATCH_ENV] = '1000000';
+    expect(resolveIntEnv(SCRATCH_ENV, 100)).toBe(1_000_000);
+    expect(stderrWrites.join('')).toBe('');
+  });
+
+  it('parses zero (the documented disable value)', () => {
+    // <= 0 is the disable knob in `shouldMarkForReset`. Must parse
+    // successfully so operators can opt out without hitting the
+    // fallback path.
+    process.env[SCRATCH_ENV] = '0';
+    expect(resolveIntEnv(SCRATCH_ENV, 100)).toBe(0);
+    expect(stderrWrites.join('')).toBe('');
+  });
+
+  it('parses a negative integer (also disables)', () => {
+    process.env[SCRATCH_ENV] = '-1';
+    expect(resolveIntEnv(SCRATCH_ENV, 100)).toBe(-1);
+    expect(stderrWrites.join('')).toBe('');
+  });
+
+  it('rejects partial-numeric input (parseInt trap)', () => {
+    // `parseInt("100abc", 10)` returns 100 — silent operator-typo
+    // hazard. Strict regex falls back to default and warns.
+    process.env[SCRATCH_ENV] = '100abc';
+    expect(resolveIntEnv(SCRATCH_ENV, 42)).toBe(42);
+    const warning = stderrWrites.find((line) => line.includes(SCRATCH_ENV));
+    expect(warning).toBeDefined();
+    expect(warning).toContain('"100abc"');
+    expect(warning).toContain('not an integer');
+  });
+
+  it('rejects fractional input (parseInt trap)', () => {
+    // `parseInt("1.5", 10)` returns 1 — same partial-parse hazard.
+    process.env[SCRATCH_ENV] = '1.5';
+    expect(resolveIntEnv(SCRATCH_ENV, 42)).toBe(42);
+    const warning = stderrWrites.find((line) => line.includes(SCRATCH_ENV));
+    expect(warning).toBeDefined();
+    expect(warning).toContain('"1.5"');
+  });
+
+  it('rejects non-numeric input', () => {
+    process.env[SCRATCH_ENV] = 'foo';
+    expect(resolveIntEnv(SCRATCH_ENV, 42)).toBe(42);
+    const warning = stderrWrites.find((line) => line.includes(SCRATCH_ENV));
+    expect(warning).toBeDefined();
+    expect(warning).toContain('"foo"');
+  });
+
+  it('returns the default for an empty string', () => {
+    // `if (!raw)` short-circuits — empty is treated as unset, not
+    // malformed. Matches the typical `.env`-with-blank-value case.
+    process.env[SCRATCH_ENV] = '';
+    expect(resolveIntEnv(SCRATCH_ENV, 42)).toBe(42);
+    expect(stderrWrites.join('')).toBe('');
   });
 });
