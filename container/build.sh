@@ -7,15 +7,39 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 IMAGE_NAME="nanoclaw-agent"
-TAG="${1:-latest}"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
+
+# Parse args: optional positional TAG, optional --no-cache flag (any order).
+# --no-cache is needed when an upstream npm-from-github dep ships a new
+# version: BuildKit caches `RUN npm install -g <github-repo>` by Dockerfile
+# string, NOT by GitHub state, so without invalidation a "rebuild" silently
+# reinstalls the prior version.
+TAG="latest"
+BUILD_FLAGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --no-cache)
+            BUILD_FLAGS+=(--no-cache --pull)
+            ;;
+        --*)
+            echo "ERROR: unknown flag '$arg' (supported: --no-cache)" >&2
+            exit 1
+            ;;
+        *)
+            TAG="$arg"
+            ;;
+    esac
+done
 
 echo "Building NanoClaw agent container image..."
 echo "Image: ${IMAGE_NAME}:${TAG}"
+if [[ ${#BUILD_FLAGS[@]} -gt 0 ]]; then
+    echo "Flags: ${BUILD_FLAGS[*]}"
+fi
 
 # Tessl tiles are installed at runtime (entrypoint), not build time.
 # The image only ships built-in skills and the tessl binary.
-${CONTAINER_RUNTIME} build -t "${IMAGE_NAME}:${TAG}" .
+${CONTAINER_RUNTIME} build "${BUILD_FLAGS[@]}" -t "${IMAGE_NAME}:${TAG}" .
 
 echo ""
 echo "Build complete!"
