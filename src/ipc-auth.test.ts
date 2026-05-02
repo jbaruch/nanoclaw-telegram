@@ -2268,6 +2268,119 @@ describe('tessl_update authorization', () => {
   });
 });
 
+// --- list_installed_tiles (#305) ---
+//
+// Admin-only sync IPC: returns the names of every tile in the local
+// Tessl registry so the agent can show the operator valid overlay
+// names before proposing a `set_additional_tiles` change. Result-file
+// shape mirrors `chat_status` / `tessl_update` — `{stdout: <JSON>}`
+// for success, `{error: <message>}` for failure. The test file's
+// hoisted `mockGetInstalledTiles` controls what the registry "looks
+// like" without needing a real `tessl-workspace/` on disk.
+
+describe('list_installed_tiles', () => {
+  beforeEach(() => {
+    ensureUnauthInputDir();
+    // Ensure the main group's input dir exists too so the success-path
+    // test's `fs.writeFileSync(resultPath, ...)` lands somewhere.
+    const mainInputDir = path.join(
+      TEST_DATA_DIR,
+      'ipc',
+      'whatsapp_main',
+      'input-default',
+    );
+    fs.mkdirSync(mainInputDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    cleanupUnauthFixtures();
+    // Clean up any result files written under whatsapp_main during
+    // success-path tests. Walk the input dir and unlink everything —
+    // tessl_update / push_staged_to_branch use the same convention.
+    const mainInputDir = path.join(
+      TEST_DATA_DIR,
+      'ipc',
+      'whatsapp_main',
+      'input-default',
+    );
+    if (fs.existsSync(mainInputDir)) {
+      for (const f of fs.readdirSync(mainInputDir)) {
+        fs.unlinkSync(path.join(mainInputDir, f));
+      }
+    }
+  });
+
+  it('non-main group is rejected with an error response', async () => {
+    const resultPath = resultPathFor('list-tiles-unauth');
+    await processTaskIpc(
+      { type: 'list_installed_tiles', requestId: 'list-tiles-unauth' },
+      UNAUTH_GROUP,
+      false,
+      deps,
+    );
+    expect(fs.existsSync(resultPath)).toBe(true);
+    const body = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+    expect(body.error).toMatch(/admin-tile only/);
+  });
+
+  it('main returns the installed tile list as JSON in stdout', async () => {
+    mockGetInstalledTiles.mockReturnValue([
+      'nanoclaw-coding',
+      'nanoclaw-core',
+      'nanoclaw-family',
+      'nanoclaw-trusted',
+    ]);
+    const requestId = 'list-tiles-ok';
+    const resultPath = path.join(
+      TEST_DATA_DIR,
+      'ipc',
+      'whatsapp_main',
+      'input-default',
+      `_script_result_${requestId}.json`,
+    );
+    await processTaskIpc(
+      { type: 'list_installed_tiles', requestId },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    expect(fs.existsSync(resultPath)).toBe(true);
+    const body = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+    expect(body.error).toBeUndefined();
+    const inner = JSON.parse(body.stdout);
+    expect(inner.registryAbsent).toBe(false);
+    expect(inner.tiles).toEqual([
+      'nanoclaw-coding',
+      'nanoclaw-core',
+      'nanoclaw-family',
+      'nanoclaw-trusted',
+    ]);
+  });
+
+  it('signals registryAbsent when the registry directory does not exist', async () => {
+    mockGetInstalledTiles.mockReturnValue(null);
+    const requestId = 'list-tiles-cold';
+    const resultPath = path.join(
+      TEST_DATA_DIR,
+      'ipc',
+      'whatsapp_main',
+      'input-default',
+      `_script_result_${requestId}.json`,
+    );
+    await processTaskIpc(
+      { type: 'list_installed_tiles', requestId },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    expect(fs.existsSync(resultPath)).toBe(true);
+    const body = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+    const inner = JSON.parse(body.stdout);
+    expect(inner.registryAbsent).toBe(true);
+    expect(inner.tiles).toEqual([]);
+  });
+});
+
 describe('push_staged_to_branch authorization', () => {
   beforeEach(() => {
     ensureUnauthInputDir();

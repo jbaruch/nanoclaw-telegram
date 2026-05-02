@@ -3522,6 +3522,74 @@ export async function processTaskIpc(
       }
       break;
 
+    case 'list_installed_tiles': {
+      // Admin tile only. Returns the names of every tile currently
+      // installed in the local Tessl registry — the same set
+      // `set_additional_tiles` validates against. The agent uses this
+      // to surface "what overlay tiles can I set on this chat?" to
+      // the operator before proposing a config change. Read-only;
+      // never mutates the registry.
+      //
+      // The result includes BOTH overlay tiles and the trust-tier
+      // baseline (`nanoclaw-core`, `nanoclaw-trusted`,
+      // `nanoclaw-untrusted`, `nanoclaw-admin`). The agent presenting
+      // this list is expected to call out the baseline names as
+      // reserved — `selectTiles` dedupes them against the baseline so
+      // configuring one as an overlay is a no-op, not an error, but
+      // it's still a misuse of the surface. We don't filter here
+      // because (a) the baseline set is policy that lives in
+      // `selectTiles`, not registry truth, and (b) future trust-tier
+      // changes shouldn't silently alter what this tool returns.
+      const tilesResultPath = scriptResultPath(sourceGroup, data);
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized list_installed_tiles attempt',
+        );
+        fs.writeFileSync(
+          tilesResultPath,
+          JSON.stringify({
+            error: 'list_installed_tiles is admin-tile only',
+          }),
+        );
+        break;
+      }
+      const tiles = getInstalledTiles();
+      if (tiles === null) {
+        // Registry directory doesn't exist (cold start, never ran
+        // `tessl install`). Distinct from "registry exists but empty"
+        // so the operator knows whether to run `tessl_update` first.
+        logger.warn(
+          { sourceGroup },
+          'list_installed_tiles: registry directory absent — run tessl_update',
+        );
+        fs.writeFileSync(
+          tilesResultPath,
+          JSON.stringify({
+            stdout: JSON.stringify({
+              tiles: [],
+              registryAbsent: true,
+            }),
+          }),
+        );
+        break;
+      }
+      logger.info(
+        { sourceGroup, count: tiles.length },
+        'list_installed_tiles served via IPC',
+      );
+      fs.writeFileSync(
+        tilesResultPath,
+        JSON.stringify({
+          stdout: JSON.stringify({
+            tiles,
+            registryAbsent: false,
+          }),
+        }),
+      );
+      break;
+    }
+
     case 'push_staged_to_branch':
       if (
         data.requestId &&
