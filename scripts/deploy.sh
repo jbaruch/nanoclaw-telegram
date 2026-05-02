@@ -288,22 +288,39 @@ docker exec nanoclaw node -e '
 const Database = require("better-sqlite3");
 const db = new Database("/app/store/messages.db");
 const MIGRATED = ["tessl__heartbeat", "tessl__composio-fetch"];
+// task_run_logs has FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id),
+// so a bare DELETE FROM scheduled_tasks fails with FOREIGN KEY
+// constraint failed on every row that has any historical run logs.
+// Find the offending ids first, drop their log rows, then drop the
+// scheduled_tasks rows themselves — atomic via a transaction so an
+// abort mid-cleanup leaves no orphan log rows pointing at a deleted
+// task. The same FK pattern applies to any operator-side row drop
+// that uses cancel_task on a task with run history.
 let total = 0;
+const findIds = db.prepare(`
+    SELECT id FROM scheduled_tasks
+     WHERE source = ?
+       AND schedule_type = ?
+       AND prompt LIKE ?
+`);
+const dropLogs = db.prepare(`DELETE FROM task_run_logs WHERE task_id = ?`);
+const dropTask = db.prepare(`DELETE FROM scheduled_tasks WHERE id = ?`);
 for (const skill of MIGRATED) {
-    const result = db.prepare(`
-        DELETE FROM scheduled_tasks
-         WHERE source = ?
-           AND schedule_type = ?
-           AND prompt LIKE ?
-    `).run(
+    const ids = findIds.all(
         "schedule-task",
         "interval",
         `%MANDATORY FIRST ACTION: Call Skill(skill: "${skill}")%`,
-    );
-    if (result.changes > 0) {
-        console.log(`  removed ${result.changes} legacy row(s) for ${skill}`);
-    }
-    total += result.changes;
+    ).map((r) => r.id);
+    if (ids.length === 0) continue;
+    const tx = db.transaction(() => {
+        for (const id of ids) {
+            dropLogs.run(id);
+            dropTask.run(id);
+        }
+    });
+    tx();
+    console.log(`  removed ${ids.length} legacy row(s) for ${skill}: ${ids.join(", ")}`);
+    total += ids.length;
 }
 console.log(`  total: ${total} legacy row(s) cleaned`);
 '
