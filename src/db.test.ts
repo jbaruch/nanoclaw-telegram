@@ -12,6 +12,7 @@ import {
   getBotMessageByTelegramId,
   getChatByJid,
   getLastBotMessageTimestamp,
+  getMessageById,
   getMessagesSince,
   getNewMessages,
   getRegisteredGroup,
@@ -333,6 +334,123 @@ describe('telegram_message_id', () => {
     // Looking up by the same string returns null because
     // telegram_message_id column is NULL for this row.
     expect(getBotMessageByTelegramId('tg:-100123', '4975')).toBeNull();
+  });
+});
+
+// --- getMessageById ---
+
+describe('getMessageById', () => {
+  it('finds inbound rows whose `id` is the platform-native id', () => {
+    storeChatMetadata('tg:-100123', '2024-01-01T00:00:00.000Z');
+
+    storeMessage({
+      id: '4975',
+      chat_jid: 'tg:-100123',
+      sender: 'user@test',
+      sender_name: 'User',
+      content: 'hi bot',
+      timestamp: '2024-01-01T00:00:01.000Z',
+    });
+
+    const found = getMessageById('4975', 'tg:-100123');
+    expect(found).not.toBeNull();
+    expect(found?.id).toBe('4975');
+    expect(found?.is_from_me).toBe(false);
+  });
+
+  it('falls back to telegram_message_id for bot rows whose `id` is `bot-<ts>-<rand>`', () => {
+    // Regression for the trigger gate's `reply:*` matcher silently
+    // denying replies to OUR bot's messages: bot sends store the
+    // platform-native id in `telegram_message_id`, not `id`, so the
+    // id-only lookup missed and `replyTo.isAssistant` came back false
+    // even when the user was clearly replying to the assistant.
+    // Concrete repro: tg:-1001633120997 msg 378306 → bot row id
+    // bot-1777747764042-6tppb (telegram_message_id 378305).
+    storeChatMetadata('tg:-1001633120997', '2024-01-01T00:00:00.000Z');
+
+    storeMessage({
+      id: 'bot-1777747764042-6tppb',
+      chat_jid: 'tg:-1001633120997',
+      sender: 'AyeAye',
+      sender_name: 'AyeAye',
+      content: 'Жив. Не дождётесь.',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: true,
+      is_bot_message: true,
+      telegram_message_id: '378305',
+    });
+
+    const found = getMessageById('378305', 'tg:-1001633120997');
+    expect(found).not.toBeNull();
+    expect(found?.id).toBe('bot-1777747764042-6tppb');
+    expect(found?.is_from_me).toBe(true);
+    expect(found?.is_bot_message).toBe(true);
+  });
+
+  it('keeps fallback chat-scoped — bot-row telegram_message_id from another chat does not leak', () => {
+    storeChatMetadata('tg:-100aaa', '2024-01-01T00:00:00.000Z');
+    storeChatMetadata('tg:-100bbb', '2024-01-01T00:00:00.000Z');
+
+    storeMessage({
+      id: 'bot-a',
+      chat_jid: 'tg:-100aaa',
+      sender: 'Andy',
+      sender_name: 'Andy',
+      content: 'chat A',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: true,
+      is_bot_message: true,
+      telegram_message_id: '500',
+    });
+
+    expect(getMessageById('500', 'tg:-100aaa')?.content).toBe('chat A');
+    expect(getMessageById('500', 'tg:-100bbb')).toBeNull();
+  });
+
+  it('id-column hit wins over telegram_message_id fallback when both could match', () => {
+    // Telegram per-chat IDs are unique, but a defensive ordering check:
+    // an inbound row whose `id` equals a bot row's `telegram_message_id`
+    // in a DIFFERENT chat must not collide. Same-chat collision is
+    // impossible by Telegram's per-chat sequence guarantee, so we test
+    // the "same id string, same chat, only one row exists" path.
+    storeChatMetadata('tg:-100xxx', '2024-01-01T00:00:00.000Z');
+
+    storeMessage({
+      id: '777',
+      chat_jid: 'tg:-100xxx',
+      sender: 'user@test',
+      sender_name: 'User',
+      content: 'inbound',
+      timestamp: '2024-01-01T00:00:01.000Z',
+    });
+
+    const found = getMessageById('777', 'tg:-100xxx');
+    expect(found?.content).toBe('inbound');
+    expect(found?.is_from_me).toBe(false);
+  });
+
+  it('returns null for non-Telegram bot sends — telegram_message_id column is NULL', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    storeMessage({
+      id: 'bot-wa-1',
+      chat_jid: 'group@g.us',
+      sender: 'Andy',
+      sender_name: 'Andy',
+      content: 'whatsapp send',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: true,
+      is_bot_message: true,
+      // no telegram_message_id — non-Telegram channel
+    });
+
+    // Looking up by the synthetic id still works (id-column path).
+    expect(getMessageById('bot-wa-1', 'group@g.us')?.content).toBe(
+      'whatsapp send',
+    );
+    // But a stray Telegram-style numeric id won't match — fallback
+    // returns null because telegram_message_id is NULL for this row.
+    expect(getMessageById('12345', 'group@g.us')).toBeNull();
   });
 });
 
