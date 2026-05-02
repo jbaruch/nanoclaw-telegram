@@ -1000,6 +1000,15 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
             currentTask.schedule_value,
             currentTask.schedule_timezone,
           );
+          // Short-circuit on pause-broken-cron: the helper just
+          // flipped the row to status='paused' (intent: stop running
+          // a structurally broken schedule), but `currentTask` in
+          // memory still says 'active' because we read it before the
+          // remediation. Without this skip we'd dispatch the very
+          // task we just paused — Copilot review on PR #446.
+          if (computed.remediation === 'pause-broken-cron') {
+            continue;
+          }
         }
         if (computed.nextRun === null && currentTask.schedule_type === 'once') {
           // Genuine once-task completion — pre-mark as completed so

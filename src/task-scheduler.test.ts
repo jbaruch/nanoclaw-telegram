@@ -2296,6 +2296,58 @@ describe('interval cadence end-to-end (#438)', () => {
     await vi.advanceTimersByTimeAsync(10);
   });
 
+  it('skips dispatch when remediation paused the row mid-tick (cron with broken expression)', async () => {
+    // Copilot review on PR #446: a row with an unparseable cron
+    // expression returns `remediation: 'pause-broken-cron'` from
+    // `computeNextRunDetailed`; `applyComputeNextRunRemediation`
+    // flips the DB row to `status='paused'`, but `currentTask` in
+    // memory still says 'active' because we read it before the
+    // remediation. Without an explicit short-circuit the loop would
+    // dispatch the very task we just paused. This test sets up a
+    // broken-cron row and asserts `enqueueTask` never fires.
+    createTask({
+      id: 'broken-cron',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      schedule_type: 'cron',
+      schedule_value: 'totally not a cron expression',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
+      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+      wipeSessionJsonl: vi.fn(() => 1),
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    // No dispatch — the remediation-paused row was correctly
+    // skipped. Without the short-circuit the row would have been
+    // enqueued exactly once (and then mockRunContainerAgent would
+    // have run on a row whose DB status is 'paused').
+    expect(enqueueTask).not.toHaveBeenCalled();
+
+    // And the row is in fact paused on disk now.
+    expect(getTaskById('broken-cron')?.status).toBe('paused');
+  });
+
   it('clears dispatchedTaskIds when enqueueTask throws synchronously (does not wedge the row)', async () => {
     // OpenAI policy review on PR #446: if `deps.queue.enqueueTask`
     // throws synchronously, the runTask wrapper's `.finally` never
