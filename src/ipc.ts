@@ -57,7 +57,7 @@ export interface IpcDeps {
     filePath: string,
     caption?: string,
     replyToMessageId?: string,
-  ) => Promise<void>;
+  ) => Promise<string | undefined>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   /**
@@ -490,7 +490,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                             : undefined,
                         )
                       : '';
-                    await deps.sendFile(
+                    const sentFileMsgId = await deps.sendFile(
                       data.chatJid,
                       hostPath,
                       cleanCaption || undefined,
@@ -504,8 +504,15 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     // responded. Store the cleaned version — storing the
                     // raw caption would let a caption whose visible text
                     // was empty after stripping count as an "answered"
-                    // response.
-                    if (cleanCaption) {
+                    // response. Gate on `sentFileMsgId` (#428) — a
+                    // failed send must not leave a phantom row that
+                    // marks the user as answered when delivery never
+                    // landed.
+                    const captionDelivered = shouldStoreBotMessage(
+                      data.chatJid,
+                      sentFileMsgId,
+                    );
+                    if (cleanCaption && captionDelivered) {
                       storeMessage({
                         id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
                         chat_jid: data.chatJid,
@@ -517,6 +524,15 @@ export function startIpcWatcher(deps: IpcDeps): void {
                         is_bot_message: true,
                         reply_to_message_id: data.replyToMessageId,
                       });
+                    } else if (cleanCaption && !captionDelivered) {
+                      logger.warn(
+                        {
+                          chatJid: data.chatJid,
+                          hostPath,
+                          captionLen: cleanCaption.length,
+                        },
+                        'send_file: skipping caption storeMessage — sendFile returned no message id (delivery failed)',
+                      );
                     }
                     logger.info(
                       { chatJid: data.chatJid, hostPath, sourceGroup },

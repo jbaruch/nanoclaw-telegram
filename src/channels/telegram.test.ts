@@ -1525,6 +1525,61 @@ describe('TelegramChannel', () => {
       expect(currentBot().api.sendDocument).toHaveBeenCalledTimes(1);
     });
 
+    it('returns the Telegram message id (as string) on a successful send (#428)', async () => {
+      // The IPC `send_file` handler at `src/ipc.ts:492` and the
+      // orchestrator's `deps.sendFile` proxy at `src/index.ts:2553`
+      // gate the post-send caption `storeMessage` on a truthy
+      // return — pre-#428 sendFile was `Promise<void>` and the
+      // caption row was written regardless of delivery, leaving
+      // phantom rows in `messages.db` for failed sends. Lock the
+      // success-path return shape so the gate sees the right
+      // value.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      currentBot().api.sendDocument.mockResolvedValueOnce({ message_id: 4321 });
+
+      await expect(
+        channel.sendFile('tg:100200300', '/tmp/nanoclaw-test.png', 'cap'),
+      ).resolves.toBe('4321');
+    });
+
+    it('returns undefined when sendDocument throws and the outer catch swallows (#428)', async () => {
+      // The outer `Failed to send Telegram file` catch returns
+      // undefined so the IPC caller skips the caption-row write.
+      // Without the fix, sendFile returned `Promise<void>` and
+      // any catch path looked identical to a successful send to
+      // the IPC handler.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      currentBot().api.sendDocument.mockRejectedValue(new Error('ECONNRESET'));
+
+      await expect(
+        channel.sendFile('tg:100200300', '/tmp/nanoclaw-test.png'),
+      ).resolves.toBeUndefined();
+    });
+
+    it('returns the message id from the plain-caption fallback path on parse-rejection success (#428)', async () => {
+      // When the HTML caption parse rejects with a 400, the plain-
+      // caption fallback still produces a real message id —
+      // sendFile returns it so the caller's storeMessage gate
+      // still treats the delivery as successful.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      currentBot()
+        .api.sendDocument.mockRejectedValueOnce(makeParseError())
+        .mockResolvedValueOnce({ message_id: 5555 });
+
+      await expect(
+        channel.sendFile('tg:100200300', '/tmp/nanoclaw-test.png', 'cap _x_'),
+      ).resolves.toBe('5555');
+    });
+
     it('does not retry sendDocument when no caption was provided', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);

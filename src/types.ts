@@ -369,13 +369,17 @@ export interface Channel {
   reactToLatestMessage?(jid: string, emoji: string): Promise<void>;
   // Optional: pin a message in the chat.
   pinMessage?(jid: string, messageId: string): Promise<void>;
-  // Optional: send a file to the chat.
+  // Optional: send a file to the chat. Returns the channel-specific
+  // message id when the send succeeds, undefined otherwise. Callers
+  // gate post-send persistence (e.g. `storeMessage` for caption
+  // accounting) on a truthy return value so a failed send doesn't
+  // leave a phantom "answered" record in `messages.db` (#428).
   sendFile?(
     jid: string,
     filePath: string,
     caption?: string,
     replyToMessageId?: string,
-  ): Promise<void>;
+  ): Promise<string | undefined>;
 }
 
 // Callback type that channels use to deliver inbound messages
