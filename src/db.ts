@@ -841,6 +841,21 @@ export function storeMessageDirect(msg: {
 /**
  * Look up a single message by its platform message_id and chat_jid.
  * Returns null if not found.
+ *
+ * Two-pass lookup. Inbound messages and non-Telegram bot sends store
+ * the platform-native id directly in the `id` column — that's the
+ * fast path. Telegram bot sends are different: the `id` column holds
+ * a synthetic `bot-<ts>-<rand>` (#80) and the platform-native id
+ * lives in `telegram_message_id`. Without the fallback,
+ * `reply_to_message_id` lookups against bot-emitted messages miss,
+ * which silently breaks `replyTo.isAssistant` in the gate context
+ * (the trigger gate's `reply:*` matcher denies the message) and the
+ * cross-chat `safeReplyToForChat` guard in `channels/telegram.ts`
+ * (drops legitimate same-chat reply threading). Concrete repro:
+ * `tg:-1001633120997` msg 378306, a reply to bot row id
+ * `bot-1777747764042-6tppb` (telegram_message_id `378305`), denied
+ * by the trigger gate with "no trigger pattern matched" because the
+ * id-only lookup couldn't see it was a reply to the assistant.
  */
 export function getMessageById(
   messageId: string,
@@ -864,17 +879,19 @@ export function getMessageById(
         is_bot_message: number | null;
       }
     | undefined;
-  if (!row) return null;
-  return {
-    id: row.id,
-    chat_jid: row.chat_jid,
-    sender: row.sender,
-    sender_name: row.sender_name,
-    content: row.content,
-    timestamp: row.timestamp,
-    is_from_me: row.is_from_me === 1,
-    is_bot_message: row.is_bot_message === 1,
-  };
+  if (row) {
+    return {
+      id: row.id,
+      chat_jid: row.chat_jid,
+      sender: row.sender,
+      sender_name: row.sender_name,
+      content: row.content,
+      timestamp: row.timestamp,
+      is_from_me: row.is_from_me === 1,
+      is_bot_message: row.is_bot_message === 1,
+    };
+  }
+  return getBotMessageByTelegramId(chatJid, messageId);
 }
 
 /**
