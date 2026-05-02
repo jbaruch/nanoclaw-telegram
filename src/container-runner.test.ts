@@ -314,6 +314,87 @@ describe('selectTiles', () => {
     expect(selectTiles(false, true)).not.toContain('nanoclaw-admin');
     expect(selectTiles(false, false)).not.toContain('nanoclaw-admin');
   });
+
+  // --- #305: additionalTiles overlay ---
+
+  it('appends additionalTiles after baseline for trusted group', () => {
+    expect(
+      selectTiles(false, true, ['nanoclaw-coding', 'nanoclaw-family']),
+    ).toEqual([
+      'nanoclaw-core',
+      'nanoclaw-trusted',
+      'nanoclaw-coding',
+      'nanoclaw-family',
+    ]);
+  });
+
+  it('appends additionalTiles after baseline for untrusted group', () => {
+    expect(selectTiles(false, false, ['nanoclaw-coding'])).toEqual([
+      'nanoclaw-core',
+      'nanoclaw-untrusted',
+      'nanoclaw-coding',
+    ]);
+  });
+
+  it('appends additionalTiles after baseline for main group (admin still last among baseline)', () => {
+    expect(selectTiles(true, false, ['nanoclaw-coding'])).toEqual([
+      'nanoclaw-core',
+      'nanoclaw-trusted',
+      'nanoclaw-admin',
+      'nanoclaw-coding',
+    ]);
+  });
+
+  it('drops additionalTiles entries that duplicate a baseline tile', () => {
+    expect(
+      selectTiles(false, true, [
+        'nanoclaw-core',
+        'nanoclaw-trusted',
+        'nanoclaw-coding',
+      ]),
+    ).toEqual(['nanoclaw-core', 'nanoclaw-trusted', 'nanoclaw-coding']);
+  });
+
+  it('de-duplicates repeated entries within additionalTiles', () => {
+    expect(
+      selectTiles(false, true, ['nanoclaw-coding', 'nanoclaw-coding']),
+    ).toEqual(['nanoclaw-core', 'nanoclaw-trusted', 'nanoclaw-coding']);
+  });
+
+  it('skips empty / whitespace-only entries in additionalTiles', () => {
+    expect(selectTiles(false, true, ['', '   ', 'nanoclaw-coding'])).toEqual([
+      'nanoclaw-core',
+      'nanoclaw-trusted',
+      'nanoclaw-coding',
+    ]);
+  });
+
+  it('preserves order when additionalTiles are all unique against baseline', () => {
+    expect(
+      selectTiles(false, true, ['nanoclaw-c', 'nanoclaw-a', 'nanoclaw-b']),
+    ).toEqual([
+      'nanoclaw-core',
+      'nanoclaw-trusted',
+      'nanoclaw-c',
+      'nanoclaw-a',
+      'nanoclaw-b',
+    ]);
+  });
+
+  it('treats undefined / empty additionalTiles as a no-op', () => {
+    expect(selectTiles(false, true)).toEqual([
+      'nanoclaw-core',
+      'nanoclaw-trusted',
+    ]);
+    expect(selectTiles(false, true, [])).toEqual([
+      'nanoclaw-core',
+      'nanoclaw-trusted',
+    ]);
+    expect(selectTiles(false, true, undefined)).toEqual([
+      'nanoclaw-core',
+      'nanoclaw-trusted',
+    ]);
+  });
 });
 
 // --- host-logs mount admin-only gating (#103 item 3) ---

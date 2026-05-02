@@ -17,6 +17,7 @@ import { sendPoolMessage } from './channels/telegram.js';
 import {
   AvailableGroup,
   DEFAULT_SESSION_NAME,
+  getInstalledTiles,
   resolveAgentModel,
   resolvePerGroupAgentModel,
   sessionInputDirName,
@@ -842,6 +843,11 @@ export async function processTaskIpc(
     // clear the override (fall back to global AGENT_MODEL).
     // `undefined` is rejected at the handler.
     agentModel?: string | null;
+    // For set_additional_tiles (#305). Array of tile names from the
+    // local registry to overlay on top of the trust-tier baseline.
+    // `null` or `[]` clears the override. Anything else (string,
+    // object, undefined) is rejected at the handler.
+    additionalTiles?: string[] | null;
     // For host operations / github_backup / promote_staging / sessionize
     requestId?: string;
     message?: string;
@@ -1696,6 +1702,139 @@ export async function processTaskIpc(
       deps.writeGroupsSnapshot(
         sourceGroup,
         isMain,
+        availableGroups,
+        new Set(Object.keys(registeredGroups)),
+      );
+      break;
+    }
+
+    case 'set_additional_tiles': {
+      // Partial update: change `containerConfig.additionalTiles` only
+      // (#305). Authorization: main-only — this is a trust-adjacent
+      // capability (loading extra skill/rule tiles into the chat's
+      // container) and a non-main agent must not be able to grant
+      // itself capabilities its trust tier wasn't supposed to have.
+      // Mirrors `set_trusted` semantics rather than `set_agent_model`'s
+      // "owner can change own bill" semantics.
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized set_additional_tiles attempt blocked',
+        );
+        break;
+      }
+      const groupFolder =
+        typeof data.groupFolder === 'string' ? data.groupFolder.trim() : '';
+      if (!groupFolder) {
+        logger.warn(
+          { data },
+          'Invalid set_additional_tiles request - missing/empty groupFolder',
+        );
+        break;
+      }
+      // Accept array (set/replace) or null (clear). Reject anything
+      // else so a malformed payload doesn't silently no-op the way an
+      // `undefined` would. Element-level validation (string, non-empty,
+      // installed) runs below.
+      const raw = data.additionalTiles;
+      if (raw !== null && !Array.isArray(raw)) {
+        logger.warn(
+          { data },
+          'Invalid set_additional_tiles request - additionalTiles must be array or null',
+        );
+        break;
+      }
+      // Look up target group by folder. Same iteration pattern as
+      // set_agent_model — the in-memory registry is the source of
+      // truth and we want the JID to call deps.registerGroup.
+      let targetJid: string | undefined;
+      let targetGroup: RegisteredGroup | undefined;
+      for (const [jid, g] of Object.entries(registeredGroups)) {
+        if (g.folder === groupFolder) {
+          targetJid = jid;
+          targetGroup = g;
+          break;
+        }
+      }
+      if (!targetJid || !targetGroup) {
+        logger.warn(
+          { groupFolder },
+          'set_additional_tiles: group not registered (use register_group first)',
+        );
+        break;
+      }
+
+      const nextContainerConfig: RegisteredGroup['containerConfig'] = {
+        ...(targetGroup.containerConfig ?? {}),
+      };
+
+      if (raw === null || raw.length === 0) {
+        // Explicit clear — drop the field so it serialises as absent
+        // (not as JSON null / empty array) and `selectTiles` falls
+        // through to the trust-tier baseline.
+        delete nextContainerConfig.additionalTiles;
+      } else {
+        // Element validation: every entry must be a non-empty trimmed
+        // string. Reject the whole write on the first malformed entry
+        // — partial acceptance ("dropped 'foo' but kept the rest")
+        // would silently lose capabilities the operator asked for.
+        const cleaned: string[] = [];
+        for (const entry of raw) {
+          if (typeof entry !== 'string') {
+            logger.warn(
+              { groupFolder, entry },
+              'set_additional_tiles: every entry must be a string',
+            );
+            return;
+          }
+          const trimmed = entry.trim();
+          if (!trimmed) {
+            logger.warn(
+              { groupFolder },
+              'set_additional_tiles: empty/whitespace tile name rejected',
+            );
+            return;
+          }
+          // De-dup at write time so the persisted value is clean and
+          // selectTiles doesn't have to do the work on every spawn.
+          if (!cleaned.includes(trimmed)) cleaned.push(trimmed);
+        }
+
+        // Registry validation: every entry must resolve to an
+        // installed tile under `tessl-workspace/.tessl/tiles/<owner>/`.
+        // `getInstalledTiles()` returns null when the registry
+        // directory itself doesn't exist (cold start, never ran
+        // `tessl install`) — treat as "nothing installed" so the
+        // operator sees the failure now instead of on next spawn.
+        const installed = new Set(getInstalledTiles() ?? []);
+        const missing = cleaned.filter((t) => !installed.has(t));
+        if (missing.length > 0) {
+          logger.warn(
+            { groupFolder, missing, requested: cleaned },
+            `set_additional_tiles rejected: tile${missing.length === 1 ? '' : 's'} not in registry: ${missing.map((t) => `'${t}'`).join(', ')}`,
+          );
+          return;
+        }
+
+        nextContainerConfig.additionalTiles = cleaned;
+      }
+
+      deps.registerGroup(targetJid, {
+        ...targetGroup,
+        containerConfig: nextContainerConfig,
+      });
+      logger.info(
+        {
+          groupFolder,
+          additionalTiles: nextContainerConfig.additionalTiles ?? null,
+          source: sourceGroup,
+        },
+        'set_additional_tiles: updated per-group tile overlay',
+      );
+      const availableGroups = deps.getAvailableGroups();
+      deps.writeGroupsSnapshot(
+        sourceGroup,
+        true,
         availableGroups,
         new Set(Object.keys(registeredGroups)),
       );

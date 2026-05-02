@@ -54,14 +54,92 @@ import { RegisteredGroup } from './types.js';
 import { readEnvFile } from './env.js';
 
 /**
- * Select which tiles to install based on group trust tier.
- * Main: core + trusted + admin. Trusted: core + trusted. Untrusted: core + untrusted.
- * Admin loads last so it can override trusted skills.
+ * Select which tiles to install based on group trust tier, plus any
+ * per-chat overlay tiles (#305).
+ *
+ * Trust-tier baseline:
+ *   - Main: core + trusted + admin (admin loads last so it can override
+ *     trusted skills).
+ *   - Trusted: core + trusted.
+ *   - Untrusted: core + untrusted.
+ *
+ * `additionalTiles` (from `containerConfig.additionalTiles`) is appended
+ * after the baseline. Duplicates already present in the baseline are
+ * dropped so the install order stays stable. The overlay never replaces
+ * the baseline — it only adds capability tiles on top.
  */
-export function selectTiles(isMain: boolean, isTrusted: boolean): string[] {
-  if (isMain) return ['nanoclaw-core', 'nanoclaw-trusted', 'nanoclaw-admin'];
-  if (isTrusted) return ['nanoclaw-core', 'nanoclaw-trusted'];
-  return ['nanoclaw-core', 'nanoclaw-untrusted'];
+export function selectTiles(
+  isMain: boolean,
+  isTrusted: boolean,
+  additionalTiles?: readonly string[],
+): string[] {
+  const baseline = isMain
+    ? ['nanoclaw-core', 'nanoclaw-trusted', 'nanoclaw-admin']
+    : isTrusted
+      ? ['nanoclaw-core', 'nanoclaw-trusted']
+      : ['nanoclaw-core', 'nanoclaw-untrusted'];
+  if (!additionalTiles || additionalTiles.length === 0) return baseline;
+  const seen = new Set(baseline);
+  const overlay: string[] = [];
+  for (const tile of additionalTiles) {
+    // Skip empty / whitespace-only names defensively — IPC validation
+    // already rejects them, but a buggy direct-DB write shouldn't push
+    // an empty string into the install loop where it would resolve to
+    // `path.join(registryTiles, '')` === `registryTiles` itself.
+    const trimmed = typeof tile === 'string' ? tile.trim() : '';
+    if (!trimmed) continue;
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    overlay.push(trimmed);
+  }
+  return [...baseline, ...overlay];
+}
+
+/**
+ * Resolve the directory the local Tessl registry installs tiles into.
+ * Single source of truth for both spawn-time tile copy and write-time
+ * `set_additional_tiles` validation (#305).
+ */
+export function getRegistryTilesDir(): string {
+  return path.join(
+    process.cwd(),
+    'tessl-workspace',
+    '.tessl',
+    'tiles',
+    TILE_OWNER,
+  );
+}
+
+/**
+ * Return the names of tiles installed in the local registry, or `null`
+ * if the registry directory doesn't exist (cold start, never ran
+ * `tessl install`). Callers distinguish "registry empty" from "registry
+ * absent" by checking for `null`.
+ *
+ * NOTE: presence of a tile directory does NOT guarantee the tile's
+ * content is healthy (a partial copy can leave an empty dir). The
+ * spawn-time tile-install loop has its own per-tile sanity checks for
+ * that; this helper is the cheaper "is the name even known" gate used
+ * before persisting a config change so admins see typos at write time.
+ */
+export function getInstalledTiles(): string[] | null {
+  const dir = getRegistryTilesDir();
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (err: unknown) {
+    if (
+      err instanceof Error &&
+      (err as NodeJS.ErrnoException).code === 'ENOENT'
+    ) {
+      return null;
+    }
+    throw err;
+  }
+  return entries
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .sort();
 }
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -1332,15 +1410,46 @@ export function buildVolumeMounts(
     fs.rmSync(dstTessl, { recursive: true, force: true });
   }
 
-  const tilesToInstall = selectTiles(isMain, !!group.containerConfig?.trusted);
-
-  const registryTiles = path.join(
-    process.cwd(),
-    'tessl-workspace',
-    '.tessl',
-    'tiles',
-    TILE_OWNER,
+  const tilesToInstall = selectTiles(
+    isMain,
+    !!group.containerConfig?.trusted,
+    group.containerConfig?.additionalTiles,
   );
+
+  const registryTiles = getRegistryTilesDir();
+
+  // #305 fail-closed guard for `additionalTiles`. The trust-tier
+  // baseline (`nanoclaw-core`, `nanoclaw-trusted`/`nanoclaw-untrusted`,
+  // and `nanoclaw-admin` for main) is allowed to degrade if the
+  // registry is mid-rebuild — the per-tile `existsSync` warning inside
+  // the install loop catches that. But every entry in
+  // `additionalTiles` was explicitly opted in by config, and silently
+  // dropping one would mean the chat loses a capability with no
+  // signal. Refuse to spawn so the operator notices.
+  //
+  // Validation runs against the live registry directory, the same
+  // source the install loop reads three blocks down. `getInstalledTiles()`
+  // returns `null` when the registry directory itself doesn't exist
+  // — treated as "all additionalTiles missing" so the spawn refuses
+  // with the same diagnostic.
+  const configuredOverlay = group.containerConfig?.additionalTiles ?? [];
+  if (configuredOverlay.length > 0) {
+    const installed = new Set(getInstalledTiles() ?? []);
+    const missing = configuredOverlay.filter((t) => !installed.has(t));
+    if (missing.length > 0) {
+      const detail = `additionalTiles missing from registry: ${missing.join(', ')} (registry=${registryTiles}). Run \`tessl update\` in the orchestrator or remove the entries via \`set_additional_tiles\`.`;
+      logger.error(
+        {
+          groupFolder: group.folder,
+          missing,
+          configuredOverlay,
+          registryTiles,
+        },
+        `Refusing to spawn container: ${detail}`,
+      );
+      throw new Error(detail);
+    }
+  }
 
   // Build the group's tile-managed scripts/ in a sibling tmp dir, then
   // publish it atomically via a symlink flip (see the swap block below).
