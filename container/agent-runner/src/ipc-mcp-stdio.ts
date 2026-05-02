@@ -11,6 +11,8 @@ import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
+import { STABLE_TASK_ID_REGEX } from './stable-task-id.js';
+
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
@@ -362,6 +364,16 @@ SCHEDULE VALUE FORMAT:
       .describe(
         'Optional bash script to run before waking the agent. Script must output JSON on the last line of stdout: { "wakeAgent": boolean, "data"?: any }. If wakeAgent is false, the agent is not called. Test your script with bash -c "..." before scheduling.',
       ),
+    task_id: z
+      .string()
+      .regex(
+        STABLE_TASK_ID_REGEX,
+        'task_id must be lowercase alphanumeric + hyphens, 1–64 chars, starting and ending with a letter or digit (hyphens only in the interior)',
+      )
+      .optional()
+      .describe(
+        'Optional stable ID for long-lived recurring rows (e.g. `task-subskill-memory-rotation`, `task-overlay-cron-foo`). Auto-generated as `task-<ms>-<rand>` if omitted. Format: lowercase alphanumeric + hyphens, 1–64 chars, must start AND end with letter/digit (hyphens only in the interior). Use auto-generated for one-off "remind me" reminders; use stable for tile-installed / overlay / system-bootstrap rows where logs and audit trails should identify by intent rather than by random slug. PK collisions surface in `list_tasks` after the call (the IPC is fire-and-forget — host writes a row or logs a constraint failure; the agent\'s "scheduled" response is best-effort).',
+      ),
   },
   async (args) => {
     // Validate schedule_value before writing IPC
@@ -457,7 +469,16 @@ SCHEDULE VALUE FORMAT:
     const targetJid =
       isMain && args.target_group_jid ? args.target_group_jid : chatJid;
 
-    const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // #440 — caller-supplied `task_id` (Zod-validated against
+    // `STABLE_TASK_ID_REGEX` above) takes precedence; otherwise the
+    // legacy autogen fires. Stable IDs are for long-lived recurring
+    // rows (sub-skill bootstraps, overlay-installed crons, audit-replay
+    // identity); the autogen path stays unchanged for one-off
+    // "remind me" reminders. Host-side `src/ipc.ts` already accepts
+    // `data.taskId || autogen`, so no orchestrator change is needed.
+    const taskId =
+      args.task_id ||
+      `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     const data: Record<string, unknown> = {
       type: 'schedule_task',
