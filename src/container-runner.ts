@@ -24,6 +24,7 @@ import {
   HOST_PROJECT_ROOT,
   HOST_UID,
   IDLE_TIMEOUT,
+  MAINTENANCE_CONTAINER_TIMEOUT,
   MAINTENANCE_RULE_BLOCKLIST,
   MAINTENANCE_SKILL_BLOCKLIST,
   STORE_DIR,
@@ -2955,9 +2956,29 @@ export async function runContainerAgent(
         ? CONTAINER_TIMEOUT
         : UNTRUSTED_TIMEOUT;
     const configTimeout = group.containerConfig?.timeout || defaultTimeout;
-    // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
-    // graceful _close sentinel has time to trigger before the hard kill fires.
-    const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
+    // #461 — maintenance-session inactivity timeout. The kill timer
+    // here is reset by `resetTimeout()` on every streamed stdout
+    // marker (see the `hadStreamingOutput = true; resetTimeout();`
+    // block lower in this function), so this is an *inactivity*
+    // timeout, not a wall-clock cap — same shape as the existing
+    // default-session timer.
+    //
+    // Maintenance work is single-turn burst-then-quiet, so it
+    // doesn't need the user-facing default's `IDLE_TIMEOUT + 30s`
+    // graceful-close floor (that floor exists so a multi-turn
+    // conversation can drain through `_close`). With the
+    // agent-runner's silent-stop synthesis (#461 layer 1), a healthy
+    // maintenance run signals teardown within seconds; this shorter
+    // window is the backstop for the "SDK hung past graceful close"
+    // pathology. Bypass the IDLE_TIMEOUT floor for maintenance only.
+    //
+    // Per-group `containerConfig.timeout` still wins when set so
+    // operators can extend the window for groups with heavy precheck
+    // scripts that run silently for longer than the env default.
+    const isMaintenanceSession = sessionName === MAINTENANCE_SESSION_NAME;
+    const timeoutMs = isMaintenanceSession
+      ? group.containerConfig?.timeout || MAINTENANCE_CONTAINER_TIMEOUT
+      : Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
 
     const killOnTimeout = () => {
       timedOut = true;

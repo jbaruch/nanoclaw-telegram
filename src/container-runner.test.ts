@@ -25,6 +25,7 @@ vi.mock('./config.js', () => ({
   HOST_UID: undefined,
   HOST_GID: undefined,
   IDLE_TIMEOUT: 1800000, // 30min
+  MAINTENANCE_CONTAINER_TIMEOUT: 300000, // 5min — #461 maintenance hard cap
   MODEL_CONTEXT_WINDOW: 1000000,
   TILE_OWNER: 'test',
   TIMEZONE: 'America/Los_Angeles',
@@ -287,6 +288,140 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+
+  // #461 — maintenance-session inactivity timeout. Same shape as the
+  // existing default-session timer (resets on every streamed stdout
+  // marker via `resetTimeout()`), but with a much shorter window
+  // because maintenance work is single-turn burst-then-quiet and
+  // doesn't need the multi-turn graceful-close floor.
+  it('maintenance session uses MAINTENANCE_CONTAINER_TIMEOUT (5min), not IDLE_TIMEOUT+30s floor', async () => {
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    // 5 min inactivity window — anything earlier than 300_000ms with
+    // no streamed output must NOT fire the kill.
+    await vi.advanceTimersByTimeAsync(299_000);
+    expect(fakeProc.kill).not.toHaveBeenCalled();
+
+    // Crossing 5 min of silence triggers the maintenance kill (well
+    // below the user-facing default container's 1830000ms floor).
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    fakeProc.emit('close', 137);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('error');
+    expect(result.error).toContain('timed out');
+  });
+
+  it('default session keeps the IDLE_TIMEOUT+30s graceful-close floor', async () => {
+    const onOutput = vi.fn(async () => {});
+    // No sessionName → falls through to DEFAULT_SESSION_NAME.
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+    );
+
+    // The maintenance window (300_000ms) must NOT apply here — at 5
+    // min the default container is still alive.
+    await vi.advanceTimersByTimeAsync(310_000);
+    expect(fakeProc.kill).not.toHaveBeenCalled();
+
+    // Cross the IDLE_TIMEOUT + 30s floor at 1_830_000ms total.
+    await vi.advanceTimersByTimeAsync(1_530_000);
+
+    fakeProc.emit('close', 137);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('error');
+    expect(result.error).toContain('timed out');
+  });
+
+  // Per-group `containerConfig.timeout` overrides the env-default
+  // for maintenance sessions too — operators can extend the window
+  // for groups with heavy precheck scripts that legitimately run
+  // silently for longer than 5 min.
+  it('maintenance session honors per-group containerConfig.timeout override', async () => {
+    const onOutput = vi.fn(async () => {});
+    const groupWithLongTimeout: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: { timeout: 600_000 }, // 10 min — beyond env default
+    };
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      groupWithLongTimeout,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    // At 5 min — the env default — the override must keep it alive.
+    await vi.advanceTimersByTimeAsync(310_000);
+    expect(fakeProc.kill).not.toHaveBeenCalled();
+
+    // Cross the per-group 10-min override.
+    await vi.advanceTimersByTimeAsync(295_000);
+
+    fakeProc.emit('close', 137);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('error');
+    expect(result.error).toContain('timed out');
+  });
+
+  // Inactivity-timeout semantics: the timer resets on every streamed
+  // stdout marker, so a maintenance run that produces output past
+  // the env default keeps running. This is the same shape as the
+  // existing default-session timer — pin it explicitly so a future
+  // refactor that removes resetTimeout for maintenance fails loudly.
+  it('maintenance session timer resets on streamed output (inactivity, not wall-clock)', async () => {
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    // Stream output every 200s — under the 300s window. The timer
+    // should reset each time, so the container stays alive past 5
+    // min of total runtime. If MAINTENANCE_CONTAINER_TIMEOUT were a
+    // wall-clock cap (Copilot review #478 surfaced this misnomer
+    // pre-fix), the kill would fire at 300s of total time
+    // regardless of the streamed-output activity below.
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(200_000);
+      emitOutputMarker(fakeProc, {
+        status: 'success',
+        result: null,
+        newSessionId: `session-${i}`,
+      });
+      await vi.advanceTimersByTimeAsync(10);
+    }
+    // Total elapsed: ~1_000_000ms (16+ min) — well past the env
+    // default — and the kill timer has not fired because output
+    // kept arriving inside the 300s window.
+    expect(fakeProc.kill).not.toHaveBeenCalled();
+
+    // Drain naturally so the test can finish — the success path
+    // here is "kill never fired", which the assertion above proves.
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    const result = await resultPromise;
+    expect(result.status).toBe('success');
   });
 });
 

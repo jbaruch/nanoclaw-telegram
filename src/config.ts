@@ -211,6 +211,27 @@ export const MAX_MESSAGES_PER_PROMPT = Math.max(
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 
+// #461 — maintenance-session inactivity timeout. The user-facing
+// default container needs the long IDLE_TIMEOUT + 30s floor so the
+// graceful `_close` sentinel can drain a multi-turn conversation.
+// Maintenance containers run scheduled tasks — single-turn,
+// burst-then-quiet — and don't need that floor; the silent-stop
+// synthesis on the agent side (see container/agent-runner/src/index.ts
+// #461) gives the host its teardown signal within seconds, so this
+// shorter window protects against the "agent hung past graceful
+// close" pathology rather than a typical run.
+//
+// Note: this is the inactivity-timeout window, not a wall-clock cap.
+// The kill timer in `runContainerAgent` is reset by `resetTimeout()`
+// on every streamed stdout marker, so a maintenance run that streams
+// output regularly will not hit this even if its total runtime
+// exceeds the value. The timeout fires only after `MAINTENANCE_CONTAINER_TIMEOUT`
+// of *no streamed output*.
+export const MAINTENANCE_CONTAINER_TIMEOUT = parseInt(
+  process.env.MAINTENANCE_CONTAINER_TIMEOUT || '300000',
+  10,
+); // 5min default — maintenance-session inactivity timeout
+
 // Kill-auto-compaction master flag (issue #104, design at
 // docs/proposals/kill-auto-compaction.md). When OFF (default), the
 // orchestrator collects token-usage telemetry and writes ## Facts

@@ -66,6 +66,7 @@ import { decideGroundTruthReminder } from './ground-truth-reminder.js';
 import { detectLazyVerification } from './lazy-verification.js';
 import { createReadonlyWarner } from './ipc-readonly-warn.js';
 import { rewriteMarkdownToHtml } from './markdown-to-html.js';
+import { shouldSynthesizeSilentStop } from './silent-stop-synthesis.js';
 import { isStaleSessionError } from './stale-session.js';
 import {
   DEFAULT_HYGIENE_WINDOW_MS,
@@ -2924,6 +2925,22 @@ async function runQuery(
       closedDuringQuery = true;
       stream.end();
       ipcPolling = false;
+      // #461 — hard-exit watchdog. After `stream.end()`, the SDK
+      // iterator is supposed to drain promptly so main() can return
+      // and the natural `process.exit(0)` at the bottom of the file
+      // fires. If the SDK hangs (open keepalive, lingering Promise,
+      // pending tool_result it expects to never arrive), the
+      // container would stay alive against the host's hard timeout.
+      // Force-exit 30s after we observe `_close` so the slot drains
+      // regardless. The natural exit path runs first when healthy —
+      // process.exit synchronously terminates, so this timer's
+      // callback only fires when something is actually stuck.
+      setTimeout(() => {
+        log(
+          'Hard-exit watchdog: 30s elapsed since _close with no natural drain — process.exit(0)',
+        );
+        process.exit(0);
+      }, 30_000).unref();
       return;
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
@@ -3982,6 +3999,28 @@ async function runQuery(
   }
 
   ipcPolling = false;
+
+  // #461 — silent-stop synthesis. The host's task-scheduler arms
+  // `scheduleClose` ONLY on `streamedOutput.status === 'success'`,
+  // so when the for-await drains without a `result` message the
+  // host never gets the teardown signal and the slot stays held
+  // until the IDLE_TIMEOUT + 30s floor. Synthesize a terminal
+  // `{status: 'success', result: ''}` so maintenance slots drain
+  // within seconds. The predicate lives in a sibling helper so the
+  // decision is unit-testable without spinning the SDK iterator —
+  // see `silent-stop-synthesis.ts`.
+  if (shouldSynthesizeSilentStop(resultCount, sawErrorResult)) {
+    log(
+      `No SDK result event observed; synthesizing terminal success (closedDuringQuery=${closedDuringQuery})`,
+    );
+    writeOutput({
+      status: 'success',
+      result: '',
+      newSessionId,
+      usage: latestUsage,
+    });
+  }
+
   // Build the metrics tail for the observer summary. Wall is
   // measured from the runQuery entry point. Tokens come from the
   // most recent assistant message's `usage` payload (already
