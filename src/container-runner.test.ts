@@ -1016,13 +1016,33 @@ describe('per-group AGENT_MODEL override on container spawn', () => {
 
     const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
     expect(args).toContain(`AGENT_MODEL=${DEFAULT_AGENT_MODEL}`);
-    // No "override active" log when nothing was overridden.
-    const infoCalls = vi.mocked(logger.info).mock.calls;
-    expect(
-      infoCalls.some(
-        (c) => typeof c[1] === 'string' && c[1].includes('override active'),
-      ),
-    ).toBe(false);
+  });
+
+  // #418: spawn-time AGENT_MODEL log fires UNCONDITIONALLY so cost /
+  // latency auditing has a per-spawn trail covering both override AND
+  // default cases. The `source` field tags which path the value came
+  // from so the log is self-explaining.
+  it('emits exactly one AGENT_MODEL-resolved log per default spawn (#418)', async () => {
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const infoCalls = vi
+      .mocked(logger.info)
+      .mock.calls.filter(
+        (c) =>
+          typeof c[1] === 'string' &&
+          c[1].includes('Container spawn AGENT_MODEL resolved'),
+      );
+    expect(infoCalls.length).toBe(1);
+    expect(infoCalls[0]![0]).toEqual(
+      expect.objectContaining({
+        agentModel: DEFAULT_AGENT_MODEL,
+        globalDefault: DEFAULT_AGENT_MODEL,
+        source: 'global_default',
+      }),
+    );
   });
 
   it('forwards a valid per-group override and emits one info log', async () => {
@@ -1039,13 +1059,24 @@ describe('per-group AGENT_MODEL override on container spawn', () => {
     expect(args).toContain('AGENT_MODEL=claude-sonnet-4-6[1m]');
     expect(args).not.toContain(`AGENT_MODEL=${DEFAULT_AGENT_MODEL}`);
 
-    // Exactly one info-level "override active" log per spawn.
+    // #418: same single info log fires for override spawns; the
+    // `source` field tags it as `group_override` to distinguish from
+    // the default-spawn case.
     const infoCalls = vi
       .mocked(logger.info)
       .mock.calls.filter(
-        (c) => typeof c[1] === 'string' && c[1].includes('override active'),
+        (c) =>
+          typeof c[1] === 'string' &&
+          c[1].includes('Container spawn AGENT_MODEL resolved'),
       );
     expect(infoCalls.length).toBe(1);
+    expect(infoCalls[0]![0]).toEqual(
+      expect.objectContaining({
+        agentModel: 'claude-sonnet-4-6[1m]',
+        globalDefault: DEFAULT_AGENT_MODEL,
+        source: 'group_override',
+      }),
+    );
   });
 
   it('falls back to global default + warns when override has unknown prefix', async () => {

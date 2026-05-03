@@ -2341,23 +2341,30 @@ function buildContainerArgs(
   // #395: per-group `containerConfig.agentModel` override. When set and
   // valid, replaces the global AGENT_MODEL for this group's spawn only;
   // an unknown-prefix value falls back to the global default (see
-  // `resolvePerGroupAgentModel` for branching). One info log per spawn
-  // when an override is actually in effect — useful for cost / latency
-  // attribution when a group quietly runs on a different model.
+  // `resolvePerGroupAgentModel` for branching).
+  //
+  // #418: emit one info log per spawn UNCONDITIONALLY — every container
+  // spawn records the resolved `effectiveAgentModel` so cost / latency
+  // attribution has a per-spawn audit trail with no silent-default
+  // blind spot (the prior `if (override)`-gated log left default spawns
+  // invisible to the audit). The `source` field distinguishes
+  // default-vs-override so the log line is self-explaining without
+  // joining against group config.
   const perGroupAgentModelRaw = group.containerConfig?.agentModel;
   const effectiveAgentModel = perGroupAgentModelRaw
     ? resolvePerGroupAgentModel(perGroupAgentModelRaw, AGENT_MODEL)
     : AGENT_MODEL;
-  if (effectiveAgentModel !== AGENT_MODEL) {
-    logger.info(
-      {
-        groupFolder: group.folder,
-        agentModel: effectiveAgentModel,
-        globalDefault: AGENT_MODEL,
-      },
-      'Per-group AGENT_MODEL override active',
-    );
-  }
+  const agentModelSource: 'group_override' | 'global_default' =
+    effectiveAgentModel !== AGENT_MODEL ? 'group_override' : 'global_default';
+  logger.info(
+    {
+      groupFolder: group.folder,
+      agentModel: effectiveAgentModel,
+      globalDefault: AGENT_MODEL,
+      source: agentModelSource,
+    },
+    'Container spawn AGENT_MODEL resolved',
+  );
   args.push('-e', `AGENT_MODEL=${effectiveAgentModel}`);
   args.push('-e', `AGENT_EFFORT=${AGENT_EFFORT}`);
 
