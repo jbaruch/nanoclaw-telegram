@@ -291,8 +291,9 @@ done
 echo "  cleaned $OVERRIDE_COUNT group(s) with overrides"
 echo ""
 
-# 4b. #305 Plan B — clean up legacy schedule-task rows for skills that
-#     migrated to declarative `cadence:` frontmatter on the admin tile.
+# 4b. #305 Plan B + #456 Wave 2 — clean up legacy schedule-task rows
+#     for skills that migrated to declarative `cadence:` frontmatter
+#     on the admin tile.
 #
 # The cadence-registry from #305 Phase 2a writes
 # `source = 'cadence-registry'` rows on every container spawn from the
@@ -306,10 +307,11 @@ echo ""
 # Predicate is narrow to protect against false positives:
 #   1. `source = 'schedule-task'` — never touches cadence-registry
 #      rows that this script's later container restart will manage.
-#   2. `schedule_type = 'interval'` — both heartbeat and composio-fetch
-#      are 30-min interval-shape legacy rows; the cadence-registry
-#      writes `cron`, and any owner-scheduled cron row that happens to
-#      invoke one of these skills (rare but legal) stays untouched.
+#   2. `schedule_type` matches the legacy shape: `'interval'` for
+#      heartbeat/composio-fetch (30-min cadences), `'cron'` for
+#      morning-brief (`0 7 * * *`). Pinned per-skill so that an
+#      owner-scheduled row of the OTHER shape that happens to invoke
+#      the same skill (rare but legal) stays untouched.
 #   3. `prompt LIKE '%MANDATORY FIRST ACTION: Call Skill(skill:
 #      "tessl__<name>")%'` — matches the specific prompt shape the
 #      `schedule-task` IPC formats for operator bootstraps, not just
@@ -324,11 +326,20 @@ echo ""
 # skill simply doesn't fire until the next deploy after the admin
 # PR lands (bounded by the cadence-registry's first rebuild after
 # next agent spawn).
-echo "4b. Cleaning legacy schedule-task rows for cadence-migrated skills (#305 Plan B)..."
+echo "4b. Cleaning legacy schedule-task rows for cadence-migrated skills (#305 Plan B + #456)..."
 docker exec nanoclaw node -e '
 const Database = require("better-sqlite3");
 const db = new Database("/app/store/messages.db");
-const MIGRATED = ["tessl__heartbeat", "tessl__composio-fetch"];
+// Each entry is [skill, schedule_type] — the legacy row shape the
+// `schedule-task` IPC produced before the skill migrated to
+// declarative `cadence:` frontmatter. Per-skill schedule_type pinning
+// protects ad-hoc owner-scheduled rows of the OTHER shape from
+// false-positive deletion.
+const MIGRATED = [
+    ["tessl__heartbeat", "interval"],
+    ["tessl__composio-fetch", "interval"],
+    ["tessl__morning-brief", "cron"],
+];
 // task_run_logs has FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id),
 // so a bare DELETE FROM scheduled_tasks fails with FOREIGN KEY
 // constraint failed on every row that has any historical run logs.
@@ -346,10 +357,10 @@ const findIds = db.prepare(`
 `);
 const dropLogs = db.prepare(`DELETE FROM task_run_logs WHERE task_id = ?`);
 const dropTask = db.prepare(`DELETE FROM scheduled_tasks WHERE id = ?`);
-for (const skill of MIGRATED) {
+for (const [skill, scheduleType] of MIGRATED) {
     const ids = findIds.all(
         "schedule-task",
-        "interval",
+        scheduleType,
         `%MANDATORY FIRST ACTION: Call Skill(skill: "${skill}")%`,
     ).map((r) => r.id);
     if (ids.length === 0) continue;
@@ -360,7 +371,7 @@ for (const skill of MIGRATED) {
         }
     });
     tx();
-    console.log(`  removed ${ids.length} legacy row(s) for ${skill}: ${ids.join(", ")}`);
+    console.log(`  removed ${ids.length} legacy row(s) for ${skill} (${scheduleType}): ${ids.join(", ")}`);
     total += ids.length;
 }
 console.log(`  total: ${total} legacy row(s) cleaned`);
