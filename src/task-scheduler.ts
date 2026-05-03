@@ -19,6 +19,7 @@ import { computeThresholds } from './threshold.js';
 import { emitSessionTokens } from './usage-telemetry.js';
 import {
   getAllTasks,
+  getCurrentTz,
   getDormantRecurringTasks,
   getDueTasks,
   resurrectZombieTasks,
@@ -82,7 +83,10 @@ export interface NextRunResult {
   remediation?: NextRunRemediation;
 }
 
-export function computeNextRunDetailed(task: ScheduledTask): NextRunResult {
+export function computeNextRunDetailed(
+  task: ScheduledTask,
+  resolveLocalTz?: () => string | null,
+): NextRunResult {
   if (task.schedule_type === 'once') return { nextRun: null };
 
   const now = Date.now();
@@ -92,6 +96,16 @@ export function computeNextRunDetailed(task: ScheduledTask): NextRunResult {
     // server-wide TIMEZONE config. NULL/undefined falls back to TIMEZONE
     // — the pre-#102 behavior.
     //
+    // The literal token `'local'` (#456) is resolved at fire time
+    // against `tz_state.current_tz` via the optional `resolveLocalTz`
+    // callback. Rows declared via cadence-registry frontmatter
+    // `cadence: "<cron> (TZ=local)"` carry `schedule_timezone='local'`
+    // and travel with the owner without row mutation. If no resolver
+    // is provided (test harness, pre-#456 callers) or the resolver
+    // returns null (tz_state empty / unfamiliar schema_version), fall
+    // through to TIMEZONE — the same fallback NULL `schedule_timezone`
+    // already uses.
+    //
     // Pure function (no DB writes): a previous version called
     // `updateTask` directly here, which raced with concurrent
     // `update_task` IPC — a user fixing a broken tz could have their
@@ -99,9 +113,36 @@ export function computeNextRunDetailed(task: ScheduledTask): NextRunResult {
     // the old value. Now we just compute and report; the caller is
     // responsible for pausing or clearing the tz against the FRESH
     // DB row.
+    let effectiveTz: string;
+    if (task.schedule_timezone === 'local') {
+      // Wrap the resolver call: a transient throw from the underlying
+      // DB read (or any future resolver) must degrade to the TIMEZONE
+      // fallback rather than propagate out of the scheduler tick. Per
+      // `coding-policy: error-handling` § Graceful Fallback.
+      let resolved: string | null = null;
+      if (resolveLocalTz) {
+        try {
+          resolved = resolveLocalTz() ?? null;
+        } catch (resolverErr) {
+          logger.warn(
+            {
+              taskId: task.id,
+              err:
+                resolverErr instanceof Error
+                  ? resolverErr.message
+                  : String(resolverErr),
+            },
+            'computeNextRun: resolveLocalTz threw — falling back to TIMEZONE',
+          );
+        }
+      }
+      effectiveTz = resolved ?? TIMEZONE;
+    } else {
+      effectiveTz = task.schedule_timezone || TIMEZONE;
+    }
     try {
       const interval = CronExpressionParser.parse(task.schedule_value, {
-        tz: task.schedule_timezone || TIMEZONE,
+        tz: effectiveTz,
       });
       return { nextRun: interval.next().toISOString() };
     } catch (err) {
@@ -110,6 +151,7 @@ export function computeNextRunDetailed(task: ScheduledTask): NextRunResult {
           taskId: task.id,
           scheduleValue: task.schedule_value,
           scheduleTimezone: task.schedule_timezone,
+          effectiveTz,
           err: err instanceof Error ? err.message : String(err),
         },
         'computeNextRun: cron parse failed — retrying with server TIMEZONE',
@@ -118,6 +160,18 @@ export function computeNextRunDetailed(task: ScheduledTask): NextRunResult {
         const interval = CronExpressionParser.parse(task.schedule_value, {
           tz: TIMEZONE,
         });
+        // For `schedule_timezone === 'local'`, the bad value is in
+        // `tz_state.current_tz` (which `task-tz-sync` writes), not in
+        // the row's `schedule_timezone` itself. Emitting
+        // `clear-bad-timezone` here would mutate the row and silently
+        // strip the `'local'` token — converting a travel-anchored
+        // schedule into a server-TZ schedule. Suppress remediation in
+        // that case: this tick falls back to TIMEZONE for a single fire,
+        // and the next fire retries the resolver (which may have been
+        // fixed by an updated `tz_state.current_tz` in the meantime).
+        if (task.schedule_timezone === 'local') {
+          return { nextRun: interval.next().toISOString() };
+        }
         return {
           nextRun: interval.next().toISOString(),
           remediation: 'clear-bad-timezone',
@@ -169,8 +223,11 @@ export function computeNextRunDetailed(task: ScheduledTask): NextRunResult {
  * fresh DB row (re-fetch via `getTaskById`) to avoid clobbering
  * concurrent IPC updates.
  */
-export function computeNextRun(task: ScheduledTask): string | null {
-  return computeNextRunDetailed(task).nextRun;
+export function computeNextRun(
+  task: ScheduledTask,
+  resolveLocalTz?: () => string | null,
+): string | null {
+  return computeNextRunDetailed(task, resolveLocalTz).nextRun;
 }
 
 /**
@@ -800,7 +857,7 @@ async function runTask(
     // the stale capture (the same race `applyComputeNextRunRemediation`
     // already guards against on the remediation path).
     const fresh = getTaskById(task.id) ?? task;
-    const computed = computeNextRunDetailed(fresh);
+    const computed = computeNextRunDetailed(fresh, getCurrentTz);
     if (computed.remediation) {
       applyComputeNextRunRemediation(
         fresh.id,
@@ -988,7 +1045,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         // pre-advance write was a separate (and bug-prone) attempt at
         // crash-safety. Removing the pre-advance leaves remediation
         // intact.
-        const computed = computeNextRunDetailed(currentTask);
+        const computed = computeNextRunDetailed(currentTask, getCurrentTz);
         if (computed.remediation) {
           // Apply remediation against the FRESH DB row — if a user
           // raced an `update_task` IPC between the read above and

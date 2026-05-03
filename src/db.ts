@@ -1607,6 +1607,69 @@ export function getDueTasks(): ScheduledTask[] {
     .all(now) as ScheduledTask[];
 }
 
+// Highest tz_state schema_version this reader knows how to interpret.
+// Per `coding-policy: stateful-artifacts`, readers that observe a higher
+// `schema_version` must treat the row as "no usable prior state" rather
+// than guess. Bump in lock-step with the next state-NNN migration that
+// reshapes `tz_state`.
+const SUPPORTED_TZ_STATE_SCHEMA_VERSION = 1;
+
+/**
+ * Test-only helper: seed the singleton `tz_state` row directly. The
+ * production writer is the agent-side `task-tz-sync` skill; this
+ * shortcut lets `getCurrentTz` tests exercise read paths without
+ * spinning up the full skill.
+ */
+export function _seedTzStateForTests(args: {
+  currentTz: string;
+  homeTz?: string;
+  schedulerTz?: string | null;
+  schemaVersion?: number;
+}): void {
+  db.prepare(
+    `INSERT INTO tz_state (id, current_tz, home_tz, scheduler_tz, schema_version)
+       VALUES (1, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       current_tz     = excluded.current_tz,
+       home_tz        = excluded.home_tz,
+       scheduler_tz   = excluded.scheduler_tz,
+       schema_version = excluded.schema_version`,
+  ).run(
+    args.currentTz,
+    args.homeTz ?? args.currentTz,
+    args.schedulerTz ?? null,
+    args.schemaVersion ?? 1,
+  );
+}
+
+/**
+ * Read `current_tz` from the singleton `tz_state` row. Returns null if
+ * the row is absent (pre-state-010 install / migration not yet run) or
+ * if `schema_version` is unfamiliar to this reader.
+ *
+ * Used by `task-scheduler.ts:computeNextRunDetailed` to resolve rows
+ * declared with `schedule_timezone = 'local'` (#456): the cron is
+ * evaluated against the owner's current zone at fire time without
+ * mutating the row's `schedule_value`.
+ */
+export function getCurrentTz(): string | null {
+  const row = db
+    .prepare('SELECT current_tz, schema_version FROM tz_state WHERE id = 1')
+    .get() as { current_tz: string; schema_version: number } | undefined;
+  if (!row) return null;
+  if (row.schema_version !== SUPPORTED_TZ_STATE_SCHEMA_VERSION) {
+    logger.warn(
+      {
+        observed: row.schema_version,
+        supported: SUPPORTED_TZ_STATE_SCHEMA_VERSION,
+      },
+      'tz_state schema_version unfamiliar — treating as no usable prior state',
+    );
+    return null;
+  }
+  return row.current_tz;
+}
+
 export function updateTaskAfterRun(
   id: string,
   nextRun: string | null,

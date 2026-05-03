@@ -48,6 +48,8 @@ import {
   parseTaskSkill,
   startSchedulerLoop,
 } from './task-scheduler.js';
+import { TIMEZONE } from './config.js';
+import { CronExpressionParser } from 'cron-parser';
 import { logger } from './logger.js';
 import type { ContainerOutput } from './container-runner.js';
 import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
@@ -173,6 +175,193 @@ describe('task scheduler', () => {
     const next = new Date(nextRun!);
     expect(next.getUTCHours()).toBe(12);
     expect(next.getUTCMinutes()).toBe(0);
+  });
+
+  it("computeNextRun resolves schedule_timezone='local' against the resolver callback (#456)", () => {
+    const task = {
+      id: 'cron-local',
+      group_folder: 'test',
+      chat_jid: 'test@g.us',
+      prompt: 'test',
+      schedule_type: 'cron' as const,
+      schedule_value: '0 7 * * *', // 7am
+      schedule_timezone: 'local',
+      context_mode: 'isolated' as const,
+      next_run: null,
+      last_run: null,
+      last_result: null,
+      status: 'active' as const,
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    };
+
+    // 7am Chicago in summer is 12:00 UTC (CDT, UTC-5).
+    const next = computeNextRun(task, () => 'America/Chicago');
+    expect(next).not.toBeNull();
+    const utc = new Date(next!);
+    // Allow either CDT (12:00) or CST (13:00) depending on date; either
+    // way 7am Chicago resolves to a fixed UTC hour, NOT 7am UTC.
+    expect(utc.getUTCHours()).not.toBe(7);
+  });
+
+  it("schedule_timezone='local' produces different next_run on TZ flip without row mutation (#456)", () => {
+    createTask({
+      id: 'cron-local-flip',
+      group_folder: 'test',
+      chat_jid: 'test@g.us',
+      prompt: 'test',
+      schedule_type: 'cron',
+      schedule_value: '0 7 * * *',
+      schedule_timezone: 'local',
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner',
+    });
+    const task = getTaskById('cron-local-flip')!;
+
+    const chicagoNext = computeNextRun(task, () => 'America/Chicago');
+    const amsterdamNext = computeNextRun(task, () => 'Europe/Amsterdam');
+
+    expect(chicagoNext).not.toBeNull();
+    expect(amsterdamNext).not.toBeNull();
+    // Same cron, same row, different zone → different UTC instant.
+    expect(chicagoNext).not.toBe(amsterdamNext);
+    // Pure: no DB writes. The row's schedule_value/_timezone are
+    // unchanged — the entire point of #456 vs the legacy mutation pattern.
+    const after = getTaskById('cron-local-flip')!;
+    expect(after.schedule_value).toBe('0 7 * * *');
+    expect(after.schedule_timezone).toBe('local');
+  });
+
+  it("schedule_timezone='local' with no resolver falls back to TIMEZONE (#456)", () => {
+    const task = {
+      id: 'cron-local-no-resolver',
+      group_folder: 'test',
+      chat_jid: 'test@g.us',
+      prompt: 'test',
+      schedule_type: 'cron' as const,
+      schedule_value: '0 7 * * *',
+      schedule_timezone: 'local',
+      context_mode: 'isolated' as const,
+      next_run: null,
+      last_run: null,
+      last_result: null,
+      status: 'active' as const,
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    };
+
+    // No resolver passed → falls through to TIMEZONE. Compare against
+    // what cron-parser produces with TIMEZONE directly to avoid pinning
+    // a specific zone (the test machine's TZ varies between local dev
+    // and CI). The contract is "behaves identically to NULL
+    // schedule_timezone with the same cron".
+    const next = computeNextRun(task);
+    const expected = CronExpressionParser.parse('0 7 * * *', { tz: TIMEZONE })
+      .next()
+      .toDate()
+      .toISOString();
+    expect(next).toBe(expected);
+  });
+
+  it("schedule_timezone='local' with resolver returning null falls back to TIMEZONE (#456)", () => {
+    const task = {
+      id: 'cron-local-null-resolver',
+      group_folder: 'test',
+      chat_jid: 'test@g.us',
+      prompt: 'test',
+      schedule_type: 'cron' as const,
+      schedule_value: '0 7 * * *',
+      schedule_timezone: 'local',
+      context_mode: 'isolated' as const,
+      next_run: null,
+      last_run: null,
+      last_result: null,
+      status: 'active' as const,
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    };
+
+    // Resolver returns null (e.g. tz_state row absent or schema_version
+    // unfamiliar) → falls through to TIMEZONE same as no-resolver case.
+    const next = computeNextRun(task, () => null);
+    const expected = CronExpressionParser.parse('0 7 * * *', { tz: TIMEZONE })
+      .next()
+      .toDate()
+      .toISOString();
+    expect(next).toBe(expected);
+  });
+
+  it("schedule_timezone='local' + resolver that throws degrades to TIMEZONE without propagating (#456)", () => {
+    // Regression guard: a transient DB read failure inside getCurrentTz
+    // (or any future resolver) must NOT abort the scheduler tick. Per
+    // `coding-policy: error-handling` § Graceful Fallback.
+    const task = {
+      id: 'cron-local-throwing-resolver',
+      group_folder: 'test',
+      chat_jid: 'test@g.us',
+      prompt: 'test',
+      schedule_type: 'cron' as const,
+      schedule_value: '0 7 * * *',
+      schedule_timezone: 'local',
+      context_mode: 'isolated' as const,
+      next_run: null,
+      last_run: null,
+      last_result: null,
+      status: 'active' as const,
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    };
+
+    const result = computeNextRunDetailed(task, () => {
+      throw new Error('transient DB read failure');
+    });
+
+    // Falls back to TIMEZONE, no remediation, no propagated throw.
+    expect(result.nextRun).not.toBeNull();
+    expect(result.remediation).toBeUndefined();
+    const expected = CronExpressionParser.parse('0 7 * * *', { tz: TIMEZONE })
+      .next()
+      .toDate()
+      .toISOString();
+    expect(result.nextRun).toBe(expected);
+  });
+
+  it("schedule_timezone='local' + invalid resolver output does NOT trigger clear-bad-timezone remediation (#456)", () => {
+    // Regression guard: a malformed `tz_state.current_tz` (e.g. corruption
+    // or a future schema mismatch the reader didn't catch) must NOT cause
+    // the row's `schedule_timezone` to be cleared — the bad value isn't
+    // on the row, it's on the singleton tz_state. Clearing would silently
+    // convert a travel-anchored schedule into a server-TZ schedule.
+    createTask({
+      id: 'cron-local-bad-resolver',
+      group_folder: 'test',
+      chat_jid: 'test@g.us',
+      prompt: 'test',
+      schedule_type: 'cron',
+      schedule_value: '0 7 * * *',
+      schedule_timezone: 'local',
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner',
+    });
+    const task = getTaskById('cron-local-bad-resolver')!;
+
+    const result = computeNextRunDetailed(task, () => 'Not/A/Real/Zone');
+
+    // Falls back to TIMEZONE for THIS tick, but NO remediation emitted —
+    // the row's 'local' token survives so the next tick can retry once
+    // tz_state is fixed.
+    expect(result.nextRun).not.toBeNull();
+    expect(result.remediation).toBeUndefined();
+    // Pure: no DB writes from compute.
+    expect(getTaskById('cron-local-bad-resolver')?.schedule_timezone).toBe(
+      'local',
+    );
   });
 
   it('computeNextRunDetailed flags clear-bad-timezone when per-task tz is invalid but TIMEZONE works (#102)', () => {

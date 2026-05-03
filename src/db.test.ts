@@ -2,8 +2,10 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import {
   _initTestDatabase,
+  _seedTzStateForTests,
   _writeRawRegisteredGroup,
   createTask,
+  getCurrentTz,
   deleteRegisteredGroup,
   deleteTask,
   deriveTriggerString,
@@ -1661,5 +1663,31 @@ describe('legacy trigger backfill shape classification', () => {
     const cfg = getTriggerPatterns('barekeyword@g.us');
     expect(cfg!.patterns[0].pattern).toBe('nanoclaw');
     expect(cfg!.patterns[0].kind).toBe('keyword');
+  });
+});
+
+describe('getCurrentTz (#456)', () => {
+  it('returns null when tz_state row is absent', () => {
+    expect(getCurrentTz()).toBeNull();
+  });
+
+  it('returns current_tz when seeded with supported schema_version', () => {
+    _seedTzStateForTests({ currentTz: 'America/Chicago', schemaVersion: 1 });
+    expect(getCurrentTz()).toBe('America/Chicago');
+  });
+
+  it('reflects updates without staleness across calls', () => {
+    _seedTzStateForTests({ currentTz: 'America/Chicago', schemaVersion: 1 });
+    expect(getCurrentTz()).toBe('America/Chicago');
+    _seedTzStateForTests({ currentTz: 'Europe/Amsterdam', schemaVersion: 1 });
+    expect(getCurrentTz()).toBe('Europe/Amsterdam');
+  });
+
+  it('returns null and warns on unfamiliar schema_version', () => {
+    _seedTzStateForTests({ currentTz: 'America/Chicago', schemaVersion: 2 });
+    // Reader contract per `coding-policy: stateful-artifacts`: unfamiliar
+    // schema_version means "no usable prior state" — fall back rather
+    // than guess at the new shape.
+    expect(getCurrentTz()).toBeNull();
   });
 });
