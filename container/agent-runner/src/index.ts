@@ -66,6 +66,10 @@ import { decideGroundTruthReminder } from './ground-truth-reminder.js';
 import { detectLazyVerification } from './lazy-verification.js';
 import { createReadonlyWarner } from './ipc-readonly-warn.js';
 import { rewriteMarkdownToHtml } from './markdown-to-html.js';
+import {
+  parseScriptOutput,
+  type ScriptResult,
+} from './script-output-parse.js';
 import { shouldSynthesizeSilentStop } from './silent-stop-synthesis.js';
 import { isStaleSessionError } from './stale-session.js';
 import {
@@ -4049,11 +4053,6 @@ async function runQuery(
   };
 }
 
-interface ScriptResult {
-  wakeAgent: boolean;
-  data?: unknown;
-}
-
 const SCRIPT_TIMEOUT_MS = 30_000;
 
 async function runScript(script: string): Promise<ScriptResult | null> {
@@ -4079,27 +4078,23 @@ async function runScript(script: string): Promise<ScriptResult | null> {
           return resolve(null);
         }
 
-        // Parse last non-empty line of stdout as JSON
-        const lines = stdout.trim().split('\n');
-        const lastLine = lines[lines.length - 1];
-        if (!lastLine) {
-          log('Script produced no output');
+        const outcome = parseScriptOutput(stdout);
+        if (!outcome.ok) {
+          const lastLine = (outcome.lastLine ?? '').slice(0, 200);
+          if (outcome.reason === 'empty') {
+            log('Script produced no output');
+          } else if (outcome.reason === 'invalid_json') {
+            log(`Script output is not valid JSON: ${lastLine}`);
+          } else if (outcome.reason === 'invalid_data_shape') {
+            log(
+              `Script output 'data' must be a JSON object per coding-policy: script-delegation: ${lastLine}`,
+            );
+          } else {
+            log(`Script output missing wake_agent boolean: ${lastLine}`);
+          }
           return resolve(null);
         }
-
-        try {
-          const result = JSON.parse(lastLine);
-          if (typeof result.wakeAgent !== 'boolean') {
-            log(
-              `Script output missing wakeAgent boolean: ${lastLine.slice(0, 200)}`,
-            );
-            return resolve(null);
-          }
-          resolve(result as ScriptResult);
-        } catch {
-          log(`Script output is not valid JSON: ${lastLine.slice(0, 200)}`);
-          resolve(null);
-        }
+        resolve(outcome.result);
       },
     );
   });
@@ -4309,9 +4304,9 @@ async function main(): Promise<void> {
     log('Running task script...');
     const scriptResult = await runScript(containerInput.script);
 
-    if (!scriptResult || !scriptResult.wakeAgent) {
+    if (!scriptResult || !scriptResult.wake_agent) {
       const reason = scriptResult
-        ? 'wakeAgent=false'
+        ? 'wake_agent=false'
         : 'script error/no output';
       log(`Script decided not to wake agent: ${reason}`);
       writeOutput({
@@ -4322,7 +4317,7 @@ async function main(): Promise<void> {
     }
 
     // Script says wake agent — enrich prompt with script data
-    log(`Script wakeAgent=true, enriching prompt with data`);
+    log(`Script wake_agent=true, enriching prompt with data`);
     prompt = `[SCHEDULED TASK]\n\nScript output:\n${JSON.stringify(scriptResult.data, null, 2)}\n\nInstructions:\n${containerInput.prompt}`;
   }
 

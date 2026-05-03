@@ -383,7 +383,7 @@ SCHEDULE VALUE FORMAT:
       .string()
       .optional()
       .describe(
-        'Optional bash script to run before waking the agent. Script must output JSON on the last line of stdout: { "wakeAgent": boolean, "data"?: any }. If wakeAgent is false, the agent is not called. Test your script with bash -c "..." before scheduling.',
+        'Optional bash script to run before waking the agent. Script must output JSON on the last line of stdout: { "wake_agent": boolean, "data"?: any }. If wake_agent is false, the agent is not called. Test your script with bash -c "..." before scheduling.',
       ),
     task_id: z
       .string()
