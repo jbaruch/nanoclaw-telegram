@@ -3,6 +3,7 @@
 #
 # Usage: ssh nas "cd ~/nanoclaw && ./scripts/deploy.sh"
 #    or: ssh nas "cd ~/nanoclaw && ./scripts/deploy.sh --tiles-only"
+#    or: ssh nas "cd ~/nanoclaw && ./scripts/deploy.sh --no-cache"
 #
 # Steps:
 #   1. Pull latest code from origin
@@ -15,8 +16,19 @@
 #   6. Clear ALL sessions from DB
 #   7. Restart orchestrator
 #
-# The --tiles-only flag skips the git pull and image rebuilds (for when
-# only tile content changed, not source code).
+# Flags (mutually exclusive):
+#   --tiles-only  Skip git pull and image rebuilds (only tile content changed).
+#   --no-cache    Force `docker build --no-cache --pull` for both agent and
+#                 orchestrator images. Required when an upstream npm-from-
+#                 github dep in `Dockerfile.orchestrator` (e.g.
+#                 `reclaim-tripit-timezones-sync`) ships a new version:
+#                 BuildKit caches the `RUN npm install -g <github-repo>` layer
+#                 by Dockerfile string, NOT by GitHub state, so a default
+#                 deploy silently reinstalls the prior version. Also splits
+#                 step 2b into separate build + `up -d --force-recreate
+#                 --no-build` calls — a single `up -d --build` after a
+#                 manual `--no-cache` build can resurrect a stale cached
+#                 layer (observed 2026-05-02).
 
 set -euo pipefail
 
@@ -61,8 +73,20 @@ if [ -f .env ] && [ -z "${CONTAINER_IMAGE:-}" ]; then
 fi
 
 TILES_ONLY=false
-if [[ "${1:-}" == "--tiles-only" ]]; then
-    TILES_ONLY=true
+NO_CACHE=false
+for arg in "$@"; do
+    case "$arg" in
+        --tiles-only) TILES_ONLY=true ;;
+        --no-cache)   NO_CACHE=true ;;
+        *)
+            echo "ERROR: unknown flag '$arg' (supported: --tiles-only, --no-cache)" >&2
+            exit 1
+            ;;
+    esac
+done
+if [[ "$TILES_ONLY" == true && "$NO_CACHE" == true ]]; then
+    echo "ERROR: --tiles-only and --no-cache are mutually exclusive (--tiles-only skips rebuilds)." >&2
+    exit 1
 fi
 
 echo "=== NanoClaw Deploy ==="
@@ -136,6 +160,10 @@ if [[ "$TILES_ONLY" == false ]]; then
     # (`TAG="${1:-latest}"`). Passing as env var would be silently
     # ignored and default to `latest` — the exact stale-image bug this
     # PR is meant to prevent.
+    AGENT_BUILD_FLAGS=()
+    if [[ "$NO_CACHE" == true ]]; then
+        AGENT_BUILD_FLAGS+=(--no-cache)
+    fi
     if [[ "$AGENT_IMAGE" == *@sha256:* ]]; then
         # Digest-pinned reference. Docker accepts both `name:tag@sha256:...`
         # and `name@sha256:...` (digest-only, no tag) — match either via
@@ -155,18 +183,18 @@ if [[ "$TILES_ONLY" == false ]]; then
         # to latest with a warning so the operator notices the typo.
         if [[ -z "$AGENT_TAG" ]]; then
             echo "WARNING: CONTAINER_IMAGE='$AGENT_IMAGE' has an empty tag; building nanoclaw-agent:latest instead."
-            ./container/build.sh
+            ./container/build.sh "${AGENT_BUILD_FLAGS[@]}"
         else
-            ./container/build.sh "$AGENT_TAG"
+            ./container/build.sh "$AGENT_TAG" "${AGENT_BUILD_FLAGS[@]}"
         fi
     elif [[ "$AGENT_IMAGE" == "nanoclaw-agent" ]]; then
-        ./container/build.sh
+        ./container/build.sh "${AGENT_BUILD_FLAGS[@]}"
     else
         echo "WARNING: CONTAINER_IMAGE='$AGENT_IMAGE' is not local nanoclaw-agent:*"
         echo "WARNING: ./container/build.sh will rebuild nanoclaw-agent:latest,"
         echo "WARNING: which is NOT the image the orchestrator will spawn from."
         echo "WARNING: Push/tag your own build pipeline for '$AGENT_IMAGE' separately."
-        ./container/build.sh
+        ./container/build.sh "${AGENT_BUILD_FLAGS[@]}"
     fi
     echo ""
 
@@ -191,7 +219,20 @@ if [[ "$TILES_ONLY" == false ]]; then
     # images then atomic-swap — would close the residual race entirely
     # but adds complexity not worth the cost for a personal deploy.
     echo "2b. Rebuilding orchestrator..."
-    docker compose up -d --build
+    if [[ "$NO_CACHE" == true ]]; then
+        # Split build and recreate so BuildKit can't resurrect a stale
+        # cached layer. Observed 2026-05-02: a manual `docker compose
+        # build --no-cache --pull nanoclaw` produced a fresh image, but
+        # the subsequent `docker compose up -d --build` reused an older
+        # cached layer entry and re-tagged the OLD sha as `:latest` —
+        # the running container then served pre-update code. The split
+        # form (`build --no-cache --pull` then `up -d --force-recreate
+        # --no-build`) avoids the second build entirely.
+        docker compose build --no-cache --pull nanoclaw
+        docker compose up -d --force-recreate --no-build nanoclaw
+    else
+        docker compose up -d --build
+    fi
     echo ""
 else
     echo "1-2b. Skipped (--tiles-only)"
