@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'http';
 import type { AddressInfo } from 'net';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 const mockEnv: Record<string, string> = {};
 vi.mock('./env.js', () => ({
@@ -166,6 +169,113 @@ describe('credential-proxy', () => {
     // custom keep-alive and transfer-encoding must not be forwarded.
     expect(lastUpstreamHeaders['keep-alive']).toBeUndefined();
     expect(lastUpstreamHeaders['transfer-encoding']).toBeUndefined();
+  });
+
+  describe('DUMP_API_REQUESTS', () => {
+    let dumpDir: string;
+    const originalEnv = process.env.DUMP_API_REQUESTS;
+
+    beforeEach(() => {
+      dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dump-api-requests-'));
+    });
+
+    afterEach(() => {
+      if (originalEnv === undefined) {
+        delete process.env.DUMP_API_REQUESTS;
+      } else {
+        process.env.DUMP_API_REQUESTS = originalEnv;
+      }
+      // `force: true` already tolerates a missing path — no try/catch
+      // needed, and a bare catch-all here would suppress legitimate
+      // cleanup bugs per `error-handling.Specific Exceptions`.
+      fs.rmSync(dumpDir, { recursive: true, force: true });
+    });
+
+    it('default OFF: env unset writes no files', async () => {
+      delete process.env.DUMP_API_REQUESTS;
+      proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });
+
+      await makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/v1/messages',
+          headers: { 'content-type': 'application/json' },
+        },
+        '{"hello":"world"}',
+      );
+
+      expect(fs.readdirSync(dumpDir)).toHaveLength(0);
+    });
+
+    it('enabled: writes the request body to the dump dir', async () => {
+      process.env.DUMP_API_REQUESTS = dumpDir;
+      proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });
+
+      const sentBody = '{"prompt":"capture me"}';
+      await makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/v1/messages',
+          headers: { 'content-type': 'application/json' },
+        },
+        sentBody,
+      );
+
+      const files = fs.readdirSync(dumpDir);
+      expect(files).toHaveLength(1);
+      expect(files[0]).toMatch(/^.*-POST-messages\.json$/);
+      const dumped = fs.readFileSync(path.join(dumpDir, files[0]), 'utf-8');
+      expect(dumped).toBe(sentBody);
+    });
+
+    it('strips query string from filename (so dumps glob predictably)', async () => {
+      process.env.DUMP_API_REQUESTS = dumpDir;
+      proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });
+
+      await makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/v1/messages?stream=true',
+          headers: { 'content-type': 'application/json' },
+        },
+        '{}',
+      );
+
+      const files = fs.readdirSync(dumpDir);
+      expect(files).toHaveLength(1);
+      expect(files[0]).toMatch(/^.*-POST-messages\.json$/);
+      // Query-string chars must NOT leak into the filename.
+      expect(files[0]).not.toContain('?');
+      expect(files[0]).not.toContain('=');
+    });
+
+    it('degrades gracefully when the dump dir is unwritable: still forwards the request', async () => {
+      // Point DUMP_API_REQUESTS at a path under a regular file — mkdir
+      // recursive will fail because the parent isn't a directory. The
+      // proxy must log a warn and forward the request anyway.
+      const blockingFile = path.join(dumpDir, 'blocker');
+      fs.writeFileSync(blockingFile, '');
+      process.env.DUMP_API_REQUESTS = path.join(blockingFile, 'subdir');
+      proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });
+
+      const result = await makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/v1/messages',
+          headers: { 'content-type': 'application/json' },
+        },
+        '{}',
+      );
+
+      // Forwarding still succeeds — the blocker path can't be written
+      // to, but the upstream request continues normally.
+      expect(result.statusCode).toBe(200);
+      expect(lastUpstreamHeaders['x-api-key']).toBe('sk-ant-real-key');
+    });
   });
 
   it('returns 502 when upstream is unreachable', async () => {

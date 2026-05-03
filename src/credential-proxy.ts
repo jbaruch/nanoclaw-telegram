@@ -13,6 +13,8 @@
 import { createServer, Server } from 'http';
 import { request as httpsRequest } from 'https';
 import { request as httpRequest, RequestOptions } from 'http';
+import { writeFileSync, mkdirSync } from 'fs';
+import { join } from 'path';
 
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
@@ -50,6 +52,70 @@ export function startCredentialProxy(
       req.on('data', (c) => chunks.push(c));
       req.on('end', () => {
         const body = Buffer.concat(chunks);
+
+        // Optional request capture for prompt/tool-catalog inspection.
+        // Set DUMP_API_REQUESTS=<dir> in the orchestrator env to enable.
+        // Default OFF; never enable in long-running production — the
+        // captured request bodies contain user prompts and the SDK's
+        // full system prompt + tool catalog, which is sensitive
+        // operator material. Single-shot capture pattern: set, fire
+        // one request, unset.
+        //
+        // Failure handling per `error-handling.Specific Exceptions` +
+        // `Graceful Fallback`: catch ONLY the known recoverable
+        // `NodeJS.ErrnoException` codes that fs operations emit on
+        // operator-misconfigured dump targets (EACCES, ENOSPC,
+        // ENOENT, ENOTDIR, EPERM, EROFS, EISDIR). On those we log and
+        // continue forwarding — the proxy's primary contract is to
+        // forward the request; capture is strictly diagnostic. On any
+        // OTHER exception (TypeError, ReferenceError, programming
+        // bugs introduced by future edits), we rethrow so the bug
+        // surfaces loudly instead of being silently swallowed by a
+        // catch-all. Sync I/O is intentional: this is operator-toggled
+        // debug, used in single-shot mode where dump-path latency is
+        // acceptable.
+        const dumpDir = process.env.DUMP_API_REQUESTS;
+        if (dumpDir) {
+          try {
+            mkdirSync(dumpDir, { recursive: true });
+            const ts = new Date().toISOString().replace(/[:.]/g, '-');
+            // Strip query string and sanitize the filename component
+            // to a conservative set so dumps glob predictably even when
+            // the proxied URL carries `?foo=bar` or other unsafe chars.
+            const urlPath = (req.url || '/').split('?')[0];
+            const lastRaw = urlPath.split('/').pop() || 'root';
+            const last = lastRaw.replace(/[^a-zA-Z0-9._-]/g, '_') || 'root';
+            const method =
+              (req.method || 'UNKNOWN').replace(/[^A-Z]/g, '') || 'UNKNOWN';
+            writeFileSync(join(dumpDir, `${ts}-${method}-${last}.json`), body);
+          } catch (err) {
+            const RECOVERABLE_FS_CODES = new Set([
+              'EACCES',
+              'ENOSPC',
+              'ENOENT',
+              'ENOTDIR',
+              'EPERM',
+              'EROFS',
+              'EISDIR',
+            ]);
+            const code =
+              err instanceof Error && 'code' in err
+                ? (err as NodeJS.ErrnoException).code
+                : undefined;
+            if (code && RECOVERABLE_FS_CODES.has(code)) {
+              logger.warn(
+                { code, dumpDir, err: (err as Error).message },
+                'DUMP_API_REQUESTS write failed — continuing forward without capture',
+              );
+            } else {
+              // Unexpected exception (programming bug, not an fs
+              // condition the operator can fix). Surface loudly per
+              // `error-handling.Specific Exceptions`.
+              throw err;
+            }
+          }
+        }
+
         const headers: Record<string, string | number | string[] | undefined> =
           {
             ...(req.headers as Record<string, string>),
