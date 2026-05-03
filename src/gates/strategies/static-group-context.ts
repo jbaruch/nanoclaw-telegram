@@ -17,7 +17,7 @@ import {
   ASSISTANT_NAME,
   ASSISTANT_OWNER_HANDLE,
   ASSISTANT_OWNER_NAME,
-  ASSISTANT_USERNAME,
+  ASSISTANT_USERNAMES,
 } from '../../config.js';
 import { getRegisteredGroup } from '../../db.js';
 import { logger } from '../../logger.js';
@@ -66,12 +66,23 @@ export const staticGroupContextStrategy: ContextStrategy = {
 
   async buildContext(ctx: GateContext): Promise<string> {
     const info = resolveGroupInfo(ctx);
+    // Render every configured handle so the classifier knows the bot
+    // can be addressed under any of them (#464). Single-handle deploys
+    // see the original `Telegram @-handle: @x` line; multi-handle
+    // deploys see a plural label listing every alias. The label
+    // change is what the classifier prompt's identity-match rule
+    // keys off — pluralizing only when there's more than one handle
+    // keeps single-handle prompts byte-stable.
+    const handleLine =
+      ASSISTANT_USERNAMES.length === 1
+        ? `  Telegram @-handle: @${ASSISTANT_USERNAMES[0]}`
+        : `  Telegram @-handles (aliases — any of these refers to the assistant): ${ASSISTANT_USERNAMES.map((u) => `@${u}`).join(', ')}`;
     const lines = [
       `Group: ${info.groupName}`,
       `Group folder: ${ctx.groupFolder}`,
       `Assistant identity:`,
       `  Display name: ${ASSISTANT_NAME}`,
-      `  Telegram @-handle: @${ASSISTANT_USERNAME}`,
+      handleLine,
     ];
     // Owner line is opt-in: the classifier's owner-aware rule keys off
     // the `Owner: <Name> (@<handle>)` substring. When either var is

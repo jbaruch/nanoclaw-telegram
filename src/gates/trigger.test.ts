@@ -295,48 +295,48 @@ describe('triggerGate — reply kind', () => {
 });
 
 describe('triggerGate — quote-prefix false-positive regression (#107)', () => {
-  // Bug observed today: msg id=4115 in wtf chat, sender Leonid
-  // (@ligolnik), DB content was the inline `[Replying to ...]` quote
-  // prefix containing "LoMBot" PLUS the user's actual body "Yes do it".
-  // Stage 1's synthetic identity match (auto, kind=keyword
-  // pattern=LoMBot) hit the substring inside the quote prefix and
-  // short-circuited Stage 2. The fix: GateContext.message.text is now
-  // the CLEAN body — the call site (buildGateContext) strips the
-  // prefix, exposing reply context structurally via replyTo.
+  // Original bug: a reply DB row content held the inline
+  // `[Replying to ...]` quote prefix containing the assistant's
+  // name PLUS the user's actual body "Yes do it". Stage 1's
+  // synthetic identity match (auto, kind=keyword) hit the
+  // substring inside the quote prefix and short-circuited Stage 2.
+  // The fix: GateContext.message.text is now the CLEAN body — the
+  // call site (buildGateContext) strips the prefix, exposing reply
+  // context structurally via replyTo.
   //
   // This test asserts the gate behaviour after that contract: the
   // gate's input `text` is "Yes do it" (no prefix) and `replyTo`
   // describes the peer-bot reply target. Synthetic identity matchers
-  // run on the clean body and find no LoMBot reference — so the gate
-  // returns `pass` (or `deny` if operator patterns also miss),
-  // letting the chain fall through to Stage 2.
-  it('does not Stage-1-allow a "Yes do it" reply to a peer bot whose preview contains LoMBot', () => {
+  // run on the clean body and find no assistant-name reference — so
+  // the gate returns `pass` (or `deny` if operator patterns also
+  // miss), letting the chain fall through to Stage 2.
+  it('does not Stage-1-allow a "Yes do it" reply to a peer bot whose preview contains the assistant name', () => {
     const result = triggerGate(
       ctx(
         'Yes do it', // clean body — gate input has NO inline prefix
         {
           replyTo: {
             messageId: '4114',
-            senderName: 'MythicalClaw',
+            senderName: 'PeerBot',
             isBot: true,
             isAssistant: false, // peer bot, NOT this assistant
             contentPreview:
-              '[Replying to LoMBot: "Based on today\'s conversation and the merged PRs, here\'s what changed for me: Stage 2 Haiku..."]',
+              '[Replying to TestBot: "Based on today\'s conversation and the merged PRs, here\'s what changed for me: Stage 2 Haiku..."]',
           },
         },
         // No operator patterns — only the synthetic identity matchers run.
         { version: 1, patterns: [] },
       ),
     );
-    // No synthetic match (clean body has no LoMBot / no @-handle).
+    // No synthetic match (clean body has no assistant-name / no @-handle).
     // No operator patterns either, so we fall through to "pass" so
     // Stage 2 (Haiku) gets to adjudicate. Critically: NOT `allow`.
     expect(result.decision).toBe('pass');
   });
 
   it('does not Stage-1-allow when operator keyword would only match the quoted preview', () => {
-    // Operator keyword "LoMBot" defined; the user body is "Yes do it"
-    // and the preview contains LoMBot. The matcher sees only the
+    // Operator keyword "TestBot" defined; the user body is "Yes do it"
+    // and the preview contains TestBot. The matcher sees only the
     // clean body and so returns deny (no operator pattern matched).
     const result = triggerGate(
       ctx(
@@ -344,13 +344,13 @@ describe('triggerGate — quote-prefix false-positive regression (#107)', () => 
         {
           replyTo: {
             messageId: '4114',
-            senderName: 'MythicalClaw',
+            senderName: 'PeerBot',
             isBot: true,
             isAssistant: false,
-            contentPreview: 'Stage 2 Haiku — see LoMBot output above',
+            contentPreview: 'Stage 2 Haiku — see TestBot output above',
           },
         },
-        cfg(pattern('keyword', 'LoMBot')),
+        cfg(pattern('keyword', 'TestBot')),
       ),
     );
     expect(result.decision).toBe('deny');

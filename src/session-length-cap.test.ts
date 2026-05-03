@@ -111,24 +111,26 @@ describe('buildHandoffPrefix', () => {
     const out = buildHandoffPrefix({
       lastAssistantText: 'Done — the deploy script reports green.',
       lastUserText: 'ship it',
-      assistantName: 'AyeAye',
+      assistantName: 'TestAssistant',
     });
     expect(out).toContain('<session-handoff>');
     expect(out).toContain('</session-handoff>');
     expect(out).toContain('User just before reset: ship it');
     expect(out).toContain(
-      "AyeAye's last reply: Done — the deploy script reports green.",
+      "TestAssistant's last reply: Done — the deploy script reports green.",
     );
   });
 
   it('omits the user line when only the assistant text is provided', () => {
     const out = buildHandoffPrefix({
       lastAssistantText: 'I rebuilt the container.',
-      assistantName: 'AyeAye',
+      assistantName: 'TestAssistant',
     });
     expect(out).not.toBeNull();
     expect(out).not.toContain('User just before reset:');
-    expect(out).toContain("AyeAye's last reply: I rebuilt the container.");
+    expect(out).toContain(
+      "TestAssistant's last reply: I rebuilt the container.",
+    );
   });
 
   it('uses the passed-in assistantName in the prefix label', () => {
@@ -137,7 +139,7 @@ describe('buildHandoffPrefix', () => {
       assistantName: 'NanoClaw',
     });
     expect(out).toContain("NanoClaw's last reply: Container restarted.");
-    expect(out).not.toContain("AyeAye's last reply:");
+    expect(out).not.toContain("TestAssistant's last reply:");
   });
 
   it("falls back to neutral 'Assistant' label when assistantName is unset", () => {
@@ -145,7 +147,7 @@ describe('buildHandoffPrefix', () => {
       lastAssistantText: 'Working on it.',
     });
     expect(out).toContain("Assistant's last reply: Working on it.");
-    expect(out).not.toContain("AyeAye's last reply:");
+    expect(out).not.toContain("TestAssistant's last reply:");
   });
 
   it("falls back to 'Assistant' for whitespace-only assistantName", () => {
@@ -162,7 +164,7 @@ describe('buildHandoffPrefix', () => {
     const longText = 'a'.repeat(2_000);
     const out = buildHandoffPrefix({
       lastAssistantText: longText,
-      assistantName: 'AyeAye',
+      assistantName: 'TestAssistant',
     });
     expect(out).not.toBeNull();
     // 400-char cap (399 chars + ellipsis).
@@ -173,9 +175,9 @@ describe('buildHandoffPrefix', () => {
   it('collapses internal whitespace so multi-line snippets do not waste budget', () => {
     const out = buildHandoffPrefix({
       lastAssistantText: 'line1\n\n\nline2\t\tline3',
-      assistantName: 'AyeAye',
+      assistantName: 'TestAssistant',
     });
-    expect(out).toContain("AyeAye's last reply: line1 line2 line3");
+    expect(out).toContain("TestAssistant's last reply: line1 line2 line3");
   });
 });
 

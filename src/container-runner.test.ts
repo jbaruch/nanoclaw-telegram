@@ -10,8 +10,9 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 // Mock config
 vi.mock('./config.js', () => ({
   AGENT_AUTO_COMPACT_WINDOW: 800000,
-  ASSISTANT_NAME: 'LoMBot',
-  ASSISTANT_USERNAME: 'limlombot',
+  ASSISTANT_NAME: 'TestBot',
+  ASSISTANT_USERNAME: 'testbot',
+  ASSISTANT_USERNAMES: ['testbot'],
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
@@ -1101,13 +1102,13 @@ describe('per-group AGENT_MODEL override on container spawn', () => {
 // buildIdentityPreamble). Without this, untrusted-tier containers
 // without an explicit identity statement in their persona files have
 // been observed templating themselves from fictional bot handles in
-// tile rules (live repro: a LoMBot deployment reading the @AyeAye /
-// @AyeAyeSureBot canonical example from nanoclaw-core 0.1.94 and
-// claiming those handles as its own identity).
+// tile rules (a deployment reading the @AyeAye / @AyeAyeSureBot
+// canonical example from nanoclaw-core 0.1.94 and claiming those
+// handles as its own identity).
 //
 // These are not secrets, so the test config mock above sets them as
-// plain strings ('LoMBot' / 'limlombot') and the assertion checks they
-// flow straight through to the spawn args via -e.
+// plain synthetic strings ('TestBot' / 'testbot') and the assertion
+// checks they flow straight through to the spawn args via -e.
 // ----------------------------------------------------------------------
 
 describe('ASSISTANT_NAME / ASSISTANT_USERNAME forwarding', () => {
@@ -1121,14 +1122,21 @@ describe('ASSISTANT_NAME / ASSISTANT_USERNAME forwarding', () => {
     vi.useRealTimers();
   });
 
-  it('forwards ASSISTANT_NAME and ASSISTANT_USERNAME on container spawn', async () => {
+  it('forwards ASSISTANT_NAME and the joined ASSISTANT_USERNAMES list on container spawn', async () => {
     const promise = runContainerAgent(testGroup, testInput, () => {});
     fakeProc.emit('close', 0);
     await vi.advanceTimersByTimeAsync(10);
     await promise;
 
     const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
-    expect(args).toContain('ASSISTANT_NAME=LoMBot');
-    expect(args).toContain('ASSISTANT_USERNAME=limlombot');
+    expect(args).toContain('ASSISTANT_NAME=TestBot');
+    // Multi-handle forwarding (#464): the orchestrator joins
+    // `ASSISTANT_USERNAMES` so the agent-runner sees every alias and
+    // its identity preamble can teach the agent that all of them
+    // resolve to it. Single-handle case (this fixture) collapses to
+    // one bare token — byte-stable with the pre-#464 single-value
+    // forwarding. The `len > 1` re-parse is covered end-to-end in
+    // `container/agent-runner/src/identity-preamble.test.ts`.
+    expect(args).toContain('ASSISTANT_USERNAME=testbot');
   });
 });

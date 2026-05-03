@@ -20,8 +20,9 @@ import { PassThrough } from 'stream';
 
 vi.mock('./config.js', () => ({
   AGENT_AUTO_COMPACT_WINDOW: 800000,
-  ASSISTANT_NAME: 'LoMBot',
-  ASSISTANT_USERNAME: 'limlombot',
+  ASSISTANT_NAME: 'TestBot',
+  ASSISTANT_USERNAME: 'testbot',
+  ASSISTANT_USERNAMES: ['testbot'],
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000,

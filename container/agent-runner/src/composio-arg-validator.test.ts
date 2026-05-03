@@ -353,7 +353,7 @@ describe('validateComposioArgs — well-formed pass-through', () => {
     const decision = validateComposioArgs('mcp__composio__gmail_send_email', {
       recipient_email: 'a@x.io',
       subject: 'Status update',
-      body: 'Things look good.\n\nBest,\nAyeAye',
+      body: 'Things look good.\n\nBest,\nTestAssistant',
       cc: ['team@x.io'],
     });
     expect(decision.kind).toBe('allow');

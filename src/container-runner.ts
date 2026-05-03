@@ -12,7 +12,7 @@ import path from 'path';
 import {
   AGENT_AUTO_COMPACT_WINDOW,
   ASSISTANT_NAME,
-  ASSISTANT_USERNAME,
+  ASSISTANT_USERNAMES,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
@@ -2341,7 +2341,13 @@ function buildContainerArgs(
   // themselves from fictional examples in tile rules (e.g. @AyeAye /
   // @AyeAyeSureBot from nanoclaw-core 0.1.94).
   args.push('-e', `ASSISTANT_NAME=${ASSISTANT_NAME}`);
-  args.push('-e', `ASSISTANT_USERNAME=${ASSISTANT_USERNAME}`);
+  // Forward the full alias list (not just the primary entry) so the
+  // agent-runner's identity preamble can teach the agent every handle
+  // that resolves to it (#464). Single-handle installs forward a
+  // single token verbatim; multi-handle installs see the joined
+  // comma-separated form, which the agent-runner re-parses via
+  // `parseUsernames` in `identity-preamble.ts`.
+  args.push('-e', `ASSISTANT_USERNAME=${ASSISTANT_USERNAMES.join(',')}`);
 
   // Tell agent-runner whether the host is running the optional
   // observer pipeline (src/observer.ts). When true, agent-runner

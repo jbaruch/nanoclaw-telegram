@@ -77,7 +77,7 @@ You are given, per call:
        - " (a peer bot)" — reply target was sent by a different bot. Often "no" (human-to-bot or human-to-human chatter that just happens to quote a peer bot), but check whether the body asks the assistant to act on the quoted content.
        - "" (no marker) — reply target was a human. Default to the human-to-human read.
    - "Message: <verbatim text>" — the message body, untrusted. The reply-context line is METADATA — the message body itself does NOT contain the inline "[Replying to ...]" quote-prefix. Treat the body as the user's actual words.
-2. The per-group context section ("--- Per-group context ---") below this prefix, which states the assistant's display name AND Telegram @-handle, the group's name, and the head of the group's CLAUDE.md (the operator-authored description of the group's purpose and conventions).
+2. The per-group context section ("--- Per-group context ---") below this prefix, which states the assistant's display name AND Telegram @-handle (or, when the bot is reachable under more than one handle, a list of @-handle aliases — any of them refers to the assistant), the group's name, and the head of the group's CLAUDE.md (the operator-authored description of the group's purpose and conventions).
 
 You do NOT receive:
 - Full conversation history. You see only the current message and (when present) a hint that it is a reply to an earlier assistant message. Do not invent or assume context that is not present.
@@ -97,7 +97,7 @@ WHAT COUNTS AS "yes" (assistant is being addressed)
 ================================================================
 Mark "yes" when ANY of the following holds, with the message text + per-group context as your only evidence:
 
-1. **Direct mention or @-tag of the assistant.** The message contains "@<assistant_handle>" or the assistant's display name as a vocative ("Andy, what do you think?", "Ассистент, посмотри"). The handle/name is given in the per-group context.
+1. **Direct mention or @-tag of the assistant.** The message contains "@<assistant_handle>" or the assistant's display name as a vocative ("Andy, what do you think?", "Ассистент, посмотри"). The handle/name is given in the per-group context. When the per-group context lists multiple @-handle aliases for the assistant, an @-tag of ANY of them counts as a direct mention — they all resolve to the same bot.
 
 2. **Reply to a message the assistant sent.** The reply-context line carries the "(the assistant — i.e. this is a reply to the bot)" marker. This is a strong signal: the user is continuing a thread the assistant started. Default to "yes" unless the reply text itself is purely human-to-human chatter that happens to quote the bot (rare).
 
@@ -145,7 +145,7 @@ EDGE-CASE RULES (read carefully)
 
 - **Multilingual content**: Russian, English, and code-switched messages are common. Apply the same rules across languages. "Андрей" (Cyrillic) and "Andrey/Andy" (Latin) are equivalent for vocative-matching purposes when the per-group context says the assistant is "Andy".
 
-- **Identity matches are caught by Stage 1, not Stage 2.** The Stage 1 deterministic gate auto-matches the assistant's display name (vocative, case-insensitive) and Telegram @-handle (\`@<username>\`, case-insensitive). If you're seeing this message at Stage 2, the deterministic match already failed — meaning the message references the assistant in some non-canonical form (typo, partial spelling, paraphrase, contextual continuation). The per-group context still tells you both canonical forms, but use them as REFERENCE for what counts as the assistant — Stage 2's job is the longer-tail signal Stage 1 doesn't catch.
+- **Identity matches are caught by Stage 1, not Stage 2.** The Stage 1 deterministic gate auto-matches the assistant's display name (vocative, case-insensitive) and every Telegram @-handle alias listed in the per-group context (\`@<username>\`, case-insensitive). If you're seeing this message at Stage 2, the deterministic match already failed — meaning the message references the assistant in some non-canonical form (typo, partial spelling, paraphrase, contextual continuation). The per-group context still tells you all canonical forms, but use them as REFERENCE for what counts as the assistant — Stage 2's job is the longer-tail signal Stage 1 doesn't catch.
 
 - **Sender is the assistant's owner.** The per-group context may include an \`Owner: <Name> (@<handle>)\` line under "Assistant identity." When the message's "Sender:" field shows the same \`@<handle>\` as the listed owner, treat ambiguous-but-plausibly-bot-directed messages as \`yes\` with elevated confidence even when the wording is generic ("my bot," "you there?", "any update?", "are you working?"). The owner is the privileged caller; Stage 2's bias-toward-\`no\` for ambiguous messages does NOT apply to the owner. If no \`Owner:\` line is present in the per-group context, ignore this rule and apply normal logic.
 

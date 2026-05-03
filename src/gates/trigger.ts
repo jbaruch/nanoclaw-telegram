@@ -40,7 +40,7 @@
  */
 import type { GateContext, GateDecision } from './index.js';
 import type { TriggerPattern } from '../types.js';
-import { ASSISTANT_NAME, ASSISTANT_USERNAME } from '../config.js';
+import { ASSISTANT_NAME, ASSISTANT_USERNAMES } from '../config.js';
 
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -129,10 +129,17 @@ function matchPattern(p: TriggerPattern, ctx: GateContext): MatchResult {
 /**
  * Build the synthetic identity patterns evaluated before any
  * operator-configured patterns. These are derived on every gate
- * invocation from `ASSISTANT_NAME` and `ASSISTANT_USERNAME` and are
+ * invocation from `ASSISTANT_NAME` and `ASSISTANT_USERNAMES` and are
  * NOT stored in the DB — they exist purely to short-circuit
  * direct-identity references at Stage 1 (microseconds, zero API
  * cost) instead of letting them fall through to Stage 2 Haiku.
+ *
+ * One synthetic `mention` pattern is emitted per entry in
+ * `ASSISTANT_USERNAMES` so multi-handle bots (e.g. `@AyeAye` plus
+ * autocomplete-only `@AyeAyeSureBot`) match regardless of which
+ * handle the user typed (#464). The alias list is small (typically
+ * 1–2 entries) and each pattern is a single regex test, so iterating
+ * has negligible cost.
  *
  * Operator-configured identity patterns (e.g. `@LoMBot`) remain in
  * the DB for backward compatibility. They match alongside the
@@ -142,9 +149,10 @@ function matchPattern(p: TriggerPattern, ctx: GateContext): MatchResult {
  */
 function buildSyntheticIdentityPatterns(): TriggerPattern[] {
   const now: TriggerPattern[] = [];
-  if (ASSISTANT_USERNAME && ASSISTANT_USERNAME.trim()) {
+  for (const username of ASSISTANT_USERNAMES) {
+    if (!username || !username.trim()) continue;
     now.push({
-      pattern: ASSISTANT_USERNAME,
+      pattern: username,
       kind: 'mention',
       source: 'owner-set',
       precision: 0,
@@ -179,7 +187,7 @@ export const triggerGate = (ctx: GateContext): GateDecision => {
 
   // Synthetic identity patterns evaluated FIRST. Built per-call so
   // they pick up any test-time override of ASSISTANT_NAME /
-  // ASSISTANT_USERNAME (the constants are imported once at module
+  // ASSISTANT_USERNAMES (the constants are imported once at module
   // load — but in practice the env is fixed for the host process
   // lifetime, so the perf cost is negligible).
   const syntheticPatterns = buildSyntheticIdentityPatterns();

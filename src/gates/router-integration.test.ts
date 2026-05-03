@@ -141,7 +141,7 @@ describe('resolveGatesForGroup — migration path A', () => {
         patterns: [
           {
             kind: 'mention',
-            pattern: 'LoMBot',
+            pattern: 'TestBot',
             source: 'owner-set',
             precision: 0,
             sample_count: 0,
@@ -614,7 +614,7 @@ describe('gateAllowsSpawn — [trigger, haiku-classifier] last-gate-wins', () =>
     patterns: [
       {
         kind: 'keyword' as const,
-        pattern: '@limlombot',
+        pattern: '@testbot',
         source: 'owner-set' as const,
         precision: 0,
         sample_count: 0,
@@ -685,7 +685,7 @@ describe('gateAllowsSpawn — [trigger, haiku-classifier] last-gate-wins', () =>
     const g: RegisteredGroup = {
       name: 'WTF',
       folder: FOLDER,
-      trigger: '@limlombot',
+      trigger: '@testbot',
       added_at: '2024-01-01T00:00:00Z',
       containerConfig: { stage2Enabled: true },
       triggerPatterns,
@@ -693,7 +693,7 @@ describe('gateAllowsSpawn — [trigger, haiku-classifier] last-gate-wins', () =>
     const allowed = await gateAllowsSpawn(
       g,
       JID,
-      [msg('@limlombot please help')],
+      [msg('@testbot please help')],
       ['trigger', 'haiku-classifier'],
     );
     expect(allowed).toBe(true);
@@ -712,7 +712,7 @@ describe('gateAllowsSpawn — [trigger, haiku-classifier] last-gate-wins', () =>
     const g: RegisteredGroup = {
       name: 'WTF',
       folder: FOLDER,
-      trigger: '@limlombot',
+      trigger: '@testbot',
       added_at: '2024-01-01T00:00:00Z',
       containerConfig: { stage2Enabled: true },
       triggerPatterns,
@@ -738,7 +738,7 @@ describe('gateAllowsSpawn — [trigger, haiku-classifier] last-gate-wins', () =>
     const g: RegisteredGroup = {
       name: 'WTF',
       folder: FOLDER,
-      trigger: '@limlombot',
+      trigger: '@testbot',
       added_at: '2024-01-01T00:00:00Z',
       containerConfig: { stage2Enabled: true },
       triggerPatterns,

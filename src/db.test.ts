@@ -371,8 +371,8 @@ describe('getMessageById', () => {
     storeMessage({
       id: 'bot-1777747764042-6tppb',
       chat_jid: 'tg:-1001633120997',
-      sender: 'AyeAye',
-      sender_name: 'AyeAye',
+      sender: 'TestAssistant',
+      sender_name: 'TestAssistant',
       content: 'Жив. Не дождётесь.',
       timestamp: '2024-01-01T00:00:01.000Z',
       is_from_me: true,
@@ -1622,7 +1622,7 @@ describe('legacy trigger backfill shape classification', () => {
       jid: 'rawmention@g.us',
       name: 'Raw Mention',
       folder: 'whatsapp_rawmention',
-      trigger: '@AyeAye', // legacy string shape, matches bare-mention regex
+      trigger: '@TestBot', // legacy string shape, matches bare-mention regex
       added_at: '2024-01-01T00:00:00.000Z',
       container_config: null,
     });
@@ -1642,7 +1642,7 @@ describe('legacy trigger backfill shape classification', () => {
     // dual-mode reader behaviour stays bug-compatible with #81; the
     // smarter classification happens at migration time only, on rows
     // that the backfill has not yet touched.
-    expect(cfg!.patterns[0].pattern).toBe('@AyeAye');
+    expect(cfg!.patterns[0].pattern).toBe('@TestBot');
     expect(cfg!.patterns[0].kind).toBe('keyword');
   });
 

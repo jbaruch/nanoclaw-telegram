@@ -446,7 +446,7 @@ describe('haikuClassifierGate — structured reply rendering (#107)', () => {
           senderJid: 's@s.whatsapp.net',
           replyTo: {
             messageId: '4114',
-            senderName: 'MythicalClaw',
+            senderName: 'PeerBot',
             isBot: true,
             isAssistant: false,
             contentPreview: 'Stage 2 Haiku output',
@@ -455,7 +455,7 @@ describe('haikuClassifierGate — structured reply rendering (#107)', () => {
       }),
     );
     const userText = calls[0].params.messages[0].content as string;
-    expect(userText).toContain('[Replying to MythicalClaw');
+    expect(userText).toContain('[Replying to PeerBot');
     expect(userText).toContain('a peer bot');
     expect(userText).not.toContain('the assistant');
     expect(userText).toContain('Message: Yes do it');

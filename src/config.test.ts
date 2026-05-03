@@ -22,7 +22,7 @@ import {
   afterAll,
 } from 'vitest';
 
-import { parseHostId, resolveIntEnv } from './config.js';
+import { parseHostId, parseUsernames, resolveIntEnv } from './config.js';
 
 const ORIGINAL_HOST_UID = process.env.HOST_UID;
 const ORIGINAL_HOST_GID = process.env.HOST_GID;
@@ -234,5 +234,82 @@ describe('resolveIntEnv', () => {
     process.env[SCRATCH_ENV] = '';
     expect(resolveIntEnv(SCRATCH_ENV, 42)).toBe(42);
     expect(stderrWrites.join('')).toBe('');
+  });
+});
+
+// `parseUsernames` is the operator-input normalizer for
+// ASSISTANT_USERNAME (#464). Tested directly rather than through a
+// vi.resetModules() round-trip for the same logger-listener-leak
+// reason documented at the top of this file.
+describe('parseUsernames', () => {
+  it('returns [] when the env var is unset', () => {
+    expect(parseUsernames(undefined)).toEqual([]);
+  });
+
+  it('returns [] for an empty string', () => {
+    expect(parseUsernames('')).toEqual([]);
+  });
+
+  it('parses a single bare handle', () => {
+    expect(parseUsernames('testbot')).toEqual(['testbot']);
+  });
+
+  it('strips a single leading `@` from a bare handle (operator-typo tolerance)', () => {
+    expect(parseUsernames('@testbot')).toEqual(['testbot']);
+  });
+
+  it('parses comma-separated handles into an ordered list', () => {
+    expect(parseUsernames('testbot,testbotsurebot')).toEqual([
+      'testbot',
+      'testbotsurebot',
+    ]);
+  });
+
+  it('strips `@` from each entry of a comma-separated list', () => {
+    expect(parseUsernames('@testbot,@testbotsurebot')).toEqual([
+      'testbot',
+      'testbotsurebot',
+    ]);
+  });
+
+  it('trims surrounding whitespace from each entry', () => {
+    expect(parseUsernames('  testbot ,  testbotsurebot  ')).toEqual([
+      'testbot',
+      'testbotsurebot',
+    ]);
+  });
+
+  it('drops empty entries (trailing comma, blank between commas)', () => {
+    expect(parseUsernames('testbot,,testbotsurebot,')).toEqual([
+      'testbot',
+      'testbotsurebot',
+    ]);
+  });
+
+  it('treats `@`-only and whitespace-after-`@` entries as empty', () => {
+    expect(parseUsernames('@,@  ,testbot')).toEqual(['testbot']);
+  });
+
+  it('de-dupes repeated handles, preserving first-occurrence order', () => {
+    expect(parseUsernames('testbot,testbot,testbotsurebot,testbot')).toEqual([
+      'testbot',
+      'testbotsurebot',
+    ]);
+  });
+
+  it('treats `@foo` and `foo` as the same handle for de-dupe purposes', () => {
+    // Without the `@`-strip-before-dedupe ordering, `@testbot,testbot`
+    // would parse to `['testbot', 'testbot']` post-strip and the dedupe
+    // would catch it. Pin both shapes.
+    expect(parseUsernames('@testbot,testbot')).toEqual(['testbot']);
+    expect(parseUsernames('testbot,@testbot')).toEqual(['testbot']);
+  });
+
+  it('returns [] when every entry is whitespace or empty after normalization', () => {
+    // Same shape as "missing" semantically — the consumer (config
+    // module-init) falls back to `[ASSISTANT_NAME.toLowerCase()]`.
+    expect(parseUsernames(' , ,')).toEqual([]);
+    expect(parseUsernames(',,,')).toEqual([]);
+    expect(parseUsernames('@, @ ,@')).toEqual([]);
   });
 });

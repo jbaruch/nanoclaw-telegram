@@ -9,7 +9,7 @@ const baseInput = {
   isSubagent: false,
   isScheduledTask: false,
   prompt: 'check the deploy status',
-  assistantName: 'AyeAye',
+  assistantName: 'TestAssistant',
 };
 
 describe('decideGroundTruthReminder', () => {

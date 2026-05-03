@@ -16,6 +16,10 @@ let dataDir: string;
 // `beforeEach`.
 let ownerName: string | undefined;
 let ownerHandle: string | undefined;
+// Mutable assistant-username fixture so tests can exercise both
+// single-handle and multi-handle (#464) deployments without
+// re-mounting the module.
+let assistantUsernames: string[] = ['testbot'];
 
 vi.mock('../../config.js', async () => {
   const actual =
@@ -28,8 +32,13 @@ vi.mock('../../config.js', async () => {
     get DATA_DIR() {
       return dataDir;
     },
-    ASSISTANT_NAME: 'Andy',
-    ASSISTANT_USERNAME: 'limlombot',
+    ASSISTANT_NAME: 'TestAssistant',
+    get ASSISTANT_USERNAME() {
+      return assistantUsernames[0];
+    },
+    get ASSISTANT_USERNAMES() {
+      return assistantUsernames;
+    },
     get ASSISTANT_OWNER_NAME() {
       return ownerName;
     },
@@ -65,6 +74,8 @@ beforeEach(() => {
   // buildContext.
   ownerName = undefined;
   ownerHandle = undefined;
+  // Default to a single-handle install; multi-handle tests overwrite.
+  assistantUsernames = ['testbot'];
   fs.mkdirSync(groupsDir, { recursive: true });
   fs.mkdirSync(dataDir, { recursive: true });
   _initTestDatabase();
@@ -92,7 +103,7 @@ describe('staticGroupContextStrategy.buildContext', () => {
     );
     const out = await staticGroupContextStrategy.buildContext(buildCtx());
     expect(out).toContain('Strategy Test Group');
-    expect(out).toContain('Andy');
+    expect(out).toContain('TestAssistant');
     expect(out).toContain('# Test Group');
     expect(out).toContain('This is a test description.');
     expect(out).toContain('Group CLAUDE.md (head):');
@@ -107,8 +118,34 @@ describe('staticGroupContextStrategy.buildContext', () => {
     // line shape — just assert presence of the section header and
     // both identity forms.
     expect(out).toContain('Assistant identity:');
-    expect(out).toContain('Andy');
-    expect(out).toContain('@limlombot');
+    expect(out).toContain('TestAssistant');
+    expect(out).toContain('@testbot');
+  });
+
+  // #464: multi-handle bots — when more than one Telegram handle
+  // resolves to the same assistant (autocomplete-only handle plus
+  // an internal/vocative one), the strategy must list every alias
+  // so the classifier prompt's identity-match rule recognizes a
+  // mention of any of them. The plural label keys the prompt's
+  // alias-resolution rule.
+  it('lists every alias when ASSISTANT_USERNAMES has multiple entries', async () => {
+    const groupDir = path.join(groupsDir, TEST_FOLDER);
+    fs.mkdirSync(groupDir, { recursive: true });
+    assistantUsernames = ['testbot', 'testbotsurebot'];
+    const out = await staticGroupContextStrategy.buildContext(buildCtx());
+    expect(out).toContain('Assistant identity:');
+    expect(out).toContain('@testbot');
+    expect(out).toContain('@testbotsurebot');
+    expect(out).toContain('aliases');
+  });
+
+  it('uses the singular handle label for single-handle installs', async () => {
+    const groupDir = path.join(groupsDir, TEST_FOLDER);
+    fs.mkdirSync(groupDir, { recursive: true });
+    // Default fixture (set in beforeEach) is single-handle.
+    const out = await staticGroupContextStrategy.buildContext(buildCtx());
+    expect(out).toContain('Telegram @-handle: @testbot');
+    expect(out).not.toContain('aliases');
   });
 
   it('returns minimal context when CLAUDE.md is missing (no throw)', async () => {
@@ -116,7 +153,7 @@ describe('staticGroupContextStrategy.buildContext', () => {
     fs.mkdirSync(groupDir, { recursive: true });
     const out = await staticGroupContextStrategy.buildContext(buildCtx());
     expect(out).toContain('Strategy Test Group');
-    expect(out).toContain('Andy');
+    expect(out).toContain('TestAssistant');
     expect(out).toContain('Group CLAUDE.md: not present');
   });
 
@@ -143,16 +180,16 @@ describe('staticGroupContextStrategy.buildContext', () => {
   it('emits Owner line when both ASSISTANT_OWNER_NAME and ASSISTANT_OWNER_HANDLE are set', async () => {
     const groupDir = path.join(groupsDir, TEST_FOLDER);
     fs.mkdirSync(groupDir, { recursive: true });
-    ownerName = 'Leonid Igolnik';
-    ownerHandle = 'ligolnik';
+    ownerName = 'Test Owner';
+    ownerHandle = 'testowner';
     const out = await staticGroupContextStrategy.buildContext(buildCtx());
-    expect(out).toContain('Owner: Leonid Igolnik (@ligolnik)');
+    expect(out).toContain('Owner: Test Owner (@testowner)');
   });
 
   it('suppresses Owner line when only ASSISTANT_OWNER_NAME is set', async () => {
     const groupDir = path.join(groupsDir, TEST_FOLDER);
     fs.mkdirSync(groupDir, { recursive: true });
-    ownerName = 'Leonid Igolnik';
+    ownerName = 'Test Owner';
     ownerHandle = undefined;
     const out = await staticGroupContextStrategy.buildContext(buildCtx());
     expect(out).not.toContain('Owner:');
@@ -162,7 +199,7 @@ describe('staticGroupContextStrategy.buildContext', () => {
     const groupDir = path.join(groupsDir, TEST_FOLDER);
     fs.mkdirSync(groupDir, { recursive: true });
     ownerName = undefined;
-    ownerHandle = 'ligolnik';
+    ownerHandle = 'testowner';
     const out = await staticGroupContextStrategy.buildContext(buildCtx());
     expect(out).not.toContain('Owner:');
   });

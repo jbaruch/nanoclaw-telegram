@@ -11,8 +11,8 @@ import {
 const baseGate = {
   isScheduledTask: false,
   isSubagent: false,
-  prompt: 'hey AyeAye, how are things?',
-  assistantName: 'AyeAye',
+  prompt: 'hey TestAssistant, how are things?',
+  assistantName: 'TestAssistant',
 };
 
 describe('decideReactFirst', () => {
@@ -123,7 +123,7 @@ describe('runReactFirstHook', () => {
     isScheduledTask: false,
     isSubagent: false,
     prompt: '<message id="msg_42" sender="Baruch">help me</message>',
-    assistantName: 'AyeAye',
+    assistantName: 'TestAssistant',
     chatJid: '120363042@g.us',
     groupFolder: 'main',
     sessionName: 'default',

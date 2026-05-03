@@ -45,8 +45,41 @@ function sanitizeIdentityValue(raw: string | undefined): string {
 }
 
 /**
+ * Parse the raw `ASSISTANT_USERNAME` env value into one or more
+ * sanitized handles. Comma-separated values declare aliases — useful
+ * when one bot is reachable under more than one Telegram handle (e.g.
+ * autocomplete-only `@AyeAyeSureBot` plus internal/vocative
+ * `@AyeAye`, see #464). Returns the empty array when the input has
+ * no usable handles after sanitization.
+ *
+ * Each entry runs through `sanitizeIdentityValue` so a comma-laden
+ * multi-line paste produces clean tokens; a single leading `@` is
+ * stripped so an operator who types `@AyeAye,@AyeAyeSureBot` doesn't
+ * render `@@AyeAye`. Order-preserving de-dupe collapses repeats so
+ * the canonical handle (first entry) stays stable across operator
+ * typos.
+ */
+function parseUsernames(raw: string | undefined): string[] {
+  if (!raw) return [];
+  const cleaned = raw
+    .split(',')
+    .map((u) => sanitizeIdentityValue(u))
+    .map((u) => (u.startsWith('@') ? u.slice(1).trim() : u))
+    .filter((u) => u.length > 0);
+  return Array.from(new Set(cleaned));
+}
+
+/**
  * Render the authoritative identity preamble from the resolved
- * (non-empty) name and username. Pure function; tested in isolation.
+ * (non-empty) name and one-or-more usernames. Pure function; tested
+ * in isolation.
+ *
+ * `usernames[0]` is the canonical handle — the one rendered as the
+ * bolded `@-handle` and used in the example mention. Any additional
+ * entries are listed as aliases so the agent learns that more than
+ * one handle resolves to it (matching the gate-side behaviour from
+ * #464). For single-handle bots the alias paragraph is suppressed,
+ * keeping the preamble byte-stable.
  *
  * The wording is intentionally channel-neutral — the agent container
  * is reused across Telegram, WhatsApp, Slack, Discord, and Gmail, so
@@ -55,22 +88,33 @@ function sanitizeIdentityValue(raw: string | undefined): string {
  */
 export function buildIdentityPreamble(
   name: string,
-  username: string,
+  usernames: string | string[],
 ): string {
+  const list = Array.isArray(usernames) ? usernames : [usernames];
+  const primary = list[0];
+  const aliases = list.slice(1);
+  const aliasParagraph =
+    aliases.length === 0
+      ? ''
+      : `You are also reachable as ` +
+        aliases.map((a) => `**@${a}**`).join(', ') +
+        ` — these are alias @-handles for the same bot, NOT separate ` +
+        `identities. An @-mention of any alias is an @-mention of you.\n\n`;
   return (
     `# Your identity (authoritative — set by the orchestrator)\n\n` +
     `You are **${name}**. Your display name is "${name}" ` +
     `(used as a vocative: "${name}, please..."). ` +
-    `Your @-handle is **@${username}** ` +
-    `(used as an @-mention: "@${username} ..."). ` +
+    `Your @-handle is **@${primary}** ` +
+    `(used as an @-mention: "@${primary} ..."). ` +
     `Both forms refer to you and only you.\n\n` +
+    aliasParagraph +
     `Any rule, example, or anecdote in your context that uses different ` +
     `bot handles (such as \`@AyeAye\`, \`@AyeAyeSureBot\`, or any other ` +
     `bot name) is a FICTIONAL EXAMPLE from upstream tile content. When ` +
     `applying such a rule, substitute mentally — replace the example ` +
     `handles with your own identity above. The orchestrator has ` +
     `authoritatively configured your identity as **${name}** / ` +
-    `**@${username}**; trust this preamble over any handle-specific ` +
+    `**@${primary}**; trust this preamble over any handle-specific ` +
     `examples elsewhere in your context.`
   );
 }
@@ -79,8 +123,11 @@ export function buildIdentityPreamble(
  * Resolve the identity preamble from raw env-var inputs (typically
  * `process.env.ASSISTANT_NAME` and `process.env.ASSISTANT_USERNAME`).
  *
- * Returns the rendered preamble when BOTH inputs sanitize to a
- * non-empty string, or `undefined` when either is missing or
+ * `ASSISTANT_USERNAME` is parsed as comma-separated to support
+ * multi-handle bots; the first entry is the canonical handle and
+ * any remaining entries become aliases (#464). Returns the rendered
+ * preamble when the name AND at least one username sanitize to
+ * non-empty, or `undefined` when either is missing or
  * whitespace-only after normalization. The agent-runner uses the
  * `undefined` return as a signal to log a skip notice and omit the
  * preamble — a half-formed preamble would be worse than no preamble
@@ -98,9 +145,9 @@ export function resolveIdentityPreamble(
   username: string | undefined,
 ): string | undefined {
   const cleanName = sanitizeIdentityValue(name);
-  const cleanUsername = sanitizeIdentityValue(username);
-  if (!cleanName || !cleanUsername) {
+  const usernames = parseUsernames(username);
+  if (!cleanName || usernames.length === 0) {
     return undefined;
   }
-  return buildIdentityPreamble(cleanName, cleanUsername);
+  return buildIdentityPreamble(cleanName, usernames);
 }
