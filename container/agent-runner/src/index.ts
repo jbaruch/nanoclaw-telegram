@@ -236,6 +236,10 @@ import {
   resolveIdentityPreamble,
 } from './identity-preamble.js';
 export { buildIdentityPreamble, resolveIdentityPreamble };
+import { buildFrozenSystemPromptAppend } from './system-prompt-assembly.js';
+export { buildFrozenSystemPromptAppend };
+import { parseTranscript, type ParsedMessage } from './parse-transcript.js';
+export { parseTranscript };
 
 /**
  * Effort levels the SDK's `query()` accepts (as of
@@ -2596,38 +2600,9 @@ function generateFallbackName(): string {
   return `conversation-${time.getHours().toString().padStart(2, '0')}${time.getMinutes().toString().padStart(2, '0')}`;
 }
 
-interface ParsedMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-function parseTranscript(content: string): ParsedMessage[] {
-  const messages: ParsedMessage[] = [];
-
-  for (const line of content.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      const entry = JSON.parse(line);
-      if (entry.type === 'user' && entry.message?.content) {
-        const text =
-          typeof entry.message.content === 'string'
-            ? entry.message.content
-            : entry.message.content
-                .map((c: { text?: string }) => c.text || '')
-                .join('');
-        if (text) messages.push({ role: 'user', content: text });
-      } else if (entry.type === 'assistant' && entry.message?.content) {
-        const textParts = entry.message.content
-          .filter((c: { type: string }) => c.type === 'text')
-          .map((c: { text: string }) => c.text);
-        const text = textParts.join('');
-        if (text) messages.push({ role: 'assistant', content: text });
-      }
-    } catch {}
-  }
-
-  return messages;
-}
+// `parseTranscript` and `ParsedMessage` were extracted to
+// `./parse-transcript.ts` so the SDK-free unit tests can import them
+// directly. Keep the import close to the call sites it serves.
 
 function formatTranscriptMarkdown(
   messages: ParsedMessage[],
@@ -2954,6 +2929,15 @@ async function runQuery(
   let newSessionId: string | undefined;
   let lastAssistantUuid: string | undefined;
   let messageCount = 0;
+  // Tracks assistant-turn count specifically, distinct from
+  // `messageCount` (which counts every SDK event — system, user,
+  // tool_result, assistant). Used for the per-turn `[cache]` log line
+  // so the operator's "turn 1 = creation, turn 2+ = read" guidance
+  // lines up with the literal `turn #N` value rather than the raw
+  // event index (init/tool_result events would otherwise make the
+  // first cache line read `msg #2+` and confuse manual cache-hit
+  // verification).
+  let assistantTurnCount = 0;
   let resultCount = 0;
   // Track whether the agent invoked an explicit user-facing send tool
   // AND the tool actually succeeded during this query. If so, the SDK's
@@ -2988,35 +2972,54 @@ async function runQuery(
   // Per-group CLAUDE.md is no longer loaded here (it's a thin trust-marker
   // + @import pointer post-#153) — the imported targets (SOUL/FORMATTING)
   // are loaded directly so they make it into the persistent system prompt.
+  //
+  // Frozen vs volatile split (#416). Everything appended here is the
+  // FROZEN segment — byte-identical across every API call in the same
+  // group/session window so the Anthropic prompt cache (5-min TTL,
+  // API-key-scoped) lands the prefix on subsequent calls. The
+  // SDK-managed dynamic sections (cwd, auto-memory paths, git status,
+  // env info) are stripped via `excludeDynamicSections: true` (see
+  // the `query()` options below) so they re-inject as a synthetic
+  // `isMeta:true` user message instead of breaking the system-prompt
+  // cache prefix. Group folder `CLAUDE.md` / `MEMORY.md` and any
+  // `additionalDirectories` CLAUDE.md files are loaded via separate
+  // SDK pipelines (`settingSources` / `additionalDirectories`) that
+  // this PR leaves alone — whether they sit before or after the SDK's
+  // internal cache breakpoint depends on agent-SDK behavior we don't
+  // promise here, so they're explicitly out of the FROZEN-segment
+  // scope. Classification is deterministic and lives in
+  // `system-prompt-assembly.ts` (covers the `append` string only).
   const soulMdPath = '/workspace/global/SOUL.md';
   const formattingMdPath = '/workspace/global/FORMATTING.md';
-  const appendParts: string[] = [];
 
-  // Identity preamble — must come FIRST so it sits at the top of the
-  // appended system prompt and reads as authoritative context. Forwarded
-  // by the orchestrator via -e ASSISTANT_NAME / ASSISTANT_USERNAME (see
-  // src/container-runner.ts). Skip entirely if either env var is missing
-  // — emitting a half-formed preamble would be worse than no preamble.
+  // Identity preamble — forwarded by the orchestrator via -e
+  // ASSISTANT_NAME / ASSISTANT_USERNAME (see src/container-runner.ts).
+  // Skip entirely if either env var is missing — emitting a
+  // half-formed preamble would be worse than no preamble.
   const identityPreamble = resolveIdentityPreamble(
     process.env.ASSISTANT_NAME,
     process.env.ASSISTANT_USERNAME,
   );
-  if (identityPreamble) {
-    appendParts.push(identityPreamble);
-  } else {
+  if (!identityPreamble) {
     log(
       'identity preamble skipped — ASSISTANT_NAME or ASSISTANT_USERNAME not set',
     );
   }
 
-  if (fs.existsSync(soulMdPath)) {
-    appendParts.push(fs.readFileSync(soulMdPath, 'utf-8'));
-  }
-  if (fs.existsSync(formattingMdPath)) {
-    appendParts.push(fs.readFileSync(formattingMdPath, 'utf-8'));
-  }
-  const systemPromptAppend =
-    appendParts.length > 0 ? appendParts.join('\n\n---\n\n') : undefined;
+  const soulMd = fs.existsSync(soulMdPath)
+    ? fs.readFileSync(soulMdPath, 'utf-8')
+    : undefined;
+  const formattingMd = fs.existsSync(formattingMdPath)
+    ? fs.readFileSync(formattingMdPath, 'utf-8')
+    : undefined;
+
+  // Pure assembly — order (identity → SOUL → FORMATTING) and
+  // separators are pinned in `system-prompt-assembly.test.ts`.
+  const systemPromptAppend = buildFrozenSystemPromptAppend({
+    identityPreamble,
+    soulMd,
+    formattingMd,
+  });
 
   // Rules are loaded by the SDK via the tessl chain: CLAUDE.md → AGENTS.md → .tessl/RULES.md
   // For untrusted groups, the orchestrator copies .tessl from a main group's session.
@@ -3213,13 +3216,56 @@ async function runQuery(
       // (drop-resumeAt-on-error) only papered over the symptom; the
       // fix is to never set up the poison in the first place.
       resume: sessionId,
+      // System prompt: frozen-prefix-cacheable shape (#416).
+      //
+      // `excludeDynamicSections: true` strips per-message dynamic
+      // sections (working directory, auto-memory paths, git status)
+      // from the preset's system prompt so the prefix stays
+      // byte-identical across messages and lands in the Anthropic
+      // prompt cache. The SDK re-injects the stripped content as the
+      // first user message, so the model still has access to it — the
+      // tradeoff is that those sections become slightly less
+      // authoritative for steering, which is acceptable for our
+      // workload because authoritative steering already lives in the
+      // identity preamble + SOUL.md (both in the frozen `append`).
+      //
+      // The two-segment structure THIS PR controls is:
+      //   [FROZEN] Claude Code preset (static portion) + identity
+      //            preamble + SOUL.md + FORMATTING.md
+      //   <implicit cache_control: ephemeral breakpoint, managed by
+      //    the SDK at the dynamic-sections boundary>
+      //   [VOLATILE-via-excludeDynamicSections] re-injected dynamic
+      //              sections (cwd, auto-memory paths, git status,
+      //              env info) emitted by the preset under the hood
+      //              + the user turn itself
+      //
+      // What this PR does NOT control. The SDK ALSO loads group folder
+      // `CLAUDE.md` / `MEMORY.md` and any `additionalDirectories`
+      // CLAUDE.md files via separate `settingSources` /
+      // `additionalDirectories` paths that this change leaves alone.
+      // Those inputs ride a different SDK pipeline (a per-call read
+      // off cwd, not the `append` string we control here), and
+      // whether they sit before or after the cache breakpoint depends
+      // on internal SDK behavior we don't promise here. If the cache
+      // misses on what looks like a stable session, check those
+      // inputs too — the frozen builder in `system-prompt-assembly.ts`
+      // covers only the explicit `append` string.
+      //
+      // The classification is deterministic — see
+      // `system-prompt-assembly.ts` for the frozen-content builder
+      // and the rule that nothing volatile may enter `append`.
       systemPrompt: systemPromptAppend
         ? {
             type: 'preset' as const,
             preset: 'claude_code' as const,
             append: systemPromptAppend,
+            excludeDynamicSections: true,
           }
-        : undefined,
+        : {
+            type: 'preset' as const,
+            preset: 'claude_code' as const,
+            excludeDynamicSections: true,
+          },
       // AGENT_MODEL is set by the orchestrator (`src/container-runner.ts`)
       // so the model can be bumped without rebuilding the agent-runner image.
       // Fallback matches the historical hardcoded value.
@@ -3573,6 +3619,7 @@ async function runQuery(
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
+      assistantTurnCount++;
       // Capture per-turn token usage off the assistant message's
       // wrapped Anthropic API response. Stored as `latestUsage` so the
       // final result emit (below) can pin it onto the ContainerOutput
@@ -3611,6 +3658,35 @@ async function runQuery(
           cache_read_input_tokens: u.cache_read_input_tokens,
           cache_creation_input_tokens: u.cache_creation_input_tokens,
         };
+        // Cache validation log (#416). Emit `cache_creation` and
+        // `cache_read` token counts every assistant turn so the
+        // operator can verify the frozen-prefix cache is actually
+        // hitting after the split rolled. The cache lives in
+        // Anthropic's edge (5-min TTL, API-key-scoped) and is keyed
+        // by the system prompt prefix, NOT by our `runQuery`
+        // boundaries. Expected pattern, indexed by API CALL within
+        // the cache's 5-min window:
+        //   - First API call in a fresh 5-min window (cold cache):
+        //     `creation > 0, read = 0`.
+        //   - Every subsequent API call within the same 5-min window
+        //     (cache hit on the frozen prefix): `creation = 0,
+        //     read > 0` — including the first turn of a SECOND
+        //     `runQuery` invocation in the same session if it falls
+        //     inside the window.
+        //   - Persistent `creation > 0` on every API call means the
+        //     prefix is shifting between calls — investigate
+        //     `system-prompt-assembly.ts` for volatile content
+        //     leaking into the frozen segment.
+        // `assistantTurnCount` is reset per `runQuery`, so the log
+        // line's `turn #N` is accurate within ONE runQuery only —
+        // don't conflate it with cache-window boundaries (a `turn #1`
+        // line emitted by a follow-up runQuery inside the 5-min
+        // window will show `read > 0` because the cache is keyed by
+        // wall-clock TTL, not by turn count). Numeric counters only —
+        // never the prompt content itself (per `coding-policy: no-secrets`).
+        log(
+          `[cache] turn #${assistantTurnCount} cache_creation_input_tokens=${u.cache_creation_input_tokens ?? 0} cache_read_input_tokens=${u.cache_read_input_tokens ?? 0} input_tokens=${u.input_tokens}`,
+        );
       }
       // Extract text content for streaming preview, and emit per-block
       // observability log lines so the optional observer channel
