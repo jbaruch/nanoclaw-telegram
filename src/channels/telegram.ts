@@ -446,6 +446,93 @@ export function _isAllowedReaction(emoji: string): boolean {
  */
 export const _EMOJI_SHORTCODE_TO_UNICODE = EMOJI_SHORTCODE_TO_UNICODE;
 
+/**
+ * Classify a Telegram API failure as a known-unactionable transient
+ * error so the caller can downgrade it from ERROR to WARN.
+ *
+ * Production logs (12h window, ligolnik/nanoclaw-public#76) showed
+ * 484+ ERROR-level entries dominated by patterns the operator cannot
+ * action mid-flight — they flooded the ERROR log and made real bugs
+ * harder to spot. Four buckets:
+ *
+ *   1. Target message gone / forbidden (user deleted their own
+ *      message, chat deleted, bot kicked, user blocked us):
+ *      - "message to react … not found" (400)
+ *      - "message to be replied not found" (400)
+ *      - "message can't be deleted" (400)
+ *      - "message is not modified" (400 — idempotent retry on same emoji)
+ *      - "MESSAGE_ID_INVALID"
+ *      - "chat not found"
+ *      - "reactions are not available in chat"
+ *      - "bot was blocked" / "bot was kicked"
+ *      - "user is deactivated"
+ *
+ *   2. Permission changes after registration — admin removed bot
+ *      send permission; the BOT OWNER (not the orchestrator) needs
+ *      to fix this, but not in real time:
+ *      - "not enough rights to send …"
+ *
+ *   3. Rate limits — Telegram tells us to back off, the call retries
+ *      on the next agent turn:
+ *      - "429: Too Many Requests"
+ *
+ *   4. Transport-level transient — network blip on the way to
+ *      Telegram's edge, recovers on next attempt:
+ *      - "Network request for '<method>' failed!" (Grammy `HttpError`)
+ *
+ * Genuine unexpected errors ("Internal Server Error", "ETIMEDOUT",
+ * "PARSE_ENTITIES_FAILED", "chat_id is empty", auth/401) STAY at
+ * ERROR — the negative-classification tests pin this.
+ *
+ * Exported (with `_` prefix) so call sites in this module
+ * (sendReaction, sendMessage, future paths) share one definition
+ * rather than each inlining a regex bouquet that drifts out of sync.
+ *
+ * @internal
+ */
+export function _isUnactionableTelegramError(msg: string): boolean {
+  return (
+    /message to react.*not found/i.test(msg) ||
+    /message to be replied not found/i.test(msg) ||
+    /message can't be deleted/i.test(msg) ||
+    /message is not modified/i.test(msg) ||
+    /MESSAGE_ID_INVALID/i.test(msg) ||
+    /chat not found/i.test(msg) ||
+    /reactions are not available in chat/i.test(msg) ||
+    /bot was (blocked|kicked)/i.test(msg) ||
+    /user is deactivated/i.test(msg) ||
+    /not enough rights to send/i.test(msg) ||
+    /\b429:\s*Too Many Requests/i.test(msg) ||
+    /Network request for .* failed/i.test(msg)
+  );
+}
+
+const UNACTIONABLE_TELEGRAM_ERRORS = Object.freeze({
+  /**
+   * Patterns covered by `_isUnactionableTelegramError`. Listed here
+   * for grep-ability and as the documented reference set; the
+   * predicate above is the executable form.
+   */
+  patterns: [
+    'Bad Request: message to be replied not found',
+    'Bad Request: message to react not found',
+    'Bad Request: message to react to not found',
+    "Bad Request: message can't be deleted",
+    'Bad Request: message is not modified',
+    'Bad Request: MESSAGE_ID_INVALID',
+    'Bad Request: chat not found',
+    'Bad Request: reactions are not available in chat',
+    'Bad Request: not enough rights to send',
+    'Forbidden: bot was blocked by the user',
+    'Forbidden: bot was kicked from the supergroup chat',
+    'Forbidden: user is deactivated',
+    '(429: Too Many Requests: retry after N)',
+    "Network request for '<method>' failed!",
+  ] as const,
+});
+
+export const _UNACTIONABLE_TELEGRAM_ERRORS = UNACTIONABLE_TELEGRAM_ERRORS;
+
 // Telegram's allowed reaction emoji (as of Bot API 7.x)
 const TELEGRAM_ALLOWED_REACTIONS = new Set([
   '👍',
@@ -1703,14 +1790,44 @@ export class TelegramChannel implements Channel {
       // (i.e. both HTML and plain-text sends failed). Return undefined
       // so the caller's `if (sentMsgId)` guards skip the post-send
       // work. The message did NOT reach Telegram in this path.
-      logger.error(
-        {
-          jid,
-          err,
-          preview: text.slice(0, 200),
-        },
-        '[send] Failed to send Telegram message — returning undefined (message NOT delivered)',
-      );
+      //
+      // Classify against the known-unactionable bucket first
+      // (`_isUnactionableTelegramError`) — production logs (12h, 484+
+      // ERROR entries / ligolnik/nanoclaw-public#76) showed `not
+      // enough rights to send` (admin removed bot post permission,
+      // ~96/12h), `Network request … failed` (transport blip), and
+      // `429: Too Many Requests` (rate limit) dominating sendMessage
+      // failures. None are actionable mid-flight; downgrading to
+      // WARN keeps the ERROR-level log meaningful for the genuine
+      // bugs (Internal Server Error, PARSE_ENTITIES_FAILED, etc.)
+      // that still surface there. See jbaruch/nanoclaw#458.
+      const msg = err instanceof Error ? err.message : String(err ?? '');
+      if (_isUnactionableTelegramError(msg)) {
+        // Metadata-only WARN. These fire at high volume per
+        // production data; a `text.slice(0, 200)` preview here was
+        // a privacy regression vs. the prior ERROR-only behavior.
+        // `classifiedMessage` keeps the classifier-matched string
+        // greppable without dragging the original Error stringly.
+        logger.warn(
+          {
+            jid,
+            err,
+            classifiedMessage: msg,
+            textLen: text.length,
+            replyToMessageId,
+          },
+          '[send] Telegram message dropped (transient or unactionable) — returning undefined (message NOT delivered)',
+        );
+      } else {
+        logger.error(
+          {
+            jid,
+            err,
+            preview: text.slice(0, 200),
+          },
+          '[send] Failed to send Telegram message — returning undefined (message NOT delivered)',
+        );
+      }
     }
   }
 
@@ -1944,10 +2061,33 @@ export class TelegramChannel implements Channel {
         'Telegram reaction sent',
       );
     } catch (err) {
-      logger.error(
-        { jid, messageId, emoji: validEmoji, err },
-        'Failed to send Telegram reaction',
-      );
+      // Reactions to deleted / forbidden messages, idempotent retries
+      // on the same emoji ("message is not modified"), rate-limit
+      // pushback, and transport blips are all known-unactionable —
+      // downgrade to WARN so the ERROR-level log stays meaningful.
+      // See `_isUnactionableTelegramError` for the full bucket and
+      // jbaruch/nanoclaw#458 for the production-log motivation
+      // (363 reaction errors / 12h before this change).
+      const msg = err instanceof Error ? err.message : String(err ?? '');
+      if (_isUnactionableTelegramError(msg)) {
+        // `classifiedMessage` keeps the matched-string greppable
+        // (Error.message stringification varies by sink).
+        logger.warn(
+          {
+            jid,
+            messageId,
+            emoji: validEmoji,
+            err,
+            classifiedMessage: msg,
+          },
+          'Telegram reaction skipped (transient or unactionable)',
+        );
+      } else {
+        logger.error(
+          { jid, messageId, emoji: validEmoji, err },
+          'Failed to send Telegram reaction',
+        );
+      }
     }
   }
 
