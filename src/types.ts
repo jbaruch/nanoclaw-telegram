@@ -56,6 +56,20 @@ export interface ContainerConfig {
    */
   agentModel?: string;
   /**
+   * Per-group opt-in for the per-tier custom system prompt (#113).
+   * When `true`, the agent-runner is launched with `USE_CUSTOM_PROMPT=1`
+   * and reads `/workspace/global/prompts/{main,trusted,untrusted}.md`
+   * instead of the SDK's `claude_code` preset. When `false`, force OFF
+   * even if the global `USE_CUSTOM_PROMPT_FOR_MAIN` env is set.
+   *
+   * Default (undefined): defer to the global env. The global env only
+   * enables custom prompts for the main-tier container; trusted/untrusted
+   * stay on the preset until per-group opt-in.
+   *
+   * Reversible: unsetting reverts to the preset path on the next spawn.
+   */
+  useCustomPrompt?: boolean;
+  /**
    * Host-side Stage 1 gate chain (#80). Names of gates from
    * `src/gates/index.ts` registry, evaluated in `gateNames` order
    * (the per-group config order, not registration order). Combinator

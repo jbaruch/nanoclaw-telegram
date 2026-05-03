@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildFrozenSystemPromptAppend,
+  pickSystemPrompt,
   type FrozenSystemPromptInputs,
 } from './system-prompt-assembly.js';
 
@@ -234,5 +235,95 @@ describe('buildFrozenSystemPromptAppend', () => {
     expect(idIdx).toBeGreaterThanOrEqual(0);
     expect(soulIdx).toBeGreaterThan(idIdx);
     expect(fmtIdx).toBeGreaterThan(soulIdx);
+  });
+});
+
+// pickSystemPrompt — pure decisional logic for the SDK's `systemPrompt`
+// shape under the #465 / ligolnik#122 USE_CUSTOM_PROMPT flag. The
+// runtime caller (`index.ts`) does the I/O (env read, file read,
+// HTML-comment strip, hash log) and hands inputs here; the picker
+// stays a pure function so the precedence invariants are unit-testable
+// without spinning up the SDK or the agent-runner process.
+//
+// Invariants pinned:
+//   1. Default OFF — preset shape WITH excludeDynamicSections=true
+//      preserves the post-#416 frozen-prefix cache shape.
+//   2. Custom path with missing tier file — fall back to preset shape
+//      (no half-formed prompt).
+//   3. Custom path with present tier file — frozen append goes AFTER
+//      custom text so authoritative steering wins over tier prompts.
+describe('pickSystemPrompt', () => {
+  const FROZEN = 'IDENTITY\n\n---\n\nSOUL\n\n---\n\nFORMATTING';
+
+  it('default path (useCustomPrompt=false) returns preset shape with excludeDynamicSections=true', () => {
+    const out = pickSystemPrompt({
+      useCustomPrompt: false,
+      frozenAppend: FROZEN,
+      customText: undefined,
+    });
+    expect(out).toEqual({
+      type: 'preset',
+      preset: 'claude_code',
+      append: FROZEN,
+      excludeDynamicSections: true,
+    });
+  });
+
+  it('default path with no frozen append still returns preset shape (no append field, excludeDynamicSections kept)', () => {
+    const out = pickSystemPrompt({
+      useCustomPrompt: false,
+      frozenAppend: undefined,
+      customText: undefined,
+    });
+    expect(out).toEqual({
+      type: 'preset',
+      preset: 'claude_code',
+      excludeDynamicSections: true,
+    });
+  });
+
+  it('custom path with missing tier file falls back to preset shape (does not return a half-formed prompt)', () => {
+    const out = pickSystemPrompt({
+      useCustomPrompt: true,
+      frozenAppend: FROZEN,
+      customText: undefined,
+    });
+    expect(out).toEqual({
+      type: 'preset',
+      preset: 'claude_code',
+      append: FROZEN,
+      excludeDynamicSections: true,
+    });
+  });
+
+  it('custom path with tier file present concatenates customText + frozenAppend with a blank-line separator', () => {
+    const out = pickSystemPrompt({
+      useCustomPrompt: true,
+      frozenAppend: FROZEN,
+      customText: 'CUSTOM_TIER_TEXT',
+    });
+    expect(out).toBe('CUSTOM_TIER_TEXT\n\n' + FROZEN);
+  });
+
+  it('custom path: frozen append goes AFTER custom text so identity preamble wins on conflicts', () => {
+    const out = pickSystemPrompt({
+      useCustomPrompt: true,
+      frozenAppend: FROZEN,
+      customText: 'CUSTOM',
+    });
+    expect(typeof out).toBe('string');
+    const customIdx = (out as string).indexOf('CUSTOM');
+    const frozenIdx = (out as string).indexOf(FROZEN);
+    expect(customIdx).toBeGreaterThanOrEqual(0);
+    expect(frozenIdx).toBeGreaterThan(customIdx);
+  });
+
+  it('custom path with no frozen append returns customText alone (no spurious separator)', () => {
+    const out = pickSystemPrompt({
+      useCustomPrompt: true,
+      frozenAppend: undefined,
+      customText: 'CUSTOM_ONLY',
+    });
+    expect(out).toBe('CUSTOM_ONLY');
   });
 });

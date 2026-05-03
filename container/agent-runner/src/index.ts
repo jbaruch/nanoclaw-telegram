@@ -16,6 +16,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import crypto from 'node:crypto';
 import { execFile } from 'child_process';
 import {
   query,
@@ -236,7 +237,10 @@ import {
   resolveIdentityPreamble,
 } from './identity-preamble.js';
 export { buildIdentityPreamble, resolveIdentityPreamble };
-import { buildFrozenSystemPromptAppend } from './system-prompt-assembly.js';
+import {
+  buildFrozenSystemPromptAppend,
+  pickSystemPrompt,
+} from './system-prompt-assembly.js';
 export { buildFrozenSystemPromptAppend };
 import { parseTranscript, type ParsedMessage } from './parse-transcript.js';
 export { parseTranscript };
@@ -3021,6 +3025,72 @@ async function runQuery(
     formattingMd,
   });
 
+  // Resolve which systemPrompt shape to hand the SDK. The decisional
+  // logic lives in `pickSystemPrompt()` (see `system-prompt-assembly.ts`)
+  // so it stays unit-testable; this block does the I/O (env read, file
+  // read, comment-strip, hash log) and hands the resolved inputs to the
+  // pure picker.
+  //
+  // Default path (USE_CUSTOM_PROMPT unset or != '1'): SDK preset
+  // `claude_code` with `append: systemPromptAppend` and
+  // `excludeDynamicSections: true` — the post-#416 frozen-prefix cache
+  // shape, byte-identical to today.
+  //
+  // USE_CUSTOM_PROMPT=1 path: replace the preset with a per-tier custom
+  // prompt read from the bind-mounted
+  // /workspace/global/prompts/{main,trusted,untrusted}.md. The
+  // systemPromptAppend (identity preamble + SOUL + FORMATTING) is
+  // concatenated AFTER the custom text so the preamble overrides
+  // anything in the custom prompt that conflicts. The result is a raw
+  // string handed to the SDK; the preset's `excludeDynamicSections`
+  // mechanism is bypassed because there is no preset.
+  //
+  // Default OFF is critical: production behavior MUST be byte-identical
+  // unless the flag is explicitly set. See ligolnik/nanoclaw-public#113.
+  const useCustomPrompt = process.env.USE_CUSTOM_PROMPT === '1';
+  const tier = containerInput.isMain
+    ? 'main'
+    : containerInput.isTrusted
+      ? 'trusted'
+      : 'untrusted';
+  let customText: string | undefined;
+  if (useCustomPrompt) {
+    const promptPath = `/workspace/global/prompts/${tier}.md`;
+    if (fs.existsSync(promptPath)) {
+      const rawCustomText = fs.readFileSync(promptPath, 'utf-8');
+      // Strip the leading `<!-- ... -->` block from the prompt file
+      // before sending. The committed prompts carry a provenance/version
+      // header in an HTML comment for human readers; the SDK forwards
+      // file contents verbatim so without this strip the comment is
+      // billed as part of the system prompt every cold start. Only the
+      // FIRST contiguous leading comment is stripped (it's metadata);
+      // body comments that appear later are intentional content.
+      customText = rawCustomText.replace(/^\s*<!--[\s\S]*?-->\s*/, '');
+      const fullPrompt = systemPromptAppend
+        ? customText + '\n\n' + systemPromptAppend
+        : customText;
+      const customHash = crypto
+        .createHash('sha256')
+        .update(fullPrompt)
+        .digest('hex')
+        .slice(0, 8);
+      log(
+        `USE_CUSTOM_PROMPT active: tier=${tier} promptPath=${promptPath} ` +
+          `customText=${customText.length} chars, total=${fullPrompt.length} chars, ` +
+          `sha=${customHash}`,
+      );
+    } else {
+      log(
+        `WARN: USE_CUSTOM_PROMPT=1 but ${promptPath} is missing — falling back to preset path`,
+      );
+    }
+  }
+  const resolvedSystemPrompt = pickSystemPrompt({
+    useCustomPrompt,
+    frozenAppend: systemPromptAppend,
+    customText,
+  });
+
   // Rules are loaded by the SDK via the tessl chain: CLAUDE.md → AGENTS.md → .tessl/RULES.md
   // For untrusted groups, the orchestrator copies .tessl from a main group's session.
 
@@ -3216,56 +3286,14 @@ async function runQuery(
       // (drop-resumeAt-on-error) only papered over the symptom; the
       // fix is to never set up the poison in the first place.
       resume: sessionId,
-      // System prompt: frozen-prefix-cacheable shape (#416).
-      //
-      // `excludeDynamicSections: true` strips per-message dynamic
-      // sections (working directory, auto-memory paths, git status)
-      // from the preset's system prompt so the prefix stays
-      // byte-identical across messages and lands in the Anthropic
-      // prompt cache. The SDK re-injects the stripped content as the
-      // first user message, so the model still has access to it — the
-      // tradeoff is that those sections become slightly less
-      // authoritative for steering, which is acceptable for our
-      // workload because authoritative steering already lives in the
-      // identity preamble + SOUL.md (both in the frozen `append`).
-      //
-      // The two-segment structure THIS PR controls is:
-      //   [FROZEN] Claude Code preset (static portion) + identity
-      //            preamble + SOUL.md + FORMATTING.md
-      //   <implicit cache_control: ephemeral breakpoint, managed by
-      //    the SDK at the dynamic-sections boundary>
-      //   [VOLATILE-via-excludeDynamicSections] re-injected dynamic
-      //              sections (cwd, auto-memory paths, git status,
-      //              env info) emitted by the preset under the hood
-      //              + the user turn itself
-      //
-      // What this PR does NOT control. The SDK ALSO loads group folder
-      // `CLAUDE.md` / `MEMORY.md` and any `additionalDirectories`
-      // CLAUDE.md files via separate `settingSources` /
-      // `additionalDirectories` paths that this change leaves alone.
-      // Those inputs ride a different SDK pipeline (a per-call read
-      // off cwd, not the `append` string we control here), and
-      // whether they sit before or after the cache breakpoint depends
-      // on internal SDK behavior we don't promise here. If the cache
-      // misses on what looks like a stable session, check those
-      // inputs too — the frozen builder in `system-prompt-assembly.ts`
-      // covers only the explicit `append` string.
-      //
-      // The classification is deterministic — see
-      // `system-prompt-assembly.ts` for the frozen-content builder
-      // and the rule that nothing volatile may enter `append`.
-      systemPrompt: systemPromptAppend
-        ? {
-            type: 'preset' as const,
-            preset: 'claude_code' as const,
-            append: systemPromptAppend,
-            excludeDynamicSections: true,
-          }
-        : {
-            type: 'preset' as const,
-            preset: 'claude_code' as const,
-            excludeDynamicSections: true,
-          },
+      // System prompt shape resolved by `resolveSystemPrompt()` above:
+      // — Default (USE_CUSTOM_PROMPT unset): preset + frozen append +
+      //   excludeDynamicSections=true (#416 cache shape preserved)
+      // — USE_CUSTOM_PROMPT=1: per-tier prompt file + frozen append as
+      //   a raw string; preset bypassed (#113 / ligolnik#122)
+      // The branching plus the deterministic frozen-prefix invariants
+      // are anchored by `system-prompt-assembly.test.ts`.
+      systemPrompt: resolvedSystemPrompt,
       // AGENT_MODEL is set by the orchestrator (`src/container-runner.ts`)
       // so the model can be bumped without rebuilding the agent-runner image.
       // Fallback matches the historical hardcoded value.

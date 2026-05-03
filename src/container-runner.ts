@@ -1259,6 +1259,23 @@ export function buildVolumeMounts(
         readonly: true,
       });
     }
+    // Per-tier custom system prompts (#113 / ligolnik#122). Untrusted
+    // doesn't get the full /workspace/global mount, but the
+    // agent-runner's resolveSystemPrompt() reads
+    // /workspace/global/prompts/<tier>.md when USE_CUSTOM_PROMPT=1 — so
+    // the prompts dir must be visible regardless of tier. Unlike the
+    // FORMATTING.md / BASH_SAFETY.md mounts above (single-file binds),
+    // this is a directory bind covering all three tier templates at
+    // once; readonly so the agent can't mutate prompts. Same
+    // universal-content rationale (the templates carry no owner state).
+    const promptsDir = path.join(globalDir, 'prompts');
+    if (fs.existsSync(promptsDir)) {
+      mounts.push({
+        hostPath: toHostPath(promptsDir),
+        containerPath: '/workspace/global/prompts',
+        readonly: true,
+      });
+    }
   }
 
   // .env shadowing is handled inside the container entrypoint via mount --bind
@@ -2343,6 +2360,35 @@ function buildContainerArgs(
   }
   args.push('-e', `AGENT_MODEL=${effectiveAgentModel}`);
   args.push('-e', `AGENT_EFFORT=${AGENT_EFFORT}`);
+
+  // USE_CUSTOM_PROMPT (#113) — gates the per-tier custom system prompt
+  // path in agent-runner. Default OFF: production behavior is unchanged
+  // unless explicitly opted in. Resolution order:
+  //   1. Per-group `containerConfig.useCustomPrompt` if set (true or false)
+  //      — explicit override always wins.
+  //   2. Global env `USE_CUSTOM_PROMPT_FOR_MAIN=1` enables ONLY the main
+  //      container; trusted/untrusted stay on the preset.
+  //   3. Otherwise OFF.
+  // The agent-runner reads `process.env.USE_CUSTOM_PROMPT === '1'` and
+  // falls back to the preset path on any other value (or absence).
+  const globalUseCustomForMain = process.env.USE_CUSTOM_PROMPT_FOR_MAIN === '1';
+  const useCustomPromptResolved =
+    typeof group.containerConfig?.useCustomPrompt === 'boolean'
+      ? group.containerConfig.useCustomPrompt
+      : globalUseCustomForMain && isMain;
+  if (useCustomPromptResolved) {
+    args.push('-e', 'USE_CUSTOM_PROMPT=1');
+    logger.info(
+      {
+        groupFolder: group.folder,
+        source:
+          typeof group.containerConfig?.useCustomPrompt === 'boolean'
+            ? 'containerConfig'
+            : 'USE_CUSTOM_PROMPT_FOR_MAIN',
+      },
+      'USE_CUSTOM_PROMPT enabled — agent-runner will load per-tier custom prompt',
+    );
+  }
 
   // Forward the orchestrator's authoritative assistant identity into the
   // agent container so the agent-runner can prepend an identity preamble

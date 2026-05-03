@@ -1140,3 +1140,117 @@ describe('ASSISTANT_NAME / ASSISTANT_USERNAME forwarding', () => {
     expect(args).toContain('ASSISTANT_USERNAME=testbot');
   });
 });
+
+// ----------------------------------------------------------------------
+// USE_CUSTOM_PROMPT forwarding (#465 / ligolnik#122).
+//
+// Pins the resolution shape `buildContainerArgs` uses to decide whether
+// to forward `USE_CUSTOM_PROMPT=1` to the container env:
+//
+//   1. `containerConfig.useCustomPrompt: true` → forward (any tier).
+//   2. `containerConfig.useCustomPrompt: false` → never forward, even
+//      if the global env says yes (explicit per-group veto wins).
+//   3. `containerConfig.useCustomPrompt` undefined →
+//      forward only when `USE_CUSTOM_PROMPT_FOR_MAIN=1` AND `isMain`.
+//
+// Defense-against-regression: the precedence here is what makes the
+// flag flip safe-by-default — silent leak across tiers (forwarding to
+// trusted/untrusted via the global env) would surprise operators.
+// ----------------------------------------------------------------------
+
+describe('USE_CUSTOM_PROMPT forwarding', () => {
+  const ORIGINAL_ENV = process.env.USE_CUSTOM_PROMPT_FOR_MAIN;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    delete process.env.USE_CUSTOM_PROMPT_FOR_MAIN;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (ORIGINAL_ENV === undefined) {
+      delete process.env.USE_CUSTOM_PROMPT_FOR_MAIN;
+    } else {
+      process.env.USE_CUSTOM_PROMPT_FOR_MAIN = ORIGINAL_ENV;
+    }
+  });
+
+  it('does not forward when neither global env nor per-group config is set', async () => {
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).not.toContain('USE_CUSTOM_PROMPT=1');
+  });
+
+  it('forwards when per-group containerConfig.useCustomPrompt is true (untrusted tier)', async () => {
+    const overrideGroup: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: { useCustomPrompt: true },
+    };
+    const promise = runContainerAgent(overrideGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).toContain('USE_CUSTOM_PROMPT=1');
+  });
+
+  it('does NOT forward when per-group config explicitly sets useCustomPrompt: false (even if global env is on)', async () => {
+    process.env.USE_CUSTOM_PROMPT_FOR_MAIN = '1';
+    const optOutGroup: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: { useCustomPrompt: false },
+    };
+    const promise = runContainerAgent(
+      optOutGroup,
+      { ...testInput, isMain: true },
+      () => {},
+    );
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).not.toContain('USE_CUSTOM_PROMPT=1');
+  });
+
+  it('global env enables main but does NOT leak to trusted tier', async () => {
+    process.env.USE_CUSTOM_PROMPT_FOR_MAIN = '1';
+    const trustedGroup: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: { trusted: true },
+    };
+    const promise = runContainerAgent(
+      trustedGroup,
+      { ...testInput, isMain: false, isTrusted: true },
+      () => {},
+    );
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).not.toContain('USE_CUSTOM_PROMPT=1');
+  });
+
+  it('global env enables main and the main-tier container DOES receive USE_CUSTOM_PROMPT=1', async () => {
+    process.env.USE_CUSTOM_PROMPT_FOR_MAIN = '1';
+    const promise = runContainerAgent(
+      testGroup,
+      { ...testInput, isMain: true },
+      () => {},
+    );
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).toContain('USE_CUSTOM_PROMPT=1');
+  });
+});

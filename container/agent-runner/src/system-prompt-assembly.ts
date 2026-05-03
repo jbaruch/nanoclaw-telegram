@@ -145,3 +145,86 @@ export function buildFrozenSystemPromptAppend(
   }
   return parts.length > 0 ? parts.join('\n\n---\n\n') : undefined;
 }
+
+/**
+ * Inputs to the system-prompt picker (#465 / ligolnik#122).
+ *
+ * Three load-bearing fields:
+ *   - `useCustomPrompt` — gates the per-tier custom prompt path.
+ *   - `frozenAppend` — the result of `buildFrozenSystemPromptAppend()`,
+ *     i.e., identity preamble + SOUL + FORMATTING. Carries the
+ *     authoritative steering and MUST always reach the model.
+ *   - `customText` — the per-tier prompt file contents WITH the leading
+ *     HTML provenance comment already stripped. The runtime caller
+ *     reads the file and strips the comment before invoking; the
+ *     picker stays pure.
+ *
+ * Outcomes the picker enforces:
+ *   - When `useCustomPrompt` is false → SDK preset shape with
+ *     `excludeDynamicSections: true` (post-#416 frozen-prefix cache
+ *     shape unchanged).
+ *   - When `useCustomPrompt` is true AND `customText` is undefined
+ *     (file missing on this tier) → fall back to the same preset shape.
+ *     The runtime caller is responsible for emitting the warn log.
+ *   - When `useCustomPrompt` is true AND `customText` is present →
+ *     return a raw string `customText + '\n\n' + frozenAppend`. Frozen
+ *     append goes AFTER custom text so authoritative steering wins
+ *     over anything in the tier prompt that might conflict.
+ */
+export interface SystemPromptPickInputs {
+  useCustomPrompt: boolean;
+  frozenAppend: string | undefined;
+  customText: string | undefined;
+}
+
+/**
+ * Resolved shape passed to the SDK as `systemPrompt`. Mirrors the SDK's
+ * accepted union (see `@anthropic-ai/claude-agent-sdk` types):
+ *   - `undefined` — let the SDK use its default.
+ *   - `string` — raw system prompt, no preset.
+ *   - preset object — Claude-Code preset with optional `append` and
+ *     `excludeDynamicSections`.
+ */
+export type SystemPromptOption =
+  | undefined
+  | string
+  | {
+      type: 'preset';
+      preset: 'claude_code';
+      append?: string;
+      excludeDynamicSections?: boolean;
+    };
+
+/**
+ * Pure picker for the SDK's `systemPrompt` shape.
+ *
+ * Kept separate from the runtime caller so I/O (env reads, file reads,
+ * logging) stays in `index.ts` and the decisional logic can be unit-
+ * tested directly. See `SystemPromptPickInputs` for the contract.
+ */
+export function pickSystemPrompt(
+  inputs: SystemPromptPickInputs,
+): SystemPromptOption {
+  const presetWithAppend: SystemPromptOption = inputs.frozenAppend
+    ? {
+        type: 'preset' as const,
+        preset: 'claude_code' as const,
+        append: inputs.frozenAppend,
+        excludeDynamicSections: true,
+      }
+    : {
+        type: 'preset' as const,
+        preset: 'claude_code' as const,
+        excludeDynamicSections: true,
+      };
+
+  if (!inputs.useCustomPrompt) {
+    return presetWithAppend;
+  }
+  if (inputs.customText === undefined) {
+    return presetWithAppend;
+  }
+  return inputs.frozenAppend
+    ? inputs.customText + '\n\n' + inputs.frozenAppend
+    : inputs.customText;
+}

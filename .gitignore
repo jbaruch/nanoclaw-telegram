@@ -24,6 +24,8 @@ groups/global/*
 !groups/global/FORMATTING.md
 !groups/global/MEMORY.md
 !groups/global/BASH_SAFETY.md
+!groups/global/prompts/
+!groups/global/prompts/*.md
 
 # Secrets
 *.keys.json
