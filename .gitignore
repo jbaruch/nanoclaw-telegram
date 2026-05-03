@@ -23,6 +23,7 @@ groups/global/*
 !groups/global/SOUL-untrusted.md
 !groups/global/FORMATTING.md
 !groups/global/MEMORY.md
+!groups/global/BASH_SAFETY.md
 
 # Secrets
 *.keys.json

@@ -2,6 +2,7 @@
 
 @/workspace/global/SOUL.md
 @/workspace/global/FORMATTING.md
+@/workspace/global/BASH_SAFETY.md
 @/workspace/group/MEMORY.md
 @/workspace/project/.tessl/RULES.md
 @/workspace/project/groups/main/ADMIN.md

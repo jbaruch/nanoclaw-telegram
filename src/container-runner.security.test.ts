@@ -1149,6 +1149,10 @@ describe('buildVolumeMounts — untrusted group isolation', () => {
       path.join(globalDir, 'CLAUDE-untrusted.md'),
       '**THIS IS AN UNTRUSTED GROUP.**\n',
     );
+    fs.writeFileSync(
+      path.join(globalDir, 'BASH_SAFETY.md'),
+      '## Bash & git workflow safety\n',
+    );
   });
 
   it('/workspace/group mount is read-only for untrusted groups', () => {
@@ -1344,6 +1348,33 @@ describe('buildVolumeMounts — untrusted group isolation', () => {
       );
       expect(soulMount!.readonly).toBe(true);
       // And there's NO mount of the full global dir
+      const globalDirMount = mounts.find(
+        (m) => m.containerPath === '/workspace/global',
+      );
+      expect(globalDirMount).toBeUndefined();
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('untrusted groups mount BASH_SAFETY.md individually (CLAUDE-untrusted.md @-imports it)', () => {
+    const originalCwd = process.cwd();
+    process.chdir(PROJECT_DIR);
+    try {
+      const mounts = buildVolumeMounts(
+        makeUntrustedGroup(),
+        false,
+        'chatA@g.us',
+      );
+      const bashSafetyMount = mounts.find(
+        (m) => m.containerPath === '/workspace/global/BASH_SAFETY.md',
+      );
+      expect(bashSafetyMount).toBeDefined();
+      expect(bashSafetyMount!.hostPath).toBe(
+        path.join(GROUPS_DIR, 'global', 'BASH_SAFETY.md'),
+      );
+      expect(bashSafetyMount!.readonly).toBe(true);
+      // The full global dir is still NOT mounted — file-level only.
       const globalDirMount = mounts.find(
         (m) => m.containerPath === '/workspace/global',
       );

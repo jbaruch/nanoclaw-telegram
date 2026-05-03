@@ -1246,6 +1246,19 @@ export function buildVolumeMounts(
         readonly: true,
       });
     }
+    // Untrusted CLAUDE-untrusted.md @-imports /workspace/global/BASH_SAFETY.md
+    // for the same reason main and trusted containers do — the rules apply to
+    // every shell/git/gh invocation regardless of tier. Same individual-file
+    // mount pattern as FORMATTING.md above (universal content, no owner
+    // state, safe to share across tiers).
+    const untrustedBashSafety = path.join(globalDir, 'BASH_SAFETY.md');
+    if (fs.existsSync(untrustedBashSafety)) {
+      mounts.push({
+        hostPath: toHostPath(untrustedBashSafety),
+        containerPath: '/workspace/global/BASH_SAFETY.md',
+        readonly: true,
+      });
+    }
   }
 
   // .env shadowing is handled inside the container entrypoint via mount --bind
