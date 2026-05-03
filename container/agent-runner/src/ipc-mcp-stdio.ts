@@ -146,6 +146,23 @@ const server = new McpServer({
   version: '1.0.0',
 });
 
+// Tier-gated tool registrations (#469).
+//
+// Sixteen handlers in `src/ipc.ts` reject every non-main caller with a
+// hard `if (!isMain)` gate (no conditional self-target carve-out).
+// Registering those tools in trusted/untrusted containers wastes wire-tool
+// catalog tokens at every cold start AND clutters the model's tool-
+// selection surface with options it has no privilege to call. We wrap
+// each such `server.tool(...)` registration in `if (isMain) { ... }`
+// below so the MCP catalog those tiers see is filtered at startup.
+//
+// The candidate set is verified against the host-side authz in
+// `src/ipc.ts`; tools with conditional gates that allow self-target
+// (`schedule_task`, `update_task`, `set_agent_model`) are intentionally
+// NOT gated here — non-main tiers legitimately call them on themselves.
+//
+// Existing runtime guards inside the handlers stay as defense-in-depth.
+
 server.tool(
   'send_message',
   "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times. Use reply_to with a message ID to quote-reply a specific message. To send to a different chat (cross-chat broadcast from main), pass chat_jid — only main containers may target other chats; trusted/untrusted containers can only target their own chat regardless of what's passed (host-side authz enforces this). When chat_jid is set, do NOT pass reply_to unless you have a message ID from the TARGET chat — Telegram message IDs are per-chat, so a source-chat ID will resolve to an unrelated message in the target chat.",
@@ -787,6 +804,7 @@ server.tool(
   },
 );
 
+if (isMain) {
 server.tool(
   'register_group',
   `Register a new chat/group so the agent can respond to messages there. Main group only.
@@ -866,7 +884,9 @@ Use available_groups.json to find the JID for a group. The folder name must be c
     };
   },
 );
+}
 
+if (isMain) {
 server.tool(
   'unregister_group',
   `Remove a chat/group from the registry so the agent stops responding there. Main group only.
@@ -914,7 +934,9 @@ Refuses to unregister the main group itself (losing the main registration mid-ru
     };
   },
 );
+}
 
+if (isMain) {
 server.tool(
   'set_trusted',
   `Flip a registered group's \`trusted\` flag without re-stating its other parameters. Main group only.
@@ -972,7 +994,9 @@ Use this when promoting a chat to trusted (read-write filesystem, admin tiles, l
     };
   },
 );
+}
 
+if (isMain) {
 server.tool(
   'set_trigger',
   `Change a registered group's trigger word (and optionally requiresTrigger) without re-stating its other parameters. Main group only.
@@ -1046,7 +1070,9 @@ Use this when renaming the assistant in a chat or switching between always-respo
     };
   },
 );
+}
 
+if (isMain) {
 server.tool(
   'set_additional_tiles',
   `Set the per-chat additive tile overlay (#305) on a registered group — tile names that load IN ADDITION TO the trust-tier baseline (\`nanoclaw-core\`, \`nanoclaw-trusted\`/\`nanoclaw-untrusted\`, plus \`nanoclaw-admin\` for main). Main group only.
@@ -1086,6 +1112,7 @@ Use this to give a chat extra capabilities (e.g. a coding chat with \`nanoclaw-c
     };
   },
 );
+}
 
 server.tool(
   'nuke_session',
@@ -1161,6 +1188,7 @@ server.tool(
   async () => runHostOperation('fetch_trakt_history'),
 );
 
+if (isMain) {
 server.tool(
   'audible_backup',
   'Back up Audible audiobooks. Checks for new purchases not in the existing library, downloads and decrypts them to M4B. The host handles authentication and file storage. Use --dry-run to preview without downloading.',
@@ -1206,7 +1234,9 @@ server.tool(
     };
   },
 );
+}
 
+if (isMain) {
 server.tool(
   'dominos_pizza',
   "Order Domino's Pizza. Commands: find-stores (by address), menu (by storeId), build-order (validate+price, dry-run), place-order (requires confirm=true). For build-order and place-order, pass orderJson with storeId, customer (address, firstName, lastName, phone, email), items (array of {code, qty}), and payment (for place-order only: number, expiration, securityCode, postalCode, tipAmount).",
@@ -1256,6 +1286,7 @@ server.tool(
     };
   },
 );
+}
 
 // --- Smart Home ---
 
@@ -1496,6 +1527,7 @@ print(json.dumps({"results": result, "count": len(result)}, indent=2))
   },
 );
 
+if (isMain) {
 server.tool(
   'github_backup',
   'Commit and push the group backup repo to GitHub. Use for nightly backups or when important state changes. The host handles git credentials — the container just triggers it.',
@@ -1544,6 +1576,7 @@ server.tool(
     };
   },
 );
+}
 
 server.tool(
   'sessionize_get_event',
@@ -1663,6 +1696,7 @@ const TILE_NAMES = [
   'nanoclaw-host',
 ] as const;
 
+if (isMain) {
 server.tool(
   'promote_staging',
   'Promote staged skills and rules to a tile repo. Copies staging into a fresh clone, runs a read-only `tessl skill review` pass on each promoted skill when `tessl` is on PATH (reports score; never mutates content; skipped with a warning when unavailable — Copilot + the post-merge GHA review still gate the PR), pushes a timestamped `promote/<utc>-<tile>-<rand>` branch, opens a PR on the tile repo, and summons Copilot review via GraphQL. Does NOT merge, push to main, or publish to the registry — merge is manual (or via Composio), publish fires in GHA at merge time, and the agent calls `tessl_update` afterwards to pull the new version. Main group only.',
@@ -1694,7 +1728,9 @@ server.tool(
     );
   },
 );
+}
 
+if (isMain) {
 server.tool(
   'push_staged_to_branch',
   `Push fixups from this group's staging directory to an existing tile-repo PR branch. Use after a promote PR gets review comments: fix the skill back in staging, then call this with the branch name that promote_staging printed ("Branch: promote/...-<tile>"). No new PR is opened — the existing PR auto-updates. Main group only.
@@ -1754,7 +1790,9 @@ skillName options:
     );
   },
 );
+}
 
+if (isMain) {
 server.tool(
   'chat_status',
   'Report host-side state for one or all registered chats: which tile owns each chat (admin/trusted/untrusted), trigger config, container status (running/idle/cooling-down/crashed/not-spawned) per session slot (default + maintenance), the effective AGENT_MODEL the group will run on at next spawn (per-group override resolved against the orchestrator default — useful for cost attribution / model-rollout audits without grepping spawn logs), and the latest is_from_me=1 message recorded for the chat. Use this to diagnose silent containers — when a chat went quiet you can see whether the container is running, cooling down after an error, or never spawned. Provide chat_id (JID) OR chat_name (display name) to filter to one chat; omit both for all chats. Main group only.',
@@ -1808,7 +1846,9 @@ server.tool(
     });
   },
 );
+}
 
+if (isMain) {
 server.tool(
   'inspect_gate_decisions',
   "Look up the host-side gate-chain verdicts for recent messages in a chat — the same Stage 1 (trigger) + Stage 2 (Haiku classifier) decisions that determined whether the agent was woken up. Use this to answer 'why didn't AyeAye respond to message X' or 'what did the gate think about the last 10 messages'. Returns most-recent first. Backed by a tail-and-parse over the orchestrator's host log; stale records age out via log rotation rather than DB pruning. Main group only.",
@@ -1854,7 +1894,9 @@ server.tool(
     });
   },
 );
+}
 
+if (isMain) {
 server.tool(
   'list_installed_tiles',
   `List every tile installed in the local Tessl registry — the same set \`set_additional_tiles\` and \`register_group\`'s \`additionalTiles\` validate against. Use this BEFORE proposing a per-chat overlay change so the operator picks from valid names; a typo would otherwise fail at the host with no good way to recover from inside the conversation. Returns a JSON object with \`tiles\` (sorted name list) and \`registryAbsent\` (true on cold-start when \`tessl install\` has never run — operator should run \`tessl_update\` first). Includes the trust-tier baseline names too (\`nanoclaw-core\`, \`nanoclaw-trusted\`, \`nanoclaw-untrusted\`, \`nanoclaw-admin\`); those are valid tile names but configuring one as an overlay is a no-op (the tile is already loaded by the trust-tier baseline). Read-only; never mutates the registry. Main group only.`,
@@ -1871,7 +1913,9 @@ server.tool(
     return runHostOperation('list_installed_tiles');
   },
 );
+}
 
+if (isMain) {
 server.tool(
   'nuke_chat',
   "Forcibly nuke another chat's session(s) cross-chat — wipes JSONL transcripts, kills the container, and clears DB session rows. Use when a foreign chat's container is hung, in a corrupted state, or stuck on a poisoned plan and the only way back is a clean restart. Requires chat_id OR chat_name (admin always operates cross-chat — to nuke your own chat use nuke_session). Main group only.",
@@ -1936,7 +1980,9 @@ server.tool(
     });
   },
 );
+}
 
+if (isMain) {
 server.tool(
   'send_message_to_chat',
   "Post a plain text message into another registered chat without spawning a container there. Use this when the user asks you (from the main group) to broadcast or relay a message into a different chat — e.g. \"post X to #family-chat\". Replaces the schedule_task + once: now+5s kludge. Provide chat_id (JID like \"tg:-1003869886477\") OR chat_name (display name from the registered groups list); ambiguous names error with candidate JIDs. Set sender to post as a named bot identity (Telegram only; routes through the bot pool). Set pin to pin the sent message — silently ignored on the bot-pool path because the pool send hook can't pin, so don't combine sender + pin. No reply_to: foreign chat message IDs aren't reachable from main, and Telegram message IDs are per-chat so guessing collides. Failures (unknown JID, blocked, rate-limit) return a clear error and do NOT write a phantom bot row into the target chat's DB. Main group only.",
@@ -2020,7 +2066,9 @@ server.tool(
     });
   },
 );
+}
 
+if (isMain) {
 server.tool(
   'tessl_update',
   'Run `tessl update` on the host to pull the latest tile versions from the registry. Call this after a promote PR merges (GHA publishes on merge, then the agent triggers this to get the new version). If new tiles land, sessions are cleared automatically so the next message picks them up. A periodic 15-min catch-up runs in the orchestrator as a safety net. Main group only.',
@@ -2037,6 +2085,7 @@ server.tool(
     return runHostOperation('tessl_update');
   },
 );
+}
 
 // Start the stdio transport
 const transport = new StdioServerTransport();
