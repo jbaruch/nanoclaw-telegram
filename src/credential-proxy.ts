@@ -18,6 +18,7 @@ import { join } from 'path';
 
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
+import { applyWireToolFilter } from './wire-tool-filter.js';
 
 export type AuthMode = 'api-key' | 'oauth';
 
@@ -51,15 +52,53 @@ export function startCredentialProxy(
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
       req.on('end', () => {
-        const body = Buffer.concat(chunks);
+        const rawBody = Buffer.concat(chunks);
 
-        // Optional request capture for prompt/tool-catalog inspection.
-        // Set DUMP_API_REQUESTS=<dir> in the orchestrator env to enable.
+        // Wire-tool catalog interceptor (issue #119): strip SDK-builtin tools
+        // we never use and trim the Bash description on outgoing /v1/messages
+        // requests. Default ON; disable with STRIP_DEAD_TOOLS=0. Reduces
+        // cache_create per cold start by ~12K tokens per tier.
+        const originalLength = rawBody.length;
+        const filterResult = applyWireToolFilter(
+          req.url,
+          req.method,
+          rawBody,
+          process.env,
+          (err) => {
+            logger.warn(
+              { err, url: req.url },
+              'Wire-tool filter: body parse failed, forwarding unchanged',
+            );
+          },
+        );
+        const body = filterResult.body;
+        if (filterResult.applied) {
+          // Logged at DEBUG, not INFO. The SDK ships the full catalog
+          // on every /v1/messages, so an INFO line per request would
+          // dominate the log stream in steady state. The interceptor's
+          // effect is observable via DUMP_API_REQUESTS (#467) when an
+          // operator wants per-request visibility.
+          logger.debug(
+            {
+              url: req.url,
+              toolsStripped: filterResult.stats.toolsStripped,
+              descriptionsTrimmed: filterResult.stats.descriptionsTrimmed,
+              bodyDelta: body.length - originalLength,
+            },
+            'Wire-tool interceptor active',
+          );
+        }
+
         // Default OFF; never enable in long-running production — the
         // captured request bodies contain user prompts and the SDK's
         // full system prompt + tool catalog, which is sensitive
         // operator material. Single-shot capture pattern: set, fire
         // one request, unset.
+        //
+        // Placed AFTER the wire-tool interceptor so the dumped body
+        // reflects what was actually forwarded upstream (post-filter,
+        // post-Bash-trim) — capture before the filter would dump the
+        // pre-strip catalog and obscure the interceptor's effect.
         //
         // Failure handling per `error-handling.Specific Exceptions` +
         // `Graceful Fallback`: catch ONLY the known recoverable
