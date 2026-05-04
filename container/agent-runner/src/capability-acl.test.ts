@@ -341,6 +341,16 @@ describe('decideCapabilityAcl — acceptance scenarios', () => {
     expect(decision.kind).toBe('allow');
   });
 
+  it('untrusted-container prompt may spawn current SDK Agent subagents', () => {
+    const msgs: WalkBackMessage[] = [
+      userText(wrap('untrusted-container', 'news-group', 'delegate this')),
+      assistantText('spawning helper'),
+    ];
+    expect(decideCapabilityAcl('Agent', msgs).kind).toBe('allow');
+    // Keep the legacy Task spelling too for SDK overlap / rollback windows.
+    expect(decideCapabilityAcl('Task', msgs).kind).toBe('allow');
+  });
+
   it('unknown source prefix fails closed — denies all non-inert sinks', () => {
     // Simulates a future emitter (or partial deployment / version skew)
     // that introduces a `bash:<cmd>` prefix this version doesn't know.

@@ -74,7 +74,8 @@ describe('classifyProvenance', () => {
 });
 
 describe('classifyTool', () => {
-  it('maps Task → agent_spawn', () => {
+  it('maps Agent and Task → agent_spawn', () => {
+    expect(classifyTool('Agent')).toBe('agent_spawn');
     expect(classifyTool('Task')).toBe('agent_spawn');
   });
 

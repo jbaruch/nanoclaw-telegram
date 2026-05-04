@@ -106,6 +106,7 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
     'Bash',
     READ_ONLY_COMPOSIO,
     /^mcp__tessl__/,
+    'Agent',
     'Task',
     'TaskOutput',
     'TaskStop',

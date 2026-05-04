@@ -3354,6 +3354,7 @@ async function runQuery(
         'Grep',
         'WebSearch',
         'WebFetch',
+        'Agent',
         'Task',
         'TaskOutput',
         'TaskStop',
@@ -3602,9 +3603,9 @@ async function runQuery(
           // the hook is the source of truth (matcher is a perf hint
           // so non-tracked tools don't pay the transcript-walk cost).
           {
-            matcher: '^(Task|mcp__nanoclaw__schedule_task)$',
+            matcher: '^(Agent|Task|mcp__nanoclaw__schedule_task)$',
             hooks: [createRateLimitsHook(fs, !!containerInput.isTrusted)],
-          },
+          }
         ],
         // #117 — strip invisible-Unicode + cap byte size on every MCP
         // tool result. Matcher restricts to MCP because that's the

@@ -404,7 +404,7 @@ export function recordEvent(
  * pass-through.
  */
 export function classifyTool(toolName: string): RateKind | null {
-  if (toolName === 'Task') return 'agent_spawn';
+  if (toolName === 'Agent' || toolName === 'Task') return 'agent_spawn';
   if (toolName === 'mcp__nanoclaw__schedule_task') return 'schedule_task';
   return null;
 }
