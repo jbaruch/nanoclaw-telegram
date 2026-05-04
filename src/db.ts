@@ -11,9 +11,12 @@ import { ASSISTANT_NAME, DATA_DIR, GROUPS_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import {
   handleConstraintViolationOrRethrow,
+  hasMigratedSibling,
   isObjectRow,
   listGroupFoldersForMigration,
   migrationDateStamp,
+  type MigrationSummary,
+  newMigrationSummary,
   parseJsonObjectOrWarn,
   renameMigratedSource,
 } from './json-state-import.js';
@@ -2748,13 +2751,20 @@ function migrateJsonState(): void {
     }
   }
 
+  // Per-group migrations (#293 wave). Each returns a `MigrationSummary`
+  // (#433) so we can emit one startup-summary log line per migration —
+  // the operator's grep target for "did the data plane come up clean".
+  // The DATA_DIR migrations above (router_state / sessions /
+  // registered_groups) are NOT per-group and do not contribute summaries.
+  const summaries: MigrationSummary[] = [];
+
   // Migrate per-group orders-db.json files (#294). Unlike the helpers
   // above (DATA_DIR-rooted), this scans every `groups/<name>/` folder
   // for an `orders-db.json` because the file historically lived in the
   // admin group's working dir. Idempotent: a successful migration
   // renames the source to `orders-db.json.migrated-YYYY-MM-DD`, so a
   // re-run of `initDatabase` is a no-op once the file is gone.
-  migrateOrdersDbJsonFiles();
+  summaries.push(migrateOrdersDbJsonFiles());
 
   // Migrate per-group morning-brief-pending.json files (#299). Same
   // per-group-scan pattern as the orders import above: the source
@@ -2764,7 +2774,7 @@ function migrateJsonState(): void {
   // each successful per-file import renames the source to
   // `morning-brief-pending.json.migrated-YYYY-MM-DD`, so a re-run of
   // `initDatabase` is a no-op once the file is gone.
-  migrateMorningBriefPendingJsonFiles();
+  summaries.push(migrateMorningBriefPendingJsonFiles());
 
   // Migrate per-group calendar-state.json files (#300). Same
   // per-group-scan pattern: the source file historically lived under
@@ -2775,7 +2785,7 @@ function migrateJsonState(): void {
   // successful per-file import renames the source to
   // `calendar-state.json.migrated-YYYY-MM-DD`, so a re-run of
   // `initDatabase` is a no-op once the file is gone.
-  migrateCalendarStateJsonFiles();
+  summaries.push(migrateCalendarStateJsonFiles());
 
   // Migrate per-group heartbeat-state.json files into the
   // `phase_completions` table (#301). The state-009 schema landed in
@@ -2787,7 +2797,7 @@ function migrateJsonState(): void {
   // wins without resetting defaulted columns. Source renamed to
   // `heartbeat-state.json.migrated-YYYY-MM-DD` on success — re-run is
   // a no-op once the suffix is in place.
-  migrateHeartbeatStateJsonFiles();
+  summaries.push(migrateHeartbeatStateJsonFiles());
 
   // Migrate per-group task-tz-state.json files into the singleton
   // `tz_state` row + `follow_me_tasks` per-skill rows (#302). The
@@ -2796,32 +2806,66 @@ function migrateJsonState(): void {
   // never `INSERT OR REPLACE`, which would silently reset
   // `schema_version` (a column the writer's UPSERT doesn't name) on
   // every re-run.
-  migrateTaskTzStateJsonFiles();
+  summaries.push(migrateTaskTzStateJsonFiles());
 
   // Migrate per-group session-state.json files (the multi-writer
   // trusted-memory state) into trusted_sessions + trusted_session_singleton
   // (#298). The state-006 schema landed in PR #340; this pass populates
   // both tables from the JSON-era envelope. UPSERT semantics on both
   // tables — never INSERT OR REPLACE.
-  migrateTrustedSessionStateJsonFiles();
+  summaries.push(migrateTrustedSessionStateJsonFiles());
 
   // Migrate per-group nanoclaw-state.json files (the multi-key junk
   // drawer) into the three state-005 tables: email_state singleton,
   // email_seen_ids set, resumable_cycles per-skill rows (#297).
   // UPSERT throughout — never INSERT OR REPLACE.
-  migrateNanoclawStateJsonFiles();
+  summaries.push(migrateNanoclawStateJsonFiles());
 
   // Migrate per-group scheduled-reminders.json files into the
   // scheduled_reminders table created by state-004 (#296). Append-only
   // INSERT with ON CONFLICT(event_id) DO NOTHING.
-  migrateScheduledRemindersJsonFiles();
+  summaries.push(migrateScheduledRemindersJsonFiles());
 
   // Migrate per-group email-feedback.json files into the email_feedback
   // table created by state-002 (#295). Append-only INSERT (id is
   // AUTOINCREMENT; no natural-key dedup). Idempotency gated by source-
   // file rename. Accepts both wrapped {feedback:[...]} and bare-array
   // shapes per the issue body.
-  migrateEmailFeedbackJsonFiles();
+  summaries.push(migrateEmailFeedbackJsonFiles());
+
+  emitMigrationStartupSummary(summaries);
+}
+
+/**
+ * Emit one structured log line per per-group migration (#433) so
+ * operators have a single grep target — `JSON state migration summary`
+ * — for "did the data plane come up clean". INFO when the migration
+ * left no files behind for triage; WARN when at least one group folder
+ * still holds a source file (bad JSON, DB constraint violation, missing
+ * required envelope fields).
+ *
+ * The literal string `JSON state migration summary` is load-bearing —
+ * it's the operator's grep target. Don't rephrase it.
+ */
+function emitMigrationStartupSummary(summaries: MigrationSummary[]): void {
+  for (const s of summaries) {
+    const fields = {
+      migration: s.name,
+      migrated: s.migrated,
+      skipped_already_done: s.skippedAlreadyDone,
+      left_in_place_count: s.leftInPlace.length,
+      left_in_place_groups: s.leftInPlace,
+    };
+    let message = `JSON state migration summary: ${s.name} — migrated=${s.migrated} skipped-already-done=${s.skippedAlreadyDone} left-in-place=${s.leftInPlace.length}`;
+    if (s.leftInPlace.length > 0) {
+      message += ` (groups: ${s.leftInPlace.join(', ')})`;
+    }
+    if (s.leftInPlace.length === 0) {
+      logger.info(fields, message);
+    } else {
+      logger.warn(fields, message);
+    }
+  }
 }
 
 interface OrdersDbJsonRecord {
@@ -2876,8 +2920,9 @@ export function firstNonEmpty(
   return new Date().toISOString();
 }
 
-function migrateOrdersDbJsonFiles(): void {
-  if (!fs.existsSync(GROUPS_DIR)) return;
+function migrateOrdersDbJsonFiles(): MigrationSummary {
+  const summary = newMigrationSummary('orders-db');
+  if (!fs.existsSync(GROUPS_DIR)) return summary;
   let groupFolders: string[];
   try {
     groupFolders = fs
@@ -2895,7 +2940,7 @@ function migrateOrdersDbJsonFiles(): void {
       // versions.
       .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return summary;
     throw err;
   }
 
@@ -2928,7 +2973,10 @@ function migrateOrdersDbJsonFiles(): void {
 
   for (const folder of groupFolders) {
     const filePath = path.join(GROUPS_DIR, folder, 'orders-db.json');
-    if (!fs.existsSync(filePath)) continue;
+    if (!fs.existsSync(filePath)) {
+      if (hasMigratedSibling(filePath)) summary.skippedAlreadyDone += 1;
+      continue;
+    }
 
     let parsed: OrdersDbJsonShape;
     try {
@@ -2941,6 +2989,8 @@ function migrateOrdersDbJsonFiles(): void {
           { folder, errName: err.name },
           'orders-db.json migration: invalid JSON, skipping (file left in place)',
         );
+        if (!summary.leftInPlace.includes(folder))
+          summary.leftInPlace.push(folder);
         continue;
       }
       // TOCTOU race: the existsSync check above is best-effort, not
@@ -2963,6 +3013,8 @@ function migrateOrdersDbJsonFiles(): void {
         { folder },
         'orders-db.json migration: missing "orders" array, skipping',
       );
+      if (!summary.leftInPlace.includes(folder))
+        summary.leftInPlace.push(folder);
       continue;
     }
 
@@ -3062,6 +3114,10 @@ function migrateOrdersDbJsonFiles(): void {
         },
         'orders-db.json migration: imported; source already absent at rename time',
       );
+      // Data did land in SQL; count as migrated-this-boot from the
+      // operator's "did anything land" perspective (matches
+      // renameMigratedSource's success-counting semantics).
+      summary.migrated += 1;
       continue;
     }
     logger.info(
@@ -3073,7 +3129,9 @@ function migrateOrdersDbJsonFiles(): void {
       },
       'orders-db.json migration: imported and source renamed',
     );
+    summary.migrated += 1;
   }
+  return summary;
 }
 
 interface MorningBriefCleanupItemJson {
@@ -3104,8 +3162,9 @@ interface MorningBriefPendingJsonShape {
   undated_tasks?: MorningBriefUndatedTaskJson[];
 }
 
-function migrateMorningBriefPendingJsonFiles(): void {
-  if (!fs.existsSync(GROUPS_DIR)) return;
+function migrateMorningBriefPendingJsonFiles(): MigrationSummary {
+  const summary = newMigrationSummary('morning-brief-pending');
+  if (!fs.existsSync(GROUPS_DIR)) return summary;
   let groupFolders: string[];
   try {
     groupFolders = fs
@@ -3119,7 +3178,7 @@ function migrateMorningBriefPendingJsonFiles(): void {
       // plain code-point comparison is locale-free).
       .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return summary;
     throw err;
   }
 
@@ -3174,7 +3233,10 @@ function migrateMorningBriefPendingJsonFiles(): void {
       folder,
       'morning-brief-pending.json',
     );
-    if (!fs.existsSync(filePath)) continue;
+    if (!fs.existsSync(filePath)) {
+      if (hasMigratedSibling(filePath)) summary.skippedAlreadyDone += 1;
+      continue;
+    }
 
     let parsed: MorningBriefPendingJsonShape;
     try {
@@ -3187,6 +3249,8 @@ function migrateMorningBriefPendingJsonFiles(): void {
           { folder, errName: err.name },
           'morning-brief-pending.json migration: invalid JSON, skipping (file left in place)',
         );
+        if (!summary.leftInPlace.includes(folder))
+          summary.leftInPlace.push(folder);
         continue;
       }
       // TOCTOU race: existsSync above is best-effort; file may
@@ -3226,6 +3290,8 @@ function migrateMorningBriefPendingJsonFiles(): void {
         },
         'morning-brief-pending.json migration: payload is not an object, skipping (file left in place)',
       );
+      if (!summary.leftInPlace.includes(folder))
+        summary.leftInPlace.push(folder);
       continue;
     }
 
@@ -3241,6 +3307,8 @@ function migrateMorningBriefPendingJsonFiles(): void {
         { folder },
         'morning-brief-pending.json migration: no recognised arrays (cleanup_items / pending_decisions / undated_tasks), skipping',
       );
+      if (!summary.leftInPlace.includes(folder))
+        summary.leftInPlace.push(folder);
       continue;
     }
 
@@ -3364,6 +3432,8 @@ function migrateMorningBriefPendingJsonFiles(): void {
           { folder, errCode: err.code, err },
           'morning-brief-pending.json migration: row violated a DB constraint, rolling back and leaving source file in place for triage',
         );
+        if (!summary.leftInPlace.includes(folder))
+          summary.leftInPlace.push(folder);
         continue;
       }
       throw err;
@@ -3386,6 +3456,7 @@ function migrateMorningBriefPendingJsonFiles(): void {
         },
         'morning-brief-pending.json migration: imported; source already absent at rename time',
       );
+      summary.migrated += 1;
       continue;
     }
     logger.info(
@@ -3398,7 +3469,9 @@ function migrateMorningBriefPendingJsonFiles(): void {
       },
       'morning-brief-pending.json migration: imported and source renamed',
     );
+    summary.migrated += 1;
   }
+  return summary;
 }
 
 /**
@@ -3440,9 +3513,10 @@ function migrateMorningBriefPendingJsonFiles(): void {
  * file on top of a partial migration just re-converges on the
  * already-stored row.
  */
-function migrateCalendarStateJsonFiles(): void {
+function migrateCalendarStateJsonFiles(): MigrationSummary {
+  const summary = newMigrationSummary('calendar-state');
   const groupFolders = listGroupFoldersForMigration();
-  if (groupFolders.length === 0) return;
+  if (groupFolders.length === 0) return summary;
 
   const insertSnapshot = db.prepare(
     `INSERT INTO calendar_snapshots (date, fetched_at)
@@ -3460,7 +3534,10 @@ function migrateCalendarStateJsonFiles(): void {
 
   for (const folder of groupFolders) {
     const filePath = path.join(GROUPS_DIR, folder, 'calendar-state.json');
-    if (!fs.existsSync(filePath)) continue;
+    if (!fs.existsSync(filePath)) {
+      if (hasMigratedSibling(filePath)) summary.skippedAlreadyDone += 1;
+      continue;
+    }
 
     let raw: string;
     try {
@@ -3480,7 +3557,12 @@ function migrateCalendarStateJsonFiles(): void {
       throw err;
     }
 
-    const parsed = parseJsonObjectOrWarn(raw, folder, 'calendar-state.json');
+    const parsed = parseJsonObjectOrWarn(
+      raw,
+      folder,
+      'calendar-state.json',
+      summary,
+    );
     if (parsed === null) continue;
 
     const date = parsed.date;
@@ -3494,6 +3576,8 @@ function migrateCalendarStateJsonFiles(): void {
         { folder },
         'calendar-state.json migration: missing or non-string date / fetched_at, skipping (file left in place)',
       );
+      if (!summary.leftInPlace.includes(folder))
+        summary.leftInPlace.push(folder);
       continue;
     }
     // Distinguish "missing" (key absent or undefined) from
@@ -3517,6 +3601,8 @@ function migrateCalendarStateJsonFiles(): void {
         },
         'calendar-state.json migration: events is not an array, skipping (file left in place)',
       );
+      if (!summary.leftInPlace.includes(folder))
+        summary.leftInPlace.push(folder);
       continue;
     }
 
@@ -3565,7 +3651,12 @@ function migrateCalendarStateJsonFiles(): void {
       // transaction has already rolled back on throw, so no partial
       // rows landed.
       if (
-        handleConstraintViolationOrRethrow(err, folder, 'calendar-state.json')
+        handleConstraintViolationOrRethrow(
+          err,
+          folder,
+          'calendar-state.json',
+          summary,
+        )
       )
         continue;
     }
@@ -3576,8 +3667,10 @@ function migrateCalendarStateJsonFiles(): void {
       folder,
       'calendar-state.json',
       counts,
+      summary,
     );
   }
+  return summary;
 }
 
 /**
@@ -3601,9 +3694,10 @@ interface HeartbeatStateJsonShape {
   last_composio_check?: unknown;
 }
 
-function migrateHeartbeatStateJsonFiles(): void {
+function migrateHeartbeatStateJsonFiles(): MigrationSummary {
+  const summary = newMigrationSummary('heartbeat-state');
   const groupFolders = listGroupFoldersForMigration();
-  if (groupFolders.length === 0) return;
+  if (groupFolders.length === 0) return summary;
 
   // UPSERT keyed on `phase` (PK) — see the state-009 doc-header for
   // the full rationale. Crucially NOT `INSERT OR REPLACE`: the latter
@@ -3633,7 +3727,10 @@ function migrateHeartbeatStateJsonFiles(): void {
 
   for (const folder of groupFolders) {
     const filePath = path.join(GROUPS_DIR, folder, 'heartbeat-state.json');
-    if (!fs.existsSync(filePath)) continue;
+    if (!fs.existsSync(filePath)) {
+      if (hasMigratedSibling(filePath)) summary.skippedAlreadyDone += 1;
+      continue;
+    }
 
     let raw: string;
     try {
@@ -3653,7 +3750,7 @@ function migrateHeartbeatStateJsonFiles(): void {
       throw err;
     }
 
-    const parsed = parseJsonObjectOrWarn(raw, folder, fileLabel);
+    const parsed = parseJsonObjectOrWarn(raw, folder, fileLabel, summary);
     if (parsed === null) continue;
 
     // Phase-row plan. The shape is deliberately a small array so the
@@ -3712,12 +3809,13 @@ function migrateHeartbeatStateJsonFiles(): void {
     } catch (err) {
       // The helper either returns true (caller continues) or rethrows;
       // there's no third path. Match the calendar-state pattern.
-      handleConstraintViolationOrRethrow(err, folder, fileLabel);
+      handleConstraintViolationOrRethrow(err, folder, fileLabel, summary);
       continue;
     }
 
-    renameMigratedSource(filePath, stamp, folder, fileLabel, counts);
+    renameMigratedSource(filePath, stamp, folder, fileLabel, counts, summary);
   }
+  return summary;
 }
 
 interface TaskTzStateFollowMeTaskJson {
@@ -3877,9 +3975,10 @@ function resolveFollowMeTaskShape(
  *
  * Idempotent via the standard `.migrated-YYYY-MM-DD` rename.
  */
-function migrateTaskTzStateJsonFiles(): void {
+function migrateTaskTzStateJsonFiles(): MigrationSummary {
+  const summary = newMigrationSummary('task-tz-state');
   const groupFolders = listGroupFoldersForMigration();
-  if (groupFolders.length === 0) return;
+  if (groupFolders.length === 0) return summary;
 
   // tz_state UPSERT: column list deliberately excludes
   // `schema_version` so the schema's `DEFAULT 1` fires on insert and
@@ -3924,7 +4023,10 @@ function migrateTaskTzStateJsonFiles(): void {
 
   for (const folder of groupFolders) {
     const filePath = path.join(GROUPS_DIR, folder, 'task-tz-state.json');
-    if (!fs.existsSync(filePath)) continue;
+    if (!fs.existsSync(filePath)) {
+      if (hasMigratedSibling(filePath)) summary.skippedAlreadyDone += 1;
+      continue;
+    }
 
     let raw: string;
     try {
@@ -3948,6 +4050,7 @@ function migrateTaskTzStateJsonFiles(): void {
       raw,
       folder,
       TASK_TZ_STATE_FILE_LABEL,
+      summary,
     ) as TaskTzStateJsonShape | null;
     if (parsed === null) continue;
 
@@ -3973,6 +4076,8 @@ function migrateTaskTzStateJsonFiles(): void {
         },
         `${TASK_TZ_STATE_FILE_LABEL} migration: missing or empty current_tz / home_tz, skipping (file left in place)`,
       );
+      if (!summary.leftInPlace.includes(folder))
+        summary.leftInPlace.push(folder);
       continue;
     }
 
@@ -4007,6 +4112,8 @@ function migrateTaskTzStateJsonFiles(): void {
         },
         `${TASK_TZ_STATE_FILE_LABEL} migration: follow_me_tasks is not an array, skipping (file left in place)`,
       );
+      if (!summary.leftInPlace.includes(folder))
+        summary.leftInPlace.push(folder);
       continue;
     }
 
@@ -4116,19 +4223,28 @@ function migrateTaskTzStateJsonFiles(): void {
           err,
           folder,
           TASK_TZ_STATE_FILE_LABEL,
+          summary,
         )
       )
         continue;
     }
 
-    renameMigratedSource(filePath, stamp, folder, TASK_TZ_STATE_FILE_LABEL, {
-      tz_state_inserted: counts.tz_state_inserted,
-      tz_state_refreshed: counts.tz_state_refreshed,
-      follow_me_upserted: counts.follow_me_upserted,
-      skipped: counts.skipped,
-      total: followMeTasks.length,
-    });
+    renameMigratedSource(
+      filePath,
+      stamp,
+      folder,
+      TASK_TZ_STATE_FILE_LABEL,
+      {
+        tz_state_inserted: counts.tz_state_inserted,
+        tz_state_refreshed: counts.tz_state_refreshed,
+        follow_me_upserted: counts.follow_me_upserted,
+        skipped: counts.skipped,
+        total: followMeTasks.length,
+      },
+      summary,
+    );
   }
+  return summary;
 }
 
 /**
@@ -4169,7 +4285,8 @@ function migrateTaskTzStateJsonFiles(): void {
  * here so a structured object/array on disk round-trips through the
  * column without losing shape.
  */
-function migrateTrustedSessionStateJsonFiles(): void {
+function migrateTrustedSessionStateJsonFiles(): MigrationSummary {
+  const summary = newMigrationSummary('session-state');
   const groupFolders = listGroupFoldersForMigration();
 
   // UPSERT, not INSERT OR REPLACE: REPLACE deletes the conflicting
@@ -4210,7 +4327,10 @@ function migrateTrustedSessionStateJsonFiles(): void {
 
   for (const folder of groupFolders) {
     const filePath = path.join(GROUPS_DIR, folder, 'session-state.json');
-    if (!fs.existsSync(filePath)) continue;
+    if (!fs.existsSync(filePath)) {
+      if (hasMigratedSibling(filePath)) summary.skippedAlreadyDone += 1;
+      continue;
+    }
 
     let raw: string;
     try {
@@ -4230,7 +4350,7 @@ function migrateTrustedSessionStateJsonFiles(): void {
       throw err;
     }
 
-    const parsed = parseJsonObjectOrWarn(raw, folder, fileLabel);
+    const parsed = parseJsonObjectOrWarn(raw, folder, fileLabel, summary);
     if (!parsed) continue;
 
     const sessionsField = parsed.sessions;
@@ -4248,6 +4368,8 @@ function migrateTrustedSessionStateJsonFiles(): void {
         { folder },
         `${fileLabel} migration: no recognised fields (sessions / active_session_id / pending_response / muted_threads), skipping`,
       );
+      if (!summary.leftInPlace.includes(folder))
+        summary.leftInPlace.push(folder);
       continue;
     }
 
@@ -4333,14 +4455,23 @@ function migrateTrustedSessionStateJsonFiles(): void {
       });
       importFile();
     } catch (err) {
-      if (handleConstraintViolationOrRethrow(err, folder, fileLabel)) continue;
+      if (handleConstraintViolationOrRethrow(err, folder, fileLabel, summary))
+        continue;
     }
 
-    renameMigratedSource(filePath, stamp, folder, fileLabel, {
-      sessions: sessionCounts,
-      singleton: singletonUpserted,
-    });
+    renameMigratedSource(
+      filePath,
+      stamp,
+      folder,
+      fileLabel,
+      {
+        sessions: sessionCounts,
+        singleton: singletonUpserted,
+      },
+      summary,
+    );
   }
+  return summary;
 }
 
 interface NanoclawStateResumableCycleJson {
@@ -4406,7 +4537,8 @@ interface NanoclawStateJsonShape {
  * the wider epic. See state-005 doc-header for the rationale on UPSERT
  * vs INSERT OR REPLACE and on the `strftime` defaults.
  */
-function migrateNanoclawStateJsonFiles(): void {
+function migrateNanoclawStateJsonFiles(): MigrationSummary {
+  const summary = newMigrationSummary('nanoclaw-state');
   const groupFolders = listGroupFoldersForMigration();
   const stamp = migrationDateStamp();
 
@@ -4487,7 +4619,10 @@ function migrateNanoclawStateJsonFiles(): void {
 
   for (const folder of groupFolders) {
     const filePath = path.join(GROUPS_DIR, folder, 'nanoclaw-state.json');
-    if (!fs.existsSync(filePath)) continue;
+    if (!fs.existsSync(filePath)) {
+      if (hasMigratedSibling(filePath)) summary.skippedAlreadyDone += 1;
+      continue;
+    }
 
     let raw: string;
     try {
@@ -4510,6 +4645,7 @@ function migrateNanoclawStateJsonFiles(): void {
       raw,
       folder,
       'nanoclaw-state.json',
+      summary,
     ) as NanoclawStateJsonShape | null;
     if (parsed === null) continue;
 
@@ -4564,6 +4700,8 @@ function migrateNanoclawStateJsonFiles(): void {
         { folder },
         'nanoclaw-state.json migration: no recognised sections, skipping (file left in place)',
       );
+      if (!summary.leftInPlace.includes(folder))
+        summary.leftInPlace.push(folder);
       continue;
     }
 
@@ -4689,7 +4827,12 @@ function migrateNanoclawStateJsonFiles(): void {
       // else (TypeError, ReferenceError, non-constraint SqliteError)
       // propagates per `coding-policy: error-handling`.
       if (
-        handleConstraintViolationOrRethrow(err, folder, 'nanoclaw-state.json')
+        handleConstraintViolationOrRethrow(
+          err,
+          folder,
+          'nanoclaw-state.json',
+          summary,
+        )
       ) {
         continue;
       }
@@ -4701,8 +4844,10 @@ function migrateNanoclawStateJsonFiles(): void {
       folder,
       'nanoclaw-state.json',
       counts,
+      summary,
     );
   }
+  return summary;
 }
 
 interface ScheduledReminderJson {
@@ -4732,7 +4877,8 @@ interface ScheduledReminderJson {
  * helper. Per-file work is wrapped in a single transaction so a
  * mid-import crash can't leave the table half-populated.
  */
-function migrateScheduledRemindersJsonFiles(): void {
+function migrateScheduledRemindersJsonFiles(): MigrationSummary {
+  const summary = newMigrationSummary('scheduled-reminders');
   const groupFolders = listGroupFoldersForMigration();
 
   const insertReminder = db.prepare(
@@ -4747,7 +4893,10 @@ function migrateScheduledRemindersJsonFiles(): void {
 
   for (const folder of groupFolders) {
     const filePath = path.join(GROUPS_DIR, folder, 'scheduled-reminders.json');
-    if (!fs.existsSync(filePath)) continue;
+    if (!fs.existsSync(filePath)) {
+      if (hasMigratedSibling(filePath)) summary.skippedAlreadyDone += 1;
+      continue;
+    }
 
     let raw: string;
     try {
@@ -4790,7 +4939,7 @@ function migrateScheduledRemindersJsonFiles(): void {
         // log shape stays consistent across all per-group migrations.
         // Helper detects SyntaxError, emits the standard warn, returns
         // null; skip the folder.
-        parseJsonObjectOrWarn(raw, folder, fileLabel);
+        parseJsonObjectOrWarn(raw, folder, fileLabel, summary);
         continue;
       }
       // `JSON.parse` only throws SyntaxError on string input;
@@ -4815,12 +4964,14 @@ function migrateScheduledRemindersJsonFiles(): void {
         { folder },
         `${fileLabel} migration: missing "reminders" array, skipping (file left in place)`,
       );
+      if (!summary.leftInPlace.includes(folder))
+        summary.leftInPlace.push(folder);
       continue;
     } else {
       // Primitive payload (null / number / string / boolean). Use the
       // helper so the warn carries the same `parsedType` field shape as
       // every other per-group migration.
-      parseJsonObjectOrWarn(raw, folder, fileLabel);
+      parseJsonObjectOrWarn(raw, folder, fileLabel, summary);
       continue;
     }
 
@@ -4854,15 +5005,24 @@ function migrateScheduledRemindersJsonFiles(): void {
       });
       importFile();
     } catch (err) {
-      if (handleConstraintViolationOrRethrow(err, folder, fileLabel)) continue;
+      if (handleConstraintViolationOrRethrow(err, folder, fileLabel, summary))
+        continue;
     }
 
-    renameMigratedSource(filePath, stamp, folder, fileLabel, {
-      inserted: counts.inserted,
-      skipped: counts.skipped,
-      total: counts.total,
-    });
+    renameMigratedSource(
+      filePath,
+      stamp,
+      folder,
+      fileLabel,
+      {
+        inserted: counts.inserted,
+        skipped: counts.skipped,
+        total: counts.total,
+      },
+      summary,
+    );
   }
+  return summary;
 }
 
 // --- email-feedback.json → email_feedback (#295) ---
@@ -4918,9 +5078,10 @@ function migrateScheduledRemindersJsonFiles(): void {
  * always omit the column from the INSERT and let the default fire —
  * no per-row stamping needed at migration time.
  */
-function migrateEmailFeedbackJsonFiles(): void {
+function migrateEmailFeedbackJsonFiles(): MigrationSummary {
+  const summary = newMigrationSummary('email-feedback');
   const groupFolders = listGroupFoldersForMigration();
-  if (groupFolders.length === 0) return;
+  if (groupFolders.length === 0) return summary;
 
   // Two prepared statements: one with `source`, one without, so the
   // schema default fires when the JSON-era row omitted the field.
@@ -4939,7 +5100,10 @@ function migrateEmailFeedbackJsonFiles(): void {
 
   for (const folder of groupFolders) {
     const filePath = path.join(GROUPS_DIR, folder, 'email-feedback.json');
-    if (!fs.existsSync(filePath)) continue;
+    if (!fs.existsSync(filePath)) {
+      if (hasMigratedSibling(filePath)) summary.skippedAlreadyDone += 1;
+      continue;
+    }
 
     let raw: string;
     try {
@@ -4972,6 +5136,8 @@ function migrateEmailFeedbackJsonFiles(): void {
           { folder, errName: err.name },
           'email-feedback.json migration: invalid JSON, skipping (file left in place)',
         );
+        if (!summary.leftInPlace.includes(folder))
+          summary.leftInPlace.push(folder);
         continue;
       }
       throw err;
@@ -4987,6 +5153,8 @@ function migrateEmailFeedbackJsonFiles(): void {
           { folder },
           'email-feedback.json migration: payload is an object but `feedback` is not an array, skipping (file left in place)',
         );
+        if (!summary.leftInPlace.includes(folder))
+          summary.leftInPlace.push(folder);
         continue;
       }
       feedback = wrapper.feedback;
@@ -4998,6 +5166,8 @@ function migrateEmailFeedbackJsonFiles(): void {
         },
         'email-feedback.json migration: payload is not an object or array, skipping (file left in place)',
       );
+      if (!summary.leftInPlace.includes(folder))
+        summary.leftInPlace.push(folder);
       continue;
     }
 
@@ -5057,7 +5227,12 @@ function migrateEmailFeedbackJsonFiles(): void {
       // stays put for triage. Anything else (programming bug,
       // SQLITE_CORRUPT, SQLITE_BUSY) propagates via the helper.
       if (
-        handleConstraintViolationOrRethrow(err, folder, 'email-feedback.json')
+        handleConstraintViolationOrRethrow(
+          err,
+          folder,
+          'email-feedback.json',
+          summary,
+        )
       ) {
         continue;
       }
@@ -5069,6 +5244,8 @@ function migrateEmailFeedbackJsonFiles(): void {
       folder,
       'email-feedback.json',
       counts,
+      summary,
     );
   }
+  return summary;
 }

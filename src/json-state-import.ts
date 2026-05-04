@@ -1,9 +1,94 @@
 import fs from 'fs';
+import path from 'path';
 import { SqliteError } from 'better-sqlite3';
 
 import { GROUPS_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+
+/**
+ * Per-migration counter object threaded through the shared helpers
+ * (#433). Each per-group / per-file migration constructs one of these
+ * at entry, passes it to `parseJsonObjectOrWarn` /
+ * `handleConstraintViolationOrRethrow` / `renameMigratedSource`, and
+ * returns it. `migrateJsonState()` collects the array of summaries and
+ * emits one startup-summary log line per migration so the operator
+ * has a single grep target for "did the data plane come up clean".
+ *
+ * - `migrated` is incremented by `renameMigratedSource` on the success
+ *   path (including the ENOENT-at-rename idempotent-no-op case where
+ *   the data did land but the file was already gone).
+ * - `leftInPlace` is a deduped list of group folders where the file
+ *   was present but the migration skipped it, leaving the source on
+ *   disk un-renamed so the next boot will retry. The skip can be from
+ *   `parseJsonObjectOrWarn` returning null (bad JSON shape), from
+ *   `handleConstraintViolationOrRethrow` swallowing a DB constraint
+ *   violation, OR from any inline guard in a migration that detects a
+ *   missing required envelope field / unexpected sub-shape and
+ *   bumps the counter directly. **This is the load-bearing signal
+ *   #433 surfaces** — the case in #431 sat live for ~3 days because
+ *   the only signal was the absence of a `.migrated-*` rename.
+ * - `skippedAlreadyDone` is the count of group folders where the
+ *   source file is gone but a `.migrated-*` sibling exists (counted
+ *   via `hasMigratedSibling`). Lets the operator answer "is this
+ *   migration done across the fleet" from one log line.
+ */
+export interface MigrationSummary {
+  name: string;
+  migrated: number;
+  leftInPlace: string[];
+  skippedAlreadyDone: number;
+}
+
+export function newMigrationSummary(name: string): MigrationSummary {
+  return { name, migrated: 0, leftInPlace: [], skippedAlreadyDone: 0 };
+}
+
+function recordLeftInPlace(
+  summary: MigrationSummary | undefined,
+  folder: string,
+): void {
+  if (!summary) return;
+  // Dedup: parseJsonObjectOrWarn and handleConstraintViolationOrRethrow
+  // don't both fire for the same file in current call patterns (parse
+  // runs before any DB op), but a future migration that calls both
+  // around different rows in one folder shouldn't double-count.
+  if (!summary.leftInPlace.includes(folder)) summary.leftInPlace.push(folder);
+}
+
+/**
+ * True if `<filePath>.migrated-*` exists in the parent directory of
+ * `filePath`. Lets the per-group migrations count "already done" runs
+ * without re-importing data.
+ *
+ * Catches only the specific filesystem errnos that legitimately mean
+ * "this folder isn't accessible from here" (parent gone, permission
+ * denied, not a directory) and treats them as "no sibling" — the
+ * skipped-already-done count is informational and shouldn't crash
+ * the migration on a permission edge case. Any other errno is a
+ * programming bug or environment problem the operator must see, so
+ * propagate per `coding-policy: error-handling.Specific Exceptions`.
+ */
+const MIGRATED_SIBLING_RECOVERABLE_CODES = new Set([
+  'ENOENT',
+  'ENOTDIR',
+  'EACCES',
+  'EPERM',
+]);
+
+export function hasMigratedSibling(filePath: string): boolean {
+  const dir = path.dirname(filePath);
+  const base = path.basename(filePath);
+  try {
+    return fs
+      .readdirSync(dir)
+      .some((name) => name.startsWith(`${base}.migrated-`));
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code && MIGRATED_SIBLING_RECOVERABLE_CODES.has(code)) return false;
+    throw err;
+  }
+}
 
 // Shared helpers for per-group JSON-state-import migrations (epic #293).
 //
@@ -72,6 +157,7 @@ export function parseJsonObjectOrWarn(
   raw: string,
   folder: string,
   fileLabel: string,
+  summary?: MigrationSummary,
 ): Record<string, unknown> | null {
   let parsed: unknown;
   try {
@@ -82,6 +168,7 @@ export function parseJsonObjectOrWarn(
         { folder, errName: err.name },
         `${fileLabel} migration: invalid JSON, skipping (file left in place)`,
       );
+      recordLeftInPlace(summary, folder);
       return null;
     }
     // JSON.parse on a string only throws SyntaxError; anything else is
@@ -102,6 +189,7 @@ export function parseJsonObjectOrWarn(
       },
       `${fileLabel} migration: payload is not an object, skipping (file left in place)`,
     );
+    recordLeftInPlace(summary, folder);
     return null;
   }
   return parsed as Record<string, unknown>;
@@ -129,6 +217,7 @@ export function handleConstraintViolationOrRethrow(
   err: unknown,
   folder: string,
   fileLabel: string,
+  summary?: MigrationSummary,
 ): true {
   if (
     err instanceof SqliteError &&
@@ -139,6 +228,7 @@ export function handleConstraintViolationOrRethrow(
       { folder, errCode: err.code, err },
       `${fileLabel} migration: row violated a DB constraint, rolling back and leaving source file in place for triage`,
     );
+    recordLeftInPlace(summary, folder);
     return true;
   }
   throw err;
@@ -201,6 +291,7 @@ export function renameMigratedSource(
   folder: string,
   fileLabel: string,
   importLogContext: Record<string, unknown> = {},
+  summary?: MigrationSummary,
 ): void {
   const renamedTo = `${filePath}.migrated-${dateStamp}`;
   try {
@@ -215,12 +306,17 @@ export function renameMigratedSource(
       { ...importLogContext, folder },
       `${fileLabel} migration: imported; source already absent at rename time`,
     );
+    // Even though no rename happened on disk, the data did land in
+    // SQL — count this as a successful migrated-this-boot from the
+    // operator's "did anything land" perspective.
+    if (summary) summary.migrated += 1;
     return;
   }
   logger.info(
     { ...importLogContext, folder, renamed_to: renamedTo },
     `${fileLabel} migration: imported and source renamed`,
   );
+  if (summary) summary.migrated += 1;
 }
 
 /**

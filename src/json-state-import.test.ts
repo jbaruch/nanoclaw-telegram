@@ -497,3 +497,148 @@ describe('migrationDateStamp', () => {
     expect(stamp).toBe(expected);
   });
 });
+
+describe('hasMigratedSibling (#433)', () => {
+  it('returns true when a `<file>.migrated-YYYY-MM-DD` sibling exists', async () => {
+    const { hasMigratedSibling } = await import('./json-state-import.js');
+    await runWithTempDir(async (tempDir) => {
+      const dir = path.join(tempDir, 'group');
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'state.json.migrated-2026-04-30'), '{}');
+      expect(hasMigratedSibling(path.join(dir, 'state.json'))).toBe(true);
+    });
+  });
+
+  it('returns false when only the live source file exists', async () => {
+    const { hasMigratedSibling } = await import('./json-state-import.js');
+    await runWithTempDir(async (tempDir) => {
+      const dir = path.join(tempDir, 'group');
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'state.json'), '{}');
+      expect(hasMigratedSibling(path.join(dir, 'state.json'))).toBe(false);
+    });
+  });
+
+  it('returns false when the parent directory does not exist', async () => {
+    const { hasMigratedSibling } = await import('./json-state-import.js');
+    await runWithTempDir(async (tempDir) => {
+      expect(
+        hasMigratedSibling(path.join(tempDir, 'no-such-dir', 'state.json')),
+      ).toBe(false);
+    });
+  });
+
+  it('does not match unrelated files that share a prefix', async () => {
+    // `state.json` should NOT match `state.json.migrated-...` siblings of
+    // a sibling file `state-other.json` — the prefix check is anchored
+    // against the exact base name.
+    const { hasMigratedSibling } = await import('./json-state-import.js');
+    await runWithTempDir(async (tempDir) => {
+      const dir = path.join(tempDir, 'group');
+      fs.mkdirSync(dir);
+      fs.writeFileSync(
+        path.join(dir, 'state-other.json.migrated-2026-04-30'),
+        '{}',
+      );
+      expect(hasMigratedSibling(path.join(dir, 'state.json'))).toBe(false);
+    });
+  });
+});
+
+describe('newMigrationSummary + counter threading (#433)', () => {
+  it('newMigrationSummary returns zeroed counters with the given name', async () => {
+    const { newMigrationSummary } = await import('./json-state-import.js');
+    const s = newMigrationSummary('orders-db');
+    expect(s.name).toBe('orders-db');
+    expect(s.migrated).toBe(0);
+    expect(s.skippedAlreadyDone).toBe(0);
+    expect(s.leftInPlace).toEqual([]);
+  });
+
+  it('parseJsonObjectOrWarn pushes folder to leftInPlace on bad shape', async () => {
+    const { parseJsonObjectOrWarn, newMigrationSummary } =
+      await import('./json-state-import.js');
+    const s = newMigrationSummary('test');
+    parseJsonObjectOrWarn('null', 'group_a', 'state.json', s);
+    parseJsonObjectOrWarn('not json', 'group_b', 'state.json', s);
+    expect(s.leftInPlace).toEqual(['group_a', 'group_b']);
+    expect(s.migrated).toBe(0);
+  });
+
+  it('parseJsonObjectOrWarn dedups the same folder across calls', async () => {
+    // Defensive against future migrations that pump multiple records
+    // through the helper for one folder.
+    const { parseJsonObjectOrWarn, newMigrationSummary } =
+      await import('./json-state-import.js');
+    const s = newMigrationSummary('test');
+    parseJsonObjectOrWarn('null', 'group_a', 'state.json', s);
+    parseJsonObjectOrWarn('null', 'group_a', 'state.json', s);
+    expect(s.leftInPlace).toEqual(['group_a']);
+  });
+
+  it('parseJsonObjectOrWarn does not bump anything on success', async () => {
+    const { parseJsonObjectOrWarn, newMigrationSummary } =
+      await import('./json-state-import.js');
+    const s = newMigrationSummary('test');
+    parseJsonObjectOrWarn(JSON.stringify({ a: 1 }), 'group_a', 'state.json', s);
+    expect(s.leftInPlace).toEqual([]);
+    expect(s.migrated).toBe(0);
+  });
+
+  it('handleConstraintViolationOrRethrow pushes folder to leftInPlace', async () => {
+    const { handleConstraintViolationOrRethrow, newMigrationSummary } =
+      await import('./json-state-import.js');
+    const err = captureSqliteError(
+      (db) => db.exec('CREATE TABLE t (id TEXT NOT NULL)'),
+      (db) => db.prepare('INSERT INTO t VALUES (NULL)').run(),
+    );
+    const s = newMigrationSummary('test');
+    expect(
+      handleConstraintViolationOrRethrow(err, 'group_x', 'state.json', s),
+    ).toBe(true);
+    expect(s.leftInPlace).toEqual(['group_x']);
+  });
+
+  it('renameMigratedSource increments migrated on the rename success path', async () => {
+    const { renameMigratedSource, newMigrationSummary } =
+      await import('./json-state-import.js');
+    await runWithTempDir(async (tempDir) => {
+      const dir = path.join(tempDir, 'group_a');
+      fs.mkdirSync(dir);
+      const src = path.join(dir, 'state.json');
+      fs.writeFileSync(src, '{}');
+      const s = newMigrationSummary('test');
+      renameMigratedSource(src, '2026-05-04', 'group_a', 'state.json', {}, s);
+      expect(s.migrated).toBe(1);
+      expect(fs.existsSync(`${src}.migrated-2026-05-04`)).toBe(true);
+    });
+  });
+
+  it('renameMigratedSource increments migrated on ENOENT idempotent-no-op', async () => {
+    // The data already landed in SQL; the file just vanished between
+    // import and rename — count it as a successful migrated-this-boot.
+    const { renameMigratedSource, newMigrationSummary } =
+      await import('./json-state-import.js');
+    await runWithTempDir(async (tempDir) => {
+      const s = newMigrationSummary('test');
+      renameMigratedSource(
+        path.join(tempDir, 'no-such-file.json'),
+        '2026-05-04',
+        'group_a',
+        'state.json',
+        {},
+        s,
+      );
+      expect(s.migrated).toBe(1);
+    });
+  });
+
+  it('helpers are no-ops on summary when summary is undefined', async () => {
+    // Backward compat: callers that haven't been updated to thread a
+    // summary through must still work.
+    const { parseJsonObjectOrWarn } = await import('./json-state-import.js');
+    expect(() =>
+      parseJsonObjectOrWarn('null', 'group_a', 'state.json'),
+    ).not.toThrow();
+  });
+});
