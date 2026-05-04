@@ -58,7 +58,18 @@ export function emitSessionTokens(
   ctx: SessionTokensContext,
 ): ThresholdState | null {
   if (!usage) return null;
-  const state = classifyUsage(usage.input_tokens, ctx.thresholds);
+  // Anthropic prompt caching reports `input_tokens` as just the delta
+  // (new tokens this turn) — what the model actually saw is
+  // `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`.
+  // Classifying on the delta alone left every cache-heavy turn pinned at
+  // `below_warn` even when real context sat at 76% of the window (#498
+  // production evidence: 3,517 events, all below_warn, while cache_read
+  // peaked at 761K against a 1M window).
+  const turnContextSize =
+    usage.input_tokens +
+    (usage.cache_read_input_tokens ?? 0) +
+    (usage.cache_creation_input_tokens ?? 0);
+  const state = classifyUsage(turnContextSize, ctx.thresholds);
   const logFields = {
     group: ctx.group,
     session: ctx.session,
@@ -66,8 +77,9 @@ export function emitSessionTokens(
     output_tokens: usage.output_tokens,
     cache_read: usage.cache_read_input_tokens,
     cache_creation: usage.cache_creation_input_tokens,
+    turn_context_size: turnContextSize,
     percent: Number(
-      ((usage.input_tokens / ctx.thresholds.contextWindow) * 100).toFixed(1),
+      ((turnContextSize / ctx.thresholds.contextWindow) * 100).toFixed(1),
     ),
     threshold_state: state,
     threshold_warn: ctx.thresholds.warn,

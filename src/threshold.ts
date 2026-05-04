@@ -62,10 +62,12 @@ export type ThresholdState = 'below_warn' | 'warn' | 'nuke';
 /**
  * Classify a token-usage value against the warn/nuke thresholds.
  *
- * Caller invariant: `usedTokens` is the most recent assistant
- * response's `input_tokens` field — that's what the SDK reports as
- * "tokens the model saw on this turn," which matches "current
- * context size" semantics.
+ * Caller invariant: `usedTokens` is the per-turn context size —
+ * `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`
+ * from the SDK `usage` payload. The bare `input_tokens` field is only
+ * the delta added on this turn under prompt caching, so passing it
+ * alone underreports context by 2–3 orders of magnitude on
+ * cache-heavy turns (see #498).
  *
  * Returned state tells the orchestrator how to act (when
  * ENABLE_THRESHOLD_NUKE is on) or just what to label the log entry

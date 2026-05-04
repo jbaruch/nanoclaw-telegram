@@ -40,7 +40,11 @@ export interface CheckpointInputs {
    *  Facts section so the operator can correlate "checkpoint fired
    *  at usage X" to "thresholds were Y/Z". */
   thresholds: Thresholds;
-  /** Most-recent assistant input_tokens count at threshold-cross. */
+  /** Per-turn context size at threshold-cross — sum of
+   *  `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`
+   *  from the SDK `usage` payload. The bare `input_tokens` field is
+   *  only the delta and underreports cache-heavy turns by 2–3 orders
+   *  of magnitude (see #498). */
   usedTokens: number;
   /** Group name for log lines. */
   groupName: string;

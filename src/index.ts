@@ -1870,7 +1870,16 @@ async function runAgent(
         // drives the inbound-only kill-auto-compaction handshake
         // below — scheduled-task fires don't trigger that path.
         if (output.usage) {
-          lastUsedTokens = output.usage.input_tokens;
+          // Per-turn context size — sum of input_tokens delta plus
+          // cached portions. Used for the checkpoint "Tokens used at
+          // trigger" diagnostic and `threshold_nuke_fired`/
+          // `threshold_nuke_inert` log lines, so a cache-heavy nuke
+          // doesn't render "2 / 1,000,000" when real context was 750K
+          // (#498).
+          lastUsedTokens =
+            output.usage.input_tokens +
+            (output.usage.cache_read_input_tokens ?? 0) +
+            (output.usage.cache_creation_input_tokens ?? 0);
           const state = emitSessionTokens(output.usage, {
             group: group.name,
             session: sessions[group.folder]?.[DEFAULT_SESSION_NAME],
