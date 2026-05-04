@@ -285,18 +285,81 @@ export function startCredentialProxy(
               return;
             }
 
-            // Tee: pipe the upstream stream into the client response
-            // (Node handles backpressure: a slow client pauses upRes
-            // automatically, no unbounded buffering on res.write) AND
-            // attach a non-writing `data` listener that only collects
-            // for usage parsing. If the capture buffer exceeds the
-            // cap we drop further captures and skip parsing — the
-            // pipe to the client is unaffected.
-            upRes.pipe(res);
+            // Tee: forward chunks to the client AND collect them for
+            // usage parsing. We attach the data/end listeners directly
+            // on `upRes` (instead of `upRes.pipe(res)` + a separate
+            // capture-only data listener) because the pipe-then-attach
+            // shape silently dropped capture in production: 37 of 37
+            // /v1/messages requests through the post-#487 deploy
+            // tripped sub-#3's silent-zero guard. The exact failure
+            // mode (listener-attach race vs. pipe consuming chunks
+            // before the late listener subscribed) wasn't pinpointed,
+            // but reverting to the explicit-tee shape from
+            // ligolnik#125 — augmented with explicit pause/resume
+            // for backpressure — restores capture and addresses the
+            // OpenAI reviewer's original concern about pipe's
+            // implicit backpressure being lost. `res.write()` returns
+            // false when its buffer is full; we pause `upRes` and
+            // resume on the client's `drain` event. This is the
+            // mechanism `pipe` uses internally; doing it explicitly
+            // keeps the data listener on the same flow.
             const captured: Buffer[] = [];
             let captureSize = 0;
             let capped = false;
+            // Backpressure: track whether upRes was paused so resume
+            // only fires once per drain. Using a closure flag rather
+            // than upRes.isPaused() because the latter is also true
+            // briefly after construction.
+            let upPaused = false;
+            const resumeUpstream = () => {
+              if (upPaused) {
+                upPaused = false;
+                upRes.resume();
+              }
+            };
+            // Client-disconnect handler: if the client aborts mid-stream,
+            // tear down the upstream so we don't keep consuming data,
+            // and drop our listeners so subsequent res.write/end calls
+            // can't crash on a destroyed socket.
+            const onClientClose = () => {
+              if (!upRes.destroyed) upRes.destroy();
+              res.removeListener('drain', resumeUpstream);
+            };
+            res.on('drain', resumeUpstream);
+            res.on('close', onClientClose);
+            // Helper: guard res.write so an already-ended/destroyed
+            // client can't crash the proxy. Returns true on successful
+            // write, false otherwise (so the caller can stop capturing).
+            // Catches only the specific Node stream errors that
+            // res.write() can throw on a torn-down socket — write
+            // races between our writableEnded/destroyed check and
+            // the write call itself. Any other exception is a
+            // programming bug and propagates per
+            // error-handling.Specific Exceptions.
+            const STREAM_TEARDOWN_CODES = new Set([
+              'ERR_STREAM_WRITE_AFTER_END',
+              'ERR_STREAM_DESTROYED',
+              'ERR_STREAM_ALREADY_FINISHED',
+            ]);
+            const safeWrite = (chunk: Buffer): boolean => {
+              if (res.writableEnded || res.destroyed) return false;
+              try {
+                return res.write(chunk);
+              } catch (err) {
+                const code =
+                  err instanceof Error && 'code' in err
+                    ? (err as NodeJS.ErrnoException).code
+                    : undefined;
+                if (code && STREAM_TEARDOWN_CODES.has(code)) return false;
+                throw err;
+              }
+            };
             upRes.on('data', (chunk: Buffer) => {
+              const writeOk = safeWrite(chunk);
+              if (!writeOk && !upPaused) {
+                upPaused = true;
+                upRes.pause();
+              }
               if (capped) return;
               captureSize += chunk.length;
               if (captureSize > USAGE_CAPTURE_BUFFER_CAP) {
@@ -311,9 +374,12 @@ export function startCredentialProxy(
               }
             });
             upRes.on('end', () => {
-              // `pipe` calls `res.end()` for us — don't double-end.
+              if (!res.writableEnded && !res.destroyed) res.end();
+              res.removeListener('drain', resumeUpstream);
+              res.removeListener('close', onClientClose);
               if (capped) return;
-              const bodyText = Buffer.concat(captured).toString('utf8');
+              const bodyBuffer = Buffer.concat(captured);
+              const bodyText = bodyBuffer.toString('utf8');
               const ctx: ContainerContext = containerCtx ?? {
                 group: 'unknown',
                 tier: 'untrusted',
@@ -333,6 +399,28 @@ export function startCredentialProxy(
                   // Fire-and-forget. appendUsageRecord swallows IO
                   // errors internally so this can never reject.
                   void appendUsageRecord(usageLogPath, record);
+                } else {
+                  // Temporary content-free diagnostic: if the body
+                  // doesn't parse, log structural signals (byte
+                  // count, presence of key SSE markers) so we can
+                  // see WHY without exposing prompt/response text.
+                  // Drop once first JSONL line lands and capture is
+                  // confirmed healthy in production.
+                  logger.debug(
+                    {
+                      url: upstreamPath,
+                      bodyBytes: bodyBuffer.length,
+                      hasMessageStart: bodyText.includes(
+                        '"type":"message_start"',
+                      ),
+                      hasMessageDelta: bodyText.includes(
+                        '"type":"message_delta"',
+                      ),
+                      hasDataLine: /(?:^|\r?\n)data: /.test(bodyText),
+                      startsWithBrace: bodyText.charCodeAt(0) === 0x7b,
+                    },
+                    'usage-log: parser returned null (structural diagnostic)',
+                  );
                 }
               } catch (err) {
                 // Defense in depth: parseUsageFromBody is designed not
@@ -344,12 +432,13 @@ export function startCredentialProxy(
               }
             });
             upRes.on('error', (err) => {
-              // Pipe propagates the error and tears down the response;
-              // we just warn about the capture-side impact.
               logger.warn(
                 { err, url: upstreamPath },
                 'usage-log: upstream stream error during capture',
               );
+              res.removeListener('drain', resumeUpstream);
+              res.removeListener('close', onClientClose);
+              if (!res.writableEnded && !res.destroyed) res.end();
             });
           },
         );

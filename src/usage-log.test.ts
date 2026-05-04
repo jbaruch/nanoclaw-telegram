@@ -232,6 +232,33 @@ describe('parseUsageFromBody', () => {
     expect(rec!.cache_c_1h).toBe(85);
   });
 
+  it('parses CRLF-separated SSE the same as LF-separated', () => {
+    // Anthropic's edge sometimes returns CRLF line endings; the
+    // production-capture failure-mode this test guards against was
+    // 37 requests through the proxy with zero JSONL records, traced
+    // (in part) to the `\n\n`-only split missing CRLF blank lines.
+    const startEvent = {
+      type: 'message_start',
+      message: {
+        id: 'msg_crlf',
+        model: 'claude-sonnet-4-6',
+        usage: { input_tokens: 5, output_tokens: 0 },
+      },
+    };
+    const deltaEvent = {
+      type: 'message_delta',
+      usage: { input_tokens: 5, output_tokens: 11 },
+    };
+    const sse =
+      `event: message_start\r\ndata: ${JSON.stringify(startEvent)}\r\n\r\n` +
+      `event: message_delta\r\ndata: ${JSON.stringify(deltaEvent)}\r\n\r\n`;
+    const rec = parseUsageFromBody(sse, CTX, 0, null);
+    expect(rec).not.toBeNull();
+    expect(rec!.api_id).toBe('msg_crlf');
+    expect(rec!.in).toBe(5);
+    expect(rec!.out).toBe(11);
+  });
+
   it('returns null when no usage field present', () => {
     expect(parseUsageFromBody('{"error": "x"}', CTX, 0, null)).toBeNull();
     expect(parseUsageFromBody('not json', CTX, 0, null)).toBeNull();

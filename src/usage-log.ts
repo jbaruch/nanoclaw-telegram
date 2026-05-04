@@ -346,11 +346,15 @@ export function parseUsageFromBody(
   let model: string | null = null;
   let apiId: string | null = null;
 
-  // Each event is separated by a blank line. Splitting on \n\n is
-  // sufficient for compliant SSE; the proxy buffer is plain text.
-  const events = body.split('\n\n');
+  // Each event is separated by a blank line. Real-world SSE traffic
+  // mixes LF and CRLF (the spec allows both, and Anthropic's edge
+  // sometimes returns CRLF). Split on `\r?\n\r?\n` so either line
+  // ending works; same for the per-event line split. This was a
+  // suspected silent-failure root cause when 37 production captures
+  // came back empty after the post-#487 deploy.
+  const events = body.split(/\r?\n\r?\n/);
   for (const evt of events) {
-    const dataLine = evt.split('\n').find((l) => l.startsWith('data: '));
+    const dataLine = evt.split(/\r?\n/).find((l) => l.startsWith('data: '));
     if (!dataLine) continue;
     const json = dataLine.slice(6);
     let parsed: unknown;
