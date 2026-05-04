@@ -392,6 +392,12 @@ const MIGRATED = [
     ["tessl__heartbeat", "interval"],
     ["tessl__composio-fetch", "interval"],
     ["tessl__morning-brief", "cron"],
+    ["tessl__memory-rotation", "cron"],
+    ["tessl__nightly-backup", "cron"],
+    ["tessl__nightly-external-sync", "cron"],
+    ["tessl__nightly-undated-task-sweep", "cron"],
+    ["tessl__check-watchlist", "cron"],
+    ["tessl__state-purge", "cron"],
 ];
 // task_run_logs has FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id),
 // so a bare DELETE FROM scheduled_tasks fails with FOREIGN KEY
