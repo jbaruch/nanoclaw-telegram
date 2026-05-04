@@ -40,7 +40,11 @@ import type { ContainerStatus } from './group-queue.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { stripInternalTags } from './router.js';
-import { normalizeScheduleTimezone, type ScheduleType } from './timezone.js';
+import {
+  isValidTimezone,
+  normalizeScheduleTimezone,
+  type ScheduleType,
+} from './timezone.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -176,6 +180,43 @@ const KNOWN_TILE_NAMES: ReadonlySet<string> = new Set([
   'nanoclaw-trusted',
   'nanoclaw-host',
 ]);
+
+/**
+ * Resolve the IANA zone to pass to `cron-parser` when computing an
+ * initial `next_run` for a stored task row. Centralised so
+ * `schedule_task` and `update_task` produce values consistent with
+ * `task-scheduler.ts:computeNextRunDetailed` at fire time.
+ *
+ * Three inputs:
+ *   - `null`         → server-wide TIMEZONE fallback (pre-#102 behaviour
+ *                       for rows without a per-task tz).
+ *   - IANA name      → pass through unchanged (validated upstream by
+ *                       `normalizeScheduleTimezone`).
+ *   - `'local'`      → resolve via `getCurrentTz()` — the singleton
+ *                       `tz_state.current_tz` written by `task-tz-sync`.
+ *                       If the resolver returns null (no tz_state row
+ *                       yet, or unfamiliar `schema_version`) OR returns
+ *                       a value `Intl.DateTimeFormat` doesn't recognize
+ *                       (corrupt write), fall back to TIMEZONE. Same
+ *                       fallback the scheduler reaches via its
+ *                       catch-and-retry path — narrowed here to a
+ *                       sanity check up-front so a corrupt resolver
+ *                       result doesn't brick `schedule_task` /
+ *                       `update_task` with an "Invalid cron expression"
+ *                       error that's actually a tz_state problem.
+ */
+function resolveCronTz(scheduleTimezone: string | null): string {
+  if (scheduleTimezone === 'local') {
+    const resolved = getCurrentTz();
+    if (resolved && isValidTimezone(resolved)) return resolved;
+    logger.warn(
+      { resolved },
+      'resolveCronTz: tz_state.current_tz unusable for cron-parser — falling back to TIMEZONE',
+    );
+    return TIMEZONE;
+  }
+  return scheduleTimezone || TIMEZONE;
+}
 
 /**
  * Compute the host path where an IPC response file should land.
@@ -988,16 +1029,15 @@ export async function processTaskIpc(
         let nextRun: string | null = null;
         if (scheduleType === 'cron') {
           try {
-            // #456: when `scheduleTimezone === 'local'`, resolve the
-            // initial next_run against `tz_state.current_tz` to mirror
-            // the fire-time behavior in `computeNextRunDetailed`. Null
-            // resolver result (tz_state empty / unfamiliar
-            // schema_version) falls through to TIMEZONE — same fallback
-            // a NULL `schedule_timezone` already uses.
-            const cronTz =
-              scheduleTimezone === 'local'
-                ? (getCurrentTz() ?? TIMEZONE)
-                : scheduleTimezone || TIMEZONE;
+            // #456: resolve `'local'` against `tz_state.current_tz` to
+            // mirror `computeNextRunDetailed`. The scheduler retries
+            // with TIMEZONE on cron-parser failure; we narrow the
+            // failure surface here by sanity-checking the resolved
+            // value up-front so a corrupt `tz_state.current_tz` (e.g.
+            // a future task-tz-sync bug writing garbage) doesn't brick
+            // schedule_task — falls through to TIMEZONE just like NULL
+            // `schedule_timezone` and like the scheduler's retry path.
+            const cronTz = resolveCronTz(scheduleTimezone);
             const interval = CronExpressionParser.parse(data.schedule_value, {
               tz: cronTz,
             });
@@ -1271,15 +1311,13 @@ export async function processTaskIpc(
           };
           if (updatedTask.schedule_type === 'cron') {
             try {
-              // #456: mirror the schedule_task path — `'local'` resolves
-              // against `tz_state.current_tz` for the initial next_run
-              // so the recomputed value matches what
-              // `computeNextRunDetailed` would produce on the next
-              // scheduler tick.
-              const cronTz =
-                updatedTask.schedule_timezone === 'local'
-                  ? (getCurrentTz() ?? TIMEZONE)
-                  : updatedTask.schedule_timezone || TIMEZONE;
+              // #456: same `'local'`-aware resolver as the schedule_task
+              // path — sanity-checks `tz_state.current_tz` before
+              // passing to cron-parser so a corrupt resolver result
+              // falls back to TIMEZONE rather than aborting the update.
+              const cronTz = resolveCronTz(
+                updatedTask.schedule_timezone ?? null,
+              );
               const interval = CronExpressionParser.parse(
                 updatedTask.schedule_value,
                 { tz: cronTz },
