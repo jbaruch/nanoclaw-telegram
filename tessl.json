@@ -1,12 +1,12 @@
 {
   "name": "nanoclaw",
-  "mode": "vendored",
+  "mode": "managed",
   "dependencies": {
     "jbaruch/nanoclaw-host": {
-      "version": "0.1.17"
+      "version": "latest"
     },
     "jbaruch/coding-policy": {
-      "version": "0.2.3"
+      "version": "latest"
     }
   }
 }

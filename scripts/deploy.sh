@@ -244,36 +244,89 @@ echo "3. Updating tiles from registry..."
 docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl update --yes --dangerously-ignore-security 2>&1' | tail -10
 echo ""
 
-# 3b. Verify no literal pins crept into tessl-workspace/tessl.json.
+# 3b. Verify every tessl.json in the repo declares mode: managed and
+# floats every dependency to "latest".
 #
-# Per `nanoclaw-host: tessl-version-floating` (registry 0.1.25+), every
-# `dependencies.<tile>.version` in this manifest MUST be the literal
-# string "latest" — an approved exception to `coding-policy:
-# dependency-management` for this one file. `tessl install <tile>`
-# writes a literal pin by default, so an operator hand-installing a
-# new tile (or merging a fork) can quietly reintroduce drift; this
-# check fails the deploy when that happens.
-echo "3b. Verifying tessl-workspace/tessl.json uses 'latest' for every dependency..."
-PINNED_OFFENDERS=$(python3 - <<'PY'
-import json, sys, pathlib
-manifest = pathlib.Path("tessl-workspace/tessl.json")
-data = json.loads(manifest.read_text())
-bad = [
-    name for name, dep in data.get("dependencies", {}).items()
-    if dep.get("version") != "latest"
+# Per `nanoclaw-host: tessl-version-floating`, NanoClaw's lifecycle is
+# dynamic-latest-loading: `tessl update` rewrites manifests in-place at
+# three independent points (this script, the orchestrator's 15-min
+# catch-up loop in `src/index.ts`, and the `tessl_update` MCP tool in
+# `src/ipc.ts`), and `.tessl/tiles/<workspace>/<tile>/` is gitignored.
+# Both invariants together rule out vendoring (mode: vendored is a lie
+# when the content isn't committed) AND pinning (a literal pin produces
+# a working-tree diff after every successful update that nobody commits,
+# so `git pull` rolls the deployment backward against the registry).
+# Every `tessl.json` MUST therefore declare `mode: managed` AND every
+# `dependencies.<tile>.version` MUST be the literal string "latest" —
+# the approved exception to `coding-policy: dependency-management`.
+# `tessl install <tile>` writes a literal pin by default and prior
+# tessl versions wrote `mode: vendored` at init, so an operator hand-
+# installing a new tile (or merging a fork) can quietly reintroduce
+# drift; this check fails the deploy when that happens.
+echo "3b. Verifying named carve-out manifests use 'mode: managed' + 'version: latest'..."
+MANIFEST_OFFENDERS=$(python3 - <<'PY'
+import json, pathlib
+# Read each manifest in the explicitly named carve-out set
+# (`nanoclaw-host: tessl-version-floating` lists them):
+#   - tessl-workspace/tessl.json  — orchestrator workspace manifest
+#     (consumed by the runtime catch-up loop / tessl_update MCP tool)
+#   - tessl.json                  — project-root manifest
+#     (consumed by `tessl install` to populate `.tessl/tiles/` for
+#      `@.tessl/RULES.md` resolution at agent runtime)
+# Add to MANIFESTS in lock-step with naming a new manifest in the
+# authority-of-record rule — never via globbing, which would wildcard
+# the carve-out and silently auto-include manifests that the policy
+# requires named explicitly.
+MANIFESTS = [
+    pathlib.Path("tessl-workspace/tessl.json"),
+    pathlib.Path("tessl.json"),
 ]
-if bad:
-    print("\n".join(bad))
+bad_lines: list[str] = []
+for m in MANIFESTS:
+    if not m.exists():
+        bad_lines.append(f"{m}: missing (named manifest in carve-out must exist)")
+        continue
+    try:
+        data = json.loads(m.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        bad_lines.append(f"{m}: unreadable ({type(exc).__name__}: {exc})")
+        continue
+    if not isinstance(data, dict):
+        bad_lines.append(f"{m}: root is {type(data).__name__}, expected dict")
+        continue
+    mode = data.get("mode")
+    if mode != "managed":
+        bad_lines.append(f"{m}: mode={mode!r} (must be 'managed')")
+    deps = data.get("dependencies", {})
+    if not isinstance(deps, dict):
+        # `dependencies` set to null, list, or string would crash
+        # `.items()` below and bypass the diagnostic path under
+        # `set -euo pipefail`. Report the bad container shape and
+        # skip the per-dep walk for this manifest.
+        bad_lines.append(f"{m}: dependencies={deps!r} (must be an object)")
+        continue
+    for name, dep in deps.items():
+        if not isinstance(dep, dict):
+            # The shorthand form `"<tile>": "latest"` (string instead of
+            # object) is invalid here regardless of the value, and calling
+            # .get() on a non-dict would crash the verifier — report the
+            # raw value with the wrapping-shape hint.
+            bad_lines.append(f"{m}: {name}={dep!r} (must be a {{\"version\": \"latest\"}} object)")
+            continue
+        if dep.get("version") != "latest":
+            bad_lines.append(f"{m}: {name}.version={dep.get('version')!r} (must be 'latest')")
+if bad_lines:
+    print("\n".join(bad_lines))
 PY
 )
-if [[ -n "$PINNED_OFFENDERS" ]]; then
-    echo "ERROR: tessl-workspace/tessl.json has non-'latest' pins:" >&2
-    echo "$PINNED_OFFENDERS" | sed 's/^/  - /' >&2
-    echo "Fix: edit each entry to {\"version\": \"latest\"} and re-run deploy." >&2
+if [[ -n "$MANIFEST_OFFENDERS" ]]; then
+    echo "ERROR: named carve-out manifest(s) violate 'mode: managed' + 'version: latest':" >&2
+    echo "$MANIFEST_OFFENDERS" | sed 's/^/  - /' >&2
+    echo "Fix: edit each manifest to {\"mode\": \"managed\", \"dependencies\": {\"<tile>\": {\"version\": \"latest\"}}} and re-run deploy." >&2
     echo "Why: nanoclaw-host: tessl-version-floating (approved exception to coding-policy: dependency-management)." >&2
     exit 1
 fi
-echo "  ok — all dependencies float to latest"
+echo "  ok — named carve-out manifests declare mode: managed + version: latest"
 echo ""
 
 # 4. Clear runtime skill overrides from all groups
