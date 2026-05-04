@@ -539,7 +539,11 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ 'main@g.us': MAIN_GROUP }),
-      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
       onProcess: () => {},
       sendMessage: async () => {},
       wipeSessionJsonl: () => 0,
@@ -623,7 +627,11 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ 'main@g.us': MAIN_GROUP }),
-      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
       onProcess: () => {},
       sendMessage: async () => {},
       wipeSessionJsonl: wipeSpy,
@@ -700,7 +708,11 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ 'main@g.us': MAIN_GROUP }),
-      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
       onProcess: () => {},
       sendMessage: async () => {},
       wipeSessionJsonl: () => 0,
@@ -760,7 +772,11 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ 'main@g.us': MAIN_GROUP }),
-      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
       onProcess: () => {},
       sendMessage: async () => {},
       wipeSessionJsonl: () => 0,
@@ -829,7 +845,11 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ 'main@g.us': MAIN_GROUP }),
-      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
       onProcess: () => {},
       sendMessage: async () => {},
       wipeSessionJsonl: () => 0,
@@ -910,7 +930,11 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ [chatJid]: MAIN_GROUP }),
-      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
       onProcess: () => {},
       sendMessage: async (_jid: string, text: string) => {
         sentTexts.push(text);
@@ -991,7 +1015,11 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ [chatJid]: FRESH_GROUP }),
-      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
       onProcess: () => {},
       sendMessage: async () => {},
       wipeSessionJsonl: () => 0,
@@ -1075,7 +1103,11 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ [groupJid]: GROUP_REG, [dmJid]: GROUP_REG }),
-      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
       onProcess: () => {},
       sendMessage: async () => {},
       wipeSessionJsonl: () => 0,
@@ -1146,7 +1178,11 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ [chatJid]: GROUP_REG }),
-      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
       onProcess: () => {},
       sendMessage: async () => {},
       wipeSessionJsonl: () => 0,
@@ -1214,7 +1250,11 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({ [chatJid]: MAIN_GROUP }),
-      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
       onProcess: () => {},
       sendMessage: async (_jid: string, text: string) => {
         sentTexts.push(text);
@@ -1990,7 +2030,11 @@ describe('per-task session_id reuse (#336)', () => {
     const wipeSpy = vi.fn(() => 1);
     startSchedulerLoop({
       registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
-      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
       onProcess: () => {},
       sendMessage: async () => {},
       wipeSessionJsonl: wipeSpy,
@@ -2237,7 +2281,11 @@ describe('per-task session_id reuse (#336)', () => {
     );
     startSchedulerLoop({
       registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
-      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
       onProcess: () => {},
       sendMessage: async () => {},
       wipeSessionJsonl: () => 0,
@@ -2375,7 +2423,11 @@ describe('interval cadence end-to-end (#438)', () => {
     );
     startSchedulerLoop({
       registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
-      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
       onProcess: () => {},
       sendMessage: async () => {},
       wipeSessionJsonl: vi.fn(() => 1),
@@ -2464,7 +2516,11 @@ describe('interval cadence end-to-end (#438)', () => {
     );
     startSchedulerLoop({
       registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
-      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
       onProcess: () => {},
       sendMessage: async () => {},
       wipeSessionJsonl: vi.fn(() => 1),
@@ -2520,7 +2576,11 @@ describe('interval cadence end-to-end (#438)', () => {
     );
     startSchedulerLoop({
       registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
-      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
       onProcess: () => {},
       sendMessage: async () => {},
       wipeSessionJsonl: vi.fn(() => 1),
@@ -2584,7 +2644,11 @@ describe('interval cadence end-to-end (#438)', () => {
     );
     startSchedulerLoop({
       registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
-      queue: { enqueueTask, closeStdin: vi.fn() } as never,
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
       onProcess: () => {},
       sendMessage: async () => {},
       wipeSessionJsonl: vi.fn(() => 1),
@@ -2606,6 +2670,231 @@ describe('interval cadence end-to-end (#438)', () => {
     expect(enqueueTask).toHaveBeenCalledTimes(2);
 
     // Drain the run so the test doesn't leave open promises.
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  // --- killed-status reclassification (#496) ---
+  //
+  // When the periodic `tessl_update` calls `closeAllActiveContainers`
+  // mid-run, the agent-runner's hard-exit watchdog fires
+  // `process.exit(0)` 30s after seeing `_close`. The container's
+  // exit code is 0, so without the reclassification logic the
+  // task_run_logs row would land as `status='success'` even though
+  // the task was killed mid-flight and may have left a dangling
+  // `pending_run_at` lock on `follow_me_tasks`. The scheduler reads
+  // the queue's `forcedCloseAt` stamp after `runContainerAgent`
+  // returns and reclassifies the run as `status='killed'` when the
+  // stamp falls within the run's window.
+
+  it('reclassifies a force-closed run as status=killed when the queue reports a forcedCloseAt stamp within the run window', async () => {
+    const RECURRING_GROUP = {
+      name: 'Main',
+      folder: 'main',
+      trigger: 'always',
+      added_at: '2026-01-01T00:00:00.000Z',
+      isMain: true,
+    };
+
+    createTask({
+      id: 'killed-task',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'run',
+      schedule_type: 'cron',
+      schedule_value: '0 13 * * *',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    // Simulate the watchdog-success shape: container exits 0 with
+    // streaming output, `runContainerAgent` returns success.
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, _onOutput) => {
+        return { status: 'success', result: 'ok' };
+      },
+    );
+
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+
+    // Queue stub returns a stamp within the run's window — i.e.
+    // closeAllActiveContainers fired mid-run.
+    const consumeForcedCloseAt = vi.fn(() => Date.now());
+
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt,
+      } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    // The scheduler must consume the stamp from the maintenance slot
+    // (where scheduled tasks always run).
+    expect(consumeForcedCloseAt).toHaveBeenCalledWith(
+      'main@g.us',
+      MAINTENANCE_SESSION_NAME,
+    );
+
+    const { _rawQueryForTests } = await import('./db.js');
+    const rows = _rawQueryForTests<{ status: string; error: string | null }>(
+      `SELECT status, error FROM task_run_logs WHERE task_id = ?`,
+      ['killed-task'],
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].status).toBe('killed');
+    expect(rows[0].error).toMatch(/force-closed|tessl_update|#496/i);
+
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('keeps status=success when the queue reports no forcedCloseAt stamp (normal path)', async () => {
+    const RECURRING_GROUP = {
+      name: 'Main',
+      folder: 'main',
+      trigger: 'always',
+      added_at: '2026-01-01T00:00:00.000Z',
+      isMain: true,
+    };
+
+    createTask({
+      id: 'happy-task',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'run',
+      schedule_type: 'cron',
+      schedule_value: '0 13 * * *',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    mockRunContainerAgent.mockImplementation(async () => ({
+      status: 'success',
+      result: 'ok',
+    }));
+
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    const { _rawQueryForTests } = await import('./db.js');
+    const rows = _rawQueryForTests<{ status: string }>(
+      `SELECT status FROM task_run_logs WHERE task_id = ?`,
+      ['happy-task'],
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].status).toBe('success');
+
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('does NOT reclassify when forcedCloseAt is from BEFORE the run started (stale stamp)', async () => {
+    const RECURRING_GROUP = {
+      name: 'Main',
+      folder: 'main',
+      trigger: 'always',
+      added_at: '2026-01-01T00:00:00.000Z',
+      isMain: true,
+    };
+
+    createTask({
+      id: 'stale-stamp-task',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'run',
+      schedule_type: 'cron',
+      schedule_value: '0 13 * * *',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    mockRunContainerAgent.mockImplementation(async () => ({
+      status: 'success',
+      result: 'ok',
+    }));
+
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+
+    // Stamp is from a long time ago — predates this run. The
+    // scheduler must reject it as stale and keep status=success.
+    const ancientStamp = Date.now() - 10 * 60 * 60 * 1000;
+    const consumeForcedCloseAt = vi.fn(() => ancientStamp);
+
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt,
+      } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    const { _rawQueryForTests } = await import('./db.js');
+    const rows = _rawQueryForTests<{ status: string }>(
+      `SELECT status FROM task_run_logs WHERE task_id = ?`,
+      ['stale-stamp-task'],
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].status).toBe('success');
+
     await vi.advanceTimersByTimeAsync(10);
   });
 });

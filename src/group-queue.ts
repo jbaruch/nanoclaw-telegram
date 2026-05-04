@@ -52,6 +52,17 @@ interface GroupState {
   // blocks of `runForGroup` and `runTask` — anywhere else and it would
   // race with active runs.
   lastExitStatus: 'clean' | 'error' | null;
+  // Timestamp (ms epoch) when `closeAllActiveContainers` last wrote a
+  // forced `_close` sentinel into this slot's input dir (#496). Only
+  // the periodic `tessl_update` mid-flight close path sets this — the
+  // graceful end-of-task `closeStdin` from `scheduleClose` does NOT,
+  // because that fires AFTER the task's streaming output completed
+  // and isn't a kill. The task-scheduler reads-and-clears this via
+  // `consumeForcedCloseAt` after `runContainerAgent` returns; if it's
+  // set, the run gets logged with `status='killed'` regardless of the
+  // container's exit code (the agent-runner watchdog hard-exits 0,
+  // which would otherwise look like clean success).
+  forcedCloseAt: number | null;
 }
 
 /**
@@ -133,6 +144,7 @@ export class GroupQueue {
         groupFolder: null,
         retryCount: 0,
         lastExitStatus: null,
+        forcedCloseAt: null,
       };
       sessions.set(sessionName, state);
     }
@@ -386,6 +398,7 @@ export class GroupQueue {
    */
   closeAllActiveContainers(): number {
     let signaled = 0;
+    const now = Date.now();
     for (const [groupJid, sessions] of this.groups.entries()) {
       for (const [sessionName, state] of sessions.entries()) {
         if (!state.active || !state.groupFolder) continue;
@@ -398,6 +411,12 @@ export class GroupQueue {
           );
           fs.mkdirSync(inputDir, { recursive: true });
           fs.writeFileSync(path.join(inputDir, '_close'), '');
+          // Stamp the slot so the task-scheduler can reclassify the
+          // resulting `runContainerAgent` outcome as `status='killed'`
+          // (#496). Only this code path sets the stamp — the graceful
+          // `closeStdin` from `scheduleClose` after a successful task
+          // result is unmarked by design.
+          state.forcedCloseAt = now;
           signaled++;
         } catch (err) {
           if (!isExpectedFsError(err)) throw err;
@@ -409,6 +428,27 @@ export class GroupQueue {
       }
     }
     return signaled;
+  }
+
+  /**
+   * Read-and-clear the `forcedCloseAt` stamp for a slot (#496). The
+   * task-scheduler calls this after `runContainerAgent` returns: if the
+   * stamp falls within the current run's window
+   * (`>= runStartedAt`), the slot was force-closed mid-run by
+   * `closeAllActiveContainers`, and the scheduler logs the run with
+   * `status='killed'` instead of trusting the container's exit code.
+   *
+   * "Read-and-clear" semantics so a stamp set during run N doesn't
+   * leak into the classification of run N+1 on the same slot. Returns
+   * `null` when the slot has never been force-closed (or the stamp
+   * was already consumed).
+   */
+  consumeForcedCloseAt(groupJid: string, sessionName: string): number | null {
+    const state = this.peekGroup(groupJid, sessionName);
+    if (!state) return null;
+    const stamp = state.forcedCloseAt;
+    state.forcedCloseAt = null;
+    return stamp;
   }
 
   private async runForGroup(

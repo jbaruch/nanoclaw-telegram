@@ -46,9 +46,11 @@ import {
   writeHandoffMarker,
 } from './handoff.js';
 import {
+  clearStalePendingRunAt,
   clearTaskSessionIdsForGroup,
   clearSessionLengthStateForGroup,
   consumeSessionReset,
+  getActivePendingRunAtNames,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -459,6 +461,20 @@ const MAX_CONSECUTIVE_FAILURES = 5;
 const CIRCUIT_BREAKER_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
 const consecutiveFailures: Record<string, number> = {};
 const circuitBreakerUntil: Record<string, number> = {};
+
+// #496 — `follow_me_tasks.pending_run_at` is treated as "fresh" (and
+// therefore worth respecting) for this long after stamp-time. Anything
+// older is presumed orphaned by a dead/killed container and gets
+// reclaimed via `clearStalePendingRunAt`.
+//
+// Sized for the largest plausible follow-me task duration with margin:
+// the morning-brief skill (the longest in the fleet) caps around
+// 10–15 min of agent work; 1h gives 4× margin for an unusually slow
+// run while still recovering well before the next-day fire. A shorter
+// window (e.g. 10 min) would risk reclaiming an in-flight lock from a
+// genuinely long but legitimate run; a longer window delays recovery
+// past the daily-fire boundary, defeating the point.
+const PENDING_RUN_AT_FRESHNESS_MS = 60 * 60 * 1000; // 1 hour
 
 // Per-folder timestamp of the most recent `nukeSession` call. Used to
 // gate the post-spawn `setSession` writes against a race where a nuke
@@ -3064,11 +3080,65 @@ async function main(): Promise<void> {
   // Start Hubitat smart home listener (if configured)
   startHubitatListener();
 
+  // #496 — stale-lock recovery. On startup, clear any
+  // `follow_me_tasks.pending_run_at` older than the freshness window.
+  // A pre-restart crash (or a `tessl_update`-killed run from before
+  // this fix shipped) can leave dangling locks that block the next
+  // scheduled fire on its Phase A gate. The host is a non-owner
+  // reader of `follow_me_tasks` per
+  // `coding-policy: stateful-artifacts`, so we don't migrate the
+  // schema; we only NULL out value fields whose owners are demonstrably
+  // dead. Threshold matches `PENDING_RUN_AT_FRESHNESS_MS` below — see
+  // that constant's doc for the rationale.
+  try {
+    const cleared = clearStalePendingRunAt(PENDING_RUN_AT_FRESHNESS_MS);
+    if (cleared.length > 0) {
+      logger.warn(
+        { tasks: cleared, ageThresholdMs: PENDING_RUN_AT_FRESHNESS_MS },
+        'Cleared stale pending_run_at locks at startup (#496) — likely orphaned by a prior crash or a tessl_update mid-flight kill',
+      );
+    }
+  } catch (err) {
+    if (!(err instanceof Error)) throw err;
+    logger.error(
+      { err },
+      'Startup pending_run_at cleanup failed — scheduled tasks with stale locks may refuse to fire on Phase A gate; investigate follow_me_tasks rows manually',
+    );
+  }
+
   // Periodic tile update from registry (every 15 min)
   // Heartbeat runs in the container and can't call tessl update.
   // This catches publishes that the post-promote timer missed.
   const { execFile: execTesslUpdate } = await import('child_process');
   setInterval(() => {
+    // #496 — defer the periodic tessl_update if a scheduled task is
+    // currently mid-flight (its skill has acquired a fresh
+    // `follow_me_tasks.pending_run_at` lock). Running tessl_update now
+    // would force-close the maintenance container via the
+    // `closeAllActiveContainers` path and leave the lock dangling.
+    // Skipping this tick is harmless — the next 15-min tick retries,
+    // and the periodic catch-up isn't time-critical (the on-demand
+    // `tessl_update` MCP tool is the load-bearing path for fresh
+    // tile content; this loop is the safety net for missed
+    // invocations).
+    let activeLocks: string[];
+    try {
+      activeLocks = getActivePendingRunAtNames(PENDING_RUN_AT_FRESHNESS_MS);
+    } catch (err) {
+      if (!(err instanceof Error)) throw err;
+      logger.warn(
+        { err },
+        'Periodic tessl update: pending_run_at check failed — proceeding with update (failing closed would skip every tick)',
+      );
+      activeLocks = [];
+    }
+    if (activeLocks.length > 0) {
+      logger.info(
+        { activeLocks },
+        'Periodic tessl update deferred — scheduled task(s) mid-flight with fresh pending_run_at lock (#496); will retry on next 15-min tick',
+      );
+      return;
+    }
     execTesslUpdate(
       'bash',
       [

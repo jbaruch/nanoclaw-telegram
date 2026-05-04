@@ -385,7 +385,14 @@ export interface TaskRunLog {
   task_id: string;
   run_at: string;
   duration_ms: number;
-  status: 'success' | 'error';
+  // 'killed' (#496) marks a run that was force-terminated by the host
+  // (e.g. `tessl_update`'s `_close` sentinel + agent-runner watchdog
+  // fired, exit code 0 from the watchdog, but the task didn't actually
+  // produce a complete result). Distinct from 'error' (the run threw)
+  // and 'success' (the run finished cleanly) so operator-facing audits
+  // can tell apart bookkeeping-success from semantic-success — exit
+  // code 0 alone is no longer a guarantee the work landed.
+  status: 'success' | 'error' | 'killed';
   result: string | null;
   error: string | null;
 }

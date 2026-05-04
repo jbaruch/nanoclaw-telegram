@@ -1252,4 +1252,137 @@ describe('GroupQueue', () => {
     releases.forEach((r) => r());
     await vi.advanceTimersByTimeAsync(10);
   });
+
+  // --- forcedCloseAt stamp / consumeForcedCloseAt (#496) ---
+
+  it('consumeForcedCloseAt returns null for slots that were never force-closed', async () => {
+    // A slot the queue has never seen returns null without creating a
+    // phantom entry — peekGroup, not getGroup. The task-scheduler calls
+    // this once per scheduled run and a `null` answer means "the run
+    // wasn't reclassified by tessl_update", which is the steady state.
+    expect(
+      queue.consumeForcedCloseAt('never-seen@g.us', MAINTENANCE_SESSION_NAME),
+    ).toBeNull();
+
+    const releases: Array<() => void> = [];
+    queue.enqueueTask(
+      'group1@g.us',
+      'g1-maint',
+      MAINTENANCE_SESSION_NAME,
+      vi.fn(async () => {
+        await new Promise<void>((r) => releases.push(r));
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Active slot, but no closeAllActiveContainers yet → null.
+    expect(
+      queue.consumeForcedCloseAt('group1@g.us', MAINTENANCE_SESSION_NAME),
+    ).toBeNull();
+
+    releases.forEach((r) => r());
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('closeAllActiveContainers stamps forcedCloseAt on every signaled slot', async () => {
+    const releases: Array<() => void> = [];
+    queue.enqueueTask(
+      'group1@g.us',
+      'g1-maint',
+      MAINTENANCE_SESSION_NAME,
+      vi.fn(async () => {
+        await new Promise<void>((r) => releases.push(r));
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(
+      'group1@g.us',
+      MAINTENANCE_SESSION_NAME,
+      {} as unknown as import('child_process').ChildProcess,
+      'container-g1-maint',
+      'group1-folder',
+    );
+
+    const before = Date.now();
+    queue.closeAllActiveContainers();
+    const after = Date.now();
+
+    const stamp = queue.consumeForcedCloseAt(
+      'group1@g.us',
+      MAINTENANCE_SESSION_NAME,
+    );
+    expect(stamp).not.toBeNull();
+    expect(stamp).toBeGreaterThanOrEqual(before);
+    expect(stamp).toBeLessThanOrEqual(after);
+
+    releases.forEach((r) => r());
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('consumeForcedCloseAt clears the stamp on read so a later run is not tainted', async () => {
+    const releases: Array<() => void> = [];
+    queue.enqueueTask(
+      'group1@g.us',
+      'g1-maint',
+      MAINTENANCE_SESSION_NAME,
+      vi.fn(async () => {
+        await new Promise<void>((r) => releases.push(r));
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(
+      'group1@g.us',
+      MAINTENANCE_SESSION_NAME,
+      {} as unknown as import('child_process').ChildProcess,
+      'container-g1-maint',
+      'group1-folder',
+    );
+
+    queue.closeAllActiveContainers();
+
+    expect(
+      queue.consumeForcedCloseAt('group1@g.us', MAINTENANCE_SESSION_NAME),
+    ).not.toBeNull();
+    // Second read returns null — the stamp was consumed.
+    expect(
+      queue.consumeForcedCloseAt('group1@g.us', MAINTENANCE_SESSION_NAME),
+    ).toBeNull();
+
+    releases.forEach((r) => r());
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('closeStdin from scheduleClose path does NOT stamp forcedCloseAt', async () => {
+    // The scheduler's normal end-of-task close (via closeStdin, NOT
+    // closeAllActiveContainers) fires AFTER the task's streaming output
+    // already reported success. Marking it as forced-closed would
+    // mis-classify every clean scheduled run as `killed` — only the
+    // closeAllActiveContainers path is a kill.
+    const releases: Array<() => void> = [];
+    queue.enqueueTask(
+      'group1@g.us',
+      'g1-maint',
+      MAINTENANCE_SESSION_NAME,
+      vi.fn(async () => {
+        await new Promise<void>((r) => releases.push(r));
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(
+      'group1@g.us',
+      MAINTENANCE_SESSION_NAME,
+      {} as unknown as import('child_process').ChildProcess,
+      'container-g1-maint',
+      'group1-folder',
+    );
+
+    queue.closeStdin('group1@g.us', MAINTENANCE_SESSION_NAME);
+
+    expect(
+      queue.consumeForcedCloseAt('group1@g.us', MAINTENANCE_SESSION_NAME),
+    ).toBeNull();
+
+    releases.forEach((r) => r());
+    await vi.advanceTimersByTimeAsync(10);
+  });
 });

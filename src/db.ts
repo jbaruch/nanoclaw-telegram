@@ -679,6 +679,22 @@ export function _closeDatabase(): void {
 /**
  * @internal - for tests only.
  *
+ * Lets tests read arbitrary rows back through the module-internal db
+ * handle without exposing a getter for every table. Used by the #496
+ * task-scheduler tests to verify `task_run_logs` rows landed with the
+ * expected `status` ('success' / 'killed') after a simulated
+ * force-close. Production code reads through the typed accessors above
+ * — this exists purely so tests can assert outcomes against
+ * write-only sinks like `task_run_logs` without proliferating
+ * single-purpose readers.
+ */
+export function _rawQueryForTests<T>(sql: string, params: unknown[] = []): T[] {
+  return db.prepare(sql).all(...params) as T[];
+}
+
+/**
+ * @internal - for tests only.
+ *
  * Writes a `registered_groups` row whose `container_config` column is a raw
  * string the caller controls. Lets tests reproduce the malformed-JSON
  * condition that the issue-156 fix guards against, without exporting the
@@ -1618,6 +1634,40 @@ export function getDueTasks(): ScheduledTask[] {
 const SUPPORTED_TZ_STATE_SCHEMA_VERSION = 1;
 
 /**
+ * Test-only helper: seed a `follow_me_tasks` row directly. The
+ * production writer is the agent-side `task-tz-sync` skill (and the
+ * other follow-me skills' Phase C / Phase D updates); this shortcut
+ * lets the host-side `clearStalePendingRunAt` /
+ * `getActivePendingRunAtNames` tests exercise the cleanup helpers
+ * without spinning up the full agent stack.
+ */
+export function _seedFollowMeTaskForTests(args: {
+  name: string;
+  localTime?: string;
+  scheduleValue?: string;
+  lastRunDate?: string | null;
+  pendingRunAt?: string | null;
+}): void {
+  db.prepare(
+    `INSERT INTO follow_me_tasks
+       (name, local_time, schedule_value, last_run_date, pending_run_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(name) DO UPDATE SET
+       local_time     = excluded.local_time,
+       schedule_value = excluded.schedule_value,
+       last_run_date  = excluded.last_run_date,
+       pending_run_at = excluded.pending_run_at,
+       updated_at     = CURRENT_TIMESTAMP`,
+  ).run(
+    args.name,
+    args.localTime ?? '08:00',
+    args.scheduleValue ?? '0 13 * * *',
+    args.lastRunDate ?? null,
+    args.pendingRunAt ?? null,
+  );
+}
+
+/**
  * Test-only helper: seed the singleton `tz_state` row directly. The
  * production writer is the agent-side `task-tz-sync` skill; this
  * shortcut lets `getCurrentTz` tests exercise read paths without
@@ -1717,6 +1767,87 @@ export function logTaskRun(log: TaskRunLog): void {
     log.result,
     log.error,
   );
+}
+
+/**
+ * Stale-lock recovery for `follow_me_tasks.pending_run_at` (#496).
+ *
+ * Background: skills running inside agent containers acquire a
+ * pending-run lock by setting `pending_run_at` mid-run, then clear it
+ * post-run. If the host kills the container mid-run (e.g. the periodic
+ * `tessl_update` writes `_close`, the agent-runner watchdog hits its
+ * 30s timeout, and the container exits before the post-run clear), the
+ * lock is left dangling. Tomorrow's scheduled fire then sees a stale
+ * `pending_run_at` and refuses to run on the Phase A gate.
+ *
+ * This helper is the host-side recovery: any `pending_run_at` older
+ * than `maxAgeMs` is treated as orphaned (its owning container is long
+ * gone) and cleared. Per `coding-policy: stateful-artifacts`, the host
+ * is a NON-OWNER reader of `follow_me_tasks` (the owning skill is
+ * `nanoclaw-admin/skills/task-tz-sync`); non-owners must not migrate
+ * the schema, but clearing a value field is lock-recovery, not
+ * migration — it's the inverse of what the owner skill does on a
+ * normal post-run.
+ *
+ * Returns the names of every task whose `pending_run_at` was cleared
+ * so the caller can log the recovery.
+ */
+export function clearStalePendingRunAt(maxAgeMs: number): string[] {
+  if (!Number.isFinite(maxAgeMs) || maxAgeMs <= 0) {
+    throw new Error(
+      `clearStalePendingRunAt: maxAgeMs must be a positive number (got ${maxAgeMs})`,
+    );
+  }
+  const cutoffIso = new Date(Date.now() - maxAgeMs).toISOString();
+  // Two-step (SELECT then UPDATE) so we can return the names of cleared
+  // rows for logging. The window between SELECT and UPDATE is racy in
+  // principle — a fresh skill could land a NEW `pending_run_at` on the
+  // same row between the two — but the UPDATE's WHERE clause re-checks
+  // the cutoff, so a row that gained a fresh lock won't be cleared.
+  const rows = db
+    .prepare(
+      `SELECT name FROM follow_me_tasks
+        WHERE pending_run_at IS NOT NULL
+          AND pending_run_at < ?`,
+    )
+    .all(cutoffIso) as { name: string }[];
+  if (rows.length === 0) return [];
+  db.prepare(
+    `UPDATE follow_me_tasks
+        SET pending_run_at = NULL,
+            updated_at     = CURRENT_TIMESTAMP
+      WHERE pending_run_at IS NOT NULL
+        AND pending_run_at < ?`,
+  ).run(cutoffIso);
+  return rows.map((r) => r.name);
+}
+
+/**
+ * Returns the names of every `follow_me_tasks` row with a fresh
+ * (within `maxAgeMs`) `pending_run_at` lock. Empty array means no
+ * task is currently mid-run from the host's perspective.
+ *
+ * Used by the periodic `tessl_update` catch-up to skip the
+ * session-clear / container-close path while a scheduled task is in
+ * flight (#496 mitigation 1). The owning agent containers wouldn't
+ * meaningfully observe new tile content until they finish anyway, so
+ * deferring is harmless; the next 15-minute tick will retry.
+ */
+export function getActivePendingRunAtNames(maxAgeMs: number): string[] {
+  if (!Number.isFinite(maxAgeMs) || maxAgeMs <= 0) {
+    throw new Error(
+      `getActivePendingRunAtNames: maxAgeMs must be a positive number (got ${maxAgeMs})`,
+    );
+  }
+  const cutoffIso = new Date(Date.now() - maxAgeMs).toISOString();
+  const rows = db
+    .prepare(
+      `SELECT name FROM follow_me_tasks
+        WHERE pending_run_at IS NOT NULL
+          AND pending_run_at >= ?`,
+    )
+    .all(cutoffIso) as { name: string }[];
+  return rows.map((r) => r.name);
 }
 
 // --- Router state accessors ---

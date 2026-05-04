@@ -29,6 +29,7 @@ import {
   createTask,
   deleteAllSessions,
   deleteTask,
+  getActivePendingRunAtNames,
   getCurrentTz,
   getLastFromMeMessages,
   getTaskById,
@@ -3468,6 +3469,47 @@ export async function processTaskIpc(
             tesslResultPath,
             JSON.stringify({
               error: 'Only the main group can trigger tessl_update.',
+            }),
+          );
+          break;
+        }
+
+        // #496 — gate the on-demand update on the same fresh-lock check
+        // the periodic catch-up uses. A scheduled task mid-flight has
+        // its skill holding `follow_me_tasks.pending_run_at`; running
+        // tessl_update now would force-close the maintenance container
+        // and orphan the lock. Defer with a structured response so the
+        // calling agent can reason about retrying. Threshold is the same
+        // 1h freshness window documented at the constant's definition
+        // in `src/index.ts` — duplicated here as a literal because
+        // ipc.ts has no shared-config home for it and lifting the
+        // constant would force a circular import via index.ts.
+        const PENDING_RUN_AT_FRESHNESS_MS = 60 * 60 * 1000;
+        let activeLocks: string[];
+        try {
+          activeLocks = getActivePendingRunAtNames(PENDING_RUN_AT_FRESHNESS_MS);
+        } catch (lockErr) {
+          if (!(lockErr instanceof Error)) throw lockErr;
+          // Don't fail the update on a lock-check error — log and
+          // proceed. Failing closed would block legitimate updates
+          // forever if the DB or schema regressed.
+          logger.warn(
+            { sourceGroup, err: lockErr.message },
+            'tessl_update: pending_run_at check failed — proceeding without deferral',
+          );
+          activeLocks = [];
+        }
+        if (activeLocks.length > 0) {
+          logger.info(
+            { sourceGroup, activeLocks },
+            'tessl_update deferred — scheduled task(s) mid-flight with fresh pending_run_at lock (#496)',
+          );
+          fs.writeFileSync(
+            tesslResultPath,
+            JSON.stringify({
+              stdout: `Deferred: scheduled task(s) currently mid-flight with fresh pending_run_at lock (${activeLocks.join(', ')}). Retry after the task(s) finish — running tessl_update now would force-close the maintenance container and orphan the lock (#496).`,
+              deferred: true,
+              activeLocks,
             }),
           );
           break;

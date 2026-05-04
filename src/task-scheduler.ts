@@ -834,6 +834,41 @@ async function runTask(
 
   const durationMs = Date.now() - startTime;
 
+  // #496 — detect mid-run force-close by `closeAllActiveContainers`
+  // (the periodic `tessl_update` catch-up path). The agent-runner
+  // watchdog hard-exits 0 after 30s of `_close`, which makes the
+  // container's exit code look like a clean success even though the
+  // task was killed mid-flight and may have left a `pending_run_at`
+  // lock dangling. Reclassify so operator-facing audits (and the
+  // reader skills that gate on `task_run_logs.status`) can tell apart
+  // bookkeeping-success from semantic-success.
+  //
+  // `consumeForcedCloseAt` clears the slot's stamp on read so it can't
+  // leak into the next run's classification. We only reclassify if the
+  // stamp was set DURING this run (`>= startTime`) — a stamp from an
+  // earlier run that never got consumed (e.g. the slot wasn't running)
+  // shouldn't taint a later, fresh run.
+  const forcedCloseAt = deps.queue.consumeForcedCloseAt(
+    task.chat_jid,
+    MAINTENANCE_SESSION_NAME,
+  );
+  const wasForcedClosed = forcedCloseAt !== null && forcedCloseAt >= startTime;
+  let runStatus: 'success' | 'error' | 'killed' = error ? 'error' : 'success';
+  if (wasForcedClosed && runStatus === 'success') {
+    runStatus = 'killed';
+    // Surface the kill in the structured log AND in `task_run_logs.error`
+    // so the row carries an actionable explanation rather than a bare
+    // `status='killed'` with no context. The owner skill watching
+    // `pending_run_at` recovery can read this when reasoning about why
+    // its lock was reclaimed.
+    error =
+      'Container force-closed mid-run by tessl_update / closeAllActiveContainers — agent-runner watchdog hard-exit 0 fires 30s after `_close`, so container exit code is misleadingly 0 (#496)';
+    logger.warn(
+      { taskId: task.id, forcedCloseAt, startTime, durationMs },
+      'Task run reclassified as killed — container was force-closed mid-flight by tessl_update; pending_run_at on follow_me_tasks may be left dangling and will be cleared by the stale-lock TTL on next startup or pre-update check',
+    );
+  }
+
   // Post-run bookkeeping is wrapped in try/finally so the disk-hygiene
   // wipe still runs if any DB write throws (transient SQLite, disk
   // full, schema mid-migration). Without the finally a thrown
@@ -844,7 +879,7 @@ async function runTask(
       task_id: task.id,
       run_at: new Date().toISOString(),
       duration_ms: durationMs,
-      status: error ? 'error' : 'success',
+      status: runStatus,
       result,
       error,
     });
