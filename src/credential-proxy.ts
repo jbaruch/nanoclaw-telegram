@@ -18,12 +18,46 @@ import { join } from 'path';
 
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
-import { applyWireToolFilter } from './wire-tool-filter.js';
+import { lookupContainer } from './proxy-registry.js';
+import {
+  appendUsageRecord,
+  noteCaptureWrite,
+  noteMessagesRequest,
+  parseUsageFromBody,
+  type ContainerContext,
+} from './usage-log.js';
+import { applyWireToolFilter, isMessagesEndpoint } from './wire-tool-filter.js';
 
 export type AuthMode = 'api-key' | 'oauth';
 
 export interface ProxyConfig {
   authMode: AuthMode;
+}
+
+/**
+ * Path-prefix used to embed a per-container attribution token in the
+ * proxy URL. Containers receive `ANTHROPIC_BASE_URL=http://gw:port/c/<token>`;
+ * the SDK joins endpoint paths so requests arrive as `/c/<token>/v1/messages`.
+ * The proxy strips the prefix, looks up `{group, tier, session, task_id}`
+ * via `proxy-registry`, and forwards the un-prefixed path upstream.
+ */
+const TOKEN_PREFIX_RE = /^\/c\/([A-Za-z0-9_-]+)(\/.*)?$/;
+
+/**
+ * Cap the response buffer at 10MB. Typical Anthropic responses are
+ * well under 200KB; if we ever see something larger, skip usage
+ * capture rather than risk holding huge buffers in memory. The
+ * response stream itself is unaffected — we only stop teeing into
+ * the buffer.
+ */
+const USAGE_CAPTURE_BUFFER_CAP = 10 * 1024 * 1024;
+
+/**
+ * Where to append captured usage. Override with `USAGE_LOG_PATH` for
+ * tests or alternate deployments.
+ */
+function resolveUsageLogPath(): string {
+  return process.env.USAGE_LOG_PATH || join('logs', 'usage.jsonl');
 }
 
 export function startCredentialProxy(
@@ -47,8 +81,30 @@ export function startCredentialProxy(
   const isHttps = upstreamUrl.protocol === 'https:';
   const makeRequest = isHttps ? httpsRequest : httpRequest;
 
+  const usageLogPath = resolveUsageLogPath();
+
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
+      // Detach the per-container attribution token from the URL prefix
+      // (`/c/<token>/...`) before doing anything else. The upstream URL
+      // is the un-prefixed path; the token feeds the usage-log lookup.
+      // Requests without the prefix keep working with `group: "unknown"`
+      // — the proxy is backward-compatible during rollout.
+      let containerCtx: ContainerContext | null = null;
+      let upstreamPath = req.url || '/';
+      const m = upstreamPath.match(TOKEN_PREFIX_RE);
+      if (m) {
+        const token = m[1];
+        upstreamPath = m[2] || '/';
+        containerCtx = lookupContainer(token);
+        if (!containerCtx) {
+          logger.warn(
+            { token: token.slice(0, 6) + '…', url: req.url },
+            'Credential proxy: unknown attribution token, recording as unknown',
+          );
+        }
+      }
+
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
       req.on('end', () => {
@@ -60,13 +116,13 @@ export function startCredentialProxy(
         // cache_create per cold start by ~12K tokens per tier.
         const originalLength = rawBody.length;
         const filterResult = applyWireToolFilter(
-          req.url,
+          upstreamPath,
           req.method,
           rawBody,
           process.env,
           (err) => {
             logger.warn(
-              { err, url: req.url },
+              { err, url: upstreamPath },
               'Wire-tool filter: body parse failed, forwarding unchanged',
             );
           },
@@ -80,7 +136,7 @@ export function startCredentialProxy(
           // operator wants per-request visibility.
           logger.debug(
             {
-              url: req.url,
+              url: upstreamPath,
               toolsStripped: filterResult.stats.toolsStripped,
               descriptionsTrimmed: filterResult.stats.descriptionsTrimmed,
               bodyDelta: body.length - originalLength,
@@ -121,7 +177,7 @@ export function startCredentialProxy(
             // Strip query string and sanitize the filename component
             // to a conservative set so dumps glob predictably even when
             // the proxied URL carries `?foo=bar` or other unsafe chars.
-            const urlPath = (req.url || '/').split('?')[0];
+            const urlPath = upstreamPath.split('?')[0];
             const lastRaw = urlPath.split('/').pop() || 'root';
             const last = lastRaw.replace(/[^a-zA-Z0-9._-]/g, '_') || 'root';
             const method =
@@ -152,6 +208,35 @@ export function startCredentialProxy(
               // `error-handling.Specific Exceptions`.
               throw err;
             }
+          }
+        }
+
+        // Capture response body for usage logging (#479 / ligolnik#125)
+        // only on /v1/messages — other endpoints (oauth exchange, health
+        // checks) have no `usage` field. Match via `isMessagesEndpoint()`
+        // (#479 sub-#4 — share one helper across the proxy so the next
+        // `?beta=...` bump can't desync capture from the wire-tool filter
+        // the way #126 caught). We tee the upstream stream into both the
+        // client response and a buffer, parse usage after the upstream
+        // ends, and append a JSONL line. Cap the buffer at 10MB; beyond
+        // that we skip capture rather than blow memory. The response
+        // stream itself is never gated on this — pipe is wired up first
+        // and is never blocked or delayed by capture.
+        const captureUsage =
+          req.method === 'POST' && isMessagesEndpoint(upstreamPath);
+        const requestStartMs = Date.now();
+        // Sniff the request body for the model name so we can fall back
+        // when the response is malformed / can't be parsed.
+        let requestModel: string | null = null;
+        if (captureUsage) {
+          noteMessagesRequest();
+          try {
+            const parsed = JSON.parse(body.toString('utf8'));
+            if (parsed && typeof parsed.model === 'string')
+              requestModel = parsed.model;
+          } catch {
+            // Body isn't JSON — leave model null; the response usually
+            // carries it anyway.
           }
         }
 
@@ -188,19 +273,89 @@ export function startCredentialProxy(
           {
             hostname: upstreamUrl.hostname,
             port: upstreamUrl.port || (isHttps ? 443 : 80),
-            path: req.url,
+            path: upstreamPath,
             method: req.method,
             headers,
           } as RequestOptions,
           (upRes) => {
             res.writeHead(upRes.statusCode!, upRes.headers);
+
+            if (!captureUsage || upRes.statusCode !== 200) {
+              upRes.pipe(res);
+              return;
+            }
+
+            // Tee: pipe the upstream stream into the client response
+            // (Node handles backpressure: a slow client pauses upRes
+            // automatically, no unbounded buffering on res.write) AND
+            // attach a non-writing `data` listener that only collects
+            // for usage parsing. If the capture buffer exceeds the
+            // cap we drop further captures and skip parsing — the
+            // pipe to the client is unaffected.
             upRes.pipe(res);
+            const captured: Buffer[] = [];
+            let captureSize = 0;
+            let capped = false;
+            upRes.on('data', (chunk: Buffer) => {
+              if (capped) return;
+              captureSize += chunk.length;
+              if (captureSize > USAGE_CAPTURE_BUFFER_CAP) {
+                capped = true;
+                captured.length = 0;
+                logger.warn(
+                  { url: upstreamPath, size: captureSize },
+                  'usage-log: response too large, skipping capture',
+                );
+              } else {
+                captured.push(chunk);
+              }
+            });
+            upRes.on('end', () => {
+              // `pipe` calls `res.end()` for us — don't double-end.
+              if (capped) return;
+              const bodyText = Buffer.concat(captured).toString('utf8');
+              const ctx: ContainerContext = containerCtx ?? {
+                group: 'unknown',
+                tier: 'untrusted',
+                session: 'unknown',
+                task_id: null,
+              };
+              try {
+                const record = parseUsageFromBody(
+                  bodyText,
+                  ctx,
+                  Date.now() - requestStartMs,
+                  requestModel,
+                );
+                if (record) {
+                  noteCaptureWrite();
+                  // Fire-and-forget. appendUsageRecord swallows IO
+                  // errors internally so this can never reject.
+                  void appendUsageRecord(usageLogPath, record);
+                }
+              } catch (err) {
+                // Defense in depth: parseUsageFromBody is designed not
+                // to throw, but if it ever does, we MUST NOT propagate.
+                logger.warn(
+                  { err, url: upstreamPath },
+                  'usage-log: parse failed',
+                );
+              }
+            });
+            upRes.on('error', (err) => {
+              // Pipe propagates the error and tears down the response;
+              // we just warn about the capture-side impact.
+              logger.warn(
+                { err, url: upstreamPath },
+                'usage-log: upstream stream error during capture',
+              );
+            });
           },
         );
 
         upstream.on('error', (err) => {
           logger.error(
-            { err, url: req.url },
+            { err, url: upstreamPath },
             'Credential proxy upstream error',
           );
           if (!res.headersSent) {

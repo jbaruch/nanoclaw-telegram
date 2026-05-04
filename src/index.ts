@@ -116,6 +116,7 @@ import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 import { initObserver } from './observer.js';
 import { runGateChain, GateContext } from './gates/index.js';
+import { checkSilentZero } from './usage-log.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -3012,6 +3013,23 @@ async function main(): Promise<void> {
       logger.warn({ err }, 'host-logs daily prune failed');
     }
   }, ONE_DAY_MS).unref();
+
+  // Silent-zero-output guard for the credential-proxy usage log
+  // (#479 sub-#3). Polls every minute; emits one ERROR if the proxy
+  // has handled at least one /v1/messages POST but produced zero
+  // JSONL records past the warmup grace period. Edge-triggered
+  // against messagesSeen so a persistent broken state logs once,
+  // not every tick — see `checkSilentZero` in src/usage-log.ts.
+  const SILENT_ZERO_POLL_MS = 60 * 1000;
+  setInterval(() => {
+    const diag = checkSilentZero();
+    if (diag) {
+      logger.error(
+        { ...diag },
+        'usage-log: /v1/messages traffic seen but zero JSONL records — capture pipeline broken (see #479 sub-#3)',
+      );
+    }
+  }, SILENT_ZERO_POLL_MS).unref();
 
   // Write available_groups.json for all main/trusted groups on startup.
   // Otherwise the snapshot only updates when a container spawns, which can

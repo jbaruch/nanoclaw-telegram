@@ -49,6 +49,7 @@ import {
 } from './container-runtime.js';
 import { defaultComputeNextRun } from './cadence-registry.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { registerContainer, unregisterContainer } from './proxy-registry.js';
 import { rebuildCadenceRegistryForGroup } from './db.js';
 import { isHandoffActive } from './handoff.js';
 import { sweepStaleInputs } from './ipc-input-sweep.js';
@@ -2261,6 +2262,7 @@ function buildContainerArgs(
   replyToMessageId?: string,
   chatJid?: string,
   continuationCycleId?: string,
+  attributionToken?: string,
 ): BuildContainerArgsResult {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -2486,11 +2488,18 @@ function buildContainerArgs(
     args.push('-e', `NANOCLAW_CONTINUATION_CYCLE_ID=${continuationCycleId}`);
   }
 
-  // Route API traffic through the credential proxy (containers never see real secrets)
-  args.push(
-    '-e',
-    `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
-  );
+  // Route API traffic through the credential proxy (containers never see real secrets).
+  // When an attribution token is supplied (#479 / ligolnik#125), embed it as a
+  // path prefix so the proxy can map each request back to {group, tier,
+  // session, task_id} for the JSONL usage log. The Claude SDK joins endpoint
+  // paths to the base URL, so requests arrive at the proxy as
+  // `/c/<token>/v1/messages`. Backward-compatible: a missing token degrades
+  // to the un-prefixed URL and the proxy records `group: "unknown"`.
+  const baseProxyUrl = `http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`;
+  const proxyBaseUrl = attributionToken
+    ? `${baseProxyUrl}/c/${attributionToken}`
+    : baseProxyUrl;
+  args.push('-e', `ANTHROPIC_BASE_URL=${proxyBaseUrl}`);
 
   // Mirror the host's auth method with a placeholder value.
   // API key mode: SDK sends x-api-key, proxy replaces with real key.
@@ -2709,353 +2718,500 @@ export async function runContainerAgent(
       }
     }
   }
-  const { args: containerArgs, cleanup: cleanupSecretEnvFile } =
-    buildContainerArgs(
-      mounts,
-      containerName,
-      group,
-      input.isMain,
-      input.replyToMessageId,
-      input.chatJid,
-      input.continuationCycleId,
+  // Per-spawn attribution token for the credential proxy's usage log
+  // (#479 / ligolnik#125). Lives only as long as the container; unregistered
+  // on close + spawn-error. The token is generated here so the URL embedded
+  // in the container env is unique per spawn, even across restarts of the
+  // same group/session.
+  const trustTier: 'main' | 'trusted' | 'untrusted' = input.isMain
+    ? 'main'
+    : group.containerConfig?.trusted === true
+      ? 'trusted'
+      : 'untrusted';
+  const attributionToken = registerContainer({
+    group: group.folder,
+    tier: trustTier,
+    session: sessionName,
+    task_id: input.isScheduledTask ? sessionName : null,
+  });
+
+  // Wrap the spawn-path so a sync throw between registration and the
+  // close/error handler attach (mostly fs.mkdirSync calls below)
+  // can't leak the registry entry. The promise itself never rejects
+  // (close/error handlers always resolve()), so this catch only fires
+  // on the early-throw window. The handlers below also call
+  // unregisterContainer; unregister is idempotent regardless.
+  try {
+    const { args: containerArgs, cleanup: cleanupSecretEnvFile } =
+      buildContainerArgs(
+        mounts,
+        containerName,
+        group,
+        input.isMain,
+        input.replyToMessageId,
+        input.chatJid,
+        input.continuationCycleId,
+        attributionToken,
+      );
+
+    logger.debug(
+      {
+        group: group.name,
+        containerName,
+        mounts: mounts.map(
+          (m) =>
+            `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
+        ),
+        containerArgs: containerArgs.join(' '),
+      },
+      'Container mount configuration',
     );
 
-  logger.debug(
-    {
-      group: group.name,
-      containerName,
-      mounts: mounts.map(
-        (m) =>
-          `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
-      ),
-      containerArgs: containerArgs.join(' '),
-    },
-    'Container mount configuration',
-  );
+    logger.info(
+      {
+        group: group.name,
+        containerName,
+        mountCount: mounts.length,
+        isMain: input.isMain,
+      },
+      'Spawning container agent',
+    );
 
-  logger.info(
-    {
-      group: group.name,
-      containerName,
-      mountCount: mounts.length,
-      isMain: input.isMain,
-    },
-    'Spawning container agent',
-  );
+    const logsDir = path.join(groupDir, 'logs');
+    fs.mkdirSync(logsDir, { recursive: true });
 
-  const logsDir = path.join(groupDir, 'logs');
-  fs.mkdirSync(logsDir, { recursive: true });
-
-  // Per-spawn streaming log under host-logs/. Distinct from the
-  // post-exit summary written at `logsDir` below — the streaming file
-  // captures output line-by-line as the container produces it, so the
-  // admin tile can read what a stuck container is actually doing
-  // without waiting for it to exit. Failure to open the stream is
-  // non-fatal: the container still runs, we just lose the host-logs
-  // copy for this spawn (the in-memory buffers + post-exit summary
-  // remain unaffected).
-  const spawnStartedAt = new Date();
-  // `input.sessionName` is optional on the type but is always set by
-  // every caller that actually invokes runContainerAgent (default or
-  // maintenance). Fall back to the canonical default to keep the file
-  // path deterministic if a future caller forgets to stamp the field.
-  const streamSessionName = input.sessionName || DEFAULT_SESSION_NAME;
-  const streamLogPath = containerLogPath(
-    group.folder,
-    streamSessionName,
-    spawnStartedAt,
-  );
-  let streamLog: fs.WriteStream | null = null;
-  try {
-    fs.mkdirSync(path.dirname(streamLogPath), { recursive: true });
-    streamLog = fs.createWriteStream(streamLogPath, { flags: 'a' });
-    // Attach an error listener BEFORE the first write. Stream errors
-    // emit async (e.g. ENOENT if the parent dir is wiped between
-    // mkdir and create, EBADF if the fd is reaped) — without a
-    // listener, Node's default handler is "throw uncaught exception"
-    // which would crash the orchestrator on a logging path. This must
-    // never happen: lose the streamed log, keep serving the user.
-    streamLog.on('error', (err) => {
+    // Per-spawn streaming log under host-logs/. Distinct from the
+    // post-exit summary written at `logsDir` below — the streaming file
+    // captures output line-by-line as the container produces it, so the
+    // admin tile can read what a stuck container is actually doing
+    // without waiting for it to exit. Failure to open the stream is
+    // non-fatal: the container still runs, we just lose the host-logs
+    // copy for this spawn (the in-memory buffers + post-exit summary
+    // remain unaffected).
+    const spawnStartedAt = new Date();
+    // `input.sessionName` is optional on the type but is always set by
+    // every caller that actually invokes runContainerAgent (default or
+    // maintenance). Fall back to the canonical default to keep the file
+    // path deterministic if a future caller forgets to stamp the field.
+    const streamSessionName = input.sessionName || DEFAULT_SESSION_NAME;
+    const streamLogPath = containerLogPath(
+      group.folder,
+      streamSessionName,
+      spawnStartedAt,
+    );
+    let streamLog: fs.WriteStream | null = null;
+    try {
+      fs.mkdirSync(path.dirname(streamLogPath), { recursive: true });
+      streamLog = fs.createWriteStream(streamLogPath, { flags: 'a' });
+      // Attach an error listener BEFORE the first write. Stream errors
+      // emit async (e.g. ENOENT if the parent dir is wiped between
+      // mkdir and create, EBADF if the fd is reaped) — without a
+      // listener, Node's default handler is "throw uncaught exception"
+      // which would crash the orchestrator on a logging path. This must
+      // never happen: lose the streamed log, keep serving the user.
+      streamLog.on('error', (err) => {
+        logger.warn(
+          { err, group: group.name, streamLogPath },
+          'host-logs stream errored mid-spawn; dropping per-spawn stream',
+        );
+        // Null the local ref so subsequent writes from the data
+        // listeners no-op rather than try to push into a broken stream.
+        streamLog = null;
+      });
+      streamLog.write(
+        [
+          `=== Container Stream Log ===`,
+          `Group: ${group.name}`,
+          `Folder: ${group.folder}`,
+          `Session: ${streamSessionName}`,
+          `Container: ${containerName}`,
+          `Start: ${spawnStartedAt.toISOString()}`,
+          `=== STDOUT/STDERR (line-prefixed) ===`,
+          ``,
+        ].join('\n'),
+      );
+    } catch (err) {
       logger.warn(
         { err, group: group.name, streamLogPath },
-        'host-logs stream errored mid-spawn; dropping per-spawn stream',
+        'host-logs stream open failed; container will run without per-spawn stream',
       );
-      // Null the local ref so subsequent writes from the data
-      // listeners no-op rather than try to push into a broken stream.
       streamLog = null;
-    });
-    streamLog.write(
-      [
-        `=== Container Stream Log ===`,
-        `Group: ${group.name}`,
-        `Folder: ${group.folder}`,
-        `Session: ${streamSessionName}`,
-        `Container: ${containerName}`,
-        `Start: ${spawnStartedAt.toISOString()}`,
-        `=== STDOUT/STDERR (line-prefixed) ===`,
-        ``,
-      ].join('\n'),
-    );
-  } catch (err) {
-    logger.warn(
-      { err, group: group.name, streamLogPath },
-      'host-logs stream open failed; container will run without per-spawn stream',
-    );
-    streamLog = null;
-  }
+    }
 
-  // Buffered line writer per stream. Container output isn't line-
-  // aligned (a single `data` event can split a line, or contain many),
-  // so we buffer until we see `\n` and emit `[OUT] ` / `[ERR] ` per
-  // complete line. Trailing partial line is flushed on container exit.
-  //
-  // The buffer is bounded: a misbehaving container that emits megabytes
-  // without a newline (e.g. binary garbage, a long single-line log
-  // dump) would otherwise grow the orchestrator's heap unboundedly.
-  // Cap at 64 KB per stream — well above typical line lengths but
-  // small enough that even pathological output flushes quickly.
-  const LINE_BUFFER_MAX = 64 * 1024;
-  const makeLinePrefixer = (prefix: string) => {
-    let buffer = '';
-    const writeLines = (chunk: string) => {
-      if (!streamLog) return;
-      buffer += chunk;
-      let nl: number;
-      while ((nl = buffer.indexOf('\n')) !== -1) {
-        const line = buffer.slice(0, nl);
-        buffer = buffer.slice(nl + 1);
-        streamLog.write(`${prefix} ${stripAnsi(line)}\n`);
-      }
-      // Cap the buffer: if no newline appeared and the buffer crossed
-      // the limit, flush the entire current buffer as a synthetic
-      // line. Tagged with `[…cap…]` so a reader knows the line was
-      // not delimited by a real newline (might cut mid-token).
-      if (buffer.length > LINE_BUFFER_MAX) {
-        streamLog.write(`${prefix} […cap…] ${stripAnsi(buffer)}\n`);
-        buffer = '';
-      }
-    };
-    const flush = () => {
-      if (!streamLog || buffer.length === 0) return;
-      streamLog.write(`${prefix} ${stripAnsi(buffer)}\n`);
-      buffer = '';
-    };
-    return { writeLines, flush };
-  };
-  const stdoutPrefixer = makeLinePrefixer('[OUT]');
-  const stderrPrefixer = makeLinePrefixer('[ERR]');
-
-  return new Promise((resolve) => {
-    const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    onProcess(container, containerName);
-
-    let stdout = '';
-    let stderr = '';
-    let stdoutTruncated = false;
-    let stderrTruncated = false;
-
-    container.stdin.write(JSON.stringify(input));
-    container.stdin.end();
-
-    // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
-    let parseBuffer = '';
-    let newSessionId: string | undefined;
-    let outputChain = Promise.resolve();
-
-    container.stdout.on('data', (data) => {
-      const chunk = data.toString();
-
-      // Streaming host-logs copy. Best-effort — write errors don't
-      // affect the buffer accumulation or marker parsing below.
-      stdoutPrefixer.writeLines(chunk);
-
-      // Always accumulate for logging
-      if (!stdoutTruncated) {
-        const remaining = CONTAINER_MAX_OUTPUT_SIZE - stdout.length;
-        if (chunk.length > remaining) {
-          stdout += chunk.slice(0, remaining);
-          stdoutTruncated = true;
-          logger.warn(
-            { group: group.name, size: stdout.length },
-            'Container stdout truncated due to size limit',
-          );
-        } else {
-          stdout += chunk;
+    // Buffered line writer per stream. Container output isn't line-
+    // aligned (a single `data` event can split a line, or contain many),
+    // so we buffer until we see `\n` and emit `[OUT] ` / `[ERR] ` per
+    // complete line. Trailing partial line is flushed on container exit.
+    //
+    // The buffer is bounded: a misbehaving container that emits megabytes
+    // without a newline (e.g. binary garbage, a long single-line log
+    // dump) would otherwise grow the orchestrator's heap unboundedly.
+    // Cap at 64 KB per stream — well above typical line lengths but
+    // small enough that even pathological output flushes quickly.
+    const LINE_BUFFER_MAX = 64 * 1024;
+    const makeLinePrefixer = (prefix: string) => {
+      let buffer = '';
+      const writeLines = (chunk: string) => {
+        if (!streamLog) return;
+        buffer += chunk;
+        let nl: number;
+        while ((nl = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 1);
+          streamLog.write(`${prefix} ${stripAnsi(line)}\n`);
         }
-      }
+        // Cap the buffer: if no newline appeared and the buffer crossed
+        // the limit, flush the entire current buffer as a synthetic
+        // line. Tagged with `[…cap…]` so a reader knows the line was
+        // not delimited by a real newline (might cut mid-token).
+        if (buffer.length > LINE_BUFFER_MAX) {
+          streamLog.write(`${prefix} […cap…] ${stripAnsi(buffer)}\n`);
+          buffer = '';
+        }
+      };
+      const flush = () => {
+        if (!streamLog || buffer.length === 0) return;
+        streamLog.write(`${prefix} ${stripAnsi(buffer)}\n`);
+        buffer = '';
+      };
+      return { writeLines, flush };
+    };
+    const stdoutPrefixer = makeLinePrefixer('[OUT]');
+    const stderrPrefixer = makeLinePrefixer('[ERR]');
 
-      // Stream-parse for output markers
-      if (onOutput) {
-        parseBuffer += chunk;
-        let startIdx: number;
-        while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
-          const endIdx = parseBuffer.indexOf(OUTPUT_END_MARKER, startIdx);
-          if (endIdx === -1) break; // Incomplete pair, wait for more data
+    return await new Promise<ContainerOutput>((resolve) => {
+      const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
 
-          const jsonStr = parseBuffer
-            .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
-            .trim();
-          parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_MARKER.length);
+      onProcess(container, containerName);
 
-          try {
-            const parsed: ContainerOutput = JSON.parse(jsonStr);
-            if (parsed.newSessionId) {
-              newSessionId = parsed.newSessionId;
-            }
-            hadStreamingOutput = true;
-            // Activity detected — reset the hard timeout
-            resetTimeout();
-            // Call onOutput for all markers (including null results)
-            // so idle timers start even for "silent" query completions.
-            outputChain = outputChain.then(() => onOutput(parsed));
-          } catch (err) {
+      let stdout = '';
+      let stderr = '';
+      let stdoutTruncated = false;
+      let stderrTruncated = false;
+
+      container.stdin.write(JSON.stringify(input));
+      container.stdin.end();
+
+      // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
+      let parseBuffer = '';
+      let newSessionId: string | undefined;
+      let outputChain = Promise.resolve();
+
+      container.stdout.on('data', (data) => {
+        const chunk = data.toString();
+
+        // Streaming host-logs copy. Best-effort — write errors don't
+        // affect the buffer accumulation or marker parsing below.
+        stdoutPrefixer.writeLines(chunk);
+
+        // Always accumulate for logging
+        if (!stdoutTruncated) {
+          const remaining = CONTAINER_MAX_OUTPUT_SIZE - stdout.length;
+          if (chunk.length > remaining) {
+            stdout += chunk.slice(0, remaining);
+            stdoutTruncated = true;
             logger.warn(
-              { group: group.name, error: err },
-              'Failed to parse streamed output chunk',
+              { group: group.name, size: stdout.length },
+              'Container stdout truncated due to size limit',
             );
+          } else {
+            stdout += chunk;
           }
         }
-      }
-    });
 
-    container.stderr.on('data', (data) => {
-      const chunk = data.toString();
-      stderrPrefixer.writeLines(chunk);
-      const lines = chunk.trim().split('\n');
-      for (const line of lines) {
-        if (line) {
-          logger.debug({ container: group.folder }, line);
-          onAgentLine(group.folder, line);
+        // Stream-parse for output markers
+        if (onOutput) {
+          parseBuffer += chunk;
+          let startIdx: number;
+          while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
+            const endIdx = parseBuffer.indexOf(OUTPUT_END_MARKER, startIdx);
+            if (endIdx === -1) break; // Incomplete pair, wait for more data
+
+            const jsonStr = parseBuffer
+              .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
+              .trim();
+            parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_MARKER.length);
+
+            try {
+              const parsed: ContainerOutput = JSON.parse(jsonStr);
+              if (parsed.newSessionId) {
+                newSessionId = parsed.newSessionId;
+              }
+              hadStreamingOutput = true;
+              // Activity detected — reset the hard timeout
+              resetTimeout();
+              // Call onOutput for all markers (including null results)
+              // so idle timers start even for "silent" query completions.
+              outputChain = outputChain.then(() => onOutput(parsed));
+            } catch (err) {
+              logger.warn(
+                { group: group.name, error: err },
+                'Failed to parse streamed output chunk',
+              );
+            }
+          }
         }
-      }
-      // Don't reset timeout on stderr — SDK writes debug logs continuously.
-      // Timeout only resets on actual output (OUTPUT_MARKER in stdout).
-      if (stderrTruncated) return;
-      const remaining = CONTAINER_MAX_OUTPUT_SIZE - stderr.length;
-      if (chunk.length > remaining) {
-        stderr += chunk.slice(0, remaining);
-        stderrTruncated = true;
-        logger.warn(
-          { group: group.name, size: stderr.length },
-          'Container stderr truncated due to size limit',
+      });
+
+      container.stderr.on('data', (data) => {
+        const chunk = data.toString();
+        stderrPrefixer.writeLines(chunk);
+        const lines = chunk.trim().split('\n');
+        for (const line of lines) {
+          if (line) {
+            logger.debug({ container: group.folder }, line);
+            onAgentLine(group.folder, line);
+          }
+        }
+        // Don't reset timeout on stderr — SDK writes debug logs continuously.
+        // Timeout only resets on actual output (OUTPUT_MARKER in stdout).
+        if (stderrTruncated) return;
+        const remaining = CONTAINER_MAX_OUTPUT_SIZE - stderr.length;
+        if (chunk.length > remaining) {
+          stderr += chunk.slice(0, remaining);
+          stderrTruncated = true;
+          logger.warn(
+            { group: group.name, size: stderr.length },
+            'Container stderr truncated due to size limit',
+          );
+        } else {
+          stderr += chunk;
+        }
+      });
+
+      let timedOut = false;
+      let hadStreamingOutput = false;
+      // Untrusted containers get shorter timeout (5 min vs 30 min default)
+      const UNTRUSTED_TIMEOUT = 300_000;
+      const defaultTimeout =
+        input.isMain || group.containerConfig?.trusted
+          ? CONTAINER_TIMEOUT
+          : UNTRUSTED_TIMEOUT;
+      const configTimeout = group.containerConfig?.timeout || defaultTimeout;
+      // #461 — maintenance-session inactivity timeout. The kill timer
+      // here is reset by `resetTimeout()` on every streamed stdout
+      // marker (see the `hadStreamingOutput = true; resetTimeout();`
+      // block lower in this function), so this is an *inactivity*
+      // timeout, not a wall-clock cap — same shape as the existing
+      // default-session timer.
+      //
+      // Maintenance work is single-turn burst-then-quiet, so it
+      // doesn't need the user-facing default's `IDLE_TIMEOUT + 30s`
+      // graceful-close floor (that floor exists so a multi-turn
+      // conversation can drain through `_close`). With the
+      // agent-runner's silent-stop synthesis (#461 layer 1), a healthy
+      // maintenance run signals teardown within seconds; this shorter
+      // window is the backstop for the "SDK hung past graceful close"
+      // pathology. Bypass the IDLE_TIMEOUT floor for maintenance only.
+      //
+      // Per-group `containerConfig.timeout` still wins when set so
+      // operators can extend the window for groups with heavy precheck
+      // scripts that run silently for longer than the env default.
+      const isMaintenanceSession = sessionName === MAINTENANCE_SESSION_NAME;
+      const timeoutMs = isMaintenanceSession
+        ? group.containerConfig?.timeout || MAINTENANCE_CONTAINER_TIMEOUT
+        : Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
+
+      const killOnTimeout = () => {
+        timedOut = true;
+        logger.error(
+          { group: group.name, containerName },
+          'Container timeout, stopping gracefully',
         );
-      } else {
-        stderr += chunk;
-      }
-    });
-
-    let timedOut = false;
-    let hadStreamingOutput = false;
-    // Untrusted containers get shorter timeout (5 min vs 30 min default)
-    const UNTRUSTED_TIMEOUT = 300_000;
-    const defaultTimeout =
-      input.isMain || group.containerConfig?.trusted
-        ? CONTAINER_TIMEOUT
-        : UNTRUSTED_TIMEOUT;
-    const configTimeout = group.containerConfig?.timeout || defaultTimeout;
-    // #461 — maintenance-session inactivity timeout. The kill timer
-    // here is reset by `resetTimeout()` on every streamed stdout
-    // marker (see the `hadStreamingOutput = true; resetTimeout();`
-    // block lower in this function), so this is an *inactivity*
-    // timeout, not a wall-clock cap — same shape as the existing
-    // default-session timer.
-    //
-    // Maintenance work is single-turn burst-then-quiet, so it
-    // doesn't need the user-facing default's `IDLE_TIMEOUT + 30s`
-    // graceful-close floor (that floor exists so a multi-turn
-    // conversation can drain through `_close`). With the
-    // agent-runner's silent-stop synthesis (#461 layer 1), a healthy
-    // maintenance run signals teardown within seconds; this shorter
-    // window is the backstop for the "SDK hung past graceful close"
-    // pathology. Bypass the IDLE_TIMEOUT floor for maintenance only.
-    //
-    // Per-group `containerConfig.timeout` still wins when set so
-    // operators can extend the window for groups with heavy precheck
-    // scripts that run silently for longer than the env default.
-    const isMaintenanceSession = sessionName === MAINTENANCE_SESSION_NAME;
-    const timeoutMs = isMaintenanceSession
-      ? group.containerConfig?.timeout || MAINTENANCE_CONTAINER_TIMEOUT
-      : Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
-
-    const killOnTimeout = () => {
-      timedOut = true;
-      logger.error(
-        { group: group.name, containerName },
-        'Container timeout, stopping gracefully',
-      );
-      try {
-        stopContainer(containerName);
-      } catch (err) {
-        logger.warn(
-          { group: group.name, containerName, err },
-          'Graceful stop failed, force killing',
-        );
-        container.kill('SIGKILL');
-      }
-    };
-
-    let timeout = setTimeout(killOnTimeout, timeoutMs);
-
-    // Reset the timeout whenever there's activity (streaming output)
-    const resetTimeout = () => {
-      clearTimeout(timeout);
-      timeout = setTimeout(killOnTimeout, timeoutMs);
-    };
-
-    container.on('close', (code) => {
-      clearTimeout(timeout);
-      // Remove the secret env-file (if any) as soon as docker has
-      // exited — the file's only consumer is the docker daemon at
-      // spawn time, so the window of exposure ends with the close
-      // event. cleanup() is idempotent; the error handler below
-      // calls it too in case `close` is skipped (spawn ENOENT etc).
-      cleanupSecretEnvFile();
-      const duration = Date.now() - startTime;
-
-      // Flush any partial trailing line and close the streaming log.
-      // Failure to close cleanly is non-fatal — Node will GC the fd
-      // eventually; the streamed bytes already on disk are intact.
-      stdoutPrefixer.flush();
-      stderrPrefixer.flush();
-      if (streamLog) {
         try {
-          streamLog.write(
-            `\n=== Container Exited ===\nCode: ${code}\nDuration: ${duration}ms\nEnd: ${new Date().toISOString()}\n`,
+          stopContainer(containerName);
+        } catch (err) {
+          logger.warn(
+            { group: group.name, containerName, err },
+            'Graceful stop failed, force killing',
           );
-          streamLog.end();
-        } catch {
-          // Stream already errored / closed — nothing useful to do.
+          container.kill('SIGKILL');
         }
-      }
+      };
 
-      if (timedOut) {
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const timeoutLog = path.join(logsDir, `container-${ts}.log`);
-        fs.writeFileSync(
-          timeoutLog,
-          [
-            `=== Container Run Log (TIMEOUT) ===`,
-            `Timestamp: ${new Date().toISOString()}`,
-            `Group: ${group.name}`,
-            `Container: ${containerName}`,
-            `Duration: ${duration}ms`,
-            `Exit Code: ${code}`,
-            `Had Streaming Output: ${hadStreamingOutput}`,
-          ].join('\n'),
-        );
+      let timeout = setTimeout(killOnTimeout, timeoutMs);
 
-        // Timeout after output = idle cleanup, not failure.
-        // The agent already sent its response; this is just the
-        // container being reaped after the idle period expired.
-        if (hadStreamingOutput) {
-          logger.info(
-            { group: group.name, containerName, duration, code },
-            'Container timed out after output (idle cleanup)',
+      // Reset the timeout whenever there's activity (streaming output)
+      const resetTimeout = () => {
+        clearTimeout(timeout);
+        timeout = setTimeout(killOnTimeout, timeoutMs);
+      };
+
+      container.on('close', (code) => {
+        clearTimeout(timeout);
+        // Remove the secret env-file (if any) as soon as docker has
+        // exited — the file's only consumer is the docker daemon at
+        // spawn time, so the window of exposure ends with the close
+        // event. cleanup() is idempotent; the error handler below
+        // calls it too in case `close` is skipped (spawn ENOENT etc).
+        cleanupSecretEnvFile();
+        // Drop the proxy-registry entry for this spawn so dead tokens
+        // don't accumulate in memory. Idempotent.
+        unregisterContainer(attributionToken);
+        const duration = Date.now() - startTime;
+
+        // Flush any partial trailing line and close the streaming log.
+        // Failure to close cleanly is non-fatal — Node will GC the fd
+        // eventually; the streamed bytes already on disk are intact.
+        stdoutPrefixer.flush();
+        stderrPrefixer.flush();
+        if (streamLog) {
+          try {
+            streamLog.write(
+              `\n=== Container Exited ===\nCode: ${code}\nDuration: ${duration}ms\nEnd: ${new Date().toISOString()}\n`,
+            );
+            streamLog.end();
+          } catch {
+            // Stream already errored / closed — nothing useful to do.
+          }
+        }
+
+        if (timedOut) {
+          const ts = new Date().toISOString().replace(/[:.]/g, '-');
+          const timeoutLog = path.join(logsDir, `container-${ts}.log`);
+          fs.writeFileSync(
+            timeoutLog,
+            [
+              `=== Container Run Log (TIMEOUT) ===`,
+              `Timestamp: ${new Date().toISOString()}`,
+              `Group: ${group.name}`,
+              `Container: ${containerName}`,
+              `Duration: ${duration}ms`,
+              `Exit Code: ${code}`,
+              `Had Streaming Output: ${hadStreamingOutput}`,
+            ].join('\n'),
           );
+
+          // Timeout after output = idle cleanup, not failure.
+          // The agent already sent its response; this is just the
+          // container being reaped after the idle period expired.
+          if (hadStreamingOutput) {
+            logger.info(
+              { group: group.name, containerName, duration, code },
+              'Container timed out after output (idle cleanup)',
+            );
+            outputChain.then(() => {
+              resolve({
+                status: 'success',
+                result: null,
+                newSessionId,
+              });
+            });
+            return;
+          }
+
+          logger.error(
+            { group: group.name, containerName, duration, code },
+            'Container timed out with no output',
+          );
+
+          resolve({
+            status: 'error',
+            result: null,
+            error: `Container timed out after ${configTimeout}ms`,
+          });
+          return;
+        }
+
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const logFile = path.join(logsDir, `container-${timestamp}.log`);
+        const isVerbose =
+          process.env.LOG_LEVEL === 'debug' ||
+          process.env.LOG_LEVEL === 'trace';
+
+        const logLines = [
+          `=== Container Run Log ===`,
+          `Timestamp: ${new Date().toISOString()}`,
+          `Group: ${group.name}`,
+          `IsMain: ${input.isMain}`,
+          `Duration: ${duration}ms`,
+          `Exit Code: ${code}`,
+          `Stdout Truncated: ${stdoutTruncated}`,
+          `Stderr Truncated: ${stderrTruncated}`,
+          ``,
+        ];
+
+        const isError = code !== 0;
+
+        if (isVerbose || isError) {
+          // On error, log input metadata only — not the full prompt.
+          // Full input is only included at verbose level to avoid
+          // persisting user conversation content on every non-zero exit.
+          if (isVerbose) {
+            logLines.push(`=== Input ===`, JSON.stringify(input, null, 2), ``);
+          } else {
+            logLines.push(
+              `=== Input Summary ===`,
+              `Prompt length: ${input.prompt.length} chars`,
+              `Session ID: ${input.sessionId || 'new'}`,
+              ``,
+            );
+          }
+          logLines.push(
+            `=== Container Args ===`,
+            containerArgs.join(' '),
+            ``,
+            `=== Mounts ===`,
+            mounts
+              .map(
+                (m) =>
+                  `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
+              )
+              .join('\n'),
+            ``,
+            `=== Stderr${stderrTruncated ? ' (TRUNCATED)' : ''} ===`,
+            stderr,
+            ``,
+            `=== Stdout${stdoutTruncated ? ' (TRUNCATED)' : ''} ===`,
+            stdout,
+          );
+        } else {
+          logLines.push(
+            `=== Input Summary ===`,
+            `Prompt length: ${input.prompt.length} chars`,
+            `Session ID: ${input.sessionId || 'new'}`,
+            ``,
+            `=== Mounts ===`,
+            mounts
+              .map((m) => `${m.containerPath}${m.readonly ? ' (ro)' : ''}`)
+              .join('\n'),
+            ``,
+          );
+        }
+
+        fs.writeFileSync(logFile, logLines.join('\n'));
+        logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
+
+        if (code !== 0) {
+          logger.error(
+            {
+              group: group.name,
+              code,
+              duration,
+              stderr,
+              stdout,
+              logFile,
+            },
+            'Container exited with error',
+          );
+
+          resolve({
+            status: 'error',
+            result: null,
+            error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
+          });
+          return;
+        }
+
+        // Streaming mode: wait for output chain to settle, return completion marker
+        if (onOutput) {
           outputChain.then(() => {
+            logger.info(
+              { group: group.name, duration, newSessionId },
+              'Container completed (streaming mode)',
+            );
             resolve({
               status: 'success',
               result: null,
@@ -3065,210 +3221,99 @@ export async function runContainerAgent(
           return;
         }
 
-        logger.error(
-          { group: group.name, containerName, duration, code },
-          'Container timed out with no output',
-        );
-
-        resolve({
-          status: 'error',
-          result: null,
-          error: `Container timed out after ${configTimeout}ms`,
-        });
-        return;
-      }
-
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const logFile = path.join(logsDir, `container-${timestamp}.log`);
-      const isVerbose =
-        process.env.LOG_LEVEL === 'debug' || process.env.LOG_LEVEL === 'trace';
-
-      const logLines = [
-        `=== Container Run Log ===`,
-        `Timestamp: ${new Date().toISOString()}`,
-        `Group: ${group.name}`,
-        `IsMain: ${input.isMain}`,
-        `Duration: ${duration}ms`,
-        `Exit Code: ${code}`,
-        `Stdout Truncated: ${stdoutTruncated}`,
-        `Stderr Truncated: ${stderrTruncated}`,
-        ``,
-      ];
-
-      const isError = code !== 0;
-
-      if (isVerbose || isError) {
-        // On error, log input metadata only — not the full prompt.
-        // Full input is only included at verbose level to avoid
-        // persisting user conversation content on every non-zero exit.
-        if (isVerbose) {
-          logLines.push(`=== Input ===`, JSON.stringify(input, null, 2), ``);
-        } else {
-          logLines.push(
-            `=== Input Summary ===`,
-            `Prompt length: ${input.prompt.length} chars`,
-            `Session ID: ${input.sessionId || 'new'}`,
-            ``,
-          );
-        }
-        logLines.push(
-          `=== Container Args ===`,
-          containerArgs.join(' '),
-          ``,
-          `=== Mounts ===`,
-          mounts
-            .map(
-              (m) =>
-                `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
-            )
-            .join('\n'),
-          ``,
-          `=== Stderr${stderrTruncated ? ' (TRUNCATED)' : ''} ===`,
-          stderr,
-          ``,
-          `=== Stdout${stdoutTruncated ? ' (TRUNCATED)' : ''} ===`,
-          stdout,
-        );
-      } else {
-        logLines.push(
-          `=== Input Summary ===`,
-          `Prompt length: ${input.prompt.length} chars`,
-          `Session ID: ${input.sessionId || 'new'}`,
-          ``,
-          `=== Mounts ===`,
-          mounts
-            .map((m) => `${m.containerPath}${m.readonly ? ' (ro)' : ''}`)
-            .join('\n'),
-          ``,
-        );
-      }
-
-      fs.writeFileSync(logFile, logLines.join('\n'));
-      logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
-
-      if (code !== 0) {
-        logger.error(
-          {
-            group: group.name,
-            code,
-            duration,
-            stderr,
-            stdout,
-            logFile,
-          },
-          'Container exited with error',
-        );
-
-        resolve({
-          status: 'error',
-          result: null,
-          error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
-        });
-        return;
-      }
-
-      // Streaming mode: wait for output chain to settle, return completion marker
-      if (onOutput) {
-        outputChain.then(() => {
-          logger.info(
-            { group: group.name, duration, newSessionId },
-            'Container completed (streaming mode)',
-          );
-          resolve({
-            status: 'success',
-            result: null,
-            newSessionId,
-          });
-        });
-        return;
-      }
-
-      // Legacy mode: parse the last output marker pair from accumulated stdout
-      try {
-        // Extract JSON between sentinel markers for robust parsing
-        const startIdx = stdout.indexOf(OUTPUT_START_MARKER);
-        const endIdx = stdout.indexOf(OUTPUT_END_MARKER);
-
-        let jsonLine: string;
-        if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-          jsonLine = stdout
-            .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
-            .trim();
-        } else {
-          // Fallback: last non-empty line (backwards compatibility)
-          const lines = stdout.trim().split('\n');
-          jsonLine = lines[lines.length - 1];
-        }
-
-        const output: ContainerOutput = JSON.parse(jsonLine);
-
-        logger.info(
-          {
-            group: group.name,
-            duration,
-            status: output.status,
-            hasResult: !!output.result,
-          },
-          'Container completed',
-        );
-
-        resolve(output);
-      } catch (err) {
-        logger.error(
-          {
-            group: group.name,
-            stdout,
-            stderr,
-            error: err,
-          },
-          'Failed to parse container output',
-        );
-
-        resolve({
-          status: 'error',
-          result: null,
-          error: `Failed to parse container output: ${err instanceof Error ? err.message : String(err)}`,
-        });
-      }
-    });
-
-    container.on('error', (err) => {
-      clearTimeout(timeout);
-      // Spawn-error path: docker may never have read the env-file
-      // (e.g. ENOENT on the docker binary itself), but the file is
-      // still on disk. cleanup() is idempotent — safe to call here
-      // and again from `close` if both fire.
-      cleanupSecretEnvFile();
-      logger.error(
-        { group: group.name, containerName, error: err },
-        'Container spawn error',
-      );
-      // Spawn-error path: the close handler may not fire on some
-      // failure modes (e.g. spawn ENOENT — the binary doesn't exist),
-      // so flush + close the streaming log here too. Without this the
-      // file descriptor leaks until process GC and the file is left
-      // open with no exit footer, which makes the on-disk record
-      // ambiguous (was the container still running, or did it die
-      // before producing any output?).
-      stdoutPrefixer.flush();
-      stderrPrefixer.flush();
-      if (streamLog) {
+        // Legacy mode: parse the last output marker pair from accumulated stdout
         try {
-          streamLog.write(
-            `\n=== Container Spawn Failed ===\nError: ${err.message}\nEnd: ${new Date().toISOString()}\n`,
+          // Extract JSON between sentinel markers for robust parsing
+          const startIdx = stdout.indexOf(OUTPUT_START_MARKER);
+          const endIdx = stdout.indexOf(OUTPUT_END_MARKER);
+
+          let jsonLine: string;
+          if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+            jsonLine = stdout
+              .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
+              .trim();
+          } else {
+            // Fallback: last non-empty line (backwards compatibility)
+            const lines = stdout.trim().split('\n');
+            jsonLine = lines[lines.length - 1];
+          }
+
+          const output: ContainerOutput = JSON.parse(jsonLine);
+
+          logger.info(
+            {
+              group: group.name,
+              duration,
+              status: output.status,
+              hasResult: !!output.result,
+            },
+            'Container completed',
           );
-          streamLog.end();
-        } catch {
-          // Stream already errored / closed — nothing to recover.
+
+          resolve(output);
+        } catch (err) {
+          logger.error(
+            {
+              group: group.name,
+              stdout,
+              stderr,
+              error: err,
+            },
+            'Failed to parse container output',
+          );
+
+          resolve({
+            status: 'error',
+            result: null,
+            error: `Failed to parse container output: ${err instanceof Error ? err.message : String(err)}`,
+          });
         }
-      }
-      resolve({
-        status: 'error',
-        result: null,
-        error: `Container spawn error: ${err.message}`,
+      });
+
+      container.on('error', (err) => {
+        clearTimeout(timeout);
+        // Spawn-error path: docker may never have read the env-file
+        // (e.g. ENOENT on the docker binary itself), but the file is
+        // still on disk. cleanup() is idempotent — safe to call here
+        // and again from `close` if both fire.
+        cleanupSecretEnvFile();
+        unregisterContainer(attributionToken);
+        logger.error(
+          { group: group.name, containerName, error: err },
+          'Container spawn error',
+        );
+        // Spawn-error path: the close handler may not fire on some
+        // failure modes (e.g. spawn ENOENT — the binary doesn't exist),
+        // so flush + close the streaming log here too. Without this the
+        // file descriptor leaks until process GC and the file is left
+        // open with no exit footer, which makes the on-disk record
+        // ambiguous (was the container still running, or did it die
+        // before producing any output?).
+        stdoutPrefixer.flush();
+        stderrPrefixer.flush();
+        if (streamLog) {
+          try {
+            streamLog.write(
+              `\n=== Container Spawn Failed ===\nError: ${err.message}\nEnd: ${new Date().toISOString()}\n`,
+            );
+            streamLog.end();
+          } catch {
+            // Stream already errored / closed — nothing to recover.
+          }
+        }
+        resolve({
+          status: 'error',
+          result: null,
+          error: `Container spawn error: ${err.message}`,
+        });
       });
     });
-  });
+  } catch (err) {
+    // Sync throw before the spawn handlers wired up — handlers can't
+    // unregister, so do it here and propagate.
+    unregisterContainer(attributionToken);
+    throw err;
+  }
 }
 
 export function writeTasksSnapshot(

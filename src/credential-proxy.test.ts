@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'http';
-import type { AddressInfo } from 'net';
-import fs from 'fs';
+import { promises as fsp } from 'fs';
+import { join } from 'path';
 import os from 'os';
-import path from 'path';
+import type { AddressInfo } from 'net';
 
 const mockEnv: Record<string, string> = {};
 vi.mock('./env.js', () => ({
@@ -15,6 +15,7 @@ vi.mock('./logger.js', () => ({
 }));
 
 import { startCredentialProxy } from './credential-proxy.js';
+import { registerContainer, _resetRegistry } from './proxy-registry.js';
 
 function makeRequest(
   port: number,
@@ -44,6 +45,39 @@ function makeRequest(
     req.write(body);
     req.end();
   });
+}
+
+/**
+ * Poll `usageLogPath` until it has at least `expectedLines` JSON lines
+ * or the deadline (default 5s) elapses. Replaces fixed `setTimeout()`
+ * waits so the test isn't timing-dependent on slow CI — completion is
+ * tied to observable file state. Returns the lines so the caller can
+ * assert on them directly.
+ */
+async function waitForUsageLines(
+  usageLogPath: string,
+  expectedLines: number,
+  deadlineMs = 5000,
+): Promise<string[]> {
+  const start = Date.now();
+  // Poll every 5ms — short enough to keep the test fast on healthy
+  // CI, long enough not to thrash the FS on a slow runner.
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      const content = await fsp.readFile(usageLogPath, 'utf8');
+      const lines = content.trim() ? content.trim().split('\n') : [];
+      if (lines.length >= expectedLines) return lines;
+    } catch {
+      // File doesn't exist yet — keep polling.
+    }
+    if (Date.now() - start > deadlineMs) {
+      throw new Error(
+        `usage log did not reach ${expectedLines} line(s) within ${deadlineMs}ms`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
 }
 
 describe('credential-proxy', () => {
@@ -171,113 +205,6 @@ describe('credential-proxy', () => {
     expect(lastUpstreamHeaders['transfer-encoding']).toBeUndefined();
   });
 
-  describe('DUMP_API_REQUESTS', () => {
-    let dumpDir: string;
-    const originalEnv = process.env.DUMP_API_REQUESTS;
-
-    beforeEach(() => {
-      dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dump-api-requests-'));
-    });
-
-    afterEach(() => {
-      if (originalEnv === undefined) {
-        delete process.env.DUMP_API_REQUESTS;
-      } else {
-        process.env.DUMP_API_REQUESTS = originalEnv;
-      }
-      // `force: true` already tolerates a missing path — no try/catch
-      // needed, and a bare catch-all here would suppress legitimate
-      // cleanup bugs per `error-handling.Specific Exceptions`.
-      fs.rmSync(dumpDir, { recursive: true, force: true });
-    });
-
-    it('default OFF: env unset writes no files', async () => {
-      delete process.env.DUMP_API_REQUESTS;
-      proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });
-
-      await makeRequest(
-        proxyPort,
-        {
-          method: 'POST',
-          path: '/v1/messages',
-          headers: { 'content-type': 'application/json' },
-        },
-        '{"hello":"world"}',
-      );
-
-      expect(fs.readdirSync(dumpDir)).toHaveLength(0);
-    });
-
-    it('enabled: writes the request body to the dump dir', async () => {
-      process.env.DUMP_API_REQUESTS = dumpDir;
-      proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });
-
-      const sentBody = '{"prompt":"capture me"}';
-      await makeRequest(
-        proxyPort,
-        {
-          method: 'POST',
-          path: '/v1/messages',
-          headers: { 'content-type': 'application/json' },
-        },
-        sentBody,
-      );
-
-      const files = fs.readdirSync(dumpDir);
-      expect(files).toHaveLength(1);
-      expect(files[0]).toMatch(/^.*-POST-messages\.json$/);
-      const dumped = fs.readFileSync(path.join(dumpDir, files[0]), 'utf-8');
-      expect(dumped).toBe(sentBody);
-    });
-
-    it('strips query string from filename (so dumps glob predictably)', async () => {
-      process.env.DUMP_API_REQUESTS = dumpDir;
-      proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });
-
-      await makeRequest(
-        proxyPort,
-        {
-          method: 'POST',
-          path: '/v1/messages?stream=true',
-          headers: { 'content-type': 'application/json' },
-        },
-        '{}',
-      );
-
-      const files = fs.readdirSync(dumpDir);
-      expect(files).toHaveLength(1);
-      expect(files[0]).toMatch(/^.*-POST-messages\.json$/);
-      // Query-string chars must NOT leak into the filename.
-      expect(files[0]).not.toContain('?');
-      expect(files[0]).not.toContain('=');
-    });
-
-    it('degrades gracefully when the dump dir is unwritable: still forwards the request', async () => {
-      // Point DUMP_API_REQUESTS at a path under a regular file — mkdir
-      // recursive will fail because the parent isn't a directory. The
-      // proxy must log a warn and forward the request anyway.
-      const blockingFile = path.join(dumpDir, 'blocker');
-      fs.writeFileSync(blockingFile, '');
-      process.env.DUMP_API_REQUESTS = path.join(blockingFile, 'subdir');
-      proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });
-
-      const result = await makeRequest(
-        proxyPort,
-        {
-          method: 'POST',
-          path: '/v1/messages',
-          headers: { 'content-type': 'application/json' },
-        },
-        '{}',
-      );
-
-      // Forwarding still succeeds — the blocker path can't be written
-      // to, but the upstream request continues normally.
-      expect(result.statusCode).toBe(200);
-      expect(lastUpstreamHeaders['x-api-key']).toBe('sk-ant-real-key');
-    });
-  });
-
   it('returns 502 when upstream is unreachable', async () => {
     Object.assign(mockEnv, {
       ANTHROPIC_API_KEY: 'sk-ant-real-key',
@@ -298,5 +225,224 @@ describe('credential-proxy', () => {
 
     expect(res.statusCode).toBe(502);
     expect(res.body).toBe('Bad Gateway');
+  });
+});
+
+describe('credential-proxy usage logging', () => {
+  let proxyServer: http.Server;
+  let upstreamServer: http.Server;
+  let upstreamPort: number;
+  let usageLogPath: string;
+  let upstreamPathSeen = '';
+
+  beforeEach(async () => {
+    _resetRegistry();
+    upstreamPathSeen = '';
+    const dir = await fsp.mkdtemp(join(os.tmpdir(), 'usage-proxy-test-'));
+    usageLogPath = join(dir, 'usage.jsonl');
+
+    upstreamServer = http.createServer((req, res) => {
+      upstreamPathSeen = req.url || '';
+      // Mock Anthropic /v1/messages JSON response (non-streaming).
+      // Match with-or-without query string — the SDK adds `?beta=true`.
+      if ((req.url || '').split('?')[0] === '/v1/messages') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            id: 'msg_01ES15ssVXAyQm25E2yBGur3',
+            model: 'claude-sonnet-4-6',
+            usage: {
+              input_tokens: 1,
+              output_tokens: 52,
+              cache_read_input_tokens: 112865,
+              cache_creation_input_tokens: 585,
+              cache_creation: {
+                ephemeral_5m_input_tokens: 585,
+                ephemeral_1h_input_tokens: 0,
+              },
+            },
+          }),
+        );
+      } else {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+      }
+    });
+    await new Promise<void>((r) => upstreamServer.listen(0, '127.0.0.1', r));
+    upstreamPort = (upstreamServer.address() as AddressInfo).port;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => proxyServer?.close(() => r()));
+    await new Promise<void>((r) => upstreamServer?.close(() => r()));
+    for (const k of Object.keys(mockEnv)) delete mockEnv[k];
+    delete process.env.USAGE_LOG_PATH;
+  });
+
+  async function startProxy(): Promise<number> {
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-real',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
+    });
+    process.env.USAGE_LOG_PATH = usageLogPath;
+    proxyServer = await startCredentialProxy(0);
+    return (proxyServer.address() as AddressInfo).port;
+  }
+
+  it('writes a complete JSONL line for /v1/messages with attribution', async () => {
+    const proxyPort = await startProxy();
+    const token = registerContainer({
+      group: 'telegram_main',
+      tier: 'main',
+      session: 'default',
+      task_id: null,
+    });
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: `/c/${token}/v1/messages`,
+        headers: { 'content-type': 'application/json' },
+      },
+      JSON.stringify({ model: 'claude-sonnet-4-6', messages: [] }),
+    );
+
+    // The proxy strips the /c/<token>/ prefix before forwarding upstream.
+    expect(upstreamPathSeen).toBe('/v1/messages');
+
+    // Poll until the JSONL line lands rather than sleep a fixed window —
+    // the write is fire-and-forget after the response ends.
+    const lines = await waitForUsageLines(usageLogPath, 1);
+    expect(lines).toHaveLength(1);
+    const rec = JSON.parse(lines[0]);
+    expect(rec).toMatchObject({
+      group: 'telegram_main',
+      tier: 'main',
+      session: 'default',
+      task_id: null,
+      model: 'claude-sonnet-4-6',
+      api_id: 'msg_01ES15ssVXAyQm25E2yBGur3',
+      in: 1,
+      out: 52,
+      cache_r: 112865,
+      cache_c_5m: 585,
+      cache_c_1h: 0,
+      cost_micro: 3683625,
+    });
+    expect(typeof rec.ts).toBe('string');
+    expect(typeof rec.dur_ms).toBe('number');
+  });
+
+  it('captures usage when the SDK appends ?beta=true to /v1/messages', async () => {
+    // Regression: the Claude SDK posts to `/v1/messages?beta=true`, not the
+    // bare `/v1/messages`. Strict equality on the path silently disabled
+    // capture for every real container call.
+    const proxyPort = await startProxy();
+    const token = registerContainer({
+      group: 'telegram_main',
+      tier: 'main',
+      session: 'default',
+      task_id: null,
+    });
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: `/c/${token}/v1/messages?beta=true`,
+        headers: { 'content-type': 'application/json' },
+      },
+      JSON.stringify({ model: 'claude-sonnet-4-6', messages: [] }),
+    );
+
+    expect(upstreamPathSeen).toBe('/v1/messages?beta=true');
+
+    const lines = await waitForUsageLines(usageLogPath, 1);
+    expect(lines).toHaveLength(1);
+    const rec = JSON.parse(lines[0]);
+    expect(rec.group).toBe('telegram_main');
+    expect(rec.in).toBe(1);
+    expect(rec.cache_r).toBe(112865);
+  });
+
+  it('records group: "unknown" when token is missing', async () => {
+    const proxyPort = await startProxy();
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: { 'content-type': 'application/json' },
+      },
+      JSON.stringify({ model: 'claude-sonnet-4-6', messages: [] }),
+    );
+
+    const lines = await waitForUsageLines(usageLogPath, 1);
+    const rec = JSON.parse(lines[0]);
+    expect(rec.group).toBe('unknown');
+  });
+
+  it('does NOT write usage for non-/v1/messages requests', async () => {
+    const proxyPort = await startProxy();
+    const token = registerContainer({
+      group: 'g',
+      tier: 'main',
+      session: 's',
+      task_id: null,
+    });
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: `/c/${token}/api/oauth/claude_cli/create_api_key`,
+        headers: { 'content-type': 'application/json' },
+      },
+      '{}',
+    );
+
+    // Non-/v1/messages requests don't trigger captureUsage, so no
+    // async file write is scheduled — checking immediately after the
+    // response cycle ends is deterministic. (No sleep needed: if the
+    // proxy were to write, the work would be queued by the time
+    // makeRequest returned, since `noteCaptureWrite` runs in the
+    // upstream `end` handler that fires before the client `end`.)
+    const exists = await fsp
+      .access(usageLogPath)
+      .then(() => true)
+      .catch(() => false);
+    expect(exists).toBe(false);
+  });
+
+  it('still forwards the response when the usage log write fails', async () => {
+    // Point USAGE_LOG_PATH at a path under a regular file → mkdir fails.
+    const dir = await fsp.mkdtemp(join(os.tmpdir(), 'usage-fail-test-'));
+    const blocker = join(dir, 'blocker');
+    await fsp.writeFile(blocker, 'x');
+    process.env.USAGE_LOG_PATH = join(blocker, 'usage.jsonl');
+
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-real',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstreamPort}`,
+    });
+    proxyServer = await startCredentialProxy(0);
+    const proxyPort = (proxyServer.address() as AddressInfo).port;
+
+    const res = await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: { 'content-type': 'application/json' },
+      },
+      JSON.stringify({ model: 'claude-sonnet-4-6', messages: [] }),
+    );
+
+    // Response stream MUST still complete with the upstream body.
+    expect(res.statusCode).toBe(200);
+    const parsed = JSON.parse(res.body);
+    expect(parsed.id).toBe('msg_01ES15ssVXAyQm25E2yBGur3');
   });
 });
