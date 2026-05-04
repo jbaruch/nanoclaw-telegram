@@ -247,6 +247,18 @@ export interface ContainerContext {
   tier: 'main' | 'trusted' | 'untrusted';
   session: string;
   task_id: string | null;
+  /**
+   * #479 sub-#1: trigger message_id when an inbound user message
+   * caused the spawn, null otherwise (scheduled tasks, IPC scripts,
+   * housekeeping). The orchestrator wires this from
+   * `evaluateGateChain`'s `allowedMessageId` — the message that
+   * actually cleared the gate verdict and triggered the spawn — and
+   * falls back to `replyToMessageId` (the reply target) when no gate
+   * chain ran. Per-message attribution lets cost reports break down
+   * spend by specific Telegram message instead of stopping at
+   * session-level.
+   */
+  message_id: string | null;
 }
 
 /** Single line written to logs/usage.jsonl. */
@@ -256,6 +268,13 @@ export interface UsageRecord {
   tier: string;
   session: string;
   task_id: string | null;
+  /**
+   * #479 sub-#1: trigger message_id (channel-side, e.g. Telegram
+   * message id) for user-initiated spawns, null for scheduled tasks /
+   * IPC scripts / housekeeping. Lets cost reports break down spend by
+   * specific message instead of stopping at session granularity.
+   */
+  message_id: string | null;
   model: string;
   api_id: string | null;
   in: number;
@@ -420,6 +439,7 @@ function buildRecord(
     tier: ctx.tier,
     session: ctx.session,
     task_id: ctx.task_id,
+    message_id: ctx.message_id,
     model,
     api_id: apiId,
     in: tokens.in_,

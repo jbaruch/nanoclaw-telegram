@@ -319,6 +319,7 @@ export function startCredentialProxy(
                 tier: 'untrusted',
                 session: 'unknown',
                 task_id: null,
+                message_id: null,
               };
               try {
                 const record = parseUsageFromBody(

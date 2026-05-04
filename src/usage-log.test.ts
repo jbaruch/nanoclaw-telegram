@@ -25,6 +25,7 @@ const CTX: ContainerContext = {
   tier: 'main',
   session: 'default',
   task_id: null,
+  message_id: null,
 };
 
 describe('resolvePricing', () => {
@@ -167,9 +168,25 @@ describe('parseUsageFromBody', () => {
     expect(rec!.dur_ms).toBe(4218);
     expect(rec!.group).toBe('telegram_main');
     expect(rec!.tier).toBe('main');
+    expect(rec!.message_id).toBeNull();
     // Exact-match pricing — no fallback flags.
     expect(rec!.cost_unknown).toBeUndefined();
     expect(rec!.cost_approximate).toBeUndefined();
+  });
+
+  it('passes message_id through from context to record (#479 sub-#1)', () => {
+    const ctxWithMessage: ContainerContext = {
+      ...CTX,
+      message_id: '67890',
+    };
+    const body = JSON.stringify({
+      id: 'msg_attr',
+      model: 'claude-sonnet-4-6',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    const rec = parseUsageFromBody(body, ctxWithMessage, 0, null);
+    expect(rec).not.toBeNull();
+    expect(rec!.message_id).toBe('67890');
   });
 
   it('parses streaming SSE with cache_creation breakdown', () => {
@@ -275,6 +292,7 @@ describe('appendUsageRecord', () => {
       tier: 'main',
       session: 'default',
       task_id: null,
+      message_id: null,
       model: 'claude-sonnet-4-6',
       api_id: 'msg_xyz',
       in: 1,
@@ -305,6 +323,7 @@ describe('appendUsageRecord', () => {
       tier: 'main',
       session: 's',
       task_id: null,
+      message_id: null,
       model: 'm',
       api_id: null,
       in: 0,

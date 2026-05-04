@@ -836,6 +836,17 @@ export interface ContainerInput {
   script?: string;
   replyToMessageId?: string;
   /**
+   * #479 sub-#1: trigger message id for usage attribution (the
+   * gate-allowed message in `evaluateGateChain`'s verdict). Distinct
+   * from `replyToMessageId`, which is the reply-target — usually the
+   * latest message in a polled batch — for reply-threading. The two
+   * differ when the gate allows on an earlier message in a batch and
+   * the reply quotes the latest. The credential proxy logs this as
+   * `message_id` on each JSONL line; `replyToMessageId` is used as a
+   * fallback when no gate verdict was computed (empty gate chain).
+   */
+  triggerMessageId?: string;
+  /**
    * Whether the inbound batch is "addressed to us" — drives the
    * agent-runner's react-first 👀 gate (#289). Resolved by the
    * orchestrator (see `isAddressedToUs` in `src/index.ts`) from
@@ -2733,6 +2744,13 @@ export async function runContainerAgent(
     tier: trustTier,
     session: sessionName,
     task_id: input.isScheduledTask ? sessionName : null,
+    // #479 sub-#1: prefer the gate-verdict's trigger message id
+    // (`triggerMessageId`) so attribution lands on the message that
+    // actually caused the spawn. Fall back to `replyToMessageId` for
+    // callers that don't yet plumb the gate verdict — rare, since
+    // `evaluateGateChain` already computes it; and finally null for
+    // scheduled tasks / IPC scripts / housekeeping.
+    message_id: input.triggerMessageId ?? input.replyToMessageId ?? null,
   });
 
   // Wrap the spawn-path so a sync throw between registration and the

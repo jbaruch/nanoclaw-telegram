@@ -18,6 +18,7 @@ describe('proxy-registry', () => {
       tier: 'main' as const,
       session: 'default',
       task_id: null,
+      message_id: null,
     };
     const token = registerContainer(ctx);
     expect(typeof token).toBe('string');
@@ -31,6 +32,7 @@ describe('proxy-registry', () => {
       tier: 'untrusted',
       session: 's',
       task_id: null,
+      message_id: null,
     });
     expect(_registrySize()).toBe(1);
     unregisterContainer(token);

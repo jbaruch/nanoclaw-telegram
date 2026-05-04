@@ -296,6 +296,7 @@ describe('credential-proxy usage logging', () => {
       tier: 'main',
       session: 'default',
       task_id: null,
+      message_id: '12345',
     });
 
     await makeRequest(
@@ -321,6 +322,9 @@ describe('credential-proxy usage logging', () => {
       tier: 'main',
       session: 'default',
       task_id: null,
+      // #479 sub-#1: trigger message_id flows into the JSONL line so
+      // cost reports can break down spend per inbound message.
+      message_id: '12345',
       model: 'claude-sonnet-4-6',
       api_id: 'msg_01ES15ssVXAyQm25E2yBGur3',
       in: 1,
@@ -344,6 +348,7 @@ describe('credential-proxy usage logging', () => {
       tier: 'main',
       session: 'default',
       task_id: null,
+      message_id: null,
     });
 
     await makeRequest(
@@ -391,6 +396,7 @@ describe('credential-proxy usage logging', () => {
       tier: 'main',
       session: 's',
       task_id: null,
+      message_id: null,
     });
 
     await makeRequest(

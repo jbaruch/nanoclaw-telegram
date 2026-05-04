@@ -1499,7 +1499,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // clears gating; latest message id is the implicit verdict target.
     allowedMessageId = missedMessages[missedMessages.length - 1]?.id;
   }
-  void allowedMessageId;
 
   const prompt = formatMessages(missedMessages, TIMEZONE);
 
@@ -1628,6 +1627,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     },
     pendingReplyTo[chatJid],
     isAddressedToUs(group, chatJid, missedMessages),
+    allowedMessageId,
   );
 
   await channel.setTyping?.(chatJid, false);
@@ -1690,6 +1690,7 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
   replyToMessageId?: string,
   addressedToUs?: boolean,
+  triggerMessageId?: string,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
   // User-facing path always uses the `default` slot's session chain.
@@ -1991,6 +1992,9 @@ async function runAgent(
         isTrusted: !!group.containerConfig?.trusted,
         assistantName: ASSISTANT_NAME,
         replyToMessageId,
+        // #479 sub-#1: gate-verdict trigger message id for usage-log
+        // attribution. Distinct from replyToMessageId (reply target).
+        triggerMessageId,
         // User-facing path. Invariant: inbound messages always route to
         // `default`. `src/task-scheduler.ts` is the sole writer of
         // `'maintenance'` — maintenance-AyeAye never reaches this code path.
