@@ -389,6 +389,73 @@ describe('credential-proxy usage logging', () => {
     expect(rec.group).toBe('unknown');
   });
 
+  it('decodes gzip-encoded responses before parsing usage', async () => {
+    // Anthropic's edge serves gzip when the SDK sends
+    // accept-encoding: gzip. The proxy must decode the captured copy
+    // before parsing — otherwise bodyText is binary garbage and the
+    // parser silently returns null. This is the actual production
+    // bug behind the post-#487 silent-zero-guard alarms: 37 of 37
+    // requests had compressed bodies and zero JSONL lines landed.
+    const { gzipSync } = await import('zlib');
+
+    // Spin up a one-off upstream that returns gzip-compressed JSON
+    // with the expected Content-Encoding header.
+    const gzipUpstream = http.createServer((req, res) => {
+      const body = gzipSync(
+        Buffer.from(
+          JSON.stringify({
+            id: 'msg_gz',
+            model: 'claude-sonnet-4-6',
+            usage: { input_tokens: 11, output_tokens: 22 },
+          }),
+          'utf8',
+        ),
+      );
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'content-encoding': 'gzip',
+        'content-length': String(body.length),
+      });
+      res.end(body);
+    });
+    await new Promise<void>((r) => gzipUpstream.listen(0, '127.0.0.1', r));
+    const gzipPort = (gzipUpstream.address() as AddressInfo).port;
+
+    Object.assign(mockEnv, {
+      ANTHROPIC_API_KEY: 'sk-real',
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${gzipPort}`,
+    });
+    process.env.USAGE_LOG_PATH = usageLogPath;
+    proxyServer = await startCredentialProxy(0);
+    const proxyPort = (proxyServer.address() as AddressInfo).port;
+
+    const token = registerContainer({
+      group: 'telegram_main',
+      tier: 'main',
+      session: 'default',
+      task_id: null,
+      message_id: null,
+    });
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: `/c/${token}/v1/messages`,
+        headers: { 'content-type': 'application/json' },
+      },
+      JSON.stringify({ model: 'claude-sonnet-4-6', messages: [] }),
+    );
+
+    const lines = await waitForUsageLines(usageLogPath, 1);
+    const rec = JSON.parse(lines[0]);
+    expect(rec.api_id).toBe('msg_gz');
+    expect(rec.in).toBe(11);
+    expect(rec.out).toBe(22);
+
+    await new Promise<void>((r) => gzipUpstream.close(() => r()));
+  });
+
   it('does NOT write usage for non-/v1/messages requests', async () => {
     const proxyPort = await startProxy();
     const token = registerContainer({

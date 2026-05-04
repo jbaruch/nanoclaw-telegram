@@ -15,6 +15,7 @@ import { request as httpsRequest } from 'https';
 import { request as httpRequest, RequestOptions } from 'http';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
+import { brotliDecompressSync, gunzipSync, inflateSync } from 'zlib';
 
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
@@ -378,7 +379,43 @@ export function startCredentialProxy(
               res.removeListener('drain', resumeUpstream);
               res.removeListener('close', onClientClose);
               if (capped) return;
-              const bodyBuffer = Buffer.concat(captured);
+              const rawBuffer = Buffer.concat(captured);
+              // The Claude SDK (undici) sends `accept-encoding: gzip,
+              // deflate, br` by default, so Anthropic's edge serves
+              // compressed responses. The proxy forwards the raw
+              // (encoded) bytes to the client so the SDK can
+              // decompress them transparently — but for capture we
+              // need the decompressed text to parse SSE / JSON. Read
+              // the response Content-Encoding and decode accordingly;
+              // identity (or unset) keeps the raw bytes. Decompression
+              // failures fall through to the raw buffer with a warn
+              // log so downstream parsing still gets a chance.
+              const encoding = (
+                upRes.headers['content-encoding'] || ''
+              ).toLowerCase();
+              let bodyBuffer = rawBuffer;
+              if (
+                encoding === 'gzip' ||
+                encoding === 'br' ||
+                encoding === 'deflate'
+              ) {
+                try {
+                  if (encoding === 'gzip') bodyBuffer = gunzipSync(rawBuffer);
+                  else if (encoding === 'br')
+                    bodyBuffer = brotliDecompressSync(rawBuffer);
+                  else bodyBuffer = inflateSync(rawBuffer);
+                } catch (err) {
+                  logger.warn(
+                    {
+                      err,
+                      url: upstreamPath,
+                      encoding,
+                      rawBytes: rawBuffer.length,
+                    },
+                    'usage-log: response decompression failed, falling back to raw buffer for parse',
+                  );
+                }
+              }
               const bodyText = bodyBuffer.toString('utf8');
               const ctx: ContainerContext = containerCtx ?? {
                 group: 'unknown',
@@ -400,16 +437,16 @@ export function startCredentialProxy(
                   // errors internally so this can never reject.
                   void appendUsageRecord(usageLogPath, record);
                 } else {
-                  // Temporary content-free diagnostic: if the body
-                  // doesn't parse, log structural signals (byte
-                  // count, presence of key SSE markers) so we can
-                  // see WHY without exposing prompt/response text.
-                  // Drop once first JSONL line lands and capture is
-                  // confirmed healthy in production.
-                  logger.debug(
+                  // Temporary content-free diagnostic surfaced at INFO
+                  // (not DEBUG) so it's visible in production while
+                  // we verify the decompression fix. Drop once first
+                  // JSONL line lands.
+                  logger.info(
                     {
                       url: upstreamPath,
-                      bodyBytes: bodyBuffer.length,
+                      contentEncoding: encoding || '(none)',
+                      rawBytes: rawBuffer.length,
+                      decodedBytes: bodyBuffer.length,
                       hasMessageStart: bodyText.includes(
                         '"type":"message_start"',
                       ),
