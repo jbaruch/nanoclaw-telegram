@@ -64,6 +64,7 @@ import path from 'path';
 
 import {
   _initTestDatabase,
+  _seedTzStateForTests,
   createTask,
   deleteRegisteredGroup,
   getAllTasks,
@@ -1000,6 +1001,196 @@ describe('schedule_task with UTC schedule_value (#102)', () => {
     expect(getTaskById('once-bad-update')?.next_run).toBe(
       '2030-01-01T12:00:00.000Z',
     );
+  });
+});
+
+// --- #456: travel-anchored cadence via schedule_timezone='local' ---
+
+describe("schedule_task with schedule_timezone='local' (#456)", () => {
+  it("persists 'local' verbatim and resolves next_run against tz_state.current_tz", async () => {
+    // Pre-#456 the IPC handler ran every non-null timezone through
+    // isValidTimezone(); 'local' threw inside Intl.DateTimeFormat and
+    // the handler logged "Invalid IANA timezone for schedule_task" and
+    // aborted. Now it's accepted as a literal token, the row stores
+    // 'local' (not the resolved zone — the resolution happens at fire
+    // time), and the initial next_run matches what cron-parser would
+    // produce for the seeded current_tz.
+    _seedTzStateForTests({ currentTz: 'America/Chicago' });
+
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'travel-anchored cron',
+        schedule_type: 'cron',
+        schedule_value: '0 7 * * *',
+        timezone: 'local',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const tasks = getAllTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].schedule_timezone).toBe('local');
+    // 7am America/Chicago in UTC: standard time → 13:00, DST → 12:00.
+    // Either is correct depending on date; assert the UTC hour is
+    // one of the two valid values rather than pinning a calendar date.
+    const next = new Date(tasks[0].next_run!);
+    expect([12, 13]).toContain(next.getUTCHours());
+    expect(next.getUTCMinutes()).toBe(0);
+  });
+
+  it('falls back to TIMEZONE when tz_state is empty (no row yet)', async () => {
+    // First-run shape: agent calls schedule_task with 'local' before
+    // task-tz-sync has populated tz_state. The row still persists with
+    // schedule_timezone='local' (so it'll start travelling once
+    // tz_state lands), but the initial next_run is computed against
+    // TIMEZONE — same fallback NULL schedule_timezone uses.
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'local before tz_state',
+        schedule_type: 'cron',
+        schedule_value: '0 7 * * *',
+        timezone: 'local',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const tasks = getAllTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].schedule_timezone).toBe('local');
+    expect(tasks[0].next_run).toBeTruthy();
+  });
+
+  it('falls back to TIMEZONE when tz_state.current_tz is corrupt', async () => {
+    // Defensive: a task-tz-sync bug or bad import could write garbage
+    // into tz_state.current_tz. Pre-validation in resolveCronTz routes
+    // that case to TIMEZONE rather than letting cron-parser throw and
+    // bricking the schedule call. The row still stores 'local' so the
+    // next valid task-tz-sync write recovers the row at fire time.
+    _seedTzStateForTests({ currentTz: 'NotAZone' });
+
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'local with bad tz_state',
+        schedule_type: 'cron',
+        schedule_value: '0 7 * * *',
+        timezone: 'local',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const tasks = getAllTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].schedule_timezone).toBe('local');
+    expect(tasks[0].next_run).toBeTruthy();
+  });
+
+  it("forces schedule_timezone null on once-tasks even with timezone='local'", async () => {
+    // 'local' is meaningless for a once-task (the instant is already
+    // pinned to a specific UTC moment). Same drop-silently rule that
+    // applies to pinned IANA on once/interval — the column is nulled
+    // at write time so a later type flip to cron doesn't silently
+    // re-activate a stray 'local'.
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        prompt: 'once with stray local',
+        schedule_type: 'once',
+        schedule_value: '2030-01-01T12:00:00Z',
+        timezone: 'local',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const tasks = getAllTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].schedule_timezone).toBeFalsy();
+  });
+
+  it("update_task can set schedule_timezone to 'local' on an existing cron row", async () => {
+    _seedTzStateForTests({ currentTz: 'Europe/Amsterdam' });
+
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        taskId: 'tz-local-update',
+        prompt: 'pinned then travelling',
+        schedule_type: 'cron',
+        schedule_value: '0 9 * * *',
+        timezone: 'America/New_York',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    expect(getTaskById('tz-local-update')?.schedule_timezone).toBe(
+      'America/New_York',
+    );
+
+    await processTaskIpc(
+      {
+        type: 'update_task',
+        taskId: 'tz-local-update',
+        timezone: 'local',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const updated = getTaskById('tz-local-update');
+    expect(updated?.schedule_timezone).toBe('local');
+    // next_run recomputed against the seeded current_tz — 9am Amsterdam.
+    // Standard time → 08:00 UTC, DST → 07:00 UTC.
+    const next = new Date(updated!.next_run!);
+    expect([7, 8]).toContain(next.getUTCHours());
+  });
+
+  it("update_task can clear schedule_timezone='local' back to null", async () => {
+    _seedTzStateForTests({ currentTz: 'America/Chicago' });
+
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        taskId: 'tz-local-clear',
+        prompt: 'travelling then pinned',
+        schedule_type: 'cron',
+        schedule_value: '0 7 * * *',
+        timezone: 'local',
+        targetJid: 'other@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    await processTaskIpc(
+      {
+        type: 'update_task',
+        taskId: 'tz-local-clear',
+        timezone: '',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getTaskById('tz-local-clear')?.schedule_timezone).toBeFalsy();
   });
 });
 

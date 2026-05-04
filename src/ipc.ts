@@ -29,6 +29,7 @@ import {
   createTask,
   deleteAllSessions,
   deleteTask,
+  getCurrentTz,
   getLastFromMeMessages,
   getTaskById,
   getTasksForGroup,
@@ -39,7 +40,11 @@ import type { ContainerStatus } from './group-queue.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { stripInternalTags } from './router.js';
-import { isValidTimezone } from './timezone.js';
+import {
+  isValidTimezone,
+  normalizeScheduleTimezone,
+  type ScheduleType,
+} from './timezone.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -175,6 +180,43 @@ const KNOWN_TILE_NAMES: ReadonlySet<string> = new Set([
   'nanoclaw-trusted',
   'nanoclaw-host',
 ]);
+
+/**
+ * Resolve the IANA zone to pass to `cron-parser` when computing an
+ * initial `next_run` for a stored task row. Centralised so
+ * `schedule_task` and `update_task` produce values consistent with
+ * `task-scheduler.ts:computeNextRunDetailed` at fire time.
+ *
+ * Three inputs:
+ *   - `null`         → server-wide TIMEZONE fallback (pre-#102 behaviour
+ *                       for rows without a per-task tz).
+ *   - IANA name      → pass through unchanged (validated upstream by
+ *                       `normalizeScheduleTimezone`).
+ *   - `'local'`      → resolve via `getCurrentTz()` — the singleton
+ *                       `tz_state.current_tz` written by `task-tz-sync`.
+ *                       If the resolver returns null (no tz_state row
+ *                       yet, or unfamiliar `schema_version`) OR returns
+ *                       a value `Intl.DateTimeFormat` doesn't recognize
+ *                       (corrupt write), fall back to TIMEZONE. Same
+ *                       fallback the scheduler reaches via its
+ *                       catch-and-retry path — narrowed here to a
+ *                       sanity check up-front so a corrupt resolver
+ *                       result doesn't brick `schedule_task` /
+ *                       `update_task` with an "Invalid cron expression"
+ *                       error that's actually a tz_state problem.
+ */
+function resolveCronTz(scheduleTimezone: string | null): string {
+  if (scheduleTimezone === 'local') {
+    const resolved = getCurrentTz();
+    if (resolved && isValidTimezone(resolved)) return resolved;
+    logger.warn(
+      { resolved },
+      'resolveCronTz: tz_state.current_tz unusable for cron-parser — falling back to TIMEZONE',
+    );
+    return TIMEZONE;
+  }
+  return scheduleTimezone || TIMEZONE;
+}
 
 /**
  * Compute the host path where an IPC response file should land.
@@ -951,9 +993,12 @@ export async function processTaskIpc(
 
         const scheduleType = data.schedule_type as 'cron' | 'interval' | 'once';
 
-        // #102: optional IANA timezone parameter. Validated up-front so
-        // a typo fails the schedule call rather than silently falling
-        // back to server-local at fire time.
+        // #102: optional timezone parameter. Validated up-front so a
+        // typo fails the schedule call rather than silently falling
+        // back to server-local at fire time. #456 extends the accepted
+        // values with the literal token `'local'` — resolved at fire
+        // time against `tz_state.current_tz` by
+        // `task-scheduler.ts:computeNextRunDetailed`.
         //
         // Force `null` for non-cron types: the column has no effect on
         // `interval` (always elapsed-ms) or `once` (instant pinned at
@@ -961,38 +1006,40 @@ export async function processTaskIpc(
         // footgun if the task were later updated to `cron` without
         // explicitly passing `timezone` — an old, previously-ignored
         // value would silently start affecting cron evaluation.
-        let scheduleTimezone: string | null = null;
-        if (
-          data.timezone !== undefined &&
-          data.timezone !== null &&
-          data.timezone !== ''
-        ) {
-          // Order matters here: ignore-because-non-cron BEFORE
-          // validate-IANA. A `once` task that happens to carry a
-          // typo'd timezone field shouldn't fail to schedule — the
-          // field has no effect anyway, just drop it. Validate only
-          // when we'd otherwise persist the value.
-          if (scheduleType !== 'cron') {
-            logger.warn(
-              { timezone: data.timezone, scheduleType },
-              'schedule_task: timezone parameter is only meaningful for cron — ignoring',
-            );
-          } else if (!isValidTimezone(data.timezone)) {
-            logger.warn(
-              { timezone: data.timezone },
-              'Invalid IANA timezone for schedule_task',
-            );
-            break;
-          } else {
-            scheduleTimezone = data.timezone;
-          }
+        const tzOutcome = normalizeScheduleTimezone(
+          data.timezone,
+          scheduleType,
+        );
+        if (tzOutcome.action === 'reject-invalid') {
+          logger.warn(
+            { timezone: data.timezone },
+            'Invalid IANA timezone for schedule_task',
+          );
+          break;
         }
+        if (tzOutcome.action === 'ignore-non-cron') {
+          logger.warn(
+            { timezone: data.timezone, scheduleType },
+            'schedule_task: timezone parameter is only meaningful for cron — ignoring',
+          );
+        }
+        const scheduleTimezone: string | null =
+          tzOutcome.action === 'accept' ? tzOutcome.value : null;
 
         let nextRun: string | null = null;
         if (scheduleType === 'cron') {
           try {
+            // #456: resolve `'local'` against `tz_state.current_tz` to
+            // mirror `computeNextRunDetailed`. The scheduler retries
+            // with TIMEZONE on cron-parser failure; we narrow the
+            // failure surface here by sanity-checking the resolved
+            // value up-front so a corrupt `tz_state.current_tz` (e.g.
+            // a future task-tz-sync bug writing garbage) doesn't brick
+            // schedule_task — falls through to TIMEZONE just like NULL
+            // `schedule_timezone` and like the scheduler's retry path.
+            const cronTz = resolveCronTz(scheduleTimezone);
             const interval = CronExpressionParser.parse(data.schedule_value, {
-              tz: scheduleTimezone || TIMEZONE,
+              tz: cronTz,
             });
             nextRun = interval.next().toISOString();
           } catch (err) {
@@ -1215,12 +1262,22 @@ export async function processTaskIpc(
         }
 
         if (data.timezone !== undefined) {
-          if (data.timezone === '' || data.timezone === null) {
-            updates.schedule_timezone = null;
-          } else if (effectiveScheduleType !== 'cron') {
-            // Check non-cron BEFORE validating IANA: a typo'd tz on a
-            // once/interval task should drop silently, not abort the
-            // whole update — the field has no effect anyway.
+          // Same normalizer as schedule_task above — accepts null /
+          // empty / IANA / `'local'` (#456); ignores tz on non-cron
+          // (caller logs and forces null); rejects unrecognized
+          // strings (caller logs and aborts).
+          const updateTzOutcome = normalizeScheduleTimezone(
+            data.timezone,
+            effectiveScheduleType as ScheduleType,
+          );
+          if (updateTzOutcome.action === 'reject-invalid') {
+            logger.warn(
+              { taskId: data.taskId, timezone: data.timezone },
+              'Invalid IANA timezone in task update',
+            );
+            break;
+          }
+          if (updateTzOutcome.action === 'ignore-non-cron') {
             logger.warn(
               {
                 taskId: data.taskId,
@@ -1230,14 +1287,8 @@ export async function processTaskIpc(
               'update_task: ignoring timezone — effective schedule_type is not cron',
             );
             updates.schedule_timezone = null;
-          } else if (!isValidTimezone(data.timezone)) {
-            logger.warn(
-              { taskId: data.taskId, timezone: data.timezone },
-              'Invalid IANA timezone in task update',
-            );
-            break;
           } else {
-            updates.schedule_timezone = data.timezone;
+            updates.schedule_timezone = updateTzOutcome.value;
           }
         }
 
@@ -1260,9 +1311,16 @@ export async function processTaskIpc(
           };
           if (updatedTask.schedule_type === 'cron') {
             try {
+              // #456: same `'local'`-aware resolver as the schedule_task
+              // path — sanity-checks `tz_state.current_tz` before
+              // passing to cron-parser so a corrupt resolver result
+              // falls back to TIMEZONE rather than aborting the update.
+              const cronTz = resolveCronTz(
+                updatedTask.schedule_timezone ?? null,
+              );
               const interval = CronExpressionParser.parse(
                 updatedTask.schedule_value,
-                { tz: updatedTask.schedule_timezone || TIMEZONE },
+                { tz: cronTz },
               );
               updates.next_run = interval.next().toISOString();
             } catch (err) {
