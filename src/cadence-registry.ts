@@ -63,6 +63,17 @@ export interface CadenceDeclaration {
    * aggregator's fire.
    */
   priority: number;
+  /**
+   * Optional precheck script path, relative to the skill's directory
+   * (e.g. `scripts/precheck-foo.py`). When present and the file
+   * resolves under the skill dir, the registry composes a bash one-
+   * liner and stores it in `scheduled_tasks.script`; the agent-runner
+   * runs it before waking the LLM (`{"wake_agent": false}` short-
+   * circuits per `rules/script-delegation.md`'s precheck-gating
+   * contract). When absent, the column stays NULL and every fire wakes
+   * the LLM unconditionally — the legacy Phase 2a/2b shape.
+   */
+  script: string | null;
 }
 
 interface ParsedSkill {
@@ -278,6 +289,37 @@ export function validateCadenceDeclaration(
       priority = rawPriority;
     }
   }
+  let script: string | null = null;
+  const rawScript = frontmatter.script;
+  if (rawScript !== undefined) {
+    if (typeof rawScript !== 'string' || rawScript.trim() === '') {
+      errors.push(
+        `${skillName}: 'script:' must be a non-empty string, got ${JSON.stringify(rawScript)}`,
+      );
+    } else {
+      const trimmed = rawScript.trim();
+      // The script must live under the skill's own directory so the
+      // resolved container path is well-defined and bounded. Reject
+      // absolute paths and any segment-traversal that escapes the
+      // skill dir; everything else is forwarded to the file-existence
+      // check inside `rebuildCadenceRegistry`.
+      if (trimmed.startsWith('/')) {
+        errors.push(
+          `${skillName}: 'script:' must be a relative path under the skill directory, got ${JSON.stringify(rawScript)}`,
+        );
+      } else if (trimmed.split('/').includes('..')) {
+        errors.push(
+          `${skillName}: 'script:' must not contain '..' segments, got ${JSON.stringify(rawScript)}`,
+        );
+      } else if (!/\.(py|sh)$/.test(trimmed)) {
+        errors.push(
+          `${skillName}: 'script:' must end in .py or .sh, got ${JSON.stringify(rawScript)}`,
+        );
+      } else {
+        script = trimmed;
+      }
+    }
+  }
   if (errors.length > 0) {
     return { ok: false, errors };
   }
@@ -286,8 +328,35 @@ export function validateCadenceDeclaration(
     declaration: {
       cadence: typeof rawCadence === 'string' ? rawCadence : '',
       priority,
+      script,
     },
   };
+}
+
+/**
+ * Compose the bash content stored in `scheduled_tasks.script` for a
+ * cadence-registered precheck. The agent-runner writes the column
+ * verbatim to `/tmp/task-script.sh` and runs it via `bash` (see
+ * `container/agent-runner/src/index.ts` `runScript`); skills mount
+ * read-only without the executable bit, so we dispatch on file
+ * extension instead of relying on the script's shebang. `.py` →
+ * `python3 <path>`; `.sh` → `bash <path>`. Other extensions are
+ * rejected upstream by `validateCadenceDeclaration`.
+ *
+ * The container-side path mirrors the host-side mount: skills land at
+ * `/home/node/.claude/skills/<dirName>/...` (see
+ * `src/container-runner.ts` skillsDst → `/home/node/.claude/skills`
+ * mount). `dirName` is the skill's directory name as it appears under
+ * the host-side `skillsDst` — already in its final surface form for
+ * tile skills (`tessl__<name>`).
+ */
+export function composePrecheckScript(
+  skillName: string,
+  relScript: string,
+): string {
+  const containerPath = `/home/node/.claude/skills/${skillName}/${relScript}`;
+  const interp = relScript.endsWith('.py') ? 'python3' : 'bash';
+  return `${interp} ${containerPath}\n`;
 }
 
 export interface CadenceRegistryRebuildResult {
@@ -375,6 +444,7 @@ export function rebuildCadenceRegistry(
     taskId: string;
     skillName: string;
     prompt: string;
+    script: string | null;
     cron: string;
     tz: string | null;
     nextRun: string;
@@ -403,7 +473,26 @@ export function rebuildCadenceRegistry(
       );
       continue;
     }
-    desired.push({ taskId, skillName, prompt, cron, tz, nextRun });
+    let script: string | null = null;
+    if (declaration.script !== null) {
+      // Resolve the precheck script under the skill's host-side dir
+      // and refuse to register if the file is missing — runtime would
+      // fail anyway, and surfacing the gap here lets `tessl skill
+      // review`-style audits catch shape/content drift between the
+      // SKILL.md frontmatter and the shipped scripts/ tree.
+      const hostPath = path.join(deps.skillsDir, skillName, declaration.script);
+      if (!fs.existsSync(hostPath)) {
+        const msg = `${skillName}: 'script:' references ${declaration.script}, but ${hostPath} does not exist`;
+        errors.push(msg);
+        logger.warn(
+          { skill: skillName, script: declaration.script, hostPath },
+          'cadence-registry: script: file not found, skipping',
+        );
+        continue;
+      }
+      script = composePrecheckScript(skillName, declaration.script);
+    }
+    desired.push({ taskId, skillName, prompt, script, cron, tz, nextRun });
   }
 
   const tx = deps.db.transaction(() => {
@@ -420,12 +509,13 @@ export function rebuildCadenceRegistry(
       schedule_value: string;
       schedule_timezone: string | null;
       prompt: string;
+      script: string | null;
       next_run: string | null;
     }
     const existing = new Map<string, ExistingRow>();
     const existingRows = deps.db
       .prepare(
-        `SELECT id, schedule_value, schedule_timezone, prompt, next_run
+        `SELECT id, schedule_value, schedule_timezone, prompt, script, next_run
          FROM scheduled_tasks
          WHERE source = 'cadence-registry' AND group_folder = ?`,
       )
@@ -438,7 +528,7 @@ export function rebuildCadenceRegistry(
         schedule_type, schedule_value, schedule_timezone,
         context_mode, next_run, status, created_at,
         created_by_role, continuation_cycle_id, source
-      ) VALUES (?, ?, ?, ?, NULL, 'cron', ?, ?, 'isolated', ?, 'active', ?, ?, NULL, 'cadence-registry')
+      ) VALUES (?, ?, ?, ?, ?, 'cron', ?, ?, 'isolated', ?, 'active', ?, ?, NULL, 'cadence-registry')
     `);
     // Shape-change UPDATE: preserve session_id / last_run / last_result
     // (they're per-fire history, not declaration), recompute next_run
@@ -446,7 +536,7 @@ export function rebuildCadenceRegistry(
     // created_by_role / created_at to match the current spawn.
     const updateChangedStmt = deps.db.prepare(`
       UPDATE scheduled_tasks
-         SET prompt = ?, schedule_value = ?, schedule_timezone = ?,
+         SET prompt = ?, script = ?, schedule_value = ?, schedule_timezone = ?,
              next_run = ?, chat_jid = ?, created_by_role = ?,
              created_at = ?
        WHERE id = ?
@@ -464,6 +554,7 @@ export function rebuildCadenceRegistry(
           deps.groupFolder,
           deps.chatJid,
           row.prompt,
+          row.script,
           row.cron,
           row.tz,
           row.nextRun,
@@ -476,13 +567,15 @@ export function rebuildCadenceRegistry(
       const shapeChanged =
         prior.schedule_value !== row.cron ||
         prior.schedule_timezone !== row.tz ||
-        prior.prompt !== row.prompt;
+        prior.prompt !== row.prompt ||
+        (prior.script ?? null) !== (row.script ?? null);
       if (shapeChanged) {
         // Cadence declaration moved — recompute next_run, refresh the
         // declarative columns, but leave session_id / last_run /
         // last_result intact (they're row-history, not row-shape).
         updateChangedStmt.run(
           row.prompt,
+          row.script,
           row.cron,
           row.tz,
           row.nextRun,

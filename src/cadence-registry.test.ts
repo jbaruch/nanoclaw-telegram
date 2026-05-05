@@ -11,6 +11,7 @@ import {
   walkInstalledSkills,
   rebuildCadenceRegistry,
   defaultComputeNextRun,
+  composePrecheckScript,
 } from './cadence-registry.js';
 
 // Pinned `next_run` so per-test assertions don't drift with wall clock.
@@ -200,6 +201,7 @@ describe('validateCadenceDeclaration', () => {
       expect(r.declaration).toEqual({
         cadence: '*/30 * * * *',
         priority: 0,
+        script: null,
       });
   });
 
@@ -253,6 +255,74 @@ describe('validateCadenceDeclaration', () => {
         'morning',
       ).ok,
     ).toBe(true);
+  });
+
+  it('accepts a relative script: under the skill dir', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', script: 'scripts/precheck.py' },
+      'tessl__hb',
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok && r.declaration)
+      expect(r.declaration.script).toBe('scripts/precheck.py');
+  });
+
+  it('rejects an absolute script: path', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', script: '/etc/passwd' },
+      'tessl__hb',
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok)
+      expect(r.errors[0]).toContain('relative path under the skill directory');
+  });
+
+  it("rejects script: with a '..' segment", () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', script: '../other-skill/precheck.py' },
+      'tessl__hb',
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors[0]).toContain("'..' segments");
+  });
+
+  it('rejects script: with an unsupported extension', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', script: 'scripts/precheck.rb' },
+      'tessl__hb',
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors[0]).toContain('.py or .sh');
+  });
+
+  it('rejects an empty script: value', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', script: '' },
+      'tessl__hb',
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok)
+      expect(r.errors[0]).toContain("'script:' must be a non-empty string");
+  });
+});
+
+describe('composePrecheckScript', () => {
+  it('uses python3 for .py scripts', () => {
+    expect(composePrecheckScript('tessl__hb', 'scripts/precheck.py')).toBe(
+      'python3 /home/node/.claude/skills/tessl__hb/scripts/precheck.py\n',
+    );
+  });
+
+  it('uses bash for .sh scripts', () => {
+    expect(composePrecheckScript('tessl__hb', 'scripts/precheck.sh')).toBe(
+      'bash /home/node/.claude/skills/tessl__hb/scripts/precheck.sh\n',
+    );
+  });
+
+  it('passes the directory name through unchanged (built-in skills land without the tessl__ prefix)', () => {
+    expect(composePrecheckScript('builtin-skill', 'scripts/p.py')).toBe(
+      'python3 /home/node/.claude/skills/builtin-skill/scripts/p.py\n',
+    );
   });
 });
 
@@ -595,6 +665,176 @@ describe('rebuildCadenceRegistry', () => {
     expect(r.inserted).toBe(0);
     expect(r.deleted).toBe(0);
     expect(r.errors).toEqual([]);
+  });
+
+  it('populates scheduled_tasks.script when frontmatter declares a precheck and the file exists', () => {
+    const skills = path.join(tmpRoot, 'skills');
+    writeSkill(
+      skills,
+      'tessl__nightly-backup',
+      'cadence: "30 8 * * *"\nscript: "scripts/precheck-nightly-backup.py"',
+    );
+    fs.mkdirSync(path.join(skills, 'tessl__nightly-backup', 'scripts'), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(
+        skills,
+        'tessl__nightly-backup',
+        'scripts',
+        'precheck-nightly-backup.py',
+      ),
+      '#!/usr/bin/env python3\nprint(\'{"wake_agent": false, "data": {}}\')\n',
+    );
+    const db = makeDb();
+    const r = rebuildCadenceRegistry({
+      db,
+      groupFolder: 'g1',
+      chatJid: 'g1@chat',
+      createdByRole: 'owner',
+      skillsDir: skills,
+      computeNextRun: () => PINNED_NEXT_RUN,
+      now: () => PINNED_NOW,
+    });
+    expect(r.inserted).toBe(1);
+    expect(r.errors).toEqual([]);
+    const row = db
+      .prepare('SELECT script FROM scheduled_tasks WHERE id = ?')
+      .get('cadence-registry::g1::tessl__nightly-backup');
+    expect(row).toEqual({
+      script:
+        'python3 /home/node/.claude/skills/tessl__nightly-backup/scripts/precheck-nightly-backup.py\n',
+    });
+  });
+
+  it('leaves script NULL when frontmatter omits script:', () => {
+    const skills = path.join(tmpRoot, 'skills');
+    writeSkill(skills, 'tessl__heartbeat', 'cadence: "*/30 * * * *"');
+    const db = makeDb();
+    rebuildCadenceRegistry({
+      db,
+      groupFolder: 'g1',
+      chatJid: 'g1@chat',
+      createdByRole: 'owner',
+      skillsDir: skills,
+      computeNextRun: () => PINNED_NEXT_RUN,
+      now: () => PINNED_NOW,
+    });
+    const row = db
+      .prepare('SELECT script FROM scheduled_tasks WHERE id = ?')
+      .get('cadence-registry::g1::tessl__heartbeat');
+    expect(row).toEqual({ script: null });
+  });
+
+  it('errors and skips the row when script: references a missing file', () => {
+    const skills = path.join(tmpRoot, 'skills');
+    writeSkill(
+      skills,
+      'tessl__missing-precheck',
+      'cadence: "*/30 * * * *"\nscript: "scripts/precheck-missing.py"',
+    );
+    // Note: deliberately do NOT create scripts/precheck-missing.py.
+    const db = makeDb();
+    const r = rebuildCadenceRegistry({
+      db,
+      groupFolder: 'g1',
+      chatJid: 'g1@chat',
+      createdByRole: 'owner',
+      skillsDir: skills,
+      computeNextRun: () => PINNED_NEXT_RUN,
+      now: () => PINNED_NOW,
+    });
+    expect(r.inserted).toBe(0);
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0]).toContain('tessl__missing-precheck');
+    expect(r.errors[0]).toContain('does not exist');
+    const ids = db
+      .prepare(
+        "SELECT id FROM scheduled_tasks WHERE source = 'cadence-registry'",
+      )
+      .all() as Array<{ id: string }>;
+    expect(ids).toEqual([]);
+  });
+
+  it('treats a script: change as a shape change and refreshes the column', () => {
+    const skills = path.join(tmpRoot, 'skills');
+    const skillDir = path.join(skills, 'tessl__nb');
+    const scriptsDir = path.join(skillDir, 'scripts');
+    fs.mkdirSync(scriptsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(scriptsDir, 'old.py'),
+      '#!/usr/bin/env python3\n',
+    );
+    fs.writeFileSync(
+      path.join(scriptsDir, 'new.py'),
+      '#!/usr/bin/env python3\n',
+    );
+    writeSkill(
+      skills,
+      'tessl__nb',
+      'cadence: "30 8 * * *"\nscript: "scripts/old.py"',
+    );
+    const db = makeDb();
+    const baseDeps = {
+      db,
+      groupFolder: 'g1',
+      chatJid: 'g1@chat',
+      createdByRole: 'owner' as const,
+      skillsDir: skills,
+      computeNextRun: () => PINNED_NEXT_RUN,
+      now: () => PINNED_NOW,
+    };
+    rebuildCadenceRegistry(baseDeps);
+    // Author swaps the precheck between spawns.
+    fs.writeFileSync(
+      path.join(skillDir, 'SKILL.md'),
+      '---\ncadence: "30 8 * * *"\nscript: "scripts/new.py"\n---\n# body\n',
+    );
+    const r = rebuildCadenceRegistry(baseDeps);
+    expect(r).toMatchObject({ inserted: 0, updated: 1, preserved: 0 });
+    const row = db
+      .prepare('SELECT script FROM scheduled_tasks WHERE id = ?')
+      .get('cadence-registry::g1::tessl__nb');
+    expect(row).toEqual({
+      script: 'python3 /home/node/.claude/skills/tessl__nb/scripts/new.py\n',
+    });
+  });
+
+  it('treats removing script: as a shape change and clears the column', () => {
+    const skills = path.join(tmpRoot, 'skills');
+    const skillDir = path.join(skills, 'tessl__nb');
+    fs.mkdirSync(path.join(skillDir, 'scripts'), { recursive: true });
+    fs.writeFileSync(
+      path.join(skillDir, 'scripts', 'p.py'),
+      '#!/usr/bin/env python3\n',
+    );
+    writeSkill(
+      skills,
+      'tessl__nb',
+      'cadence: "30 8 * * *"\nscript: "scripts/p.py"',
+    );
+    const db = makeDb();
+    const baseDeps = {
+      db,
+      groupFolder: 'g1',
+      chatJid: 'g1@chat',
+      createdByRole: 'owner' as const,
+      skillsDir: skills,
+      computeNextRun: () => PINNED_NEXT_RUN,
+      now: () => PINNED_NOW,
+    };
+    rebuildCadenceRegistry(baseDeps);
+    // Author drops the precheck; cadence stays the same.
+    fs.writeFileSync(
+      path.join(skillDir, 'SKILL.md'),
+      '---\ncadence: "30 8 * * *"\n---\n# body\n',
+    );
+    const r = rebuildCadenceRegistry(baseDeps);
+    expect(r).toMatchObject({ inserted: 0, updated: 1, preserved: 0 });
+    const row = db
+      .prepare('SELECT script FROM scheduled_tasks WHERE id = ?')
+      .get('cadence-registry::g1::tessl__nb');
+    expect(row).toEqual({ script: null });
   });
 
   it('removes a previously-registered skill on a subsequent rebuild', () => {
