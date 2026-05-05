@@ -26,9 +26,14 @@ RUN apt-get update && apt-get install -y \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Set Chromium path for agent-browser
+# Set Chromium path for agent-browser and default screenshots to JPEG.
+# agent-browser falls back to PNG without these knobs, which bloats cached
+# prompts during multi-screenshot browser flows. JPEG quality 75 preserves
+# enough visual detail for agent pattern matching while cutting image tokens.
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
+ENV AGENT_BROWSER_SCREENSHOT_FORMAT=jpeg
+ENV AGENT_BROWSER_SCREENSHOT_QUALITY=75
 
 # Install agent-browser, claude-code, and composio-mcp globally
 # (tessl is not needed — tiles are delivered host-side by the orchestrator)

@@ -76,9 +76,9 @@ agent-browser get count ".item"   # Count matching elements
 ### Screenshots & PDF
 
 ```bash
-agent-browser screenshot          # Save to temp directory
-agent-browser screenshot path.png # Save to specific path
-agent-browser screenshot --full   # Full page
+agent-browser screenshot          # Save JPEG to temp directory (container default: quality 75)
+agent-browser screenshot path.jpg # Save to specific path
+agent-browser screenshot --full   # Full page JPEG
 agent-browser pdf output.pdf      # Save as PDF
 ```
 
@@ -155,5 +155,5 @@ agent-browser open https://example.com/products
 agent-browser snapshot -i
 agent-browser get text @e1  # Get product title
 agent-browser get attr @e2 href  # Get link URL
-agent-browser screenshot products.png
+agent-browser screenshot products.jpg
 ```
