@@ -11,7 +11,6 @@ import {
   GROUPS_DIR,
   HOST_GID,
   HOST_UID,
-  IDLE_TIMEOUT,
   MAX_MESSAGES_PER_PROMPT,
   MODEL_CONTEXT_WINDOW,
   POLL_INTERVAL,
@@ -119,6 +118,12 @@ import { logger } from './logger.js';
 import { initObserver } from './observer.js';
 import { runGateChain, GateContext } from './gates/index.js';
 import { checkSilentZero } from './usage-log.js';
+import {
+  getActiveIdleTimer,
+  installIdleTimerControl as installIdleTimerControlImpl,
+  releaseIdleTimerControl,
+} from './idle-timer.js';
+import type { IdleTimerControl } from './idle-timer.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -455,6 +460,19 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+
+// Idle-close timer state lives in `./idle-timer.ts` so the install /
+// release / lookup lifecycle can be unit-tested with fake timers
+// without booting the full message loop (#506). The wrapper closes
+// over `queue` so the pure module stays free of host-singleton imports.
+function installIdleTimerControl(
+  chatJid: string,
+  group: RegisteredGroup,
+): IdleTimerControl {
+  return installIdleTimerControlImpl(chatJid, group, () =>
+    queue.closeStdin(chatJid),
+  );
+}
 
 // Circuit breaker: pause groups that fail repeatedly to avoid burning credits.
 const MAX_CONSECUTIVE_FAILURES = 5;
@@ -1530,22 +1548,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     'Processing messages',
   );
 
-  // Track idle timer for closing stdin when agent is idle
-  let idleTimer: ReturnType<typeof setTimeout> | null = null;
-
-  const resetIdleTimer = () => {
-    if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(
-      () => {
-        logger.debug(
-          { group: group.name },
-          'Idle timeout, closing container stdin',
-        );
-        queue.closeStdin(chatJid);
-      },
-      group.isMain || group.containerConfig?.trusted ? IDLE_TIMEOUT : 300_000,
-    );
-  };
+  // Track idle timeout for closing stdin when the active user-facing
+  // container is idle. Installing a new control clears any stale timer
+  // from a previous container generation for this chat (#506).
+  const idleTimerControl = installIdleTimerControl(chatJid, group);
 
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
@@ -1629,8 +1635,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           pendingReplyTo[chatJid] = undefined;
           outputSentToUser = true;
         }
-        // Only reset idle timer on actual results, not session-update markers (result: null)
-        resetIdleTimer();
+        // Re-anchor idle close on any non-null agent result (tool calls,
+        // thinking, user-visible output) — not session-update markers
+        // where `result.result` is null. The reset fires even when
+        // `text` is empty after stripping `<internal>` blocks because
+        // the agent IS doing work, just not user-visible work.
+        idleTimerControl.reset('agent-output');
       }
 
       if (result.status === 'success') {
@@ -1647,7 +1657,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   );
 
   await channel.setTyping?.(chatJid, false);
-  if (idleTimer) clearTimeout(idleTimer);
+  releaseIdleTimerControl(chatJid, idleTimerControl);
 
   if (output === 'error' || hadError) {
     // Track consecutive failures for circuit breaker
@@ -2346,6 +2356,15 @@ async function startMessageLoop(): Promise<void> {
           if (
             queue.sendMessage(chatJid, formatted, lastMsgId, pipedAddressedToUs)
           ) {
+            // Re-anchor the active container's idle close on user input,
+            // not only on user-visible agent output. Tool-heavy or
+            // internal-only turns can otherwise run past a timer that was
+            // scheduled by the previous response and get closed mid-turn
+            // (#506). Optional-chain is intentional: if the prior
+            // `processGroupMessages` cycle has already released its
+            // control, a fresh cycle will install one — no need to
+            // synthesize a control here.
+            getActiveIdleTimer(chatJid)?.reset('user-input');
             // Update shared reply-to so the output callback quotes this message
             pendingReplyTo[chatJid] = lastMsgId;
             logger.debug(
