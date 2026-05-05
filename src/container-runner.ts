@@ -568,6 +568,81 @@ export function resolvePerGroupAgentModel(
   return trimmed;
 }
 
+/**
+ * Resolve the effective AGENT_MODEL for a single spawn given the
+ * session slot (#509). Per-session-slot model tier — currently only
+ * the maintenance slot has its own override; user-facing `'default'`
+ * (and any future named slot) falls through to `agentModel` →
+ * AGENT_MODEL → DEFAULT_AGENT_MODEL.
+ *
+ * Resolution order for a maintenance spawn:
+ *   1. `containerConfig.maintenanceAgentModel` (validated through
+ *      `resolvePerGroupAgentModel` against the user-facing-resolved
+ *      value as the fallback — so a fat-fingered maintenance value
+ *      doesn't silently route maintenance through the global default
+ *      when the operator already set a deliberate per-group user-facing
+ *      override).
+ *   2. `containerConfig.agentModel` (resolved against `globalDefault`).
+ *   3. `globalDefault` (the global `AGENT_MODEL`).
+ *
+ * Resolution order for a non-maintenance spawn:
+ *   1. `containerConfig.agentModel` (resolved against `globalDefault`).
+ *   2. `globalDefault`.
+ *
+ * Both paths return the user-facing-resolved value when no override
+ * applies — invariant: a non-maintenance spawn behaves byte-identically
+ * to the pre-#509 ladder.
+ *
+ * Returns `{ effective, source }` so the per-spawn audit log line
+ * (#418) can attribute the value to the right config layer without
+ * the caller re-deriving the comparison.
+ */
+export function resolveSessionAgentModel(
+  containerConfig:
+    | { agentModel?: string; maintenanceAgentModel?: string }
+    | undefined,
+  isMaintenance: boolean,
+  globalDefault: string,
+): {
+  effective: string;
+  source: 'global_default' | 'group_override' | 'maintenance_override';
+} {
+  const userFacingRaw = containerConfig?.agentModel;
+  const userFacingResolved = userFacingRaw
+    ? resolvePerGroupAgentModel(userFacingRaw, globalDefault)
+    : globalDefault;
+  const userFacingSource: 'group_override' | 'global_default' =
+    userFacingResolved !== globalDefault ? 'group_override' : 'global_default';
+
+  if (!isMaintenance) {
+    return { effective: userFacingResolved, source: userFacingSource };
+  }
+
+  const maintenanceRaw = containerConfig?.maintenanceAgentModel;
+  if (!maintenanceRaw || !maintenanceRaw.trim()) {
+    // No maintenance-specific override — maintenance uses the same
+    // resolved value as the user-facing slot (the existing pre-#509
+    // behavior). `source` reflects the user-facing source so the
+    // audit log doesn't claim a maintenance override that wasn't set.
+    return { effective: userFacingResolved, source: userFacingSource };
+  }
+
+  const maintenanceResolved = resolvePerGroupAgentModel(
+    maintenanceRaw,
+    userFacingResolved,
+  );
+  if (maintenanceResolved === userFacingResolved) {
+    // Either the maintenance value was unknown-prefix (warn already
+    // logged by `resolvePerGroupAgentModel`) and fell back to the
+    // user-facing value, OR the operator deliberately set the
+    // maintenance value to match user-facing. Either way the audit
+    // log should reflect the user-facing source — there's no
+    // *effective* maintenance-specific routing happening.
+    return { effective: userFacingResolved, source: userFacingSource };
+  }
+  return { effective: maintenanceResolved, source: 'maintenance_override' };
+}
+
 const AGENT_MODEL = resolveAgentModel(process.env.AGENT_MODEL);
 
 /**
@@ -2292,6 +2367,7 @@ function buildContainerArgs(
   containerName: string,
   group: RegisteredGroup,
   isMain: boolean,
+  sessionName: string,
   replyToMessageId?: string,
   chatJid?: string,
   continuationCycleId?: string,
@@ -2386,15 +2462,22 @@ function buildContainerArgs(
   // invisible to the audit). The `source` field distinguishes
   // default-vs-override so the log line is self-explaining without
   // joining against group config.
-  const perGroupAgentModelRaw = group.containerConfig?.agentModel;
-  const effectiveAgentModel = perGroupAgentModelRaw
-    ? resolvePerGroupAgentModel(perGroupAgentModelRaw, AGENT_MODEL)
-    : AGENT_MODEL;
-  const agentModelSource: 'group_override' | 'global_default' =
-    effectiveAgentModel !== AGENT_MODEL ? 'group_override' : 'global_default';
+  // #509: per-session-slot model tier. Maintenance spawns
+  // (sessionName === MAINTENANCE_SESSION_NAME) consult
+  // `maintenanceAgentModel` first, then fall through to the existing
+  // `agentModel` → AGENT_MODEL ladder. Non-maintenance spawns are
+  // unchanged byte-for-byte from the pre-#509 behavior.
+  const isMaintenanceSpawn = sessionName === MAINTENANCE_SESSION_NAME;
+  const { effective: effectiveAgentModel, source: agentModelSource } =
+    resolveSessionAgentModel(
+      group.containerConfig,
+      isMaintenanceSpawn,
+      AGENT_MODEL,
+    );
   logger.info(
     {
       groupFolder: group.folder,
+      sessionName,
       agentModel: effectiveAgentModel,
       globalDefault: AGENT_MODEL,
       source: agentModelSource,
@@ -2788,6 +2871,7 @@ export async function runContainerAgent(
         containerName,
         group,
         input.isMain,
+        sessionName,
         input.replyToMessageId,
         input.chatJid,
         input.continuationCycleId,

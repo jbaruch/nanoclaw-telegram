@@ -913,6 +913,12 @@ export async function processTaskIpc(
     // clear the override (fall back to global AGENT_MODEL).
     // `undefined` is rejected at the handler.
     agentModel?: string | null;
+    // For set_maintenance_agent_model (#509). `string` = per-session-slot
+    // override that applies only to the maintenance container slot for
+    // this group; `null` = clear the override (maintenance falls back to
+    // the per-group `agentModel` → global `AGENT_MODEL` ladder, which is
+    // the pre-#509 behavior).
+    maintenanceAgentModel?: string | null;
     // For set_additional_tiles (#305). Array of tile names from the
     // local registry to overlay on top of the trust-tier baseline.
     // `null` or `[]` clears the override. Anything else (string,
@@ -1787,6 +1793,93 @@ export async function processTaskIpc(
       // override on their next read. `isMain` (not hardcoded true)
       // because a non-main source legally lands here when modifying
       // its own folder.
+      const availableGroups = deps.getAvailableGroups();
+      deps.writeGroupsSnapshot(
+        sourceGroup,
+        isMain,
+        availableGroups,
+        new Set(Object.keys(registeredGroups)),
+      );
+      break;
+    }
+
+    case 'set_maintenance_agent_model': {
+      // Partial update: change `containerConfig.maintenanceAgentModel`
+      // only (#509). Mirrors set_agent_model semantics — owner-of-the-bill
+      // can change their own group's model knobs. Sibling containerConfig
+      // fields are preserved verbatim.
+      const groupFolder =
+        typeof data.groupFolder === 'string' ? data.groupFolder.trim() : '';
+      if (!groupFolder) {
+        logger.warn(
+          { data },
+          'Invalid set_maintenance_agent_model request - missing/empty groupFolder',
+        );
+        break;
+      }
+      // `maintenanceAgentModel` accepts string (set/replace) or null
+      // (clear). Anything else (number, object, undefined) is rejected.
+      if (
+        typeof data.maintenanceAgentModel !== 'string' &&
+        data.maintenanceAgentModel !== null
+      ) {
+        logger.warn(
+          { data },
+          'Invalid set_maintenance_agent_model request - maintenanceAgentModel must be string or null',
+        );
+        break;
+      }
+      let targetJid: string | undefined;
+      let targetGroup: RegisteredGroup | undefined;
+      for (const [jid, g] of Object.entries(registeredGroups)) {
+        if (g.folder === groupFolder) {
+          targetJid = jid;
+          targetGroup = g;
+          break;
+        }
+      }
+      if (!targetJid || !targetGroup) {
+        logger.warn(
+          { groupFolder },
+          'set_maintenance_agent_model: group not registered (use register_group first)',
+        );
+        break;
+      }
+      // Authorization mirrors set_agent_model — non-main can only modify
+      // its own folder.
+      if (!isMain && groupFolder !== sourceGroup) {
+        logger.warn(
+          { sourceGroup, groupFolder },
+          'Unauthorized set_maintenance_agent_model attempt blocked',
+        );
+        break;
+      }
+      const nextContainerConfig: RegisteredGroup['containerConfig'] = {
+        ...(targetGroup.containerConfig ?? {}),
+      };
+      if (data.maintenanceAgentModel === null) {
+        delete nextContainerConfig.maintenanceAgentModel;
+      } else {
+        const trimmed = data.maintenanceAgentModel.trim();
+        if (trimmed.length === 0) {
+          delete nextContainerConfig.maintenanceAgentModel;
+        } else {
+          nextContainerConfig.maintenanceAgentModel = trimmed;
+        }
+      }
+      deps.registerGroup(targetJid, {
+        ...targetGroup,
+        containerConfig: nextContainerConfig,
+      });
+      logger.info(
+        {
+          groupFolder,
+          maintenanceAgentModel:
+            nextContainerConfig.maintenanceAgentModel ?? null,
+          source: sourceGroup,
+        },
+        'set_maintenance_agent_model: updated per-group MAINTENANCE_AGENT_MODEL override',
+      );
       const availableGroups = deps.getAvailableGroups();
       deps.writeGroupsSnapshot(
         sourceGroup,

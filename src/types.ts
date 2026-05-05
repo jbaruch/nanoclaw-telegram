@@ -56,6 +56,33 @@ export interface ContainerConfig {
    */
   agentModel?: string;
   /**
+   * Per-session-slot model override for the maintenance session
+   * (`jbaruch/nanoclaw#509`). When set AND the spawn's `sessionName`
+   * is `'maintenance'`, this value replaces the resolved model for
+   * that single spawn — leaving the user-facing `'default'` session
+   * (and any future named slots) on the existing `agentModel` →
+   * `AGENT_MODEL` → `DEFAULT_AGENT_MODEL` ladder.
+   *
+   * Same value forms accepted as `agentModel`; same validation
+   * (`resolvePerGroupAgentModel`) — an unknown-prefix value falls
+   * back to whatever `agentModel` would have resolved to (NOT the
+   * global default), so the user-facing slot's intentional override
+   * isn't silently bypassed by a fat-fingered maintenance value.
+   *
+   * Use case: scheduled maintenance work (heartbeat, nightly-*,
+   * memory-rotation, etc.) does triage / orchestration that Sonnet
+   * handles equivalently to Opus, while the user-facing session
+   * stays on Opus for full reasoning headroom. Per `#509`'s
+   * `logs/usage.jsonl` analysis, ~99.8% of the maintenance container's
+   * spend was on `claude-opus-4-7` despite the maintenance work
+   * profile being lighter than user-facing chat.
+   *
+   * Undefined / null / empty / whitespace-only → maintenance falls
+   * back to `agentModel` (or its fallbacks). Cleared via
+   * `set_maintenance_agent_model` IPC with `maintenanceAgentModel: null`.
+   */
+  maintenanceAgentModel?: string;
+  /**
    * Per-group opt-in for the per-tier custom system prompt (#113).
    * When `true`, the agent-runner is launched with `USE_CUSTOM_PROMPT=1`
    * and reads `/workspace/global/prompts/{main,trusted,untrusted}.md`

@@ -166,6 +166,7 @@ import {
   selectTiles,
   resolveAgentModel,
   resolvePerGroupAgentModel,
+  resolveSessionAgentModel,
   DEFAULT_AGENT_MODEL,
 } from './container-runner.js';
 import { logger } from './logger.js';
@@ -1124,6 +1125,150 @@ describe('resolvePerGroupAgentModel', () => {
 });
 
 // ----------------------------------------------------------------------
+// resolveSessionAgentModel — per-session-slot model tier (#509).
+// Maintenance spawns get an extra layer in the resolution ladder
+// (`maintenanceAgentModel` → `agentModel` → globalDefault); non-
+// maintenance spawns are byte-identical to the pre-#509 ladder.
+// Invariant: a non-maintenance spawn never sees a maintenance-only
+// override, and a maintenance spawn with no maintenance-specific
+// value behaves identically to a non-maintenance spawn (same value,
+// same source attribution).
+// ----------------------------------------------------------------------
+
+describe('resolveSessionAgentModel', () => {
+  const GLOBAL = DEFAULT_AGENT_MODEL;
+
+  beforeEach(() => {
+    vi.mocked(logger.warn).mockClear();
+  });
+
+  it('non-maintenance with no per-group override → global default', () => {
+    expect(resolveSessionAgentModel(undefined, false, GLOBAL)).toEqual({
+      effective: GLOBAL,
+      source: 'global_default',
+    });
+    expect(resolveSessionAgentModel({}, false, GLOBAL)).toEqual({
+      effective: GLOBAL,
+      source: 'global_default',
+    });
+  });
+
+  it('non-maintenance with per-group override → group_override', () => {
+    expect(
+      resolveSessionAgentModel({ agentModel: 'sonnet' }, false, GLOBAL),
+    ).toEqual({ effective: 'sonnet', source: 'group_override' });
+  });
+
+  it('non-maintenance ignores maintenanceAgentModel even when set', () => {
+    // Invariant: a default-session spawn must never accidentally
+    // route through the maintenance override. Heartbeat-on-Sonnet
+    // shouldn't drag the user-facing chat off Opus.
+    expect(
+      resolveSessionAgentModel(
+        { maintenanceAgentModel: 'haiku' },
+        false,
+        GLOBAL,
+      ),
+    ).toEqual({ effective: GLOBAL, source: 'global_default' });
+  });
+
+  it('maintenance with no overrides → global default + source reflects no override', () => {
+    expect(resolveSessionAgentModel(undefined, true, GLOBAL)).toEqual({
+      effective: GLOBAL,
+      source: 'global_default',
+    });
+    expect(resolveSessionAgentModel({}, true, GLOBAL)).toEqual({
+      effective: GLOBAL,
+      source: 'global_default',
+    });
+  });
+
+  it('maintenance with only agentModel → that value (group_override)', () => {
+    // No maintenance-specific override → maintenance uses the user-
+    // facing per-group value. Source is `group_override`, not
+    // `maintenance_override`, so the audit log doesn't claim a
+    // maintenance routing decision that wasn't made.
+    expect(
+      resolveSessionAgentModel({ agentModel: 'sonnet' }, true, GLOBAL),
+    ).toEqual({ effective: 'sonnet', source: 'group_override' });
+  });
+
+  it('maintenance with only maintenanceAgentModel → that value (maintenance_override)', () => {
+    expect(
+      resolveSessionAgentModel(
+        { maintenanceAgentModel: 'sonnet' },
+        true,
+        GLOBAL,
+      ),
+    ).toEqual({ effective: 'sonnet', source: 'maintenance_override' });
+  });
+
+  it('maintenance with BOTH overrides → maintenance value wins (maintenance_override)', () => {
+    // Real-world setup for the swarm group: user-facing on Opus[1m],
+    // maintenance dropped to Sonnet for cost.
+    expect(
+      resolveSessionAgentModel(
+        { agentModel: 'claude-opus-4-7[1m]', maintenanceAgentModel: 'sonnet' },
+        true,
+        GLOBAL,
+      ),
+    ).toEqual({ effective: 'sonnet', source: 'maintenance_override' });
+  });
+
+  it('maintenance with maintenanceAgentModel matching the user-facing value → source is group_override', () => {
+    // Operator deliberately set maintenance to the same value as
+    // user-facing — there's no *effective* maintenance routing
+    // happening, so the audit source reflects the user-facing layer.
+    expect(
+      resolveSessionAgentModel(
+        { agentModel: 'sonnet', maintenanceAgentModel: 'sonnet' },
+        true,
+        GLOBAL,
+      ),
+    ).toEqual({ effective: 'sonnet', source: 'group_override' });
+  });
+
+  it('maintenance with unknown-prefix maintenanceAgentModel → falls back to user-facing-resolved (warn from inner resolver)', () => {
+    // The fat-fingered maintenance value falls back to the user-facing
+    // value, NOT to the global default. Without this, an operator with
+    // an intentional `agentModel: 'opus'` per-group override and a
+    // typo in the maintenance value would silently route maintenance
+    // through the global default, defeating the per-group routing.
+    expect(
+      resolveSessionAgentModel(
+        { agentModel: 'opus', maintenanceAgentModel: 'haik' },
+        true,
+        GLOBAL,
+      ),
+    ).toEqual({ effective: 'opus', source: 'group_override' });
+    // resolvePerGroupAgentModel logged the warn; verify it surfaced.
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ agentModel: 'haik', fallback: 'opus' }),
+      expect.stringContaining(
+        'Per-group AGENT_MODEL override does not look like a Claude model ID',
+      ),
+    );
+  });
+
+  it('maintenance with empty / whitespace maintenanceAgentModel → no override', () => {
+    expect(
+      resolveSessionAgentModel(
+        { agentModel: 'sonnet', maintenanceAgentModel: '' },
+        true,
+        GLOBAL,
+      ),
+    ).toEqual({ effective: 'sonnet', source: 'group_override' });
+    expect(
+      resolveSessionAgentModel(
+        { agentModel: 'sonnet', maintenanceAgentModel: '   ' },
+        true,
+        GLOBAL,
+      ),
+    ).toEqual({ effective: 'sonnet', source: 'group_override' });
+  });
+});
+
+// ----------------------------------------------------------------------
 // Per-group AGENT_MODEL override — spawn-arg integration (#395).
 // Verifies the override flows through buildContainerArgs to the actual
 // `-e AGENT_MODEL=…` arg on the docker command line, and that the global
@@ -1255,6 +1400,160 @@ describe('per-group AGENT_MODEL override on container spawn', () => {
         (c) => typeof c[1] === 'string' && c[1].includes('AGENT_MODEL'),
       );
     expect(warnCalls.length).toBe(0);
+  });
+});
+
+// ----------------------------------------------------------------------
+// Per-session-slot AGENT_MODEL override — maintenance routing (#509).
+// Verifies the maintenanceAgentModel field flows into the docker
+// command-line arg ONLY when sessionName === 'maintenance', and that
+// the user-facing default-session spawn never sees the maintenance
+// value even when both are set.
+// ----------------------------------------------------------------------
+
+describe('maintenanceAgentModel override on container spawn (#509)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    vi.mocked(logger.info).mockClear();
+    vi.mocked(logger.warn).mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('maintenance spawn with maintenanceAgentModel routes through it', async () => {
+    const swarmGroup: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: {
+        agentModel: 'claude-opus-4-7[1m]',
+        maintenanceAgentModel: 'sonnet',
+      },
+    };
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const promise = runContainerAgent(swarmGroup, maintInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).toContain('AGENT_MODEL=sonnet');
+    expect(args).not.toContain('AGENT_MODEL=claude-opus-4-7[1m]');
+
+    const infoCalls = vi
+      .mocked(logger.info)
+      .mock.calls.filter(
+        (c) =>
+          typeof c[1] === 'string' &&
+          c[1].includes('Container spawn AGENT_MODEL resolved'),
+      );
+    expect(infoCalls.length).toBe(1);
+    expect(infoCalls[0]![0]).toEqual(
+      expect.objectContaining({
+        agentModel: 'sonnet',
+        sessionName: 'maintenance',
+        source: 'maintenance_override',
+      }),
+    );
+  });
+
+  it('user-facing default-session spawn ignores maintenanceAgentModel', async () => {
+    // Invariant test: the swarm group must NOT route the user-facing
+    // chat through the maintenance Sonnet override — user-facing
+    // stays on the agentModel value. Use a non-default value here so
+    // the assertion can distinguish "override applied" from
+    // "override matches the default" — `opus` (alias) is intentionally
+    // a different value than the full DEFAULT_AGENT_MODEL string.
+    const swarmGroup: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: {
+        agentModel: 'opus',
+        maintenanceAgentModel: 'sonnet',
+      },
+    };
+    // No sessionName passed → DEFAULT_SESSION_NAME = 'default'.
+    const promise = runContainerAgent(swarmGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).toContain('AGENT_MODEL=opus');
+    expect(args).not.toContain('AGENT_MODEL=sonnet');
+
+    const infoCalls = vi
+      .mocked(logger.info)
+      .mock.calls.filter(
+        (c) =>
+          typeof c[1] === 'string' &&
+          c[1].includes('Container spawn AGENT_MODEL resolved'),
+      );
+    expect(infoCalls.length).toBe(1);
+    expect(infoCalls[0]![0]).toEqual(
+      expect.objectContaining({
+        agentModel: 'opus',
+        sessionName: 'default',
+        source: 'group_override',
+      }),
+    );
+  });
+
+  it('maintenance spawn with no maintenance override falls through to agentModel', async () => {
+    const overrideGroup: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: { agentModel: 'opus' },
+    };
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const promise = runContainerAgent(overrideGroup, maintInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).toContain('AGENT_MODEL=opus');
+
+    const infoCalls = vi
+      .mocked(logger.info)
+      .mock.calls.filter(
+        (c) =>
+          typeof c[1] === 'string' &&
+          c[1].includes('Container spawn AGENT_MODEL resolved'),
+      );
+    expect(infoCalls[0]![0]).toEqual(
+      expect.objectContaining({
+        agentModel: 'opus',
+        sessionName: 'maintenance',
+        source: 'group_override',
+      }),
+    );
+  });
+
+  it('maintenance spawn with no overrides at all falls through to global default', async () => {
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const promise = runContainerAgent(testGroup, maintInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).toContain(`AGENT_MODEL=${DEFAULT_AGENT_MODEL}`);
+
+    const infoCalls = vi
+      .mocked(logger.info)
+      .mock.calls.filter(
+        (c) =>
+          typeof c[1] === 'string' &&
+          c[1].includes('Container spawn AGENT_MODEL resolved'),
+      );
+    expect(infoCalls[0]![0]).toEqual(
+      expect.objectContaining({
+        agentModel: DEFAULT_AGENT_MODEL,
+        sessionName: 'maintenance',
+        source: 'global_default',
+      }),
+    );
   });
 });
 

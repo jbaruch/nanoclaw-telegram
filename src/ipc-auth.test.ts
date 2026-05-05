@@ -2046,6 +2046,212 @@ describe('set_agent_model', () => {
   });
 });
 
+// --- set_maintenance_agent_model (#509) ---
+//
+// Per-session-slot model override that applies only to the maintenance
+// container slot. Authorization mirrors set_agent_model (above) — main
+// can target any registered group; non-main can target only its own
+// folder. Sibling containerConfig fields must survive untouched (same
+// regression-bait as set_agent_model). The handler exists so an agent
+// or operator can flip the value at runtime without an orchestrator
+// restart.
+
+describe('set_maintenance_agent_model', () => {
+  it('main group can set maintenanceAgentModel on a registered group', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_maintenance_agent_model',
+        groupFolder: 'other-group',
+        maintenanceAgentModel: 'sonnet[1m]',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const group = getRegisteredGroup('other@g.us');
+    expect(group?.containerConfig?.maintenanceAgentModel).toBe('sonnet[1m]');
+    // Other fields preserved.
+    expect(group?.trigger).toBe('@Andy');
+    expect(group?.folder).toBe('other-group');
+  });
+
+  it('non-main group can set maintenanceAgentModel on its own folder', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_maintenance_agent_model',
+        groupFolder: 'other-group',
+        maintenanceAgentModel: 'opus',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.maintenanceAgentModel,
+    ).toBe('opus');
+  });
+
+  it('non-main group cannot set maintenanceAgentModel on another group', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_maintenance_agent_model',
+        groupFolder: 'third-group',
+        maintenanceAgentModel: 'opus',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('third@g.us')?.containerConfig?.maintenanceAgentModel,
+    ).toBeUndefined();
+  });
+
+  it('clears maintenanceAgentModel when payload is null', async () => {
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      containerConfig: { maintenanceAgentModel: 'sonnet' },
+    });
+    groups['other@g.us'] = {
+      ...OTHER_GROUP,
+      containerConfig: { maintenanceAgentModel: 'sonnet' },
+    };
+
+    await processTaskIpc(
+      {
+        type: 'set_maintenance_agent_model',
+        groupFolder: 'other-group',
+        maintenanceAgentModel: null,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.maintenanceAgentModel,
+    ).toBeUndefined();
+  });
+
+  it('preserves sibling containerConfig fields on update', async () => {
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      containerConfig: {
+        trusted: true,
+        enableHeartbeat: true,
+        agentModel: 'opus', // user-facing override survives the maintenance update
+        additionalMounts: [
+          { hostPath: '/tmp/extra', containerPath: 'extra', readonly: true },
+        ],
+      },
+    });
+    groups['other@g.us'] = getRegisteredGroup('other@g.us')!;
+
+    await processTaskIpc(
+      {
+        type: 'set_maintenance_agent_model',
+        groupFolder: 'other-group',
+        maintenanceAgentModel: 'haiku',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const cfg = getRegisteredGroup('other@g.us')?.containerConfig;
+    expect(cfg?.maintenanceAgentModel).toBe('haiku');
+    // user-facing per-group override must survive — that's the whole
+    // point of the per-session-slot knob (#509).
+    expect(cfg?.agentModel).toBe('opus');
+    expect(cfg?.trusted).toBe(true);
+    expect(cfg?.enableHeartbeat).toBe(true);
+    expect(cfg?.additionalMounts).toEqual([
+      { hostPath: '/tmp/extra', containerPath: 'extra', readonly: true },
+    ]);
+  });
+
+  it('rejects missing groupFolder', async () => {
+    await processTaskIpc(
+      // groupFolder omitted
+      {
+        type: 'set_maintenance_agent_model',
+        maintenanceAgentModel: 'opus',
+      } as Parameters<typeof processTaskIpc>[0],
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.maintenanceAgentModel,
+    ).toBeUndefined();
+  });
+
+  it('rejects non-string non-null maintenanceAgentModel (defense vs malformed payload)', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_maintenance_agent_model',
+        groupFolder: 'other-group',
+        // 42 is neither a string nor null — must be rejected, not coerced.
+        maintenanceAgentModel: 42 as unknown as string,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.maintenanceAgentModel,
+    ).toBeUndefined();
+  });
+
+  it('treats empty/whitespace maintenanceAgentModel as a clear', async () => {
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      containerConfig: { maintenanceAgentModel: 'sonnet' },
+    });
+    groups['other@g.us'] = {
+      ...OTHER_GROUP,
+      containerConfig: { maintenanceAgentModel: 'sonnet' },
+    };
+
+    await processTaskIpc(
+      {
+        type: 'set_maintenance_agent_model',
+        groupFolder: 'other-group',
+        maintenanceAgentModel: '   ',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.maintenanceAgentModel,
+    ).toBeUndefined();
+  });
+
+  it('set_maintenance_agent_model on unregistered groupFolder is a no-op', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_maintenance_agent_model',
+        groupFolder: 'never-registered-folder',
+        maintenanceAgentModel: 'opus',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // No new registration created.
+    const allFolders = Object.values(groups).map((g) => g.folder);
+    expect(allFolders).not.toContain('never-registered-folder');
+  });
+});
+
 // --- set_additional_tiles (#305) ---
 //
 // Per-chat additive tile overlay. Authorisation: main-only — overlay
