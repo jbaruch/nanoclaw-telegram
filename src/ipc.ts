@@ -14,6 +14,7 @@ import {
 } from './config.js';
 import { syncBackupRepo, type SyncResult } from './backup-sync.js';
 import { sendPoolMessage } from './channels/telegram.js';
+import { coerceTaskTextField } from './coerce-task-prompt.js';
 import {
   AvailableGroup,
   DEFAULT_SESSION_NAME,
@@ -975,6 +976,40 @@ export async function processTaskIpc(
         data.schedule_value &&
         data.targetJid
       ) {
+        // #512 — coerce `prompt` and `script` to text at the IPC
+        // boundary. TS declares `string`, but the value is
+        // deserialized from JSON: a non-string here would otherwise
+        // bind as a BLOB via better-sqlite3 and surface later as
+        // `t.prompt.slice is not a function` in `list_tasks`.
+        // `coerceTaskTextField` returns:
+        //   - the string itself when `data.prompt` is a string,
+        //   - decoded UTF-8 when it's the JSON-Buffer shape
+        //     (`{type:'Buffer',data:[...]}`),
+        //   - `null` for any other shape — signal to reject the
+        //     payload rather than persist a garbage row that would
+        //     fire with `"[object Object]"` as its prompt.
+        const promptStr = coerceTaskTextField(data.prompt);
+        if (promptStr === null) {
+          logger.warn(
+            { sourceGroup, promptType: typeof data.prompt },
+            'schedule_task: rejecting non-text prompt payload',
+          );
+          break;
+        }
+        let scriptStr: string | null = null;
+        if (data.script != null) {
+          const coerced = coerceTaskTextField(data.script);
+          if (coerced === null) {
+            logger.warn(
+              { sourceGroup, scriptType: typeof data.script },
+              'schedule_task: rejecting non-text script payload',
+            );
+            break;
+          }
+          // Treat empty-string script the same as null — same
+          // semantics as the prior `data.script || null`.
+          scriptStr = coerced || null;
+        }
         // Resolve the target group from JID
         const targetJid = data.targetJid as string;
         const targetGroupEntry = registeredGroups[targetJid];
@@ -1128,8 +1163,8 @@ export async function processTaskIpc(
           id: taskId,
           group_folder: targetFolder,
           chat_jid: targetJid,
-          prompt: data.prompt,
-          script: data.script || null,
+          prompt: promptStr,
+          script: scriptStr,
           schedule_type: scheduleType,
           schedule_value: data.schedule_value,
           schedule_timezone: scheduleTimezone,
@@ -1231,8 +1266,48 @@ export async function processTaskIpc(
         }
 
         const updates: Parameters<typeof updateTask>[1] = {};
-        if (data.prompt !== undefined) updates.prompt = data.prompt;
-        if (data.script !== undefined) updates.script = data.script || null;
+        // #512 — same boundary-coercion contract as schedule_task
+        // above. `coerceTaskTextField` decodes the JSON-Buffer shape
+        // so an older writer's BLOB-shaped payload still round-trips
+        // to its real text; any other non-string shape is rejected
+        // (we abort the whole update rather than write a garbage
+        // column).
+        if (data.prompt !== undefined) {
+          const promptCoerced = coerceTaskTextField(data.prompt);
+          if (promptCoerced === null) {
+            logger.warn(
+              {
+                taskId: data.taskId,
+                sourceGroup,
+                promptType: typeof data.prompt,
+              },
+              'update_task: rejecting non-text prompt payload',
+            );
+            break;
+          }
+          updates.prompt = promptCoerced;
+        }
+        if (data.script !== undefined) {
+          if (data.script == null) {
+            updates.script = null;
+          } else {
+            const scriptCoerced = coerceTaskTextField(data.script);
+            if (scriptCoerced === null) {
+              logger.warn(
+                {
+                  taskId: data.taskId,
+                  sourceGroup,
+                  scriptType: typeof data.script,
+                },
+                'update_task: rejecting non-text script payload',
+              );
+              break;
+            }
+            // Empty string is the documented "clear back to no script"
+            // signal — preserve that semantics.
+            updates.script = scriptCoerced || null;
+          }
+        }
         if (data.schedule_type !== undefined)
           updates.schedule_type = data.schedule_type as
             | 'cron'

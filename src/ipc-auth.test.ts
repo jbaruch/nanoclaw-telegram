@@ -336,6 +336,130 @@ describe('schedule_task provenance', () => {
   });
 });
 
+// --- schedule_task / update_task prompt coercion (#512) ---
+//
+// Without coercion at the IPC boundary, a non-string `prompt` (or
+// `script`) here lands as a SQLite BLOB via better-sqlite3, and
+// `list_tasks` later throws `t.prompt.slice is not a function`. The
+// boundary contract: TEXT passes through, the JSON-Buffer shape
+// (`{type:'Buffer',data:[...]}`) decodes to UTF-8 so the real prompt
+// round-trips, every other non-string shape is REJECTED — better to
+// drop the IPC than to persist a garbage row that fires with
+// `"[object Object]"` as its prompt.
+
+describe('schedule_task prompt coercion (#512)', () => {
+  it('decodes a JSON-Buffer-shaped prompt to its UTF-8 text before persisting', async () => {
+    const promptText = 'Skill(skill: "tessl__axis-review")';
+    const blobShape = {
+      type: 'Buffer',
+      data: Array.from(Buffer.from(promptText, 'utf8')),
+    };
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        // Cast through unknown — the TS type says `string`, but at
+        // runtime IPC payloads are JSON and a malformed writer can
+        // deliver any shape. The Buffer-shape MUST round-trip to its
+        // decoded text, not to "[object Object]".
+        prompt: blobShape as unknown as string,
+        schedule_type: 'once',
+        schedule_value: '2025-06-01T00:00:00',
+        targetJid: 'main@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const tasks = getAllTasks();
+    expect(tasks.length).toBe(1);
+    expect(typeof tasks[0].prompt).toBe('string');
+    expect(tasks[0].prompt).toBe(promptText);
+  });
+
+  it('rejects a non-string non-Buffer prompt rather than persisting "[object Object]"', async () => {
+    await processTaskIpc(
+      {
+        type: 'schedule_task',
+        // A plain object with no Buffer discriminator — the prior
+        // bare-String fallback would have stored "[object Object]"
+        // here, which fires with garbage at the next tick. Reject.
+        prompt: { not: 'a buffer' } as unknown as string,
+        schedule_type: 'once',
+        schedule_value: '2025-06-01T00:00:00',
+        targetJid: 'main@g.us',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const tasks = getAllTasks();
+    expect(tasks.length).toBe(0);
+  });
+
+  it('update_task decodes a JSON-Buffer-shaped prompt to UTF-8', async () => {
+    const promptText = 'Skill(skill: "tessl__nightly-housekeeping")';
+    createTask({
+      id: 'task-update-coerce',
+      group_folder: 'whatsapp_main',
+      chat_jid: 'main@g.us',
+      prompt: 'original',
+      schedule_type: 'once',
+      schedule_value: '2025-06-01T00:00:00',
+      context_mode: 'isolated',
+      next_run: '2025-06-01T00:00:00.000Z',
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+      created_by_role: 'main_agent',
+    });
+    await processTaskIpc(
+      {
+        type: 'update_task',
+        taskId: 'task-update-coerce',
+        prompt: {
+          type: 'Buffer',
+          data: Array.from(Buffer.from(promptText, 'utf8')),
+        } as unknown as string,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const updated = getTaskById('task-update-coerce');
+    expect(updated).toBeDefined();
+    expect(typeof updated!.prompt).toBe('string');
+    expect(updated!.prompt).toBe(promptText);
+  });
+
+  it('update_task rejects a non-string non-Buffer prompt and leaves the row untouched', async () => {
+    createTask({
+      id: 'task-update-reject',
+      group_folder: 'whatsapp_main',
+      chat_jid: 'main@g.us',
+      prompt: 'original',
+      schedule_type: 'once',
+      schedule_value: '2025-06-01T00:00:00',
+      context_mode: 'isolated',
+      next_run: '2025-06-01T00:00:00.000Z',
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+      created_by_role: 'main_agent',
+    });
+    await processTaskIpc(
+      {
+        type: 'update_task',
+        taskId: 'task-update-reject',
+        prompt: 42 as unknown as string,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const updated = getTaskById('task-update-reject');
+    expect(updated).toBeDefined();
+    expect(updated!.prompt).toBe('original');
+  });
+});
+
 // --- pause_task authorization ---
 
 describe('pause_task authorization', () => {

@@ -12,6 +12,7 @@ import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
 import { STABLE_TASK_ID_REGEX } from './stable-task-id.js';
+import { formatTaskRow, type RawTaskRow } from './format-task-row.js';
 import {
   buildRegisterGroupContainerConfig,
   describeOverlayUpdate,
@@ -566,18 +567,15 @@ server.tool(
         };
       }
 
+      // #512 — `t.prompt` arrives as `unknown` because the host
+      // JSON.stringifies `getAllTasks()` straight off SQLite, and a
+      // BLOB-typed prompt column lands here as
+      // `{type:'Buffer',data:[...]}` rather than a string. The pure
+      // formatter coerces every field defensively so one row with an
+      // odd prompt shape can't poison the whole listing through the
+      // outer catch.
       const formatted = tasks
-        .map(
-          (t: {
-            id: string;
-            prompt: string;
-            schedule_type: string;
-            schedule_value: string;
-            status: string;
-            next_run: string;
-          }) =>
-            `- [${t.id}] ${t.prompt.slice(0, 50)}... (${t.schedule_type}: ${t.schedule_value}) - ${t.status}, next: ${t.next_run || 'N/A'}`,
-        )
+        .map((t: RawTaskRow) => formatTaskRow(t))
         .join('\n');
 
       return {
