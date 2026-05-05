@@ -160,6 +160,7 @@ sqlite3 ~/nanoclaw/store/messages.db "UPDATE scheduled_tasks SET prompt='new pro
 | `TELEGRAM_BOT_POOL` | @BotFather (6 bots) | Orchestrator (agent swarm) |
 | `OPENAI_API_KEY` | platform.openai.com | Voice transcription (Whisper) |
 | `COMPOSIO_API_KEY` | app.composio.dev | Agent containers, main/trusted only (Google Calendar, Gmail, Tasks, GitHub via Composio OAuth) |
+| `COMPOSIO_USER_ID` | app.composio.dev (connected-accounts list) | Agent containers, main/trusted only (binds Composio REST + MCP calls to the user's connected accounts; account-identifying, treated like the API key) |
 | `GITHUB_TOKEN` | github.com/settings/tokens | Host scripts only (git push via IPC) |
 | `TRIPIT_ICAL_URL` | TripIt settings | Host scripts only (tripit-reclaim sync) |
 | `RECLAIM_API_TOKEN` | reclaim.ai settings | Host scripts only (tripit-reclaim sync) |
@@ -167,7 +168,7 @@ sqlite3 ~/nanoclaw/store/messages.db "UPDATE scheduled_tasks SET prompt='new pro
 | `GOOGLE_CLIENT_SECRET` | GCP console | Host scripts only (Calendar OOO blocks) |
 | `GOOGLE_REFRESH_TOKEN` | OAuth flow | Host scripts only (Calendar OOO blocks) |
 
-Forwarded-into-container credentials live in `src/container-runner.ts` (`CONTAINER_VARS`). Currently the only container-forwarded secret is `COMPOSIO_API_KEY`, and only for main/trusted tiers. Everything else stays host-side and is reached through host scripts invoked via IPC. `docs/SECURITY.md` §4 is the authoritative per-tier view.
+Forwarded-into-container credentials live in `src/container-runner.ts` (`CONTAINER_VARS`). Currently the container-forwarded values are `COMPOSIO_API_KEY` (the actual credential) and `COMPOSIO_USER_ID` (account-identifying — selects which user's connected accounts to act against; not strictly a credential but treated with the same env-file 0600 handling so it doesn't appear on `docker ps`). Both forward to main/trusted tiers only. Everything else stays host-side and is reached through host scripts invoked via IPC. `docs/SECURITY.md` §4 is the authoritative per-tier view.
 
 ## Agent Container Capabilities
 

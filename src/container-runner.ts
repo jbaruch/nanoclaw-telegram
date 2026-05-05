@@ -314,14 +314,26 @@ export function atomicPublishDir(srcDir: string, dstDir: string): void {
 }
 
 /**
- * Container env vars whose VALUES are real secrets and must never appear
+ * Container env vars whose VALUES are sensitive and must never appear
  * on the docker process command line — `ps -ef` and `/proc/<pid>/cmdline`
- * are world-readable on most kernels, so a `-e KEY=<real-secret>` flag
- * leaks the secret to any local user (and to monitoring tooling that
- * captures process tables). For these names we materialize an env-file
+ * are world-readable on most kernels, so a `-e KEY=<value>` flag leaks
+ * the value to any local user (and to monitoring tooling that captures
+ * process tables). For these names we materialize an env-file
  * (mode 0600) and pass it via `--env-file <path>`; for everything else
  * (placeholders, non-secret config like AGENT_MODEL, NANOCLAW_CHAT_JID)
  * `-e KEY=value` is fine.
+ *
+ * What counts as "sensitive" for this set:
+ *   - Real credentials (API keys, OAuth tokens, etc.) — the original
+ *     case (`COMPOSIO_API_KEY` per #107).
+ *   - Account-identifying values that aren't strictly credentials but
+ *     would let an observer correlate the container to a specific user
+ *     account at the upstream provider (`COMPOSIO_USER_ID` per #509 —
+ *     binds Composio calls to a specific user's connected accounts;
+ *     leaking it on `docker ps` would identify the account even
+ *     though the value is not a credential on its own).
+ * The unifying contract is "nothing the docker command line should
+ * reveal", not "only literal credentials".
  *
  * Relationship with the `CONTAINER_VARS` list inside `buildContainerArgs`:
  * `CONTAINER_VARS` decides WHICH variables get forwarded at all (and is
@@ -330,17 +342,27 @@ export function atomicPublishDir(srcDir: string, dstDir: string): void {
  * route through the env-file rather than `-e`. The two intentionally
  * serve different concerns; do not collapse one into the other.
  *
- * When introducing a new container env var that carries a real secret:
+ * When introducing a new container env var with a sensitive value:
  * (1) add it to the local `CONTAINER_VARS` list so it's forwarded, AND
  * (2) add it here so the value goes through the env-file. Missing
- * either step leaves the secret either un-forwarded or back on the
+ * either step leaves the value either un-forwarded or back on the
  * command line.
  *
  * Variables with placeholder values (proxied through OneCLI) are NOT
- * secrets and stay on the command line.
+ * sensitive and stay on the command line. Variables with non-secret
+ * config (`AGENT_MODEL`, `NANOCLAW_CHAT_JID`, etc.) likewise stay on
+ * the command line.
  */
 export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
   'COMPOSIO_API_KEY',
+  // Composio user_id bound to the connected accounts in the project
+  // the COMPOSIO_API_KEY authenticates as. Not a credential per se —
+  // identifies WHICH user's connections to act against — but it's
+  // account-identifying and gets the same env-file treatment as the
+  // API key so it doesn't appear on `ps`/`docker ps` output. Required
+  // by `tessl__composio-fetch`'s precheck (admin tile, jbaruch/nanoclaw#509)
+  // to do the fetch inline via Composio REST instead of waking the LLM.
+  'COMPOSIO_USER_ID',
 ]);
 
 /**
@@ -2318,7 +2340,7 @@ function buildContainerArgs(
   // stay on the host. Scripts that need them run host-side via IPC.
   const isTrusted = group.containerConfig?.trusted === true;
 
-  const CONTAINER_VARS = ['COMPOSIO_API_KEY'];
+  const CONTAINER_VARS = ['COMPOSIO_API_KEY', 'COMPOSIO_USER_ID'];
 
   const varsToForward = isMain || isTrusted ? CONTAINER_VARS : [];
 

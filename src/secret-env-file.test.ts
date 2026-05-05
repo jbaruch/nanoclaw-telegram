@@ -43,6 +43,10 @@ describe('SECRET_CONTAINER_VARS', () => {
     expect(SECRET_CONTAINER_VARS.has('COMPOSIO_API_KEY')).toBe(true);
   });
 
+  it('lists COMPOSIO_USER_ID (account-identifying — same env-file treatment as the API key, jbaruch/nanoclaw#509)', () => {
+    expect(SECRET_CONTAINER_VARS.has('COMPOSIO_USER_ID')).toBe(true);
+  });
+
   it('does NOT include placeholder vars (proxied through OneCLI)', () => {
     expect(SECRET_CONTAINER_VARS.has('ANTHROPIC_API_KEY')).toBe(false);
     expect(SECRET_CONTAINER_VARS.has('CLAUDE_CODE_OAUTH_TOKEN')).toBe(false);
