@@ -39,8 +39,12 @@ afterEach(() => {
 });
 
 describe('SECRET_CONTAINER_VARS', () => {
-  it('lists COMPOSIO_API_KEY (the issue-107 leak case)', () => {
+  it('lists COMPOSIO_API_KEY (the issue-107 leak case — REST gateway, x-api-key, project-scoped ak_* key)', () => {
     expect(SECRET_CONTAINER_VARS.has('COMPOSIO_API_KEY')).toBe(true);
+  });
+
+  it('lists COMPOSIO_MCP_KEY (MCP gateway, x-consumer-api-key, consumer-scoped ck_* key — independent namespace from the REST key per 2026-05-06 empirical verification)', () => {
+    expect(SECRET_CONTAINER_VARS.has('COMPOSIO_MCP_KEY')).toBe(true);
   });
 
   it('lists COMPOSIO_USER_ID (account-identifying — same env-file treatment as the API key, jbaruch/nanoclaw#509)', () => {
@@ -102,6 +106,26 @@ describe('buildSecretEnvFile', () => {
     const content = fs.readFileSync(filePath, 'utf8');
     expect(content).toContain('COMPOSIO_API_KEY=sk-a\n');
     expect(content).toContain('OTHER_SECRET=sk-b\n');
+  });
+
+  it('emits both COMPOSIO_API_KEY and COMPOSIO_MCP_KEY when both are present (independent surfaces — REST + MCP)', () => {
+    // Both Composio keys forward through the same env-file. Earlier
+    // shape (single COMPOSIO_API_KEY, also used for MCP via
+    // x-consumer-api-key) was empirically broken for REST when the
+    // value was a `ck_*` consumer key (the only flavor we had until
+    // the project key model rolled out). The split lets each surface
+    // get its own correctly-scoped value without breaking the other.
+    const result = buildSecretEnvFile({
+      COMPOSIO_API_KEY: 'ak-rest-project-key',
+      COMPOSIO_MCP_KEY: 'ck-mcp-consumer-key',
+    });
+    expect(result).not.toBeNull();
+    const filePath = result!.args[1];
+    tempFilesToCleanup.push(filePath);
+
+    const content = fs.readFileSync(filePath, 'utf8');
+    expect(content).toContain('COMPOSIO_API_KEY=ak-rest-project-key\n');
+    expect(content).toContain('COMPOSIO_MCP_KEY=ck-mcp-consumer-key\n');
   });
 
   it('refuses values containing newlines or NUL bytes', () => {

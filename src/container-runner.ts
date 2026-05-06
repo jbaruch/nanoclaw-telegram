@@ -324,8 +324,22 @@ export function atomicPublishDir(srcDir: string, dstDir: string): void {
  * `-e KEY=value` is fine.
  *
  * What counts as "sensitive" for this set:
- *   - Real credentials (API keys, OAuth tokens, etc.) — the original
- *     case (`COMPOSIO_API_KEY` per #107).
+ *   - Real credentials (API keys, OAuth tokens, etc.). Composio splits
+ *     its auth surface into two independent keys, both treated as
+ *     secrets here:
+ *       - `COMPOSIO_API_KEY` (the original case, #107) — REST gateway
+ *         (`backend.composio.dev`, header `x-api-key`). Project-scoped
+ *         key, `ak_*` prefix. Read by the inline-fetch path in
+ *         `tessl__composio-fetch`'s precheck (admin tile).
+ *       - `COMPOSIO_MCP_KEY` — MCP gateway
+ *         (`connect.composio.dev/mcp`, header `x-consumer-api-key`).
+ *         Consumer-scoped key, `ck_*` prefix. Read by the agent
+ *         runner's MCP server registration so `mcp__composio__*`
+ *         tools authenticate.
+ *     Both surfaces have independent key namespaces (verified
+ *     empirically 2026-05-06): the `ck_*` consumer key 401s against
+ *     REST while serving MCP fine, and the `ak_*` project key (when
+ *     set) is what REST accepts. Treat them as two separate secrets.
  *   - Account-identifying values that aren't strictly credentials but
  *     would let an observer correlate the container to a specific user
  *     account at the upstream provider (`COMPOSIO_USER_ID` per #509 —
@@ -355,6 +369,11 @@ export function atomicPublishDir(srcDir: string, dstDir: string): void {
  */
 export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
   'COMPOSIO_API_KEY',
+  // Composio MCP consumer key (separate from COMPOSIO_API_KEY's REST
+  // project key — see the docstring above for the two-surface split).
+  // Read by the agent runner's MCP server registration; sent as
+  // `x-consumer-api-key` to `connect.composio.dev/mcp`.
+  'COMPOSIO_MCP_KEY',
   // Composio user_id bound to the connected accounts in the project
   // the COMPOSIO_API_KEY authenticates as. Not a credential per se —
   // identifies WHICH user's connections to act against — but it's
@@ -2416,7 +2435,11 @@ function buildContainerArgs(
   // stay on the host. Scripts that need them run host-side via IPC.
   const isTrusted = group.containerConfig?.trusted === true;
 
-  const CONTAINER_VARS = ['COMPOSIO_API_KEY', 'COMPOSIO_USER_ID'];
+  const CONTAINER_VARS = [
+    'COMPOSIO_API_KEY',
+    'COMPOSIO_MCP_KEY',
+    'COMPOSIO_USER_ID',
+  ];
 
   const varsToForward = isMain || isTrusted ? CONTAINER_VARS : [];
 
