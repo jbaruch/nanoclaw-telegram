@@ -32,6 +32,11 @@ import {
 import { readEnvFile } from '../env.js';
 import { getRegisteredGroup, getRecentSenderName } from '../db.js';
 import { logger } from '../logger.js';
+import {
+  appendUsageRecord,
+  buildUsageRecord,
+  resolveUsageLogPath,
+} from '../usage-log.js';
 
 const DEFAULT_MODEL_ID = 'claude-haiku-4-5-20251001';
 const TIMEOUT_MS = 10_000;
@@ -573,6 +578,10 @@ export const haikuClassifierGate: GateFn = async (
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
+  // Capture API latency in isolation from gate-prep work (DB reads,
+  // prompt assembly above) so dur_ms in usage.jsonl is comparable
+  // with the proxy-side capture, which records wire latency only.
+  const apiStartedAt = Date.now();
   let response: Anthropic.Message;
   try {
     response = await client.messages.create(
@@ -625,6 +634,35 @@ export const haikuClassifierGate: GateFn = async (
     return { decision: 'pass', reason: failureReason(failure) };
   }
   clearTimeout(timeout);
+
+  // Emit a usage.jsonl record for this API call. Same shape as the
+  // proxy-side capture so analysis tools see one unified stream. The
+  // classifier runs orchestrator-side so it bypasses the credential
+  // proxy entirely; without this hook its spend would be invisible to
+  // any consumer of usage.jsonl.
+  void appendUsageRecord(
+    resolveUsageLogPath(),
+    buildUsageRecord(
+      response.usage as unknown as Record<
+        string,
+        number | Record<string, number>
+      >,
+      // Anthropic may return a different model than requested
+      // (aliases, version upgrades). Trust the response over the
+      // request so cost-by-model breakdowns reflect what was actually
+      // billed; fall back to modelId only if the response omits it.
+      response.model || modelId,
+      response.id,
+      {
+        group: ctx.groupFolder,
+        tier: 'classifier',
+        session: 'gates/haiku-classifier',
+        task_id: null,
+        message_id: null,
+      },
+      Date.now() - apiStartedAt,
+    ),
+  );
 
   const verdict = parseVerdict(response);
   if (!verdict) {

@@ -11,7 +11,7 @@
  * swallowed with a warn log.
  */
 import { promises as fsp } from 'fs';
-import { dirname } from 'path';
+import { dirname, join } from 'path';
 
 import { logger } from './logger.js';
 
@@ -244,7 +244,7 @@ export function computeCostMicro(
 /** Container attribution context, looked up from per-spawn token. */
 export interface ContainerContext {
   group: string;
-  tier: 'main' | 'trusted' | 'untrusted';
+  tier: 'main' | 'trusted' | 'untrusted' | 'classifier';
   session: string;
   task_id: string | null;
   /**
@@ -325,7 +325,7 @@ export function parseUsageFromBody(
     try {
       const parsed = JSON.parse(body);
       if (parsed && parsed.usage) {
-        return buildRecord(
+        return buildUsageRecord(
           parsed.usage,
           parsed.model || fallbackModel || 'unknown',
           parsed.id || null,
@@ -380,7 +380,7 @@ export function parseUsageFromBody(
   }
 
   if (!mergedUsage) return null;
-  return buildRecord(
+  return buildUsageRecord(
     mergedUsage,
     model || fallbackModel || 'unknown',
     apiId,
@@ -397,8 +397,12 @@ export function parseUsageFromBody(
  *
  * When `cache_creation` is absent we credit the total to 5m (which is
  * the SDK's default TTL).
+ *
+ * Exported so non-proxy call sites (e.g. the orchestrator-side Haiku
+ * classifier in `gates/haiku-classifier.ts`) can append the same shape
+ * without going through the credential proxy.
  */
-function buildRecord(
+export function buildUsageRecord(
   usage: Record<string, number | Record<string, number>>,
   model: string,
   apiId: string | null,
@@ -457,6 +461,16 @@ function buildRecord(
   if (priced.cost_unknown) record.cost_unknown = true;
   if (priced.approximate) record.cost_approximate = true;
   return record;
+}
+
+/**
+ * Resolve the JSONL log path. Defaults to `logs/usage.jsonl` under the
+ * orchestrator's cwd; override with `USAGE_LOG_PATH` for tests or to
+ * relocate. Both the credential proxy and the host-side Haiku classifier
+ * use this so they agree on a single sink.
+ */
+export function resolveUsageLogPath(): string {
+  return process.env.USAGE_LOG_PATH || join('logs', 'usage.jsonl');
 }
 
 /**

@@ -161,6 +161,58 @@ describe('haikuClassifierGate — verdict mapping', () => {
     expect(result.reason).toContain('haiku-no');
     expect(result.reason).toContain('human-to-human chat');
   });
+
+  it('emits a usage.jsonl record for every API call (issue #493)', async () => {
+    // The classifier runs orchestrator-side and bypasses the credential
+    // proxy. Without a direct emit hook its spend would be invisible to
+    // anything reading logs/usage.jsonl.
+    const usageLogPath = path.join(tmpRoot, 'classifier-usage.jsonl');
+    process.env.USAGE_LOG_PATH = usageLogPath;
+    try {
+      const { _resetUsageLogState } = await import('../usage-log.js');
+      _resetUsageLogState();
+      const { client } = buildMockClient({
+        response: buildToolUseResponse('no', 'peer-to-peer'),
+      });
+      _setAnthropicClientForTesting(client);
+      await haikuClassifierGate(buildCtx());
+
+      // appendUsageRecord is fire-and-forget; poll until the line is
+      // visible rather than sleeping a fixed duration (avoids
+      // CI-load-induced flakes on slow filesystems).
+      const deadline = Date.now() + 2000;
+      let content = '';
+      while (Date.now() < deadline) {
+        if (fs.existsSync(usageLogPath)) {
+          content = fs.readFileSync(usageLogPath, 'utf8').trim();
+          if (content.length > 0) break;
+        }
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(content.length).toBeGreaterThan(0);
+      const rec = JSON.parse(content);
+      expect(rec).toMatchObject({
+        group: TEST_FOLDER,
+        tier: 'classifier',
+        session: 'gates/haiku-classifier',
+        task_id: null,
+        message_id: null,
+        model: 'claude-haiku-4-5-20251001',
+        api_id: 'msg_123',
+        in: 10,
+        out: 20,
+        cache_r: 100,
+        cache_c_5m: 0,
+        cache_c_1h: 0,
+      });
+      // 10 in × $1/MTok + 20 out × $5/MTok + 100 cache_r × $0.10/MTok
+      // = $0.00001 + $0.0001 + $0.00001 = $0.00012
+      // 1 microcent = 10⁻⁸ dollars, so $0.00012 = 12000 microcents
+      expect(rec.cost_micro).toBe(12000);
+    } finally {
+      delete process.env.USAGE_LOG_PATH;
+    }
+  });
 });
 
 describe('haikuClassifierGate — failure modes', () => {

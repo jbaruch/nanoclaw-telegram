@@ -25,6 +25,7 @@ import {
   noteCaptureWrite,
   noteMessagesRequest,
   parseUsageFromBody,
+  resolveUsageLogPath,
   type ContainerContext,
 } from './usage-log.js';
 import { applyWireToolFilter, isMessagesEndpoint } from './wire-tool-filter.js';
@@ -52,14 +53,6 @@ const TOKEN_PREFIX_RE = /^\/c\/([A-Za-z0-9_-]+)(\/.*)?$/;
  * the buffer.
  */
 const USAGE_CAPTURE_BUFFER_CAP = 10 * 1024 * 1024;
-
-/**
- * Where to append captured usage. Override with `USAGE_LOG_PATH` for
- * tests or alternate deployments.
- */
-function resolveUsageLogPath(): string {
-  return process.env.USAGE_LOG_PATH || join('logs', 'usage.jsonl');
-}
 
 export function startCredentialProxy(
   port: number,
