@@ -1254,17 +1254,30 @@ export function buildVolumeMounts(
     }
     // The proxy-side `usage.jsonl` lives in the orchestrator's `logs/`
     // dir (not under data/host-logs/), so it isn't covered by the
-    // mount above. Surface it RO at /workspace/host-logs/usage.jsonl
-    // so admin-tile prechecks (e.g. classifier-emit verification for
-    // #493) can read the same authoritative spend log the
-    // orchestrator writes. Skip silently if the file doesn't exist
-    // yet — fresh-deploy orchestrators haven't emitted any records;
-    // the precheck tolerates a missing file.
+    // mount above. Surface it RO at /workspace/proxy-logs/usage.jsonl
+    // (a SIBLING of /workspace/host-logs/, NOT a child) so admin-tile
+    // prechecks (e.g. classifier-emit verification for #493) can read
+    // the same authoritative spend log the orchestrator writes.
+    //
+    // Why not /workspace/host-logs/usage.jsonl: docker can't bind-
+    // mount a file inside a parent that's already RO-mounted (the
+    // kernel refuses to create the bind target on a read-only
+    // filesystem, OCI runtime returns code 125, container fails to
+    // spawn). Reference incident: PR #523 deployed the file mount at
+    // /workspace/host-logs/usage.jsonl and broke every main-group
+    // (telegram_swarm) spawn for ~5h until the circuit breaker
+    // tripped — morning-brief / heartbeat / inbound replies all
+    // stopped. The sibling-path keeps both mounts as independent
+    // top-level binds.
+    //
+    // Skip silently if the file doesn't exist yet — fresh-deploy
+    // orchestrators haven't emitted any records; the precheck
+    // tolerates a missing file.
     const usageLogHost = path.join(process.cwd(), 'logs', 'usage.jsonl');
     if (fs.existsSync(usageLogHost)) {
       mounts.push({
         hostPath: toHostPath(usageLogHost),
-        containerPath: '/workspace/host-logs/usage.jsonl',
+        containerPath: '/workspace/proxy-logs/usage.jsonl',
         readonly: true,
       });
     }

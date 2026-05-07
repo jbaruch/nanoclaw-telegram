@@ -623,7 +623,7 @@ describe('host-logs mount admin-only gating', () => {
       await promise;
       const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
       expect(
-        args.some((a) => a.includes(':/workspace/host-logs/usage.jsonl:ro')),
+        args.some((a) => a.includes(':/workspace/proxy-logs/usage.jsonl:ro')),
       ).toBe(true);
     } finally {
       // Restore the existsSync mock to its default (always false) so
@@ -646,7 +646,7 @@ describe('host-logs mount admin-only gating', () => {
     await promise;
     const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
     expect(
-      args.some((a) => a.includes(':/workspace/host-logs/usage.jsonl:ro')),
+      args.some((a) => a.includes(':/workspace/proxy-logs/usage.jsonl:ro')),
     ).toBe(false);
   });
 

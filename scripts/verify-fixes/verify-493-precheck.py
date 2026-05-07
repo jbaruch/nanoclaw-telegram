@@ -21,7 +21,7 @@ failure doesn't silently disable the watchdog (the outer-boundary
 contract per `coding-policy: error-handling`).
 
 Reads:
-  - /workspace/host-logs/usage.jsonl    (RO, mounted in #522)
+  - /workspace/proxy-logs/usage.jsonl    (RO, mounted in #522)
   - /workspace/store/messages.db        (RO for trusted, RW for main)
 """
 
@@ -35,7 +35,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-USAGE_LOG = Path("/workspace/host-logs/usage.jsonl")
+USAGE_LOG = Path("/workspace/proxy-logs/usage.jsonl")
 STORE_DB = Path("/workspace/store/messages.db")
 
 
