@@ -75,7 +75,7 @@ import {
   updateGroupTrigger,
 } from './db.js';
 import { processTaskIpc, IpcDeps } from './ipc.js';
-import { RegisteredGroup } from './types.js';
+import { RegisteredGroup, TriggerPattern } from './types.js';
 
 // Set up registered groups used across tests
 const MAIN_GROUP: RegisteredGroup = {
@@ -2373,6 +2373,788 @@ describe('set_maintenance_agent_model', () => {
     // No new registration created.
     const allFolders = Object.values(groups).map((g) => g.folder);
     expect(allFolders).not.toContain('never-registered-folder');
+  });
+});
+
+// --- promote_learned_trigger (#451 item 1) ---
+//
+// Flips a learned proposal's `enabled: false → true` so the trigger
+// gate starts consuming it. Authorisation mirrors set_agent_model:
+// owner-of-bill — main can target any group, non-main can target only
+// its own folder. Demotion / re-enable / dashboard / producer-side
+// enrichment are #451 items 2/3/4 — separate scopes.
+
+describe('promote_learned_trigger', () => {
+  function seedWithLearnedProposal(
+    jid: string,
+    folder: string,
+    overrides: Partial<RegisteredGroup> = {},
+  ): RegisteredGroup {
+    const group: RegisteredGroup = {
+      name: folder === 'whatsapp_main' ? 'Main' : 'Other',
+      folder,
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+      isMain: folder === 'whatsapp_main',
+      triggerPatterns: {
+        version: 1,
+        patterns: [
+          {
+            pattern: '@Andy',
+            kind: 'keyword',
+            source: 'owner-set',
+            precision: 1,
+            sample_count: 10,
+            last_matched_at: null,
+            last_updated_at: null,
+          },
+          {
+            pattern: 'help me',
+            kind: 'keyword',
+            source: 'learned',
+            precision: 0.92,
+            sample_count: 50,
+            last_matched_at: '2026-04-30T12:00:00.000Z',
+            last_updated_at: '2026-04-30T12:00:00.000Z',
+            pattern_version: 1,
+            proposed_at: '2026-04-25T08:00:00.000Z',
+            enabled: false,
+          },
+        ],
+      },
+      ...overrides,
+    };
+    setRegisteredGroup(jid, group);
+    groups[jid] = group;
+    return group;
+  }
+
+  it('main group can promote a learned proposal in any group', async () => {
+    seedWithLearnedProposal('other@g.us', 'other-group');
+    await processTaskIpc(
+      {
+        type: 'promote_learned_trigger',
+        groupFolder: 'other-group',
+        kind: 'keyword',
+        pattern: 'help me',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const updated = getRegisteredGroup('other@g.us');
+    const learned = updated?.triggerPatterns?.patterns.find(
+      (p) => p.source === 'learned' && p.pattern === 'help me',
+    );
+    expect(learned?.enabled).toBe(true);
+    // Owner-set sibling pattern preserved verbatim.
+    const ownerSet = updated?.triggerPatterns?.patterns.find(
+      (p) => p.source === 'owner-set',
+    );
+    expect(ownerSet?.enabled).toBeUndefined();
+  });
+
+  it('non-main group can promote a learned proposal in its own folder', async () => {
+    seedWithLearnedProposal('other@g.us', 'other-group');
+    await processTaskIpc(
+      {
+        type: 'promote_learned_trigger',
+        groupFolder: 'other-group',
+        kind: 'keyword',
+        pattern: 'help me',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+    const learned = getRegisteredGroup(
+      'other@g.us',
+    )?.triggerPatterns?.patterns.find(
+      (p) => p.source === 'learned' && p.pattern === 'help me',
+    );
+    expect(learned?.enabled).toBe(true);
+  });
+
+  it('non-main group cannot promote a learned proposal in another folder', async () => {
+    seedWithLearnedProposal('third@g.us', 'third-group');
+    await processTaskIpc(
+      {
+        type: 'promote_learned_trigger',
+        groupFolder: 'third-group',
+        kind: 'keyword',
+        pattern: 'help me',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+    // Reject = state unchanged: seed had enabled:false, still enabled:false.
+    const learned = getRegisteredGroup(
+      'third@g.us',
+    )?.triggerPatterns?.patterns.find(
+      (p) => p.source === 'learned' && p.pattern === 'help me',
+    );
+    expect(learned?.enabled).toBe(false);
+  });
+
+  it('rejects when the pattern is not in the config', async () => {
+    seedWithLearnedProposal('other@g.us', 'other-group');
+    await processTaskIpc(
+      {
+        type: 'promote_learned_trigger',
+        groupFolder: 'other-group',
+        kind: 'keyword',
+        pattern: 'nonexistent',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    // Existing learned row stays enabled:false (untouched by the
+    // unmatched promotion request).
+    const learned = getRegisteredGroup(
+      'other@g.us',
+    )?.triggerPatterns?.patterns.find(
+      (p) => p.source === 'learned' && p.pattern === 'help me',
+    );
+    expect(learned?.enabled).toBe(false);
+  });
+
+  it('rejects when the matching pattern is owner-set rather than learned', async () => {
+    // Owner-set patterns don't have an `enabled` field — they're
+    // active by default. Promoting one would be meaningless. The
+    // handler must require `source: 'learned'` on the match.
+    seedWithLearnedProposal('other@g.us', 'other-group');
+    await processTaskIpc(
+      {
+        type: 'promote_learned_trigger',
+        groupFolder: 'other-group',
+        kind: 'keyword',
+        pattern: '@Andy',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const ownerSet = getRegisteredGroup(
+      'other@g.us',
+    )?.triggerPatterns?.patterns.find((p) => p.source === 'owner-set');
+    expect(ownerSet?.enabled).toBeUndefined();
+  });
+
+  it('rejects an auto-rolled-back (disabled=true) pattern — operator must re-enable first', async () => {
+    seedWithLearnedProposal('other@g.us', 'other-group');
+    const seeded = getRegisteredGroup('other@g.us');
+    const withDisabled: RegisteredGroup = {
+      ...seeded!,
+      triggerPatterns: {
+        ...seeded!.triggerPatterns!,
+        patterns: seeded!.triggerPatterns!.patterns.map((p) =>
+          p.source === 'learned' ? { ...p, disabled: true } : p,
+        ),
+      },
+    };
+    setRegisteredGroup('other@g.us', withDisabled);
+    groups['other@g.us'] = withDisabled;
+
+    await processTaskIpc(
+      {
+        type: 'promote_learned_trigger',
+        groupFolder: 'other-group',
+        kind: 'keyword',
+        pattern: 'help me',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    // disabled stays true; enabled must NOT have been flipped.
+    const learned = getRegisteredGroup(
+      'other@g.us',
+    )?.triggerPatterns?.patterns.find(
+      (p) => p.source === 'learned' && p.pattern === 'help me',
+    );
+    expect(learned?.disabled).toBe(true);
+    expect(learned?.enabled).toBe(false);
+  });
+
+  it('is idempotent — already-enabled pattern is a no-op', async () => {
+    seedWithLearnedProposal('other@g.us', 'other-group');
+    const seeded = getRegisteredGroup('other@g.us');
+    const withEnabled: RegisteredGroup = {
+      ...seeded!,
+      triggerPatterns: {
+        ...seeded!.triggerPatterns!,
+        patterns: seeded!.triggerPatterns!.patterns.map((p) =>
+          p.source === 'learned' ? { ...p, enabled: true } : p,
+        ),
+      },
+    };
+    setRegisteredGroup('other@g.us', withEnabled);
+    groups['other@g.us'] = withEnabled;
+
+    await processTaskIpc(
+      {
+        type: 'promote_learned_trigger',
+        groupFolder: 'other-group',
+        kind: 'keyword',
+        pattern: 'help me',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const learned = getRegisteredGroup(
+      'other@g.us',
+    )?.triggerPatterns?.patterns.find(
+      (p) => p.source === 'learned' && p.pattern === 'help me',
+    );
+    expect(learned?.enabled).toBe(true);
+  });
+
+  it('rejects whitespace-only pattern (un-trimmed identity must still match real stored patterns)', async () => {
+    seedWithLearnedProposal('other@g.us', 'other-group');
+    await processTaskIpc(
+      {
+        type: 'promote_learned_trigger',
+        groupFolder: 'other-group',
+        kind: 'keyword',
+        pattern: '   ',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const learned = getRegisteredGroup(
+      'other@g.us',
+    )?.triggerPatterns?.patterns.find(
+      (p) => p.source === 'learned' && p.pattern === 'help me',
+    );
+    expect(learned?.enabled).toBe(false);
+  });
+
+  it('rejects when groupFolder is missing or empty', async () => {
+    seedWithLearnedProposal('other@g.us', 'other-group');
+    await processTaskIpc(
+      {
+        type: 'promote_learned_trigger',
+        groupFolder: '',
+        kind: 'keyword',
+        pattern: 'help me',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const learned = getRegisteredGroup(
+      'other@g.us',
+    )?.triggerPatterns?.patterns.find(
+      (p) => p.source === 'learned' && p.pattern === 'help me',
+    );
+    expect(learned?.enabled).toBe(false);
+  });
+
+  it('rejects when the group has no learned patterns to promote', async () => {
+    // OTHER_GROUP has only a legacy string trigger ('@Andy'); the
+    // dual-mode reader auto-derives a single owner-set pattern from
+    // it but never a learned row. The handler should reject because
+    // the {kind, pattern, source:'learned'} tuple won't match any
+    // entry — and crucially must NOT mutate the auto-derived owner-set
+    // entry.
+    setRegisteredGroup('other@g.us', { ...OTHER_GROUP });
+    groups['other@g.us'] = { ...OTHER_GROUP };
+    await processTaskIpc(
+      {
+        type: 'promote_learned_trigger',
+        groupFolder: 'other-group',
+        kind: 'keyword',
+        pattern: 'help me',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const cfg = getRegisteredGroup('other@g.us')?.triggerPatterns;
+    expect(cfg?.patterns.every((p) => p.source !== 'learned')).toBe(true);
+    expect(
+      cfg?.patterns.find((p) => p.source === 'owner-set')?.enabled,
+    ).toBeUndefined();
+  });
+});
+
+// --- reenable_learned_trigger (#451 item 2 — re-enable half) ---
+//
+// Counterpart to the learner's auto-rollback: flips `disabled: true →
+// false` on a learned proposal. Same {kind, pattern} identity + same
+// owner-of-bill auth as promote/delete. Idempotent on already-active
+// rows; refuses to mutate non-learned entries.
+
+describe('reenable_learned_trigger', () => {
+  function seedDisabled(jid: string, folder: string): RegisteredGroup {
+    const group: RegisteredGroup = {
+      name: 'Other',
+      folder,
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+      triggerPatterns: {
+        version: 1,
+        patterns: [
+          {
+            pattern: 'help me',
+            kind: 'keyword',
+            source: 'learned',
+            precision: 0.4,
+            sample_count: 100,
+            last_matched_at: '2026-04-30T12:00:00.000Z',
+            last_updated_at: '2026-04-30T12:00:00.000Z',
+            enabled: true,
+            disabled: true,
+          },
+        ],
+      },
+    };
+    setRegisteredGroup(jid, group);
+    groups[jid] = group;
+    return group;
+  }
+
+  it('flips disabled true → false on a demoted learned pattern', async () => {
+    seedDisabled('other@g.us', 'other-group');
+    await processTaskIpc(
+      {
+        type: 'reenable_learned_trigger',
+        groupFolder: 'other-group',
+        kind: 'keyword',
+        pattern: 'help me',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const learned = getRegisteredGroup(
+      'other@g.us',
+    )?.triggerPatterns?.patterns.find((p) => p.source === 'learned');
+    expect(learned?.disabled).toBe(false);
+    // enabled stays true (was true before demotion).
+    expect(learned?.enabled).toBe(true);
+  });
+
+  it('non-main can re-enable in own folder, not in another', async () => {
+    seedDisabled('other@g.us', 'other-group');
+    await processTaskIpc(
+      {
+        type: 'reenable_learned_trigger',
+        groupFolder: 'other-group',
+        kind: 'keyword',
+        pattern: 'help me',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+    expect(
+      getRegisteredGroup('other@g.us')?.triggerPatterns?.patterns.find(
+        (p) => p.source === 'learned',
+      )?.disabled,
+    ).toBe(false);
+
+    seedDisabled('third@g.us', 'third-group');
+    await processTaskIpc(
+      {
+        type: 'reenable_learned_trigger',
+        groupFolder: 'third-group',
+        kind: 'keyword',
+        pattern: 'help me',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+    expect(
+      getRegisteredGroup('third@g.us')?.triggerPatterns?.patterns.find(
+        (p) => p.source === 'learned',
+      )?.disabled,
+    ).toBe(true);
+  });
+
+  it('idempotent — already-active pattern is a no-op', async () => {
+    const seeded = seedDisabled('other@g.us', 'other-group');
+    const withoutDisabled: RegisteredGroup = {
+      ...seeded,
+      triggerPatterns: {
+        ...seeded.triggerPatterns!,
+        patterns: seeded.triggerPatterns!.patterns.map((p) => ({
+          ...p,
+          disabled: false,
+        })),
+      },
+    };
+    setRegisteredGroup('other@g.us', withoutDisabled);
+    groups['other@g.us'] = withoutDisabled;
+
+    await processTaskIpc(
+      {
+        type: 'reenable_learned_trigger',
+        groupFolder: 'other-group',
+        kind: 'keyword',
+        pattern: 'help me',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const learned = getRegisteredGroup(
+      'other@g.us',
+    )?.triggerPatterns?.patterns.find((p) => p.source === 'learned');
+    expect(learned?.disabled).toBe(false);
+  });
+
+  it('rejects when no matching learned pattern', async () => {
+    seedDisabled('other@g.us', 'other-group');
+    await processTaskIpc(
+      {
+        type: 'reenable_learned_trigger',
+        groupFolder: 'other-group',
+        kind: 'keyword',
+        pattern: 'nonexistent',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const learned = getRegisteredGroup(
+      'other@g.us',
+    )?.triggerPatterns?.patterns.find((p) => p.source === 'learned');
+    expect(learned?.disabled).toBe(true);
+  });
+});
+
+// --- delete_learned_trigger (#451 item 2 — delete half) ---
+//
+// Permanent removal of a learned proposal. Same {kind, pattern}
+// identity + same auth shape. Distinct from re-enable: the learner
+// can re-propose the same body later as a fresh row.
+
+describe('delete_learned_trigger', () => {
+  function seedTwoLearned(jid: string, folder: string): RegisteredGroup {
+    const group: RegisteredGroup = {
+      name: 'Other',
+      folder,
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+      triggerPatterns: {
+        version: 1,
+        patterns: [
+          {
+            pattern: '@Andy',
+            kind: 'keyword',
+            source: 'owner-set',
+            precision: 1,
+            sample_count: 0,
+            last_matched_at: null,
+            last_updated_at: null,
+          },
+          {
+            pattern: 'help me',
+            kind: 'keyword',
+            source: 'learned',
+            precision: 0.92,
+            sample_count: 50,
+            last_matched_at: '2026-04-30T12:00:00.000Z',
+            last_updated_at: '2026-04-30T12:00:00.000Z',
+            enabled: false,
+          },
+          {
+            pattern: 'thanks',
+            kind: 'keyword',
+            source: 'learned',
+            precision: 0.85,
+            sample_count: 30,
+            last_matched_at: null,
+            last_updated_at: null,
+            enabled: false,
+          },
+        ],
+      },
+    };
+    setRegisteredGroup(jid, group);
+    groups[jid] = group;
+    return group;
+  }
+
+  it('removes the matching learned proposal and preserves siblings', async () => {
+    seedTwoLearned('other@g.us', 'other-group');
+    await processTaskIpc(
+      {
+        type: 'delete_learned_trigger',
+        groupFolder: 'other-group',
+        kind: 'keyword',
+        pattern: 'help me',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const cfg = getRegisteredGroup('other@g.us')?.triggerPatterns;
+    expect(cfg?.patterns.length).toBe(2);
+    expect(
+      cfg?.patterns.find(
+        (p) => p.source === 'learned' && p.pattern === 'help me',
+      ),
+    ).toBeUndefined();
+    // The other learned proposal is preserved.
+    expect(
+      cfg?.patterns.find(
+        (p) => p.source === 'learned' && p.pattern === 'thanks',
+      ),
+    ).toBeDefined();
+    // Owner-set pattern preserved verbatim.
+    expect(cfg?.patterns.find((p) => p.source === 'owner-set')?.pattern).toBe(
+      '@Andy',
+    );
+  });
+
+  it('refuses to delete an owner-set pattern with the same body', async () => {
+    seedTwoLearned('other@g.us', 'other-group');
+    await processTaskIpc(
+      {
+        type: 'delete_learned_trigger',
+        groupFolder: 'other-group',
+        kind: 'keyword',
+        pattern: '@Andy',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const cfg = getRegisteredGroup('other@g.us')?.triggerPatterns;
+    expect(cfg?.patterns.length).toBe(3);
+    expect(cfg?.patterns.find((p) => p.source === 'owner-set')?.pattern).toBe(
+      '@Andy',
+    );
+  });
+
+  it('rejects when no matching learned pattern', async () => {
+    seedTwoLearned('other@g.us', 'other-group');
+    await processTaskIpc(
+      {
+        type: 'delete_learned_trigger',
+        groupFolder: 'other-group',
+        kind: 'keyword',
+        pattern: 'nonexistent',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    expect(
+      getRegisteredGroup('other@g.us')?.triggerPatterns?.patterns.length,
+    ).toBe(3);
+  });
+
+  it('non-main cannot delete in another folder', async () => {
+    seedTwoLearned('third@g.us', 'third-group');
+    await processTaskIpc(
+      {
+        type: 'delete_learned_trigger',
+        groupFolder: 'third-group',
+        kind: 'keyword',
+        pattern: 'help me',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+    expect(
+      getRegisteredGroup('third@g.us')?.triggerPatterns?.patterns.length,
+    ).toBe(3);
+  });
+});
+
+// --- list_learned_triggers (#451 item 3) ---
+//
+// Read-side observability surface. Returns the learned-source
+// patterns with their full optional-field set so a dashboard or
+// status command can render precision / sample_count / proposed_at
+// without parsing JSON columns directly. Owner-of-bill auth: non-main
+// can only inspect own folder.
+
+describe('list_learned_triggers', () => {
+  function seedAcrossGroups(): void {
+    const otherGroup: RegisteredGroup = {
+      ...OTHER_GROUP,
+      triggerPatterns: {
+        version: 1,
+        patterns: [
+          {
+            pattern: '@Andy',
+            kind: 'keyword',
+            source: 'owner-set',
+            precision: 1,
+            sample_count: 0,
+            last_matched_at: null,
+            last_updated_at: null,
+          },
+          {
+            pattern: 'help me',
+            kind: 'keyword',
+            source: 'learned',
+            precision: 0.92,
+            sample_count: 50,
+            last_matched_at: '2026-04-30T12:00:00.000Z',
+            last_updated_at: '2026-04-30T12:00:00.000Z',
+            pattern_version: 1,
+            proposed_at: '2026-04-25T08:00:00.000Z',
+            enabled: false,
+          },
+        ],
+      },
+    };
+    const thirdGroup: RegisteredGroup = {
+      ...THIRD_GROUP,
+      triggerPatterns: {
+        version: 1,
+        patterns: [
+          {
+            pattern: 'thanks',
+            kind: 'keyword',
+            source: 'learned',
+            precision: 0.85,
+            sample_count: 30,
+            last_matched_at: null,
+            last_updated_at: null,
+            pattern_version: 2,
+            proposed_at: '2026-04-26T09:00:00.000Z',
+            enabled: true,
+          },
+        ],
+      },
+    };
+    setRegisteredGroup('other@g.us', otherGroup);
+    setRegisteredGroup('third@g.us', thirdGroup);
+    groups['other@g.us'] = otherGroup;
+    groups['third@g.us'] = thirdGroup;
+  }
+
+  function readResult(sourceGroup: string, requestId: string): unknown {
+    const file = path.join(
+      TEST_DATA_DIR,
+      'ipc',
+      sourceGroup,
+      'input-default',
+      `_script_result_${requestId}.json`,
+    );
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  }
+
+  it('main with no filter returns learned patterns from every registered group', async () => {
+    seedAcrossGroups();
+    await processTaskIpc(
+      {
+        type: 'list_learned_triggers',
+        requestId: 'req-list-all',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const result = readResult('whatsapp_main', 'req-list-all') as {
+      stdout: string;
+    };
+    const parsed = JSON.parse(result.stdout) as {
+      groups: Array<{ folder: string; learned: TriggerPattern[] }>;
+    };
+    const folders = parsed.groups.map((g) => g.folder);
+    expect(folders).toContain('other-group');
+    expect(folders).toContain('third-group');
+    const otherLearned = parsed.groups.find(
+      (g) => g.folder === 'other-group',
+    )?.learned;
+    expect(otherLearned?.length).toBe(1);
+    expect(otherLearned?.[0].pattern).toBe('help me');
+    expect(otherLearned?.[0].precision).toBe(0.92);
+    expect(otherLearned?.[0].proposed_at).toBe('2026-04-25T08:00:00.000Z');
+  });
+
+  it('main with groupFolder filter returns only that group', async () => {
+    seedAcrossGroups();
+    await processTaskIpc(
+      {
+        type: 'list_learned_triggers',
+        groupFolder: 'other-group',
+        requestId: 'req-list-other',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const result = readResult('whatsapp_main', 'req-list-other') as {
+      stdout: string;
+    };
+    const parsed = JSON.parse(result.stdout) as {
+      groups: Array<{ folder: string }>;
+    };
+    expect(parsed.groups.map((g) => g.folder)).toEqual(['other-group']);
+  });
+
+  it('non-main with no filter is implicitly scoped to own folder', async () => {
+    seedAcrossGroups();
+    await processTaskIpc(
+      {
+        type: 'list_learned_triggers',
+        requestId: 'req-list-self',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+    const result = readResult('other-group', 'req-list-self') as {
+      stdout: string;
+    };
+    const parsed = JSON.parse(result.stdout) as {
+      groups: Array<{ folder: string }>;
+    };
+    expect(parsed.groups.map((g) => g.folder)).toEqual(['other-group']);
+  });
+
+  it('non-main cannot inspect another folder', async () => {
+    seedAcrossGroups();
+    await processTaskIpc(
+      {
+        type: 'list_learned_triggers',
+        groupFolder: 'third-group',
+        requestId: 'req-list-cross',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+    const result = readResult('other-group', 'req-list-cross') as {
+      error: string;
+    };
+    expect(result.error).toContain('cross-folder read denied');
+  });
+
+  it('returns an empty learned list for groups with only owner-set patterns', async () => {
+    setRegisteredGroup('other@g.us', { ...OTHER_GROUP });
+    groups['other@g.us'] = { ...OTHER_GROUP };
+    await processTaskIpc(
+      {
+        type: 'list_learned_triggers',
+        groupFolder: 'other-group',
+        requestId: 'req-list-empty',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    const result = readResult('whatsapp_main', 'req-list-empty') as {
+      stdout: string;
+    };
+    const parsed = JSON.parse(result.stdout) as {
+      groups: Array<{ folder: string; learned: TriggerPattern[] }>;
+    };
+    expect(parsed.groups[0].learned).toEqual([]);
   });
 });
 
