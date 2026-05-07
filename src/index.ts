@@ -20,6 +20,7 @@ import {
   TIMEZONE,
 } from './config.js';
 import { clearCheckpoints, writeCheckpoint } from './checkpoint.js';
+import { writeShutdownCheckpoints } from './shutdown-checkpoints.js';
 import { computeThresholds } from './threshold.js';
 import { emitSessionTokens } from './usage-telemetry.js';
 import { startCredentialProxy } from './credential-proxy.js';
@@ -2515,8 +2516,9 @@ async function main(): Promise<void> {
     // next startup will fall through to the pre-#213 cleanup
     // behaviour for these names — strictly worse than the new
     // path, but no worse than today.
+    let active: ReturnType<typeof queue.getActiveContainersForHandoff> = [];
     try {
-      const active = queue.getActiveContainersForHandoff();
+      active = queue.getActiveContainersForHandoff();
       writeHandoffMarker(active);
       logger.info(
         { count: active.length, names: active.map((c) => c.name) },
@@ -2525,6 +2527,26 @@ async function main(): Promise<void> {
     } catch (err) {
       logger.warn({ err }, 'Failed to write handoff marker');
     }
+
+    // #497: checkpoint every active default session BEFORE
+    // `queue.shutdown` runs, so deploy SIGTERM → force-kill no longer
+    // discards in-flight work. The existing SessionStart hook +
+    // `session-reentry` skill pipeline picks up the checkpoint on the
+    // next fresh spawn — no new reentry surface.
+    const checkpointed = await writeShutdownCheckpoints({
+      active,
+      sessions,
+      registeredGroups,
+      thresholds: computeThresholds(MODEL_CONTEXT_WINDOW),
+      defaultSessionName: DEFAULT_SESSION_NAME,
+      dataDir: DATA_DIR,
+      logger,
+    });
+    logger.info(
+      { count: checkpointed },
+      'Pre-shutdown checkpoint pass complete',
+    );
+
     stopHubitatListener();
     proxyServer.close();
     await queue.shutdown(10000);

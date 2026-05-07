@@ -52,6 +52,11 @@ export interface CheckpointInputs {
    *  when the caller can't easily produce this list, an empty array
    *  is fine; the Facts section just renders a "none" entry. */
   pendingReplyIds?: string[];
+  /** What caused this checkpoint write. Defaults to `'threshold-cross'`
+   *  for #104's nuke pipeline. `'shutdown'` is set by #497's pre-shutdown
+   *  pass so the rendered checkpoint is unambiguous during incident
+   *  debugging — "is this from a token nuke or a redeploy?". */
+  trigger?: 'threshold-cross' | 'shutdown';
 }
 
 const CHECKPOINTS_SUBDIR = '.checkpoints';
@@ -87,24 +92,47 @@ export function renderFacts(
     isError: boolean | null;
   }>,
 ): string {
+  const trigger: 'threshold-cross' | 'shutdown' =
+    inputs.trigger ?? 'threshold-cross';
   const lines: string[] = [];
   lines.push('# Session Checkpoint');
   lines.push('');
-  lines.push(
-    '_Written by the orchestrator at threshold-cross. The agent-authored ' +
-      '`## Reasoning` section follows below; if absent, the agent did not ' +
-      'reach the threshold-reminder before nuke (the documented degraded mode)._',
-  );
+  if (trigger === 'shutdown') {
+    lines.push(
+      '_Written by the orchestrator on graceful shutdown (deploy SIGTERM ' +
+        'or process exit). The agent-authored `## Reasoning` section ' +
+        'follows below; if absent, the agent was force-killed before it ' +
+        'could append (the documented degraded mode)._',
+    );
+  } else {
+    lines.push(
+      '_Written by the orchestrator at threshold-cross. The agent-authored ' +
+        '`## Reasoning` section follows below; if absent, the agent did not ' +
+        'reach the threshold-reminder before nuke (the documented degraded mode)._',
+    );
+  }
   lines.push('');
   lines.push('## Facts');
   lines.push('');
   lines.push(`- **Group:** ${inputs.groupName}`);
   lines.push(`- **Session id:** \`${inputs.sessionId}\``);
-  lines.push(
-    `- **Tokens used at trigger:** ${inputs.usedTokens.toLocaleString()} ` +
-      `/ ${inputs.thresholds.contextWindow.toLocaleString()} ` +
-      `(warn ${inputs.thresholds.warn.toLocaleString()}, nuke ${inputs.thresholds.nuke.toLocaleString()})`,
-  );
+  lines.push(`- **Trigger:** ${trigger}`);
+  if (trigger === 'shutdown') {
+    // usedTokens is always 0 on the shutdown path — the orchestrator
+    // doesn't track per-turn context size at SIGTERM time. Render
+    // accordingly so the operator doesn't read "0 tokens" as
+    // "session was empty" during incident debugging.
+    lines.push(
+      `- **Tokens used:** unknown (not tracked on shutdown path; ` +
+        `context window is ${inputs.thresholds.contextWindow.toLocaleString()})`,
+    );
+  } else {
+    lines.push(
+      `- **Tokens used at trigger:** ${inputs.usedTokens.toLocaleString()} ` +
+        `/ ${inputs.thresholds.contextWindow.toLocaleString()} ` +
+        `(warn ${inputs.thresholds.warn.toLocaleString()}, nuke ${inputs.thresholds.nuke.toLocaleString()})`,
+    );
+  }
   lines.push(`- **Trigger time:** ${new Date().toISOString()}`);
   lines.push('');
 
@@ -119,10 +147,17 @@ export function renderFacts(
   lines.push('');
 
   lines.push('### Do NOT re-execute');
-  lines.push(
-    '_Mutating tool calls observed in the just-nuked session. ' +
-      'Reentry must NOT re-fire any of these._',
-  );
+  if (trigger === 'shutdown') {
+    lines.push(
+      '_Mutating tool calls observed in the session that was force-killed ' +
+        'on shutdown. Reentry must NOT re-fire any of these._',
+    );
+  } else {
+    lines.push(
+      '_Mutating tool calls observed in the just-nuked session. ' +
+        'Reentry must NOT re-fire any of these._',
+    );
+  }
   lines.push('');
   if (mutatingInvocations.length === 0) {
     lines.push('- _no mutating calls observed_');
