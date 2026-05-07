@@ -334,6 +334,7 @@ function buildGateContext(
     message: {
       text: cleanText,
       senderJid: msg.sender,
+      messageId: msg.id,
       // Legacy field kept for tests that pin the old behaviour. Only
       // populated when the reply target is the assistant — same
       // semantic as before. New code should read `replyTo.isAssistant`.

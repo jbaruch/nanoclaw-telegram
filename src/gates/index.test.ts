@@ -24,6 +24,7 @@ const baseCtx: GateContext = {
   groupFolder: 'telegram_test',
   message: {
     text: 'hello world',
+    messageId: 'msg-test-1',
     senderJid: 'sender@s.whatsapp.net',
   },
   triggerPatterns: null,

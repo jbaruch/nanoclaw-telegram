@@ -39,6 +39,7 @@ function ctx(
     groupFolder: 'g',
     message: {
       text,
+      messageId: 'msg-test-1',
       senderJid: 's@s.whatsapp.net',
       ...overrides,
     },

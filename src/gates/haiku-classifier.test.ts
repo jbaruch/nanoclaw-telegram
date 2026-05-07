@@ -42,7 +42,11 @@ function buildCtx(overrides: Partial<GateContext> = {}): GateContext {
   return {
     groupJid: TEST_JID,
     groupFolder: TEST_FOLDER,
-    message: { text: 'hi', senderJid: 's@s.whatsapp.net' },
+    message: {
+      text: 'hi',
+      messageId: 'msg-test-1',
+      senderJid: 's@s.whatsapp.net',
+    },
     triggerPatterns: null,
     ...overrides,
   };
@@ -448,7 +452,11 @@ describe('haikuClassifierGate — structured reply rendering (#107)', () => {
     _setAnthropicClientForTesting(client);
     await haikuClassifierGate(
       buildCtx({
-        message: { text: 'hello there', senderJid: 's@s.whatsapp.net' },
+        message: {
+          text: 'hello there',
+          messageId: 'msg-test-1',
+          senderJid: 's@s.whatsapp.net',
+        },
       }),
     );
     const userText = calls[0].params.messages[0].content as string;
@@ -467,6 +475,7 @@ describe('haikuClassifierGate — structured reply rendering (#107)', () => {
       buildCtx({
         message: {
           text: 'got it',
+          messageId: 'msg-test-1',
           senderJid: 's@s.whatsapp.net',
           replyTo: {
             messageId: 'msg-1',
@@ -495,6 +504,7 @@ describe('haikuClassifierGate — structured reply rendering (#107)', () => {
       buildCtx({
         message: {
           text: 'Yes do it',
+          messageId: 'msg-test-1',
           senderJid: 's@s.whatsapp.net',
           replyTo: {
             messageId: '4114',
@@ -522,6 +532,7 @@ describe('haikuClassifierGate — structured reply rendering (#107)', () => {
       buildCtx({
         message: {
           text: 'see you',
+          messageId: 'msg-test-1',
           senderJid: 's@s.whatsapp.net',
           replyTo: {
             messageId: 'msg-h',
@@ -565,5 +576,11 @@ describe('haikuClassifierGate — observability', () => {
     expect(fields.cacheCreateTokens).toBe(0);
     expect(typeof fields.durationMs).toBe('number');
     expect(fields.groupFolder).toBe(TEST_FOLDER);
+    // #451 item 4: messageId + inboundText close the join
+    // mineHaikuSamples used to skip — Haiku verdicts can now be
+    // attributed to the inbound directly without stitching through
+    // a paired `gate decision` record.
+    expect(fields.messageId).toBe('msg-test-1');
+    expect(fields.inboundText).toBe('hi');
   });
 });

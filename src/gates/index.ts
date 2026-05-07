@@ -74,6 +74,15 @@ export interface GateContext {
     text: string;
     senderJid: string;
     /**
+     * Channel-side message id for the inbound (#451 item 4). Required
+     * so the producer-side enrichment of `haiku classifier verdict`
+     * can stamp `messageId` directly on the verdict log line —
+     * `mineHaikuSamples` no longer needs to stitch via a paired
+     * `gate decision` record. Plumbed from `NewMessage.id` at the
+     * `buildGateContext` call site in the orchestrator.
+     */
+    messageId: string;
+    /**
      * @deprecated Use `replyTo` instead. Kept for backward compat with
      * the trigger gate's `kind: 'reply'` matcher in the v1 wiring; new
      * code should consult `replyTo.isAssistant`.

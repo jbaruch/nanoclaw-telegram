@@ -34,7 +34,7 @@ function ctx(text: string): GateContext {
   return {
     groupJid: 'g@g.us',
     groupFolder: 'g',
-    message: { text, senderJid: 's@s.whatsapp.net' },
+    message: { text, messageId: 'msg-test-1', senderJid: 's@s.whatsapp.net' },
     triggerPatterns: { version: 1, patterns: [] },
   };
 }

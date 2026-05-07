@@ -59,7 +59,11 @@ function buildCtx(overrides: Partial<GateContext> = {}): GateContext {
   return {
     groupJid: TEST_JID,
     groupFolder: TEST_FOLDER,
-    message: { text: 'hi', senderJid: 's@s.whatsapp.net' },
+    message: {
+      text: 'hi',
+      messageId: 'msg-test-1',
+      senderJid: 's@s.whatsapp.net',
+    },
     triggerPatterns: null,
     ...overrides,
   };

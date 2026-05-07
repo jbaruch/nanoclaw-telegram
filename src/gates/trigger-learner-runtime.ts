@@ -178,15 +178,19 @@ export function mineSamplesForGroup(
  * Separate from `mineSamplesForGroup` because the join key is
  * `groupFolder` (what the log records), not `groupJid`.
  *
- * Stage 2's `intent` ('yes'/'no') is the truth signal. We drop the
- * inbound message text out of the host log via the chained `gate
- * decision` record (same chatJid + messageId), so the Haiku verdict
- * has the inbound text it adjudicated.
+ * Stage 2's `intent` ('yes'/'no') is the truth signal. Since #451
+ * item 4, the verdict log line carries `messageId` and `inboundText`
+ * directly — no need to stitch via a paired `gate decision` record.
  *
  * Note on confidence: the Haiku log emits a calibrated confidence in
  * [0,1]. We treat verdicts with confidence < 0.7 as ambiguous and
  * skip them; the issue body called Haiku a "soft truth signal" and
  * an ambiguous ~0.55 verdict isn't truth, it's noise.
+ *
+ * Records emitted by an older orchestrator that pre-dates #451 item 4
+ * (no `messageId` / `inboundText` fields on the line) are skipped
+ * silently — they have no usable text and the join-via-`gate decision`
+ * fallback was never wired in v1. Callers tolerate the empty result.
  */
 export function mineHaikuSamples(
   groupFolder: string,
@@ -194,10 +198,7 @@ export function mineHaikuSamples(
   minConfidence: number = 0.7,
 ): MinedSample[] {
   const records = readHostLog(hostLogPath);
-  const haikuByMsg = new Map<
-    string,
-    { intent: 'yes' | 'no'; confidence: number }
-  >();
+  const samples: MinedSample[] = [];
   for (const r of records) {
     if (r.msg !== 'haiku classifier verdict') continue;
     if (r.fields.groupFolder !== groupFolder) continue;
@@ -206,27 +207,26 @@ export function mineHaikuSamples(
     const confidence = r.fields.confidence;
     if (typeof confidence !== 'number') continue;
     if (confidence < minConfidence) continue;
-    // Haiku records reference the inbound `messageId` via a paired
-    // `gate decision` record at roughly the same time. Without the
-    // pairing we don't have inbound text, so we can't extract
-    // keywords. The logger emits `haiku classifier verdict` AFTER
-    // `gate decision` for the same inbound; we stitch on
-    // chatJid+messageId via the gate-decision record below.
-    // Because the haiku record itself doesn't carry the messageId
-    // directly (the producer in haiku-classifier.ts emits group-
-    // scoped fields, not message-scoped), we drop these for now and
-    // rely on reaction-based mining as the v1 truth surface.
-    // Future enhancement (out of scope for #415, tracked in the
-    // promotion-UI follow-up): bump `haiku classifier verdict` to
-    // include `messageId` and `inboundText` so this stitch works
-    // without a join.
-    void haikuByMsg;
-    void intent;
+    const inboundText = r.fields.inboundText;
+    if (typeof inboundText !== 'string' || inboundText.length === 0) continue;
+    // messageId is structurally required on post-#451-item-4 records
+    // but isn't load-bearing for sample mining (we don't dedupe
+    // here — multiple verdicts on the same message reflect different
+    // strategy passes and each is a legitimate data point). Read the
+    // field if present, otherwise fall through.
+    samples.push({
+      text: inboundText,
+      intent,
+      // Haiku verdicts have no sender — synthetic inbound. The
+      // learner's `senderTier` policy treats 'anonymous' as
+      // non-privileged, which matches: a Haiku verdict is software-
+      // produced, never owner-authoritative.
+      senderTier: 'anonymous',
+      source: 'haiku_verdict',
+      gateResponded: false,
+    });
   }
-  // v1 returns no haiku-derived samples; reaction-based mining
-  // covers the cold-start floor in practice on active groups, and
-  // the producer-side change to add messageId is its own follow-up.
-  return [];
+  return samples;
 }
 
 /**

@@ -17,7 +17,11 @@ const TEST_NAME = 'unit-test-strategy';
 const baseCtx: GateContext = {
   groupJid: 'g@g.us',
   groupFolder: 'telegram_test',
-  message: { text: 'hi', senderJid: 's@s.whatsapp.net' },
+  message: {
+    text: 'hi',
+    messageId: 'msg-test-1',
+    senderJid: 's@s.whatsapp.net',
+  },
   triggerPatterns: null,
 };
 

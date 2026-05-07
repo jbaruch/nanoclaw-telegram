@@ -696,6 +696,12 @@ export const haikuClassifierGate: GateFn = async (
   logger.info(
     {
       groupFolder: ctx.groupFolder,
+      // #451 item 4: messageId + inboundText close the join the
+      // trigger learner used to skip — `mineHaikuSamples` can now
+      // attribute Haiku verdicts to the inbound directly without
+      // stitching against a paired `gate decision` record.
+      messageId: ctx.message.messageId,
+      inboundText: ctx.message.text,
       modelId,
       strategy: strategy.name,
       intent: verdict.intent,
