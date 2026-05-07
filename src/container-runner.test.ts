@@ -593,6 +593,63 @@ describe('host-logs mount admin-only gating', () => {
     expect(args.some((a) => a.includes(':/workspace/host-logs:ro'))).toBe(true);
   });
 
+  it('admin (isMain=true) gets the usage.jsonl RO mount when the file exists', async () => {
+    // PR #523: surface the proxy-side usage.jsonl into admin-tile
+    // containers so prechecks (e.g. classifier-emit verification for
+    // #493) can read the same authoritative spend log the
+    // orchestrator writes. Mount is RO and conditional on the file
+    // existing — fresh-deploy orchestrators that haven't emitted a
+    // record yet skip the mount, and prechecks tolerate the absence.
+    //
+    // The test file mocks fs.existsSync to always return false; we
+    // override the mock to return true for the specific usage.jsonl
+    // path the production code stat()s, leaving every other path
+    // taking its default behaviour.
+    const fsModule = await import('fs');
+    const path = await import('path');
+    const usagePath = path.join(process.cwd(), 'logs', 'usage.jsonl');
+    vi.mocked(fsModule.default.existsSync).mockImplementation(
+      (p) => p === usagePath,
+    );
+    try {
+      const adminGroup: RegisteredGroup = { ...testGroup, isMain: true };
+      const promise = runContainerAgent(
+        adminGroup,
+        { ...testInput, isMain: true },
+        () => {},
+      );
+      fakeProc.emit('close', 0);
+      await vi.advanceTimersByTimeAsync(10);
+      await promise;
+      const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+      expect(
+        args.some((a) => a.includes(':/workspace/host-logs/usage.jsonl:ro')),
+      ).toBe(true);
+    } finally {
+      // Restore the existsSync mock to its default (always false) so
+      // sibling tests aren't disturbed.
+      vi.mocked(fsModule.default.existsSync).mockReturnValue(false);
+    }
+  });
+
+  it('admin without usage.jsonl present skips the mount silently', async () => {
+    // Default existsSync mock returns false, simulating fresh-deploy
+    // (no usage.jsonl on disk yet). Mount must not appear.
+    const adminGroup: RegisteredGroup = { ...testGroup, isMain: true };
+    const promise = runContainerAgent(
+      adminGroup,
+      { ...testInput, isMain: true },
+      () => {},
+    );
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(
+      args.some((a) => a.includes(':/workspace/host-logs/usage.jsonl:ro')),
+    ).toBe(false);
+  });
+
   it('trusted non-main group does NOT get the host-logs mount', async () => {
     const trustedGroup: RegisteredGroup = {
       ...testGroup,

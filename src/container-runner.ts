@@ -1252,6 +1252,22 @@ export function buildVolumeMounts(
         'host-logs dir bootstrap failed — admin tile will spawn without /workspace/host-logs',
       );
     }
+    // The proxy-side `usage.jsonl` lives in the orchestrator's `logs/`
+    // dir (not under data/host-logs/), so it isn't covered by the
+    // mount above. Surface it RO at /workspace/host-logs/usage.jsonl
+    // so admin-tile prechecks (e.g. classifier-emit verification for
+    // #493) can read the same authoritative spend log the
+    // orchestrator writes. Skip silently if the file doesn't exist
+    // yet — fresh-deploy orchestrators haven't emitted any records;
+    // the precheck tolerates a missing file.
+    const usageLogHost = path.join(process.cwd(), 'logs', 'usage.jsonl');
+    if (fs.existsSync(usageLogHost)) {
+      mounts.push({
+        hostPath: toHostPath(usageLogHost),
+        containerPath: '/workspace/host-logs/usage.jsonl',
+        readonly: true,
+      });
+    }
     // Shadow ALL files containing secrets so agents can't read bot tokens.
     // Without this, subagents curl the Telegram API directly, bypassing MCP.
     // mount --bind inside the container doesn't work (needs CAP_SYS_ADMIN),

@@ -69,3 +69,4 @@ scripts/heartbeat-external.conf
 scripts/heartbeat-external.state
 ._*
 trusted/
+__pycache__/
