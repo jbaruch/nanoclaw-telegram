@@ -683,6 +683,218 @@ describe('host-logs mount admin-only gating', () => {
   });
 });
 
+// --- No nested mount inside an RO parent (#524 regression guard) ---
+//
+// Docker bind-mounts work by creating the target file/dir inside the
+// container rootfs at mount time. When the parent is already RO-mounted,
+// the kernel refuses to create the bind target on the read-only
+// filesystem and the OCI runtime returns code 125: every spawn fails.
+//
+// PR #523 hit this: it mounted ~/nanoclaw/logs/usage.jsonl at
+// /workspace/host-logs/usage.jsonl while /workspace/host-logs/ was
+// already a RO directory mount from data/host-logs/. Result: every
+// telegram_swarm spawn failed for ~5h until the per-group circuit
+// breaker tripped — morning-brief, heartbeat, inbound replies all
+// stopped. Fix in #524 moved the mount to /workspace/proxy-logs/.
+//
+// Unit tests can't invoke real docker, but they CAN walk the spawn
+// arg list and assert the structural invariant: no mount target may
+// be nested inside an RO-mounted parent. RW-parent + nested mount is
+// fine (kernel creates the bind target — that's how
+// /workspace/group/CLAUDE.md works).
+//
+// The parser below is keyed to the test mock's arg shape:
+//   readonlyMountArgs(h, c) → ['-v', `${h}:${c}:ro`]
+//   writable mounts emit    → ['-v', `${h}:${c}`]
+// If the production mount-args helpers ever drift from this format,
+// the parser becomes a tripwire — surface here, not in production.
+
+interface ParsedMount {
+  hostPath: string;
+  containerPath: string;
+  readonly: boolean;
+}
+
+function parseDockerMounts(args: string[]): ParsedMount[] {
+  const out: ParsedMount[] = [];
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] !== '-v') continue;
+    const spec = args[i + 1];
+    // Container-path absolute paths start with `/`. Split on the
+    // first `:` BEFORE that slash so host paths with colons
+    // (unlikely on Linux but defensive) don't trip the parser.
+    const colonIdx = spec.indexOf(':/');
+    if (colonIdx < 0) continue;
+    const hostPath = spec.slice(0, colonIdx);
+    const rest = spec.slice(colonIdx + 1);
+    const ro = rest.endsWith(':ro');
+    const containerPath = ro ? rest.slice(0, -3) : rest;
+    out.push({ hostPath, containerPath, readonly: ro });
+  }
+  return out;
+}
+
+function findNestedRoConflicts(
+  mounts: ParsedMount[],
+): Array<{ parent: ParsedMount; child: ParsedMount }> {
+  const conflicts: Array<{ parent: ParsedMount; child: ParsedMount }> = [];
+  for (const parent of mounts) {
+    if (!parent.readonly) continue;
+    for (const child of mounts) {
+      if (child === parent) continue;
+      if (child.containerPath.startsWith(parent.containerPath + '/')) {
+        conflicts.push({ parent, child });
+      }
+    }
+  }
+  return conflicts;
+}
+
+describe('docker -v args: no mount nested inside an RO parent (#524 guard)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('admin spawn with usage.jsonl present has no RO-parent mount conflicts', async () => {
+    // Reproduces the failing PR #523 scenario, but against the
+    // fixed code: usage.jsonl now mounts at /workspace/proxy-logs/
+    // (sibling of /workspace/host-logs/), so the assertion holds.
+    const fsModule = await import('fs');
+    const path = await import('path');
+    const usagePath = path.join(process.cwd(), 'logs', 'usage.jsonl');
+    vi.mocked(fsModule.default.existsSync).mockImplementation(
+      (p) => p === usagePath,
+    );
+    try {
+      const adminGroup: RegisteredGroup = { ...testGroup, isMain: true };
+      const promise = runContainerAgent(
+        adminGroup,
+        { ...testInput, isMain: true },
+        () => {},
+      );
+      fakeProc.emit('close', 0);
+      await vi.advanceTimersByTimeAsync(10);
+      await promise;
+      const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+      const mounts = parseDockerMounts(args);
+      const conflicts = findNestedRoConflicts(mounts);
+      // Render conflicts as a readable failure string instead of
+      // the default object-array dump, so a regression points at
+      // the specific path pair the next time someone trips this.
+      expect(
+        conflicts.map(
+          (c) =>
+            `${c.child.containerPath} is nested inside RO mount ${c.parent.containerPath}`,
+        ),
+      ).toEqual([]);
+    } finally {
+      vi.mocked(fsModule.default.existsSync).mockReturnValue(false);
+    }
+  });
+
+  it('admin spawn without usage.jsonl present also has no conflicts', async () => {
+    // Default existsSync mock returns false — usage.jsonl mount is
+    // skipped. The remaining mount set (host-logs, group, project,
+    // global, etc.) must also be conflict-free.
+    const adminGroup: RegisteredGroup = { ...testGroup, isMain: true };
+    const promise = runContainerAgent(
+      adminGroup,
+      { ...testInput, isMain: true },
+      () => {},
+    );
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    const conflicts = findNestedRoConflicts(parseDockerMounts(args));
+    expect(
+      conflicts.map(
+        (c) =>
+          `${c.child.containerPath} is nested inside RO mount ${c.parent.containerPath}`,
+      ),
+    ).toEqual([]);
+  });
+
+  it('trusted (non-main) spawn has no RO-parent mount conflicts', async () => {
+    const trustedGroup: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: { trusted: true },
+    };
+    const promise = runContainerAgent(
+      trustedGroup,
+      { ...testInput, isMain: false, isTrusted: true },
+      () => {},
+    );
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    const conflicts = findNestedRoConflicts(parseDockerMounts(args));
+    expect(
+      conflicts.map(
+        (c) =>
+          `${c.child.containerPath} is nested inside RO mount ${c.parent.containerPath}`,
+      ),
+    ).toEqual([]);
+  });
+
+  it('untrusted spawn has no RO-parent mount conflicts', async () => {
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    const conflicts = findNestedRoConflicts(parseDockerMounts(args));
+    expect(
+      conflicts.map(
+        (c) =>
+          `${c.child.containerPath} is nested inside RO mount ${c.parent.containerPath}`,
+      ),
+    ).toEqual([]);
+  });
+
+  it('parser + detector correctly flag a synthetic conflict (self-test)', () => {
+    // Sanity-check: feed parseDockerMounts the EXACT pre-#524 broken
+    // arg list and assert the detector catches it. If this test
+    // ever fails, the detector itself regressed and the protection
+    // is silently disabled.
+    const broken = [
+      '-v',
+      '/host/data/host-logs:/workspace/host-logs:ro',
+      '-v',
+      '/host/logs/usage.jsonl:/workspace/host-logs/usage.jsonl:ro',
+    ];
+    const mounts = parseDockerMounts(broken);
+    const conflicts = findNestedRoConflicts(mounts);
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0].parent.containerPath).toBe('/workspace/host-logs');
+    expect(conflicts[0].child.containerPath).toBe(
+      '/workspace/host-logs/usage.jsonl',
+    );
+  });
+
+  it('parser + detector accept nesting inside an RW parent (kernel handles those)', () => {
+    // RW parent + nested child is the existing pattern for
+    // /workspace/group/CLAUDE.md inside /workspace/group/. Kernel
+    // creates the bind target on the writable filesystem; spawn
+    // succeeds. The detector must NOT flag those.
+    const ok = [
+      '-v',
+      '/host/groups/foo:/workspace/group',
+      '-v',
+      '/host/somewhere/CLAUDE.md:/workspace/group/CLAUDE.md:ro',
+    ];
+    const conflicts = findNestedRoConflicts(parseDockerMounts(ok));
+    expect(conflicts).toEqual([]);
+  });
+});
+
 // --- /workspace/state mount: writable, all tiers (#99 Cat 4) ---
 //
 // Per-group canonical writable state directory. Must be present for
