@@ -1,10 +1,15 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import Database from 'better-sqlite3';
 
 import {
+  _execRawForTests,
   _initTestDatabase,
+  _rawQueryForTests,
+  _runCreateSchemaForTests,
   _seedTzStateForTests,
   _writeRawRegisteredGroup,
   createTask,
+  logTaskRun,
   getCurrentTz,
   deleteRegisteredGroup,
   deleteTask,
@@ -1689,5 +1694,154 @@ describe('getCurrentTz (#456)', () => {
     // schema_version means "no usable prior state" — fall back rather
     // than guess at the new shape.
     expect(getCurrentTz()).toBeNull();
+  });
+});
+
+describe('task_run_logs FK cascade (#530)', () => {
+  // The headline incident this fix prevents: a cadence-registry rebuild
+  // walked an empty skill set on the swarm group, drove every existing
+  // cadence-registry scheduled_tasks row into the orphan-DELETE loop,
+  // and FK-aborted on the first task with surviving task_run_logs
+  // children. With ON DELETE CASCADE, the parent DELETE clears the
+  // children atomically and the rebuild transaction commits.
+
+  function fkOnDelete(database: Database.Database): string {
+    const row = database
+      .prepare(
+        `SELECT on_delete FROM pragma_foreign_key_list('task_run_logs') WHERE "table" = 'scheduled_tasks'`,
+      )
+      .get() as { on_delete: string };
+    return row.on_delete;
+  }
+
+  function makeTask(id: string) {
+    createTask({
+      id,
+      group_folder: 'main',
+      chat_jid: 'group@g.us',
+      prompt: 'cadence-registered prompt',
+      schedule_type: 'cron',
+      schedule_value: '*/5 * * * *',
+      context_mode: 'isolated',
+      next_run: '2026-01-01T00:00:00.000Z',
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+  }
+
+  it('a fresh-init database declares ON DELETE CASCADE on the FK', () => {
+    const database = new Database(':memory:');
+    try {
+      _runCreateSchemaForTests(database);
+      expect(fkOnDelete(database)).toBe('CASCADE');
+    } finally {
+      database.close();
+    }
+  });
+
+  it('deleting a parent scheduled_tasks row cascades to its run logs', () => {
+    makeTask('cadence-registry::main::tessl__demo');
+    logTaskRun({
+      task_id: 'cadence-registry::main::tessl__demo',
+      run_at: '2026-01-01T00:01:00.000Z',
+      duration_ms: 42,
+      status: 'success',
+      result: 'ok',
+      error: null,
+    });
+    logTaskRun({
+      task_id: 'cadence-registry::main::tessl__demo',
+      run_at: '2026-01-01T00:02:00.000Z',
+      duration_ms: 50,
+      status: 'success',
+      result: 'ok',
+      error: null,
+    });
+
+    // Sanity: child rows exist before the parent goes away.
+    const before = _rawQueryForTests<{ c: number }>(
+      'SELECT COUNT(*) AS c FROM task_run_logs WHERE task_id = ?',
+      ['cadence-registry::main::tessl__demo'],
+    );
+    expect(before[0].c).toBe(2);
+
+    // Delete via raw SQL — bypassing `deleteTask`'s manual child-cleanup
+    // is the whole point. The cadence-registry's orphan DELETE doesn't
+    // clear children either, and pre-fix that's what tripped the FK.
+    _execRawForTests('DELETE FROM scheduled_tasks WHERE id = ?', [
+      'cadence-registry::main::tessl__demo',
+    ]);
+
+    const after = _rawQueryForTests<{ c: number }>(
+      'SELECT COUNT(*) AS c FROM task_run_logs WHERE task_id = ?',
+      ['cadence-registry::main::tessl__demo'],
+    );
+    expect(after[0].c).toBe(0);
+  });
+
+  it('upgrades a legacy NO-ACTION FK in place and preserves rows', () => {
+    // Build a legacy-shape DB with the pre-fix FK (no cascade) plus a
+    // task_run_logs row referencing a scheduled_tasks parent. Then run
+    // createSchema again and assert (a) the FK shape upgraded to
+    // CASCADE, (b) the row survived the table rebuild verbatim.
+    const database = new Database(':memory:');
+    try {
+      database.pragma('foreign_keys = ON');
+      database.exec(`
+        CREATE TABLE scheduled_tasks (
+          id TEXT PRIMARY KEY,
+          group_folder TEXT NOT NULL,
+          chat_jid TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          schedule_type TEXT NOT NULL,
+          schedule_value TEXT NOT NULL,
+          next_run TEXT,
+          last_run TEXT,
+          last_result TEXT,
+          status TEXT DEFAULT 'active',
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE task_run_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id TEXT NOT NULL,
+          run_at TEXT NOT NULL,
+          duration_ms INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          result TEXT,
+          error TEXT,
+          FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id)
+        );
+        INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, status, created_at)
+          VALUES ('legacy-task', 'main', 'group@g.us', 'p', 'cron', '*/5 * * * *', 'active', '2026-01-01T00:00:00.000Z');
+        INSERT INTO task_run_logs (task_id, run_at, duration_ms, status, result, error)
+          VALUES ('legacy-task', '2026-01-01T00:01:00.000Z', 7, 'success', 'ok', NULL);
+      `);
+      // Pre-condition: the legacy shape has a non-CASCADE FK.
+      expect(fkOnDelete(database)).toBe('NO ACTION');
+
+      _runCreateSchemaForTests(database);
+
+      // Post-condition: FK upgraded and the run-log row survived intact.
+      expect(fkOnDelete(database)).toBe('CASCADE');
+      const surviving = database
+        .prepare(
+          'SELECT task_id, duration_ms, status FROM task_run_logs WHERE task_id = ?',
+        )
+        .get('legacy-task') as
+        | { task_id: string; duration_ms: number; status: string }
+        | undefined;
+      expect(surviving).toEqual({
+        task_id: 'legacy-task',
+        duration_ms: 7,
+        status: 'success',
+      });
+
+      // And the migration is idempotent — a second pass is a no-op.
+      _runCreateSchemaForTests(database);
+      expect(fkOnDelete(database)).toBe('CASCADE');
+    } finally {
+      database.close();
+    }
   });
 });

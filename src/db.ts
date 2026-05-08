@@ -233,7 +233,7 @@ function createSchema(database: Database.Database): void {
       status TEXT NOT NULL,
       result TEXT,
       error TEXT,
-      FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id)
+      FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at);
 
@@ -380,6 +380,53 @@ function createSchema(database: Database.Database): void {
     database.exec(
       `ALTER TABLE scheduled_tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'schedule-task'`,
     );
+  }
+
+  // Switch task_run_logs.task_id FK to ON DELETE CASCADE. Without this,
+  // rebuildCadenceRegistry's orphan DELETE (a scheduled_tasks row whose
+  // skill stopped declaring `cadence:`) FK-aborts the entire per-spawn
+  // rebuild transaction when run-log children remain — the spawn never
+  // happens, the message cursor rolls back, retry loops until the
+  // group's circuit breaker trips. Same latent bug applies to
+  // unscheduleTask via the schedule-task IPC. SQLite can't ALTER a FK
+  // in place, so detect via pragma_foreign_key_list and rebuild the
+  // table when on_delete is anything other than CASCADE.
+  const trlFk = database
+    .prepare(
+      `SELECT on_delete FROM pragma_foreign_key_list('task_run_logs') WHERE "table" = 'scheduled_tasks'`,
+    )
+    .get() as { on_delete?: string } | undefined;
+  if (trlFk && trlFk.on_delete !== 'CASCADE') {
+    // Standard 12-step table rebuild from the SQLite docs. FKs go OFF
+    // for the rewrite so the temporary _new table can be populated and
+    // renamed without enforcement; flipped back ON after. Deferred FK
+    // checks (foreign_key_check) aren't needed — the only constraint
+    // we're modifying is task_run_logs → scheduled_tasks, and INSERT
+    // INTO ... SELECT preserves every existing row's task_id literally,
+    // so any pre-existing orphans (which couldn't have existed under
+    // FK-ON anyway, since their parent DELETE would have FK-aborted)
+    // stay exactly as they were.
+    database.pragma('foreign_keys = OFF');
+    database.exec(`
+      BEGIN;
+      CREATE TABLE task_run_logs_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL,
+        run_at TEXT NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        result TEXT,
+        error TEXT,
+        FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE
+      );
+      INSERT INTO task_run_logs_new (id, task_id, run_at, duration_ms, status, result, error)
+        SELECT id, task_id, run_at, duration_ms, status, result, error FROM task_run_logs;
+      DROP TABLE task_run_logs;
+      ALTER TABLE task_run_logs_new RENAME TO task_run_logs;
+      CREATE INDEX idx_task_run_logs ON task_run_logs(task_id, run_at);
+      COMMIT;
+    `);
+    database.pragma('foreign_keys = ON');
   }
 
   // Add is_bot_message column if it doesn't exist (migration for existing DBs)
@@ -671,6 +718,21 @@ export function _initTestDatabase(): void {
   applyStateMigrations(db, STATE_MIGRATIONS);
 }
 
+/**
+ * @internal - for tests only.
+ *
+ * Re-runs `createSchema` against a caller-supplied database handle so a
+ * test can construct a legacy-shape DB by hand (e.g. `task_run_logs`
+ * with the pre-#530 NO-ACTION FK) and assert that the migration block
+ * upgrades the shape on the next initialisation. Tests use this in
+ * preference to round-tripping through `_initTestDatabase` because they
+ * need the seam between "legacy schema present" and "createSchema
+ * runs" to be observable.
+ */
+export function _runCreateSchemaForTests(database: Database.Database): void {
+  createSchema(database);
+}
+
 /** @internal - for tests only. */
 export function _closeDatabase(): void {
   db.close();
@@ -690,6 +752,17 @@ export function _closeDatabase(): void {
  */
 export function _rawQueryForTests<T>(sql: string, params: unknown[] = []): T[] {
   return db.prepare(sql).all(...params) as T[];
+}
+
+/**
+ * @internal - for tests only.
+ *
+ * Sibling of `_rawQueryForTests` for non-query SQL (DELETE / INSERT /
+ * UPDATE / DDL) so a test can drive the module-internal `db` handle
+ * without the caller having to construct a separate connection.
+ */
+export function _execRawForTests(sql: string, params: unknown[] = []): void {
+  db.prepare(sql).run(...params);
 }
 
 /**
