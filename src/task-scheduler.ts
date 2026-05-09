@@ -5,6 +5,7 @@ import fs from 'fs';
 
 import {
   ASSISTANT_NAME,
+  DATA_DIR,
   MODEL_CONTEXT_WINDOW,
   SCHEDULER_POLL_INTERVAL,
   TIMEZONE,
@@ -35,6 +36,10 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
+import {
+  pruneSessionArtifacts,
+  resolveSessionArtifactRetentionConfig,
+} from './session-artifact-retention.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 /**
@@ -537,6 +542,36 @@ async function runTask(
   };
 
   try {
+    // Pre-resume artifact pruning (#538) for maintenance-session
+    // task fires that resume a persisted session_id.
+    if (sessionId) {
+      const retention = pruneSessionArtifacts({
+        dataDir: DATA_DIR,
+        groupFolder: task.group_folder,
+        sessionName: MAINTENANCE_SESSION_NAME,
+        sessionId,
+        config: resolveSessionArtifactRetentionConfig(),
+      });
+      if (
+        retention.imageBlocksReplaced > 0 ||
+        retention.toolResultRefsReplaced > 0 ||
+        retention.toolResultFilesDeleted > 0
+      ) {
+        logger.info(
+          {
+            taskId: task.id,
+            groupFolder: task.group_folder,
+            sessionId,
+            transcriptPath: retention.transcriptPath,
+            imageBlocksReplaced: retention.imageBlocksReplaced,
+            toolResultRefsReplaced: retention.toolResultRefsReplaced,
+            toolResultFilesDeleted: retention.toolResultFilesDeleted,
+          },
+          'session_artifact_retention_pruned_task',
+        );
+      }
+    }
+
     const output = await runContainerAgent(
       group,
       {
