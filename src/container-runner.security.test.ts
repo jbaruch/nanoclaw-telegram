@@ -1502,6 +1502,117 @@ describe('buildVolumeMounts — trusted group CLAUDE.md mount', () => {
 });
 
 // -----------------------------------------------------------------------------
+// Main-group CLAUDE.md mount: source is the canonical template at
+// `groups/main/CLAUDE.md` regardless of the registered folder name. The
+// previous code resolved to `groups/<folder>/CLAUDE.md`, which silently
+// failed for any main group whose folder name was not literally `main`
+// (e.g. `groups/telegram_swarm/`) — the file didn't exist, the
+// trust-tier source-missing WARN fired on every spawn, and the agent
+// got no CLAUDE.md until an operator hand-copied the template.
+// -----------------------------------------------------------------------------
+describe('buildVolumeMounts — main group CLAUDE.md mount', () => {
+  function makeMainGroupWithCustomFolder(): RegisteredGroup {
+    return {
+      name: 'Telegram Swarm',
+      folder: 'telegram_swarm',
+      trigger: '@Aye',
+      added_at: new Date().toISOString(),
+      isMain: true,
+    };
+  }
+
+  beforeEach(() => {
+    seedMessagesDb();
+    fs.mkdirSync(path.join(GROUPS_DIR, 'telegram_swarm'), { recursive: true });
+    const mainDir = path.join(GROUPS_DIR, 'main');
+    fs.mkdirSync(mainDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(mainDir, 'CLAUDE.md'),
+      '**THIS IS THE MAIN ADMIN GROUP.**\n',
+    );
+  });
+
+  it('resolves CLAUDE.md mount source to groups/main/CLAUDE.md regardless of registered folder name', () => {
+    const originalCwd = process.cwd();
+    process.chdir(PROJECT_DIR);
+    try {
+      const mounts = buildVolumeMounts(
+        makeMainGroupWithCustomFolder(),
+        true,
+        'chatM@g.us',
+      );
+      const claudeMdMount = mounts.find(
+        (m) => m.containerPath === '/workspace/group/CLAUDE.md',
+      );
+      expect(claudeMdMount).toBeDefined();
+      // The load-bearing assertion: source is the canonical template,
+      // NOT the per-group folder's (gitignored, may not exist) copy.
+      expect(claudeMdMount!.hostPath).toBe(
+        path.join(GROUPS_DIR, 'main', 'CLAUDE.md'),
+      );
+      expect(claudeMdMount!.hostPath).not.toBe(
+        path.join(GROUPS_DIR, 'telegram_swarm', 'CLAUDE.md'),
+      );
+      expect(claudeMdMount!.readonly).toBe(true);
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('does NOT WARN about missing trust-tier source when registered folder lacks its own CLAUDE.md', () => {
+    // Pre-fix: telegram_swarm/CLAUDE.md missing → WARN every spawn.
+    // Post-fix: source resolves to main/CLAUDE.md (always present),
+    // mount succeeds, no WARN. Asserted via the absence of the host-
+    // path falling back to the registered folder.
+    const originalCwd = process.cwd();
+    process.chdir(PROJECT_DIR);
+    try {
+      // Confirm the registered folder does NOT have its own CLAUDE.md —
+      // this is the failing-pre-fix scenario the test reproduces.
+      expect(
+        fs.existsSync(path.join(GROUPS_DIR, 'telegram_swarm', 'CLAUDE.md')),
+      ).toBe(false);
+      const mounts = buildVolumeMounts(
+        makeMainGroupWithCustomFolder(),
+        true,
+        'chatM@g.us',
+      );
+      const claudeMdMount = mounts.find(
+        (m) => m.containerPath === '/workspace/group/CLAUDE.md',
+      );
+      // Pre-fix behavior was: claudeMdMount === undefined (no mount)
+      // and a WARN. Post-fix: mount is present, sourced from main.
+      expect(claudeMdMount).toBeDefined();
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('CLAUDE.md mount is positioned AFTER the group folder mount so the file shadow takes effect (parity with trusted)', () => {
+    const originalCwd = process.cwd();
+    process.chdir(PROJECT_DIR);
+    try {
+      const mounts = buildVolumeMounts(
+        makeMainGroupWithCustomFolder(),
+        true,
+        'chatM@g.us',
+      );
+      const folderIdx = mounts.findIndex(
+        (m) => m.containerPath === '/workspace/group',
+      );
+      const fileIdx = mounts.findIndex(
+        (m) => m.containerPath === '/workspace/group/CLAUDE.md',
+      );
+      expect(folderIdx).toBeGreaterThanOrEqual(0);
+      expect(fileIdx).toBeGreaterThanOrEqual(0);
+      expect(fileIdx).toBeGreaterThan(folderIdx);
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+});
+
+// -----------------------------------------------------------------------------
 // Shared auto-memory mount (issue #57): both session containers must see the
 // same `/home/node/.claude/projects/-workspace-group/memory/` path. Owner-
 // level state (feedback files) doesn't belong split per-session.

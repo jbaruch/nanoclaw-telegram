@@ -43,6 +43,17 @@ export const KNOWN_VANILLA_TEMPLATE_HASHES = new Set<string>([
   '3816bc68b7bfdb6cfc6de0c7a087c6e7d267ab91332ebb9d4ef845368bdb60a8',
   // 354 bytes — old trusted template variant B (`# AyeAye` first line, no @import).
   'a9652e52b5861358b5831362bb3f6a0251dc8b60a574a36bffcd2e2806c1781f',
+  // 276 bytes — main vanilla template (`groups/main/CLAUDE.md`).
+  // Added with the same-PR change to `container-runner.ts:1321` that
+  // points main's `claudeMdSource` at `groups/main/CLAUDE.md`
+  // unconditionally — operators (or earlier bootstrap code) may have
+  // hand-copied this file into the registered main folder
+  // (`groups/telegram_swarm/CLAUDE.md` etc.) to silence the
+  // "trust-tier source missing" WARN before the orchestrator-side
+  // fix landed. Those hand-copies are now redundant with the bind
+  // mount; the migration deletes them so the canonical template is
+  // the single source of truth.
+  '27ad547724b9efbd1df4d9056ba2fea63f78ee4593d056b035ca9d332b1bb4b1',
 ]);
 
 // Group folders whose CLAUDE.md is git-managed (a source template,

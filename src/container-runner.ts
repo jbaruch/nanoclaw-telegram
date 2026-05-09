@@ -1314,12 +1314,21 @@ export function buildVolumeMounts(
   // lives in MEMORY.md (writable for trusted/main, readonly for
   // untrusted by virtue of the group folder mount above).
   //
-  // For main the source IS the per-group file (`groups/main/CLAUDE.md`),
-  // so this is a no-op layer that just adds the readonly bit. For
-  // trusted/untrusted the source is the global template, which shadows
-  // any stale per-group file the migration may have left behind.
+  // For main the source is the git-managed canonical template at
+  // `groups/main/CLAUDE.md` — NOT the per-group folder's CLAUDE.md.
+  // The previous code hardcoded `path.join(groupDir, 'CLAUDE.md')`
+  // on the assumption that the per-group folder always has a copy
+  // because it's "git-managed," but that's only true for the literal
+  // `groups/main/` folder. A registered main group whose folder name
+  // is something else (e.g. `groups/telegram_swarm/`) is gitignored
+  // runtime state with no automatic bootstrap of CLAUDE.md, so the
+  // file was missing and the WARN below fired on every spawn until
+  // an operator hand-copied the template. Pointing the source at the
+  // canonical template makes main symmetric with trusted/untrusted —
+  // all three trust tiers now resolve to a git-tracked template that
+  // is always on disk regardless of the registered folder name.
   const claudeMdSource = isMain
-    ? path.join(groupDir, 'CLAUDE.md')
+    ? path.join(GROUPS_DIR, 'main', 'CLAUDE.md')
     : group.containerConfig?.trusted
       ? path.join(GROUPS_DIR, 'global', 'CLAUDE.md')
       : path.join(GROUPS_DIR, 'global', 'CLAUDE-untrusted.md');
@@ -1331,14 +1340,13 @@ export function buildVolumeMounts(
     // host (where the group folder is RW from the orchestrator's side)
     // so runc has a target to overlay onto. The placeholder content is
     // irrelevant — the bind-mount shadows it. Gated narrowly to the
-    // failing condition: trusted has a RW parent mount so runc creates
-    // the target itself; main's mount source equals the per-group file
-    // (always on disk, git-managed). Writing a host-side placeholder
-    // for trusted groups would also pollute `scripts/migrate-thin-claude-md.ts`,
-    // which classifies any non-vanilla `CLAUDE.md` as customized. A
-    // future trust flip from trusted → untrusted lands here on the
-    // next spawn under the same gate, so no pre-emptive creation
-    // needed.
+    // failing condition: trusted and main both have a RW parent mount
+    // so runc creates the target itself. Writing a host-side
+    // placeholder for those tiers would also pollute
+    // `scripts/migrate-thin-claude-md.ts`, which classifies any
+    // non-vanilla `CLAUDE.md` as customized. A future trust flip from
+    // trusted → untrusted lands here on the next spawn under the same
+    // gate, so no pre-emptive creation needed.
     const groupMountReadonly = !isMain && !group.containerConfig?.trusted;
     if (groupMountReadonly) {
       const placeholderTarget = path.join(groupDir, 'CLAUDE.md');
