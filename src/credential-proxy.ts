@@ -159,7 +159,12 @@ export function startCredentialProxy(
         );
         body = ttlResult.body;
         if (ttlResult.applied) {
-          logger.info(
+          // DEBUG, not INFO — this fires on every applicable
+          // /v1/messages, which would dominate the log stream in
+          // steady state. Matches the wire-tool interceptor's
+          // log level above. Per-request visibility is available via
+          // DUMP_API_REQUESTS (#467) when needed.
+          logger.debug(
             {
               url: upstreamPath,
               group: containerCtx?.group,

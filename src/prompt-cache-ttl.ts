@@ -110,9 +110,12 @@ export function applyPromptCacheTtl(
   if (method !== 'POST') return { body, stats: zero, applied: false };
   // Use the canonical helper from `wire-tool-filter` so the proxy's
   // /v1/messages routing decision stays in sync between the two
-  // interceptors. The helper does strict path equality (`=== '/v1/messages'`)
-  // — caller passes the post-proxy `upstreamPath`, where the `/c/<token>/`
-  // prefix has already been stripped, so an exact match is what we want.
+  // interceptors. The helper splits off any query string first
+  // (`url.split('?')[0]`) then does strict path equality against
+  // `/v1/messages` — caller passes the post-proxy `upstreamPath`,
+  // where the `/c/<token>/` prefix has already been stripped, so the
+  // path-segment match is what we want and `?beta=…` etc. are
+  // tolerated.
   if (!isMessagesEndpoint(url)) {
     return { body, stats: zero, applied: false };
   }
