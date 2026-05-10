@@ -3293,25 +3293,29 @@ async function main(): Promise<void> {
     try {
       flip = runTzHeartbeatAdvisory();
     } catch (err) {
-      // Narrowed to `SqliteError`: the only realistic recoverable
-      // failure on the heartbeat advisory's DB-read path
-      // (SQLITE_BUSY under WAL contention with the orchestrator's
-      // own writers, or a transient SQLITE_CORRUPT during a hot
-      // backup). Anything else (TypeError from a programming bug,
-      // a non-Error throw, an unexpected value) propagates per
-      // `coding-policy: error-handling`'s "let unexpected
-      // propagate" — there is no outer-boundary contract here that
-      // would silently misroute on uncaught propagation; a
-      // crashing orchestrator gets restarted by the host service
-      // manager and the next tick fires after the next 30-min
-      // boundary. The malformed-JSON case is handled inside
-      // `runTzHeartbeatAdvisory` (narrowed `SyntaxError`) and
-      // returns null rather than throwing, so the only thing that
-      // reaches this catch is a real DB-side failure.
-      if (!(err instanceof SqliteError)) throw err;
+      // Narrowed to transient SQLite contention codes only —
+      // SQLITE_BUSY / SQLITE_LOCKED can fire under WAL contention
+      // with the orchestrator's own writers and are genuinely
+      // recoverable on the next 30-min tick. Every other SqliteError
+      // (SQLITE_CORRUPT, SQLITE_SCHEMA, SQLITE_READONLY, missing
+      // column from a botched migration, etc.) signals a
+      // persistent state-layer problem that hiding behind a periodic
+      // warn would silently freeze `current_tz` indefinitely; those
+      // propagate per `coding-policy: error-handling`. The
+      // malformed-JSON case is handled inside
+      // `runTzHeartbeatAdvisory` (narrowed `SyntaxError`) and returns
+      // null rather than throwing, so the only thing that reaches
+      // this catch is a real DB-side failure.
+      const TRANSIENT_SQLITE_CODES = new Set(['SQLITE_BUSY', 'SQLITE_LOCKED']);
+      if (
+        !(err instanceof SqliteError) ||
+        !TRANSIENT_SQLITE_CODES.has(err.code)
+      ) {
+        throw err;
+      }
       logger.warn(
         { err: err.message, code: err.code },
-        'tz heartbeat advisory: SqliteError on read — will retry on next 30-min tick',
+        'tz heartbeat advisory: transient SqliteError on read — will retry on next 30-min tick',
       );
       return;
     }

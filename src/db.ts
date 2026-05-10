@@ -1920,13 +1920,18 @@ export function applyTripitSegmentsToTzState(
   // legitimately populates as `informational only`) on a hypothetical
   // concurrent-delete race. Plain UPDATE on a missing row is a
   // no-op which is the safer failure mode.
+  //
+  // `schema_version` is bound through `SUPPORTED_TZ_STATE_SCHEMA_VERSION`
+  // (rather than a SQL literal) so a future state-NNN bump only has to
+  // touch the constant — every writer in this file picks up the new
+  // value automatically.
   db.prepare(
     `UPDATE tz_state
         SET current_tz     = ?,
             segments       = ?,
-            schema_version = 2
+            schema_version = ?
       WHERE id = 1`,
-  ).run(next, segmentsJson);
+  ).run(next, segmentsJson, SUPPORTED_TZ_STATE_SCHEMA_VERSION);
 
   const changed = row.current_tz !== next;
   if (changed) {
@@ -1968,8 +1973,14 @@ export function runTzHeartbeatAdvisory(
   if (!row) return null;
   if (row.schema_version !== SUPPORTED_TZ_STATE_SCHEMA_VERSION) {
     // Same contract as `getCurrentTz` — an unfamiliar version is "no
-    // usable prior state". Log once at warn so an operator notices a
-    // stuck mid-migration row without the heartbeat spamming.
+    // usable prior state". The walker fires every 30 min, so this
+    // emits one warn per tick until the operator drops the bad row;
+    // there's no log-once dedup. Two tradeoffs in play: (a) a stuck
+    // mid-migration row in production is a load-bearing alert that
+    // should keep paging until cleared (silencing it would let an
+    // operator forget about it for hours), and (b) a 30-min cadence
+    // doesn't pollute the structured log meaningfully — twice an
+    // hour is far below the heartbeat noise floor on this surface.
     logger.warn(
       {
         observed: row.schema_version,
@@ -4364,17 +4375,23 @@ function resolveFollowMeTaskShape(
  * Both writes use `ON CONFLICT(...) DO UPDATE` (UPSERT) — NEVER
  * `INSERT OR REPLACE`, which is delete+insert in SQLite and would
  * silently reset defaulted columns like `schema_version` on every
- * re-import. The schema-doc on state-010 spells this out as the
- * contract; the multi-group test in
- * `task-tz-state-json-migration.test.ts` pins it down by manually
+ * re-import. The multi-group test in
+ * `task-tz-state-json-migration.test.ts` pins this down by manually
  * bumping `schema_version` between two group imports and asserting
- * the bump survives the second import's UPSERT.
+ * the post-#542 writer's known shape (currently 2) is what lands on
+ * the second import — anything else (1 or the manually-bumped value)
+ * would signal either a `INSERT OR REPLACE` regression (1) or that
+ * the writer dropped its explicit `schema_version` bind (manual
+ * bump survives, gate rejects the row).
  *
- * `tz_state` UPSERT deliberately omits `schema_version` from the
- * column list: the column's `DEFAULT 1` fires on insert; on conflict
- * the `DO UPDATE SET` clause only touches the three timezone scalars,
- * so an existing `schema_version` is preserved (the migration is data
- * backfill, not a schema upgrade).
+ * `tz_state` UPSERT writes `schema_version` explicitly through
+ * `SUPPORTED_TZ_STATE_SCHEMA_VERSION` (post-#542): a fresh-DB import
+ * would otherwise land at the state-010 column default of 1, and the
+ * reader gate (currently 2) would reject the imported row as
+ * "unfamiliar schema_version" until `applyTripitSegmentsToTzState`
+ * rewrote it on the next nightly `sync_tripit` run. The explicit
+ * bind keeps the JSON-import's row shape coherent with the writer
+ * gate from the moment it lands.
  *
  * `follow_me_tasks` UPSERT re-stamps `updated_at = CURRENT_TIMESTAMP`
  * in the conflict branch so a re-import shows up as a fresh row
@@ -4394,22 +4411,21 @@ function migrateTaskTzStateJsonFiles(): MigrationSummary {
   const groupFolders = listGroupFoldersForMigration();
   if (groupFolders.length === 0) return summary;
 
-  // tz_state UPSERT: writes `schema_version` explicitly so the
-  // backfilled row matches the reader gate
-  // (`SUPPORTED_TZ_STATE_SCHEMA_VERSION` = 2). Without the explicit
-  // value, a fresh-DB import would land at the state-010 column
-  // default of 1 — state-012's `UPDATE … WHERE id = 1` runs before
-  // this migration but is a no-op when the row doesn't yet exist, and
-  // every reader would then reject the imported row as "unfamiliar
-  // schema_version". `segments` stays NULL on import — the column
-  // gets populated on the next `sync_tripit` run via
-  // `applyTripitSegmentsToTzState`. CHECK(id=1) makes tz_state a true
-  // singleton — the second group's import updates the same row in
-  // place rather than landing id=2 (which would also fail loudly via
-  // the CHECK).
+  // tz_state UPSERT: writes `schema_version` explicitly via
+  // `SUPPORTED_TZ_STATE_SCHEMA_VERSION` so the backfilled row matches
+  // the reader gate. Without the explicit bind, a fresh-DB import
+  // would land at the state-010 column default of 1 — state-012's
+  // `UPDATE … WHERE id = 1` runs before this migration but is a
+  // no-op when the row doesn't yet exist, and every reader would
+  // then reject the imported row as "unfamiliar schema_version".
+  // `segments` stays NULL on import — the column gets populated on
+  // the next `sync_tripit` run via `applyTripitSegmentsToTzState`.
+  // CHECK(id=1) makes tz_state a true singleton — the second
+  // group's import updates the same row in place rather than landing
+  // id=2 (which would also fail loudly via the CHECK).
   const upsertTzState = db.prepare(
     `INSERT INTO tz_state (id, current_tz, home_tz, scheduler_tz, schema_version)
-     VALUES (1, ?, ?, ?, 2)
+     VALUES (1, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        current_tz     = excluded.current_tz,
        home_tz        = excluded.home_tz,
@@ -4560,7 +4576,12 @@ function migrateTaskTzStateJsonFiles(): MigrationSummary {
     };
     try {
       const importFile = db.transaction(() => {
-        const tzResult = upsertTzState.run(currentTz, homeTz, schedulerTz);
+        const tzResult = upsertTzState.run(
+          currentTz,
+          homeTz,
+          schedulerTz,
+          SUPPORTED_TZ_STATE_SCHEMA_VERSION,
+        );
         if (tzResult.changes > 0) {
           if (tzStateExistsBefore) counts.tz_state_refreshed++;
           else counts.tz_state_inserted++;

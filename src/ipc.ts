@@ -3263,17 +3263,16 @@ export async function processTaskIpc(
               // payload); a malformed stdout is logged and skipped —
               // the user's sync still succeeded from the upstream's
               // POV, and the next heartbeat advisory will reconcile
-              // current_tz once the cache is good.
+              // current_tz once the cache is good. Failures from the
+              // persistence helper itself (SqliteError, programming
+              // bugs) propagate per `coding-policy: error-handling`
+              // — they're separate from a parse failure and shouldn't
+              // be silently downgraded to a parse warning.
+              let parsed: { segments?: unknown } | null = null;
               try {
-                const parsed = JSON.parse(stdout) as {
-                  segments?: unknown;
-                };
-                const segments: TripitSegment[] = Array.isArray(parsed.segments)
-                  ? (parsed.segments as TripitSegment[])
-                  : [];
-                applyTripitSegmentsToTzState({ segments });
+                parsed = JSON.parse(stdout) as { segments?: unknown };
               } catch (parseErr) {
-                if (!(parseErr instanceof Error)) throw parseErr;
+                if (!(parseErr instanceof SyntaxError)) throw parseErr;
                 logger.warn(
                   {
                     sourceGroup,
@@ -3282,6 +3281,12 @@ export async function processTaskIpc(
                   },
                   'sync_tripit: stdout did not parse as JSON — segments not persisted (heartbeat advisory will recover on next good run)',
                 );
+              }
+              if (parsed !== null) {
+                const segments: TripitSegment[] = Array.isArray(parsed.segments)
+                  ? (parsed.segments as TripitSegment[])
+                  : [];
+                applyTripitSegmentsToTzState({ segments });
               }
               fs.writeFileSync(
                 resultPath,
