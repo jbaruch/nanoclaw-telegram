@@ -178,18 +178,22 @@ function computeEffectiveSkillBlocklistForSpawn(
   const sources = new Map<string, string>();
 
   const ingestSkillDir = (skillsRoot: string) => {
+    // Per `coding-policy: error-handling` the catches below are
+    // narrowed to ENOENT only. ENOENT on a skill source dir is
+    // expected — tile-without-skills, group without `<groupDir>/
+    // skills/` (no staging skills), or a SKILL.md missing on a
+    // non-skill subdir all hit ENOENT legitimately. Any other errno
+    // (EACCES, EIO, ENOTDIR, fs corruption) is operator-actionable
+    // drift the install loop's own per-tile checks below would also
+    // surface; let it propagate so the spawn fails loudly rather
+    // than silently under-including the closure and reintroducing
+    // the `Unknown skill` runtime failure the closure exists to
+    // prevent.
     let entries: string[];
     try {
       entries = fs.readdirSync(skillsRoot);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      // Non-ENOENT readdir failures (permission denied, fs corruption)
-      // surface to the install loop's own checks below. Best-effort
-      // pre-scan: log and continue with whatever we already gathered.
-      logger.warn(
-        { skillsRoot, err },
-        'skill-dep pre-scan: readdir failed, closure may under-include',
-      );
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
       return;
     }
     for (const skillDir of entries) {
@@ -197,7 +201,8 @@ function computeEffectiveSkillBlocklistForSpawn(
       let stat: fs.Stats;
       try {
         stat = fs.statSync(skillPath);
-      } catch {
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
         continue;
       }
       if (!stat.isDirectory()) continue;
@@ -205,17 +210,10 @@ function computeEffectiveSkillBlocklistForSpawn(
       try {
         sources.set(skillDir, fs.readFileSync(skillMdPath, 'utf8'));
       } catch (err) {
-        // Missing SKILL.md is normal for non-skill subdirs (rare but
-        // possible mid-install); other read failures (permission,
-        // partial copy) just mean we can't see this skill's
-        // references. Silently skip — the closure's worst case is
-        // an under-inclusion, which is the safe direction.
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-          logger.warn(
-            { skillMdPath, err },
-            'skill-dep pre-scan: SKILL.md read failed, skill omitted from closure',
-          );
-        }
+        // ENOENT on SKILL.md is normal for non-skill subdirs (rare
+        // but possible). Other errno propagates per the same
+        // rationale as readdir above.
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
       }
     }
   };
