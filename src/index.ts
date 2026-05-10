@@ -103,6 +103,10 @@ import {
 import { pruneOldContainerLogs } from './host-logs.js';
 import { startSessionCleanup } from './session-cleanup.js';
 import {
+  pruneSessionArtifacts,
+  resolveSessionArtifactRetentionConfig,
+} from './session-artifact-retention.js';
+import {
   extractSessionCommand,
   handleSessionCommand,
   isSessionCommandAllowed,
@@ -1809,6 +1813,39 @@ async function runAgent(
   const spawnStart = Date.now();
   const wasNukedDuringSpawn = (): boolean =>
     (nukeTimestamps[group.folder] ?? 0) >= spawnStart;
+
+  // Pre-resume artifact pruning (#538). Runs after spawnStart capture
+  // so nuke detection covers the retention sweep too — the sweep
+  // does local file I/O that's normally <100ms but a nuke landing
+  // in that window must still be detected by the post-completion
+  // handler.
+  if (sessionId) {
+    const retention = pruneSessionArtifacts({
+      dataDir: DATA_DIR,
+      groupFolder: group.folder,
+      sessionName: DEFAULT_SESSION_NAME,
+      sessionId,
+      config: resolveSessionArtifactRetentionConfig(),
+    });
+    if (
+      retention.imageBlocksReplaced > 0 ||
+      retention.toolResultRefsReplaced > 0 ||
+      retention.toolResultFilesDeleted > 0
+    ) {
+      logger.info(
+        {
+          group: group.name,
+          groupFolder: group.folder,
+          sessionId,
+          transcriptPath: retention.transcriptPath,
+          imageBlocksReplaced: retention.imageBlocksReplaced,
+          toolResultRefsReplaced: retention.toolResultRefsReplaced,
+          toolResultFilesDeleted: retention.toolResultFilesDeleted,
+        },
+        'session_artifact_retention_pruned',
+      );
+    }
+  }
 
   // Update tasks snapshot for container to read (filtered by group)
   const isTrusted = !!group.containerConfig?.trusted;
