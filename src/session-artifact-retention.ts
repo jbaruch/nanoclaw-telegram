@@ -191,21 +191,28 @@ function resolveToolResultRef(
   return resolved;
 }
 
-function shouldPruneFile(
+/**
+ * Single-syscall prunability check. Returns the file's size if it
+ * should be pruned, `null` otherwise. Returning the size lets the
+ * caller avoid a second `lstatSync` (which would race with deletion
+ * between the two calls and could throw — aborting the retention
+ * sweep and bubbling up to fail the container spawn).
+ */
+function prunableFileSize(
   filePath: string,
   config: SessionArtifactRetentionConfig,
   nowMs: number,
-): boolean {
+): number | null {
   let stat: fs.Stats;
   try {
     stat = fs.lstatSync(filePath);
   } catch {
-    return false;
+    return null;
   }
-  if (!stat.isFile() || stat.isSymbolicLink()) return false;
-  if (stat.size <= config.maxToolResultBytes) return false;
-  if (nowMs - stat.mtimeMs < config.minToolResultAgeMs) return false;
-  return true;
+  if (!stat.isFile() || stat.isSymbolicLink()) return null;
+  if (stat.size <= config.maxToolResultBytes) return null;
+  if (nowMs - stat.mtimeMs < config.minToolResultAgeMs) return null;
+  return stat.size;
 }
 
 function makeToolResultStub(filePath: string, size: number): string {
@@ -224,9 +231,10 @@ function mutateStringRefs(
     const prefixLen = match.length - ref.length;
     const prefix = match.slice(0, prefixLen);
     const filePath = resolveToolResultRef(projectDir, ref);
-    if (!filePath || !shouldPruneFile(filePath, config, nowMs)) return match;
+    if (!filePath) return match;
+    const size = prunableFileSize(filePath, config, nowMs);
+    if (size === null) return match;
 
-    const size = fs.lstatSync(filePath).size;
     filesToDelete.set(filePath, size);
     replaced++;
     return prefix + makeToolResultStub(filePath, size);
