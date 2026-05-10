@@ -121,7 +121,12 @@ function writeFakeTile(
     const skillDir = path.join(tileRoot, 'skills', skillName);
     fs.mkdirSync(skillDir, { recursive: true });
     for (const [fname, fcontent] of Object.entries(files)) {
-      fs.writeFileSync(path.join(skillDir, fname), fcontent);
+      // Filename may include a path prefix (e.g. `scripts/foo.py`) —
+      // mkdir the parent so the test can fixture nested layouts like
+      // `skills/<name>/scripts/<file>` without a separate helper.
+      const dst = path.join(skillDir, fname);
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.writeFileSync(dst, fcontent);
     }
   }
 }
@@ -178,8 +183,20 @@ describe('#337 maintenance blocklist filter', () => {
         'rule-block.md': '# block this rule',
       },
       {
-        'skill-keep': { 'SKILL.md': 'name: skill-keep\n' },
-        'skill-block': { 'SKILL.md': 'name: skill-block\n' },
+        'skill-keep': {
+          'SKILL.md': 'name: skill-keep\n',
+          'scripts/keep-helper.py': '#!/usr/bin/env python3\nprint("ok")\n',
+        },
+        'skill-block': {
+          'SKILL.md': 'name: skill-block\n',
+          // #544 — even though `skill-block` is in the maintenance
+          // blocklist, host MCP handlers (e.g. `mcp__nanoclaw__
+          // fetch_trakt_history`) consume scripts directly from
+          // `groups/<folder>/scripts/` independently of the agent
+          // context. The script must land regardless.
+          'scripts/blocked-helper.py':
+            '#!/usr/bin/env python3\nprint("still needed")\n',
+        },
       },
     );
     writeFakeTile(
@@ -336,5 +353,54 @@ describe('#337 maintenance blocklist filter', () => {
     expect(filterCalls).toHaveLength(1);
     const payload = filterCalls[0].payload as { filteredSkills: string[] };
     expect(payload.filteredSkills).toContain('nanoclaw-core/skill-block');
+  });
+
+  it('#544 — blocklisted skill scripts still land in `groups/<folder>/scripts/` (host MCP path)', async () => {
+    // Pre-#544 the blocklist filter at `container-runner.ts` excluded
+    // BOTH the agent-context skill copies (intended) AND the
+    // `copyTileScriptsToFlatDir` call (unintended). When
+    // `entertainment-sync` Step 1 then called
+    // `mcp__nanoclaw__fetch_trakt_history()`, the host IPC handler in
+    // `src/ipc.ts` looked up `groups/<folder>/scripts/trakt-watch-
+    // history.py` and got ENOENT — entertainment-sync surfaced
+    // "trakt-watch-history.py not found" and stopped. The agent
+    // context cost of a script file is zero (scripts aren't loaded
+    // into the SDK's prompt surface), so excluding them was purely
+    // accidental.
+    //
+    // Post-#544 scripts publish unconditionally to the per-group
+    // `scripts/` dir even when the owning skill's prompt is
+    // blocklisted. Keep verifying the agent-context paths are still
+    // filtered (the prior test in this file covers that side).
+    ruleBlocklist = new Set();
+    skillBlocklist = new Set(['skill-block']);
+    const { buildVolumeMounts } = await importSUT();
+    const group = makeGroup('test-maint-scripts');
+    buildVolumeMounts(group, false, jidFor(group.folder), 'maintenance');
+
+    // The atomic-publish flow at `container-runner.ts:1821+` writes
+    // through a `scripts.version.<id>` directory, then symlinks
+    // `groups/<folder>/scripts` → that version. Resolve the symlink
+    // so the assertions land on the actual filesystem entries.
+    const groupScriptsLink = path.join(
+      groupsDir,
+      'test-maint-scripts',
+      'scripts',
+    );
+    expect(fs.existsSync(groupScriptsLink)).toBe(true);
+    const resolved = fs.realpathSync(groupScriptsLink);
+
+    // Both scripts must be present — the keep-skill's because it's
+    // not blocklisted (sanity), and the block-skill's because the
+    // unconditional copy is the load-bearing fix.
+    expect(fs.existsSync(path.join(resolved, 'keep-helper.py'))).toBe(true);
+    expect(fs.existsSync(path.join(resolved, 'blocked-helper.py'))).toBe(true);
+
+    // Round-trip the blocked script's content so a hypothetical
+    // future regression that copies the parent dir but truncates
+    // the file (e.g. a partial write) still trips.
+    expect(
+      fs.readFileSync(path.join(resolved, 'blocked-helper.py'), 'utf8'),
+    ).toContain('still needed');
   });
 });

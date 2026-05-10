@@ -1768,6 +1768,25 @@ export function buildVolumeMounts(
         for (const skillDir of fs.readdirSync(tileSkillsDir)) {
           const skillSrcDir = path.join(tileSkillsDir, skillDir);
           if (!fs.statSync(skillSrcDir).isDirectory()) continue;
+          // #544 — `scripts/` is published to `groups/<folder>/scripts/`
+          // and consumed by host MCP handlers (`mcp__nanoclaw__*`)
+          // independently of the agent context. Even when a skill's
+          // SKILL.md is blocklisted (excluded from the agent's loaded
+          // tile context to save tokens), OTHER non-blocklisted
+          // skills can still trigger host operations that look up
+          // scripts from this dir — e.g. `entertainment-sync`'s Step 1
+          // calls `mcp__nanoclaw__fetch_trakt_history()`, whose host
+          // handler in `src/ipc.ts` reads
+          // `groups/<sourceGroup>/scripts/trakt-watch-history.py`.
+          // Scripts don't consume agent context (they're not in the
+          // SKILL.md surface the SDK loads), so excluding them along
+          // with the prompt is purely accidental. Copy
+          // unconditionally; only the prompt-context copies below
+          // honour the blocklist.
+          copyTileScriptsToFlatDir(
+            path.join(skillSrcDir, 'scripts'),
+            tmpScriptsDir,
+          );
           if (skillBlocklist?.has(skillDir)) {
             filteredSkills.push(`${tileName}/${skillDir}`);
             continue;
@@ -1778,14 +1797,6 @@ export function buildVolumeMounts(
           fs.cpSync(skillSrcDir, path.join(skillsDst, `tessl__${skillDir}`), {
             recursive: true,
           });
-          // Copy bundled scripts into the tmp scripts dir; swap happens below,
-          // after all tiles' skills are processed. Scripts at this path are
-          // used by named host operations and referenced from skills as
-          // `/workspace/group/scripts/<name>`.
-          copyTileScriptsToFlatDir(
-            path.join(skillSrcDir, 'scripts'),
-            tmpScriptsDir,
-          );
         }
       }
     }
