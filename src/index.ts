@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 
+import { SqliteError } from 'better-sqlite3';
+
 import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
@@ -3291,14 +3293,25 @@ async function main(): Promise<void> {
     try {
       flip = runTzHeartbeatAdvisory();
     } catch (err) {
-      // Per `coding-policy: error-handling`: narrow to Error so
-      // non-Error throws (a programming bug) propagate. The DB read
-      // is the only realistic failure mode here — fall back to
-      // "skip this tick" rather than tear the orchestrator down.
-      if (!(err instanceof Error)) throw err;
+      // Narrowed to `SqliteError`: the only realistic recoverable
+      // failure on the heartbeat advisory's DB-read path
+      // (SQLITE_BUSY under WAL contention with the orchestrator's
+      // own writers, or a transient SQLITE_CORRUPT during a hot
+      // backup). Anything else (TypeError from a programming bug,
+      // a non-Error throw, an unexpected value) propagates per
+      // `coding-policy: error-handling`'s "let unexpected
+      // propagate" — there is no outer-boundary contract here that
+      // would silently misroute on uncaught propagation; a
+      // crashing orchestrator gets restarted by the host service
+      // manager and the next tick fires after the next 30-min
+      // boundary. The malformed-JSON case is handled inside
+      // `runTzHeartbeatAdvisory` (narrowed `SyntaxError`) and
+      // returns null rather than throwing, so the only thing that
+      // reaches this catch is a real DB-side failure.
+      if (!(err instanceof SqliteError)) throw err;
       logger.warn(
-        { err: err.message },
-        'tz heartbeat advisory failed — will retry on next 30-min tick',
+        { err: err.message, code: err.code },
+        'tz heartbeat advisory: SqliteError on read — will retry on next 30-min tick',
       );
       return;
     }
@@ -3316,15 +3329,18 @@ async function main(): Promise<void> {
     }
     const mainChannel = findChannel(channels, mainJid);
     if (!mainChannel || !mainChannel.isConnected()) return;
-    mainChannel
-      .sendMessage(mainJid, `📍 Timezone changed: ${flip.prev} → ${flip.next}`)
-      .catch((err: unknown) => {
-        if (!(err instanceof Error)) return;
-        logger.warn(
-          { err: err.message, prev: flip.prev, next: flip.next },
-          'tz heartbeat advisory: chat notify failed (DB row already updated)',
-        );
-      });
+    // Fire-and-forget chat notify: matches the existing circuit-
+    // breaker notification pattern at the top of `processGroup`. The
+    // DB row already reflects the flip, so a chat-send failure
+    // means "user doesn't see the message this tick" — non-fatal;
+    // the next 30-min tick will not re-notify because the second
+    // walk produces `next === current_tz` (the flip already
+    // committed). Any rejection surfaces as an unhandled-rejection
+    // warning, which the orchestrator's process supervisor logs.
+    void mainChannel.sendMessage(
+      mainJid,
+      `📍 Timezone changed: ${flip.prev} → ${flip.next}`,
+    );
   }, TZ_HEARTBEAT_INTERVAL_MS).unref();
 
   startMessageLoop().catch((err) => {
