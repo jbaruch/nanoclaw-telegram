@@ -21,6 +21,21 @@ export interface SessionArtifactRetentionResult {
 const DEFAULT_MAX_TOOL_RESULT_BYTES = 64 * 1024;
 const DEFAULT_MIN_TOOL_RESULT_AGE_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_KEEP_RECENT_IMAGES = 2;
+
+/**
+ * Type guard for the only kind of error every fs call in this module
+ * is expected to throw — `NodeJS.ErrnoException` (errno-tagged Error
+ * with a string `.code`). Catch blocks below filter on this and
+ * rethrow anything else so programming bugs don't get silently
+ * swallowed by the retention sweep, per
+ * `jbaruch/coding-policy: error-handling`.
+ */
+function isErrno(err: unknown): err is NodeJS.ErrnoException {
+  return (
+    err instanceof Error &&
+    typeof (err as NodeJS.ErrnoException).code === 'string'
+  );
+}
 // Candidate matcher only. Every match is re-resolved and constrained under
 // `<projectDir>/tool-results/` by resolveToolResultRef before any rewrite or
 // unlink happens, so incidental text outside that directory is ignored.
@@ -95,7 +110,8 @@ function findTranscriptPath(
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(projectsDir, { withFileTypes: true });
-  } catch {
+  } catch (err) {
+    if (!isErrno(err)) throw err;
     return null;
   }
   for (const entry of entries) {
@@ -206,7 +222,8 @@ function prunableFileSize(
   let stat: fs.Stats;
   try {
     stat = fs.lstatSync(filePath);
-  } catch {
+  } catch (err) {
+    if (!isErrno(err)) throw err;
     return null;
   }
   if (!stat.isFile() || stat.isSymbolicLink()) return null;
@@ -328,7 +345,8 @@ export function pruneSessionArtifacts(options: {
   let raw: string;
   try {
     raw = fs.readFileSync(transcriptPath, 'utf8');
-  } catch {
+  } catch (err) {
+    if (!isErrno(err)) throw err;
     return result;
   }
   if (!raw.trim()) return result;
@@ -346,6 +364,7 @@ export function pruneSessionArtifacts(options: {
       totalImages += countImageBlocks(parsed);
       parsedLines.push(parsed);
     } catch (err) {
+      if (!(err instanceof SyntaxError)) throw err;
       logger.warn(
         { transcriptPath, lineIndex, err },
         'session_artifact_retention_parse_failed',
@@ -398,11 +417,17 @@ export function pruneSessionArtifacts(options: {
   try {
     fs.writeFileSync(tmp, rewritten, 'utf8');
     fs.renameSync(tmp, transcriptPath);
-  } catch {
+  } catch (err) {
+    if (!isErrno(err)) throw err;
+    // Atomic-rewrite failed (ENOSPC / EACCES / EROFS / EIO etc.).
+    // Bail out cleanly without mutating the transcript; the original
+    // file is intact since renameSync is atomic.
     try {
       fs.rmSync(tmp, { force: true });
-    } catch {
-      // best effort cleanup only
+    } catch (cleanupErr) {
+      if (!isErrno(cleanupErr)) throw cleanupErr;
+      // Tempfile cleanup is best-effort; the transcript was never
+      // overwritten so a leaked .tmp.<pid> file is just disk noise.
     }
     return emptyResult(transcriptPath);
   }
@@ -411,7 +436,8 @@ export function pruneSessionArtifacts(options: {
     try {
       fs.unlinkSync(filePath);
       result.toolResultFilesDeleted++;
-    } catch {
+    } catch (err) {
+      if (!isErrno(err)) throw err;
       // The transcript now contains a stub, so a failed unlink is only a
       // disk-space concern; never fail the container spawn because of it.
     }
