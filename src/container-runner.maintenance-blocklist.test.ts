@@ -403,4 +403,127 @@ describe('#337 maintenance blocklist filter', () => {
       fs.readFileSync(path.join(resolved, 'blocked-helper.py'), 'utf8'),
     ).toContain('still needed');
   });
+
+  it('#544b — blocklisted skill referenced via `Skill()` from a loaded skill is exempted (wiki-lint → wiki)', async () => {
+    // Reference incident: 2026-05-10 wiki-lint biweekly fire failed
+    // with "Unknown skill: wiki" — wiki was in the blocklist, but
+    // wiki-lint (not blocklisted) invokes `Skill(skill: "wiki")`
+    // from its SKILL.md. The agent loaded wiki-lint's prompt, tried
+    // to invoke wiki, and the SDK couldn't resolve the name because
+    // wiki's prompt wasn't in the maintenance container's
+    // `.claude/skills/wiki/` directory.
+    //
+    // Post-#544b the install loop pre-scans every loaded skill's
+    // SKILL.md for `Skill(skill: "...")` references and exempts the
+    // referenced skills from the blocklist for that spawn. The
+    // wiki-lint → wiki edge specifically is the load-bearing case
+    // here.
+    ruleBlocklist = new Set();
+    // wiki-lint stays loaded; the closure must rescue wiki because
+    // it's referenced from wiki-lint.
+    skillBlocklist = new Set(['wiki']);
+
+    // Replace the default fixture with the wiki-lint / wiki shape so
+    // the install loop walks the actual reference graph this test
+    // cares about.
+    fs.rmSync(path.join(registryRoot, 'tiles', 'test', 'nanoclaw-core'), {
+      recursive: true,
+    });
+    writeFakeTile(
+      'nanoclaw-core',
+      {},
+      {
+        'wiki-lint': {
+          'SKILL.md': '# wiki-lint\n\n`Skill(skill: "wiki")`\n',
+        },
+        wiki: {
+          'SKILL.md': '# wiki\n\nThe blocklisted skill rescued via closure.\n',
+        },
+      },
+    );
+
+    const { buildVolumeMounts } = await importSUT();
+    const group = makeGroup('test-maint-deps');
+    buildVolumeMounts(group, false, jidFor(group.folder), 'maintenance');
+
+    const flatSkillsDst = path.join(
+      dataDir,
+      'sessions',
+      'test-maint-deps',
+      'maintenance',
+      '.claude',
+      'skills',
+    );
+    // wiki-lint's prompt is loaded (it's the root).
+    expect(fs.existsSync(path.join(flatSkillsDst, 'tessl__wiki-lint'))).toBe(
+      true,
+    );
+    // Pre-#544b: this assertion would fail (wiki dropped because
+    // it's in the blocklist). Post-#544b: the closure exempts wiki,
+    // so the install loop copies it alongside wiki-lint.
+    expect(fs.existsSync(path.join(flatSkillsDst, 'tessl__wiki'))).toBe(true);
+
+    // No `install_blocklist_filtered` log entry should claim wiki
+    // was filtered — the effective blocklist for this spawn was
+    // empty (wiki rescued via closure).
+    const filterCalls = loggerCalls.filter(
+      (c) => c.msg === 'install_blocklist_filtered',
+    );
+    if (filterCalls.length > 0) {
+      const payload = filterCalls[0].payload as { filteredSkills: string[] };
+      expect(payload.filteredSkills).not.toContain('nanoclaw-core/wiki');
+    }
+  });
+
+  it('#544b — blocklisted skill NOT referenced from any loaded skill stays blocked', async () => {
+    // Negative case for the closure: a skill in the blocklist that
+    // isn't reachable from any loaded skill should remain blocked.
+    // Without this guard the closure would be useless (every
+    // blocklisted skill would round-trip through the closure as
+    // "exempted by accident").
+    ruleBlocklist = new Set();
+    skillBlocklist = new Set(['orphan-blocked']);
+
+    fs.rmSync(path.join(registryRoot, 'tiles', 'test', 'nanoclaw-core'), {
+      recursive: true,
+    });
+    writeFakeTile(
+      'nanoclaw-core',
+      {},
+      {
+        'live-leaf': {
+          'SKILL.md': '# live-leaf\n\nNo nested invocations.\n',
+        },
+        'orphan-blocked': {
+          'SKILL.md': '# orphan-blocked\n\nNot referenced anywhere.\n',
+        },
+      },
+    );
+
+    const { buildVolumeMounts } = await importSUT();
+    const group = makeGroup('test-maint-orphan');
+    buildVolumeMounts(group, false, jidFor(group.folder), 'maintenance');
+
+    const flatSkillsDst = path.join(
+      dataDir,
+      'sessions',
+      'test-maint-orphan',
+      'maintenance',
+      '.claude',
+      'skills',
+    );
+    expect(fs.existsSync(path.join(flatSkillsDst, 'tessl__live-leaf'))).toBe(
+      true,
+    );
+    expect(
+      fs.existsSync(path.join(flatSkillsDst, 'tessl__orphan-blocked')),
+    ).toBe(false);
+
+    const filterCalls = loggerCalls.filter(
+      (c) => c.msg === 'install_blocklist_filtered',
+    );
+    expect(filterCalls).toHaveLength(1);
+    const payload = filterCalls[0].payload as { filteredSkills: string[] };
+    expect(payload.filteredSkills).toContain('nanoclaw-core/orphan-blocked');
+  });
 });

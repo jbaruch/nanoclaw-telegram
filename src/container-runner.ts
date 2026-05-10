@@ -39,6 +39,7 @@ import {
   stripAnsi,
 } from './host-logs.js';
 import { logger } from './logger.js';
+import { computeEffectiveBlocklist } from './skill-dep-closure.js';
 import { onAgentLine } from './observer.js';
 import {
   CONTAINER_HOST_GATEWAY,
@@ -144,6 +145,88 @@ export function getInstalledTiles(): string[] | null {
     .filter((e) => e.isDirectory())
     .map((e) => e.name)
     .sort();
+}
+
+/**
+ * #544b — pre-scan helper for the maintenance skill blocklist.
+ *
+ * Walks the same three skill source directories the install loop
+ * below visits — tile skills under each `tilesToInstall[i]/skills/`,
+ * built-in skills under `<cwd>/container/skills/`, and AyeAye-staged
+ * skills under `<groupDir>/skills/` — collecting every present
+ * `SKILL.md`'s text content. Then runs `computeEffectiveBlocklist`
+ * to walk the transitive `Skill(skill: "...")` reference graph from
+ * every non-blocklisted skill and exempt anything reachable.
+ *
+ * Returns a fresh set; the input `originalBlocklist` is not mutated.
+ *
+ * Failure modes are silent (best-effort): a missing source dir, a
+ * skill subdir without a SKILL.md, or an unreadable file all
+ * collapse to "this skill contributes no references" — the closure
+ * skips that node, the install loop's existing per-tile / per-skill
+ * checks below still surface real layout problems. The closure can
+ * never produce a more-restrictive blocklist than the input, so a
+ * pre-scan miss is always a safe failure: the original blocklist is
+ * the worst-case applied filter.
+ */
+function computeEffectiveSkillBlocklistForSpawn(
+  originalBlocklist: ReadonlySet<string>,
+  tilesToInstall: readonly string[],
+  registryTiles: string,
+  groupDir: string,
+): Set<string> {
+  const sources = new Map<string, string>();
+
+  const ingestSkillDir = (skillsRoot: string) => {
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(skillsRoot);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+      // Non-ENOENT readdir failures (permission denied, fs corruption)
+      // surface to the install loop's own checks below. Best-effort
+      // pre-scan: log and continue with whatever we already gathered.
+      logger.warn(
+        { skillsRoot, err },
+        'skill-dep pre-scan: readdir failed, closure may under-include',
+      );
+      return;
+    }
+    for (const skillDir of entries) {
+      const skillPath = path.join(skillsRoot, skillDir);
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(skillPath);
+      } catch {
+        continue;
+      }
+      if (!stat.isDirectory()) continue;
+      const skillMdPath = path.join(skillPath, 'SKILL.md');
+      try {
+        sources.set(skillDir, fs.readFileSync(skillMdPath, 'utf8'));
+      } catch (err) {
+        // Missing SKILL.md is normal for non-skill subdirs (rare but
+        // possible mid-install); other read failures (permission,
+        // partial copy) just mean we can't see this skill's
+        // references. Silently skip — the closure's worst case is
+        // an under-inclusion, which is the safe direction.
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          logger.warn(
+            { skillMdPath, err },
+            'skill-dep pre-scan: SKILL.md read failed, skill omitted from closure',
+          );
+        }
+      }
+    }
+  };
+
+  for (const tileName of tilesToInstall) {
+    ingestSkillDir(path.join(registryTiles, tileName, 'skills'));
+  }
+  ingestSkillDir(path.join(process.cwd(), 'container', 'skills'));
+  ingestSkillDir(path.join(groupDir, 'skills'));
+
+  return computeEffectiveBlocklist(originalBlocklist, sources);
 }
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -1708,7 +1791,25 @@ export function buildVolumeMounts(
   // single emitted log line aggregates filtered names across all three.
   const isMaintenance = sessionName === MAINTENANCE_SESSION_NAME;
   const ruleBlocklist = isMaintenance ? MAINTENANCE_RULE_BLOCKLIST : null;
-  const skillBlocklist = isMaintenance ? MAINTENANCE_SKILL_BLOCKLIST : null;
+  // #544b — compute the EFFECTIVE skill blocklist by walking the
+  // transitive `Skill(skill: "...")` reference graph from every
+  // non-blocklisted skill. Anything reachable from a loaded skill
+  // gets exempted so nested invocations resolve at agent runtime.
+  // Reference incident: 2026-05-10 wiki-lint (root) failed with
+  // "Unknown skill: wiki" because wiki was blocklisted but invoked
+  // from wiki-lint's SKILL.md. The pre-scan walks the same three
+  // skill sources the install loop below visits (tile skills,
+  // built-in skills, staging skills) so the closure sees the full
+  // graph the agent will actually load. Default-session spawns skip
+  // the work entirely (no blocklist to adjust).
+  const skillBlocklist = isMaintenance
+    ? computeEffectiveSkillBlocklistForSpawn(
+        MAINTENANCE_SKILL_BLOCKLIST,
+        tilesToInstall,
+        registryTiles,
+        groupDir,
+      )
+    : null;
   const filteredRules: string[] = [];
   const filteredSkills: string[] = [];
 
