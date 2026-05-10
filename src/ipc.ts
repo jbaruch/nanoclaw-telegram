@@ -27,6 +27,7 @@ import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
 import { hostLogsOrchestratorFile } from './host-logs.js';
 import { findGateDecisions, readHostLog } from './host-log-parser.js';
 import {
+  applyTripitSegmentsToTzState,
   createTask,
   deleteAllSessions,
   deleteTask,
@@ -37,6 +38,7 @@ import {
   getTasksForGroup,
   storeMessage,
   updateTask,
+  type TripitSegment,
 } from './db.js';
 import type { ContainerStatus } from './group-queue.js';
 import { isValidGroupFolder } from './group-folder.js';
@@ -3252,6 +3254,35 @@ export async function processTaskIpc(
                 { sourceGroup, stdoutLen: stdout.length },
                 'sync_tripit completed',
               );
+              // #542 — Persist `segments[]` onto the singleton
+              // `tz_state` row before writing the script-result file
+              // so the agent caller's response and the host's
+              // tz_state row are coherent on the same wall-clock
+              // tick. The script invokes `node sync.mjs --output=json`
+              // (silences regular `console.log`, emits a single JSON
+              // payload); a malformed stdout is logged and skipped —
+              // the user's sync still succeeded from the upstream's
+              // POV, and the next heartbeat advisory will reconcile
+              // current_tz once the cache is good.
+              try {
+                const parsed = JSON.parse(stdout) as {
+                  segments?: unknown;
+                };
+                const segments: TripitSegment[] = Array.isArray(parsed.segments)
+                  ? (parsed.segments as TripitSegment[])
+                  : [];
+                applyTripitSegmentsToTzState({ segments });
+              } catch (parseErr) {
+                if (!(parseErr instanceof Error)) throw parseErr;
+                logger.warn(
+                  {
+                    sourceGroup,
+                    err: parseErr.message,
+                    stdoutHead: stdout.slice(0, 200),
+                  },
+                  'sync_tripit: stdout did not parse as JSON — segments not persisted (heartbeat advisory will recover on next good run)',
+                );
+              }
               fs.writeFileSync(
                 resultPath,
                 JSON.stringify({ stdout, stderr: stderr || undefined }),

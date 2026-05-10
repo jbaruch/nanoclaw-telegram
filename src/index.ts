@@ -67,6 +67,7 @@ import {
   getTaskById,
   markSessionForReset,
   recordSessionTurn,
+  runTzHeartbeatAdvisory,
   createTask,
   deleteTask,
   getNewMessages,
@@ -3275,6 +3276,56 @@ async function main(): Promise<void> {
       },
     );
   }, 900_000);
+
+  // #542 — Heartbeat advisory walker. Re-walks the cached
+  // `tz_state.segments` timeline every 30 min so a `from`/`to`
+  // segment boundary crossing flips `current_tz` mid-day without
+  // waiting for the next nightly `sync_tripit` run. Silent skip on
+  // every path where there's nothing to do (no row, no segments,
+  // computed tz matches current_tz, malformed cache); on flip,
+  // notify the main group via its channel so the user sees the
+  // change (matches the circuit-breaker notify pattern).
+  const TZ_HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000;
+  setInterval(() => {
+    let flip: { prev: string; next: string } | null;
+    try {
+      flip = runTzHeartbeatAdvisory();
+    } catch (err) {
+      // Per `coding-policy: error-handling`: narrow to Error so
+      // non-Error throws (a programming bug) propagate. The DB read
+      // is the only realistic failure mode here — fall back to
+      // "skip this tick" rather than tear the orchestrator down.
+      if (!(err instanceof Error)) throw err;
+      logger.warn(
+        { err: err.message },
+        'tz heartbeat advisory failed — will retry on next 30-min tick',
+      );
+      return;
+    }
+    if (!flip) return;
+    const mainJid = Object.keys(registeredGroups).find(
+      (jid) => registeredGroups[jid].isMain,
+    );
+    if (!mainJid) {
+      // No main group registered — the flip already landed on the
+      // DB row; the next time a main group is registered, the user
+      // will see the right `current_tz` without a separate
+      // notification. Skipping the chat send here is the right
+      // failure mode (chat delivery would have nothing to target).
+      return;
+    }
+    const mainChannel = findChannel(channels, mainJid);
+    if (!mainChannel || !mainChannel.isConnected()) return;
+    mainChannel
+      .sendMessage(mainJid, `📍 Timezone changed: ${flip.prev} → ${flip.next}`)
+      .catch((err: unknown) => {
+        if (!(err instanceof Error)) return;
+        logger.warn(
+          { err: err.message, prev: flip.prev, next: flip.next },
+          'tz heartbeat advisory: chat notify failed (DB row already updated)',
+        );
+      });
+  }, TZ_HEARTBEAT_INTERVAL_MS).unref();
 
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');

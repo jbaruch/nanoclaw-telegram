@@ -8,6 +8,7 @@ import {
   _runCreateSchemaForTests,
   _seedTzStateForTests,
   _writeRawRegisteredGroup,
+  applyTripitSegmentsToTzState,
   createTask,
   logTaskRun,
   getCurrentTz,
@@ -26,11 +27,13 @@ import {
   getTaskById,
   getTriggerPatterns,
   messageExistsInDifferentChat,
+  runTzHeartbeatAdvisory,
   setRegisteredGroup,
   setTriggerPatterns,
   storeChatMetadata,
   storeMessage,
   updateTask,
+  walkTzSegments,
 } from './db.js';
 import type { TriggerPatternConfig } from './types.js';
 import { formatMessages } from './router.js';
@@ -1677,23 +1680,422 @@ describe('getCurrentTz (#456)', () => {
   });
 
   it('returns current_tz when seeded with supported schema_version', () => {
-    _seedTzStateForTests({ currentTz: 'America/Chicago', schemaVersion: 1 });
+    _seedTzStateForTests({ currentTz: 'America/Chicago', schemaVersion: 2 });
     expect(getCurrentTz()).toBe('America/Chicago');
   });
 
   it('reflects updates without staleness across calls', () => {
-    _seedTzStateForTests({ currentTz: 'America/Chicago', schemaVersion: 1 });
+    _seedTzStateForTests({ currentTz: 'America/Chicago', schemaVersion: 2 });
     expect(getCurrentTz()).toBe('America/Chicago');
-    _seedTzStateForTests({ currentTz: 'Europe/Amsterdam', schemaVersion: 1 });
+    _seedTzStateForTests({ currentTz: 'Europe/Amsterdam', schemaVersion: 2 });
     expect(getCurrentTz()).toBe('Europe/Amsterdam');
   });
 
   it('returns null and warns on unfamiliar schema_version', () => {
-    _seedTzStateForTests({ currentTz: 'America/Chicago', schemaVersion: 2 });
+    // Bumped past the supported gate (2 post-#542) — any future
+    // state-NNN that reshapes `tz_state` must lock-step the gate to
+    // match.
+    _seedTzStateForTests({ currentTz: 'America/Chicago', schemaVersion: 3 });
     // Reader contract per `coding-policy: stateful-artifacts`: unfamiliar
     // schema_version means "no usable prior state" — fall back rather
     // than guess at the new shape.
     expect(getCurrentTz()).toBeNull();
+  });
+});
+
+describe('walkTzSegments (#542)', () => {
+  // Pure walker; no DB seeding required. Date-only YYYY-MM-DD format
+  // matches the upstream `lib/tripit.mjs::formatDate` output exactly,
+  // so lex compare === date compare.
+  const HOME = 'America/Chicago';
+
+  it('returns home_tz on null / undefined / empty segments', () => {
+    expect(walkTzSegments(null, new Date('2026-05-15T12:00:00Z'), HOME)).toBe(
+      HOME,
+    );
+    expect(
+      walkTzSegments(undefined, new Date('2026-05-15T12:00:00Z'), HOME),
+    ).toBe(HOME);
+    expect(walkTzSegments([], new Date('2026-05-15T12:00:00Z'), HOME)).toBe(
+      HOME,
+    );
+  });
+
+  it('returns the covering segment timezone when from <= today < to', () => {
+    const segments = [
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-12',
+        to: '2026-05-19',
+        label: 'Devoxx UK 2026 - London',
+      },
+    ];
+    expect(
+      walkTzSegments(segments, new Date('2026-05-15T12:00:00Z'), HOME),
+    ).toBe('Europe/Berlin');
+  });
+
+  it('falls back to home_tz on the gap between trips', () => {
+    const segments = [
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-12',
+        to: '2026-05-19',
+        label: 'one',
+      },
+      {
+        timezone: 'America/New_York',
+        from: '2026-06-03',
+        to: '2026-06-08',
+        label: 'two',
+      },
+    ];
+    // 2026-05-25 is in the gap between the two trips.
+    expect(
+      walkTzSegments(segments, new Date('2026-05-25T12:00:00Z'), HOME),
+    ).toBe(HOME);
+  });
+
+  it('treats `to === todayUtc` as past the segment (segment ended today)', () => {
+    // The match rule is `from <= today < to` — strict inequality on
+    // the right edge. A traveler whose return-flight day is today
+    // should already see `home_tz`, not the destination zone they're
+    // about to leave.
+    const segments = [
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-12',
+        to: '2026-05-19',
+        label: 'one',
+      },
+    ];
+    expect(
+      walkTzSegments(segments, new Date('2026-05-19T00:00:00Z'), HOME),
+    ).toBe(HOME);
+  });
+
+  it('skips segments with empty / non-string timezone', () => {
+    const segments = [
+      {
+        timezone: '',
+        from: '2026-05-12',
+        to: '2026-05-19',
+        label: 'malformed',
+      },
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-12',
+        to: '2026-05-19',
+        label: 'real',
+      },
+    ];
+    expect(
+      walkTzSegments(segments, new Date('2026-05-15T12:00:00Z'), HOME),
+    ).toBe('Europe/Berlin');
+  });
+
+  it('first match wins on overlapping segments', () => {
+    const segments = [
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-12',
+        to: '2026-05-19',
+        label: 'one',
+      },
+      {
+        timezone: 'Europe/Amsterdam',
+        from: '2026-05-15',
+        to: '2026-05-20',
+        label: 'overlap',
+      },
+    ];
+    expect(
+      walkTzSegments(segments, new Date('2026-05-16T12:00:00Z'), HOME),
+    ).toBe('Europe/Berlin');
+  });
+
+  it('returns home_tz before the first segment starts', () => {
+    const segments = [
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-06-12',
+        to: '2026-06-19',
+        label: 'future trip',
+      },
+    ];
+    expect(
+      walkTzSegments(segments, new Date('2026-05-15T12:00:00Z'), HOME),
+    ).toBe(HOME);
+  });
+});
+
+describe('applyTripitSegmentsToTzState (#542)', () => {
+  it('returns prev=null,next=null,changed=false when row is missing', () => {
+    // No tz_state row seeded — home_tz isn't derivable from the TripIt
+    // payload, so the helper logs and exits without writing.
+    const result = applyTripitSegmentsToTzState(
+      {
+        segments: [
+          {
+            timezone: 'Europe/Berlin',
+            from: '2026-05-12',
+            to: '2026-05-19',
+          },
+        ],
+      },
+      new Date('2026-05-15T12:00:00Z'),
+    );
+    expect(result).toEqual({ prev: null, next: null, changed: false });
+  });
+
+  it('writes computed current_tz + segments JSON and returns changed=true on flip', () => {
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      schemaVersion: 2,
+    });
+    const segments = [
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-12',
+        to: '2026-05-19',
+        label: 'Devoxx',
+      },
+    ];
+    const result = applyTripitSegmentsToTzState(
+      { segments },
+      new Date('2026-05-15T12:00:00Z'),
+    );
+    expect(result).toEqual({
+      prev: 'America/Chicago',
+      next: 'Europe/Berlin',
+      changed: true,
+    });
+    expect(getCurrentTz()).toBe('Europe/Berlin');
+    const stored = _rawQueryForTests<{ segments: string }>(
+      'SELECT segments FROM tz_state WHERE id = 1',
+    )[0];
+    expect(JSON.parse(stored!.segments)).toEqual(segments);
+  });
+
+  it('returns changed=false when the computed zone matches the prior current_tz', () => {
+    _seedTzStateForTests({
+      currentTz: 'Europe/Berlin',
+      homeTz: 'America/Chicago',
+      schemaVersion: 2,
+    });
+    const segments = [
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-12',
+        to: '2026-05-19',
+      },
+    ];
+    const result = applyTripitSegmentsToTzState(
+      { segments },
+      new Date('2026-05-15T12:00:00Z'),
+    );
+    expect(result.changed).toBe(false);
+    expect(result.prev).toBe('Europe/Berlin');
+    expect(result.next).toBe('Europe/Berlin');
+  });
+
+  it('writes home_tz on gap day and stores the segments timeline regardless', () => {
+    _seedTzStateForTests({
+      currentTz: 'Europe/Berlin',
+      homeTz: 'America/Chicago',
+      schemaVersion: 2,
+    });
+    const segments = [
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-12',
+        to: '2026-05-19',
+      },
+    ];
+    // 2026-05-25 is past the segment's `to`, so the walker falls back
+    // to `home_tz` — current_tz flips back from Berlin to Chicago.
+    const result = applyTripitSegmentsToTzState(
+      { segments },
+      new Date('2026-05-25T12:00:00Z'),
+    );
+    expect(result).toEqual({
+      prev: 'Europe/Berlin',
+      next: 'America/Chicago',
+      changed: true,
+    });
+    const stored = _rawQueryForTests<{
+      current_tz: string;
+      segments: string;
+      schema_version: number;
+    }>(
+      'SELECT current_tz, segments, schema_version FROM tz_state WHERE id = 1',
+    )[0];
+    expect(stored!.current_tz).toBe('America/Chicago');
+    expect(stored!.schema_version).toBe(2);
+    expect(JSON.parse(stored!.segments)).toEqual(segments);
+  });
+
+  it('treats null / non-array stdoutJson.segments as an empty timeline (falls back to home_tz)', () => {
+    _seedTzStateForTests({
+      currentTz: 'Europe/Berlin',
+      homeTz: 'America/Chicago',
+      schemaVersion: 2,
+    });
+    const result = applyTripitSegmentsToTzState(
+      { segments: null },
+      new Date('2026-05-15T12:00:00Z'),
+    );
+    expect(result.next).toBe('America/Chicago');
+    expect(result.changed).toBe(true);
+    const stored = _rawQueryForTests<{ segments: string }>(
+      'SELECT segments FROM tz_state WHERE id = 1',
+    )[0];
+    expect(stored!.segments).toBe('[]');
+  });
+
+  it('preserves home_tz and scheduler_tz across the write', () => {
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      schedulerTz: 'America/Chicago',
+      schemaVersion: 2,
+    });
+    applyTripitSegmentsToTzState(
+      {
+        segments: [
+          {
+            timezone: 'Europe/Berlin',
+            from: '2026-05-12',
+            to: '2026-05-19',
+          },
+        ],
+      },
+      new Date('2026-05-15T12:00:00Z'),
+    );
+    const stored = _rawQueryForTests<{
+      home_tz: string;
+      scheduler_tz: string | null;
+    }>('SELECT home_tz, scheduler_tz FROM tz_state WHERE id = 1')[0];
+    expect(stored!.home_tz).toBe('America/Chicago');
+    expect(stored!.scheduler_tz).toBe('America/Chicago');
+  });
+});
+
+describe('runTzHeartbeatAdvisory (#542)', () => {
+  it('returns null when tz_state row is absent', () => {
+    expect(runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'))).toBeNull();
+  });
+
+  it('returns null on null / empty segments (silent skip)', () => {
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      schemaVersion: 2,
+    });
+    expect(runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'))).toBeNull();
+  });
+
+  it('returns null and warns on malformed JSON segments column', () => {
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      segments: '{not valid JSON',
+      schemaVersion: 2,
+    });
+    expect(runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'))).toBeNull();
+    // current_tz must not have been touched — a malformed cache row
+    // should not erase the prior good value.
+    expect(getCurrentTz()).toBe('America/Chicago');
+  });
+
+  it('flips current_tz when cached segments cover today and computed != current', () => {
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      segments: JSON.stringify([
+        {
+          timezone: 'Europe/Berlin',
+          from: '2026-05-12',
+          to: '2026-05-19',
+        },
+      ]),
+      schemaVersion: 2,
+    });
+    const result = runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'));
+    expect(result).toEqual({
+      prev: 'America/Chicago',
+      next: 'Europe/Berlin',
+    });
+    expect(getCurrentTz()).toBe('Europe/Berlin');
+  });
+
+  it('returns null when computed matches current_tz (no flip)', () => {
+    _seedTzStateForTests({
+      currentTz: 'Europe/Berlin',
+      homeTz: 'America/Chicago',
+      segments: JSON.stringify([
+        {
+          timezone: 'Europe/Berlin',
+          from: '2026-05-12',
+          to: '2026-05-19',
+        },
+      ]),
+      schemaVersion: 2,
+    });
+    expect(runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'))).toBeNull();
+  });
+
+  it('flips back to home_tz on the day the trip ends (`to === today`)', () => {
+    _seedTzStateForTests({
+      currentTz: 'Europe/Berlin',
+      homeTz: 'America/Chicago',
+      segments: JSON.stringify([
+        {
+          timezone: 'Europe/Berlin',
+          from: '2026-05-12',
+          to: '2026-05-19',
+        },
+      ]),
+      schemaVersion: 2,
+    });
+    expect(runTzHeartbeatAdvisory(new Date('2026-05-19T00:00:00Z'))).toEqual({
+      prev: 'Europe/Berlin',
+      next: 'America/Chicago',
+    });
+    expect(getCurrentTz()).toBe('America/Chicago');
+  });
+
+  it('does not touch segments / home_tz on flip', () => {
+    const segmentsJson = JSON.stringify([
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-12',
+        to: '2026-05-19',
+      },
+    ]);
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      segments: segmentsJson,
+      schemaVersion: 2,
+    });
+    runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'));
+    const stored = _rawQueryForTests<{
+      home_tz: string;
+      segments: string;
+    }>('SELECT home_tz, segments FROM tz_state WHERE id = 1')[0];
+    expect(stored!.home_tz).toBe('America/Chicago');
+    expect(stored!.segments).toBe(segmentsJson);
+  });
+
+  it('returns null on unfamiliar schema_version', () => {
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      schemaVersion: 3,
+    });
+    expect(runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'))).toBeNull();
   });
 });
 
