@@ -342,17 +342,24 @@ describe('task-tz-state.json → SQLite migration (#302)', () => {
     });
   });
 
-  it('UPSERT preserves schema_version on the second group import (multi-group, NOT INSERT OR REPLACE)', async () => {
-    // Load-bearing assertion. Two groups each carry a task-tz-state.
-    // json. With the schema's `CHECK(id = 1)` enforcing a singleton
-    // tz_state, the second group's UPSERT must update the same row
-    // in place — row count stays at 1. AND because the writer uses
-    // `ON CONFLICT(id) DO UPDATE` (NOT `INSERT OR REPLACE`, which is
-    // delete+insert in SQLite and resets defaulted columns), an
-    // already-bumped `schema_version` survives the second group's
-    // import. We pin that down by manually bumping schema_version to
-    // 5 between the two imports and asserting it's still 5 after the
-    // second group lands.
+  it('UPSERT writes the writer-known schema_version on the second group import (singleton, NOT INSERT OR REPLACE)', async () => {
+    // Load-bearing assertion (post-#542). Two groups each carry a
+    // task-tz-state.json. With the schema's `CHECK(id = 1)` enforcing
+    // a singleton tz_state, the second group's UPSERT must update the
+    // same row in place — row count stays at 1.
+    //
+    // Pre-#542 the writer omitted `schema_version` from its column
+    // list, so an already-bumped value survived. Post-#542 the writer
+    // is expected to STAY in sync with the reader gate
+    // (SUPPORTED_TZ_STATE_SCHEMA_VERSION = 2 in src/db.ts) by writing
+    // the current shape's value explicitly. The thing we're still
+    // catching: a regression to `INSERT OR REPLACE`, which is delete+
+    // insert in SQLite and would reset schema_version to the schema's
+    // `DEFAULT 1`. So we manually bump to 5 between imports, run the
+    // second import, and assert the result equals the writer's known
+    // shape (2) — anything else (5, 1, or undefined) signals either a
+    // delete+insert regression (1) or that the manual UPDATE isn't
+    // being touched at all (5).
     //
     // To stage the manual bump in the middle of the migration pass,
     // we run the migration once with only the first group's file
@@ -422,12 +429,16 @@ describe('task-tz-state.json → SQLite migration (#302)', () => {
             current_tz: 'Europe/Berlin',
             home_tz: 'Europe/Berlin',
           });
-          // Load-bearing: schema_version preserved through UPSERT. If
-          // the writer ever drifts to `INSERT OR REPLACE`, this
-          // assertion catches it because that statement is delete+
-          // insert in SQLite and would reset schema_version to the
-          // schema's `DEFAULT 1`.
-          expect(tzRows[0].schema_version).toBe(5);
+          // Load-bearing: schema_version equals the writer's known
+          // shape (2 post-#542 in lock-step with the reader gate). If
+          // the writer ever drifts to `INSERT OR REPLACE`, the result
+          // would be `1` (delete+insert in SQLite resets to the
+          // schema's `DEFAULT 1`); if the writer ever drops the
+          // explicit column, the result would be `5` (the manual
+          // bump survives). Either drift breaks the singleton's
+          // shape contract — assert exactly the current writer's
+          // shape value.
+          expect(tzRows[0].schema_version).toBe(2);
         } finally {
           db.close();
         }

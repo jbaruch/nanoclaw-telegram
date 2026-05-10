@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 
+import { SqliteError } from 'better-sqlite3';
+
 import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
@@ -67,6 +69,7 @@ import {
   getTaskById,
   markSessionForReset,
   recordSessionTurn,
+  runTzHeartbeatAdvisory,
   createTask,
   deleteTask,
   getNewMessages,
@@ -3275,6 +3278,89 @@ async function main(): Promise<void> {
       },
     );
   }, 900_000);
+
+  // #542 — Heartbeat advisory walker. Re-walks the cached
+  // `tz_state.segments` timeline every 30 min so a `from`/`to`
+  // segment boundary crossing flips `current_tz` mid-day without
+  // waiting for the next nightly `sync_tripit` run. Silent skip on
+  // every path where there's nothing to do (no row, no segments,
+  // computed tz matches current_tz, malformed cache); on flip,
+  // notify the main group via its channel so the user sees the
+  // change (matches the circuit-breaker notify pattern).
+  const TZ_HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000;
+  setInterval(() => {
+    let flip: { prev: string; next: string } | null;
+    try {
+      flip = runTzHeartbeatAdvisory();
+    } catch (err) {
+      // Narrowed to transient SQLite contention codes only —
+      // SQLITE_BUSY / SQLITE_LOCKED can fire under WAL contention
+      // with the orchestrator's own writers and are genuinely
+      // recoverable on the next 30-min tick. Every other SqliteError
+      // (SQLITE_CORRUPT, SQLITE_SCHEMA, SQLITE_READONLY, missing
+      // column from a botched migration, etc.) signals a
+      // persistent state-layer problem that hiding behind a periodic
+      // warn would silently freeze `current_tz` indefinitely; those
+      // propagate per `coding-policy: error-handling`. The
+      // malformed-JSON case is handled inside
+      // `runTzHeartbeatAdvisory` (narrowed `SyntaxError`) and returns
+      // null rather than throwing, so the only thing that reaches
+      // this catch is a real DB-side failure.
+      const TRANSIENT_SQLITE_CODES = new Set(['SQLITE_BUSY', 'SQLITE_LOCKED']);
+      if (
+        !(err instanceof SqliteError) ||
+        !TRANSIENT_SQLITE_CODES.has(err.code)
+      ) {
+        throw err;
+      }
+      logger.warn(
+        { err: err.message, code: err.code },
+        'tz heartbeat advisory: transient SqliteError on read — will retry on next 30-min tick',
+      );
+      return;
+    }
+    if (!flip) return;
+    const mainJid = Object.keys(registeredGroups).find(
+      (jid) => registeredGroups[jid].isMain,
+    );
+    if (!mainJid) {
+      // No main group registered — the flip already landed on the
+      // DB row; the next time a main group is registered, the user
+      // will see the right `current_tz` without a separate
+      // notification. Skipping the chat send here is the right
+      // failure mode (chat delivery would have nothing to target).
+      return;
+    }
+    const mainChannel = findChannel(channels, mainJid);
+    if (!mainChannel || !mainChannel.isConnected()) return;
+    // Chat notify: best-effort. The DB row already reflects the
+    // flip, so a chat-send failure means "user doesn't see the
+    // message this tick" — non-fatal; the next 30-min tick will not
+    // re-notify because the second walk produces `next ===
+    // current_tz` (the flip already committed). The `.catch`
+    // converts rejection into a structured warn with mainJid
+    // context — `void`-ing the promise would let the rejection
+    // bubble up as an unhandled-rejection warning that newer Node
+    // versions can terminate the orchestrator over.
+    const flipForLog = flip;
+    mainChannel
+      .sendMessage(
+        mainJid,
+        `📍 Timezone changed: ${flipForLog.prev} → ${flipForLog.next}`,
+      )
+      .catch((err: unknown) => {
+        if (!(err instanceof Error)) throw err;
+        logger.warn(
+          {
+            err: err.message,
+            mainJid,
+            prev: flipForLog.prev,
+            next: flipForLog.next,
+          },
+          'tz heartbeat advisory: chat notify failed (DB row already updated)',
+        );
+      });
+  }, TZ_HEARTBEAT_INTERVAL_MS).unref();
 
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');

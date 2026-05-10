@@ -9,13 +9,21 @@ skill-side mirror lives at
 through the staging→promote pipeline alongside the SKILL.md rewrites
 that retire the JSON path.
 
-The TypeScript file `state-010-tz-state.ts` is the source of truth for
-the SQL — this Markdown only describes the contract.
+The TypeScript files `state-010-tz-state.ts` and (post-#542)
+`state-012-tz-state-segments.ts` are the source of truth for the SQL
+— this Markdown only describes the contract.
 
 ## Owner skill
 
-`nanoclaw-admin/skills/task-tz-sync` is the single writer for both
-tables. Five-plus reader skills consume the rows:
+Post-#542 the host orchestrator (`applyTripitSegmentsToTzState` in
+`src/db.ts`) is the writer for `tz_state.current_tz` /
+`tz_state.segments` after every successful `sync_tripit` run. The
+prior owner (`nanoclaw-admin/skills/task-tz-sync`) retires in
+jbaruch/nanoclaw-admin#223 (the tile-side cleanup PR). For
+`follow_me_tasks`, `task-tz-sync` (until retirement) and the
+follow-me skills' Phase C / Phase D updates remain the writers.
+
+Five-plus reader skills consume the rows:
 
 - `nanoclaw-admin/skills/morning-brief`
 - `nanoclaw-admin/skills/nightly-housekeeping`
@@ -26,33 +34,60 @@ tables. Five-plus reader skills consume the rows:
 
 ## `tz_state` (singleton)
 
-| Column           | Type    | Nullable | Default | Notes                                  |
-| ---------------- | ------- | -------- | ------- | -------------------------------------- |
-| `id`             | INTEGER | no       | —       | PK with `CHECK(id = 1)` — singleton    |
-| `current_tz`     | TEXT    | no       | —       | IANA zone name; load-bearing           |
-| `home_tz`        | TEXT    | no       | —       | IANA zone name; reference for jet-lag  |
-| `scheduler_tz`   | TEXT    | yes      | NULL    | Informational only; not load-bearing   |
-| `schema_version` | INTEGER | no       | `1`     | Bumped on shape change; owner migrates |
+| Column           | Type    | Nullable | Default | Notes                                                                                       |
+| ---------------- | ------- | -------- | ------- | ------------------------------------------------------------------------------------------- |
+| `id`             | INTEGER | no       | —       | PK with `CHECK(id = 1)` — singleton                                                         |
+| `current_tz`     | TEXT    | no       | —       | IANA zone name; load-bearing                                                                |
+| `home_tz`        | TEXT    | no       | —       | IANA zone name; reference for jet-lag                                                       |
+| `scheduler_tz`   | TEXT    | yes      | NULL    | Informational only; not load-bearing                                                        |
+| `segments`       | TEXT    | yes      | NULL    | (state-012, #542) JSON-stringified `[{timezone, from, to, label}]` from `sync_tripit`       |
+| `schema_version` | INTEGER | no       | `1`     | Column default still `1`; rows are written at the gate's current value (currently `2`)      |
 
 Read pattern: `SELECT current_tz, home_tz FROM tz_state WHERE id = 1`.
+Heartbeat advisory walker also reads `segments, schema_version`.
 
-Write pattern (UPSERT — never `INSERT OR REPLACE`, which is
-delete+insert in SQLite and would break any future FK references to
-`tz_state(id)` and silently reset defaulted columns like
-`schema_version`):
+`segments` shape:
 
-```sql
-INSERT INTO tz_state (id, current_tz, home_tz, scheduler_tz)
-VALUES (1, ?, ?, ?)
-ON CONFLICT(id) DO UPDATE SET
-  current_tz   = excluded.current_tz,
-  home_tz      = excluded.home_tz,
-  scheduler_tz = excluded.scheduler_tz;
+```json
+[
+  {
+    "timezone": "Europe/Berlin",
+    "from": "2026-05-12",
+    "to": "2026-05-19",
+    "label": "Devoxx UK 2026 - London"
+  }
+]
 ```
 
-`schema_version` is not in the writer's column list — the column's
-default takes care of inserts; shape upgrades bump it via a state-NNN
-migration, not via the steady-state writer.
+`from` / `to` are date-only `YYYY-MM-DD` strings produced upstream by
+`reclaim-tripit-timezones-sync/lib/tripit.mjs::formatDate` (UTC-derived
+ISO date slice). Lex compare is equivalent to date compare, so the
+walker uses plain string `<=`/`<`. The match rule is `from <= today <
+to` — strict inequality on the right edge, so a return-flight day flips
+back to `home_tz` instead of holding the destination zone.
+
+Write pattern after #542 (host-side `applyTripitSegmentsToTzState`,
+called from `sync_tripit`'s success path):
+
+```sql
+UPDATE tz_state
+   SET current_tz     = ?,
+       segments       = ?,
+       schema_version = 2
+ WHERE id = 1;
+```
+
+The row MUST already exist — `home_tz` is NOT NULL on the schema and
+isn't derivable from the TripIt payload, so the helper logs and
+returns silently if the singleton is absent. First-time setup / the
+JSON migration backfill seeds the row with `home_tz`, then the next
+`sync_tripit` run takes over the steady-state writes.
+
+`schema_version` is written explicitly as `2` to satisfy the reader
+gate (`SUPPORTED_TZ_STATE_SCHEMA_VERSION = 2` in `src/db.ts`). The
+state-010 column default of `1` is preserved on the schema for
+historical compatibility, but every writer post-#542 writes `2`
+directly.
 
 ## `follow_me_tasks`
 
@@ -102,12 +137,16 @@ racing the read-then-write window.
 ## Migration policy
 
 - `schema_version` columns are bumped on every shape change.
-- Only `task-tz-sync` migrates: on its own read, detect old
-  `schema_version`, upgrade the row, rewrite. Reader skills must
-  treat an old `schema_version` as "no usable prior state".
+- Post-#542 the host orchestrator owns `tz_state` migrations: on its
+  own write (`applyTripitSegmentsToTzState`), it writes the current
+  `schema_version` directly. Reader skills (the LLM-side morning-
+  brief / nightly / weekly / check-calendar / heartbeat-precheck /
+  scheduler-timezone) must treat an old `schema_version` as "no
+  usable prior state".
 - Schema-level changes (adding/removing columns, renaming) ship as a
   new state-NNN migration in `src/state-migrations/`, with a
-  corresponding bump to the relevant `schema_version` default.
+  corresponding bump to `SUPPORTED_TZ_STATE_SCHEMA_VERSION` in
+  `src/db.ts`.
 
 ## Open `name` set
 

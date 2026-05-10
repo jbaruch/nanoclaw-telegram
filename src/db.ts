@@ -1702,9 +1702,12 @@ export function getDueTasks(): ScheduledTask[] {
 // Highest tz_state schema_version this reader knows how to interpret.
 // Per `coding-policy: stateful-artifacts`, readers that observe a higher
 // `schema_version` must treat the row as "no usable prior state" rather
-// than guess. Bump in lock-step with the next state-NNN migration that
-// reshapes `tz_state`.
-const SUPPORTED_TZ_STATE_SCHEMA_VERSION = 1;
+// than guess. Bumped to 2 by state-012 (#542) when the host took over
+// as the writer of `tz_state` and added the `segments` column. The
+// state-012 migration's `UPDATE tz_state SET schema_version = 2 WHERE
+// id = 1` runs before this gate is consulted, so any row that existed
+// at v1 has already been bumped by the time `getCurrentTz` reads.
+const SUPPORTED_TZ_STATE_SCHEMA_VERSION = 2;
 
 /**
  * Test-only helper: seed a `follow_me_tasks` row directly. The
@@ -1742,29 +1745,41 @@ export function _seedFollowMeTaskForTests(args: {
 
 /**
  * Test-only helper: seed the singleton `tz_state` row directly. The
- * production writer is the agent-side `task-tz-sync` skill; this
- * shortcut lets `getCurrentTz` tests exercise read paths without
- * spinning up the full skill.
+ * production writer is the host-side `applyTripitSegmentsToTzState`
+ * (after every `sync_tripit` run, see #542); this shortcut lets
+ * `getCurrentTz` and the heartbeat-advisory walker tests exercise
+ * read paths without spinning up the full TripIt sync.
+ *
+ * `segments` defaults to NULL because most read-path tests only care
+ * about `current_tz`. Tests that exercise the heartbeat-advisory
+ * walker opt in by passing a JSON-stringified payload. The default
+ * `schemaVersion` matches `SUPPORTED_TZ_STATE_SCHEMA_VERSION` so
+ * readers don't reject the seeded row as unfamiliar; tests that need
+ * to verify the gate's "unfamiliar version" branch pass an explicit
+ * higher value.
  */
 export function _seedTzStateForTests(args: {
   currentTz: string;
   homeTz?: string;
   schedulerTz?: string | null;
+  segments?: string | null;
   schemaVersion?: number;
 }): void {
   db.prepare(
-    `INSERT INTO tz_state (id, current_tz, home_tz, scheduler_tz, schema_version)
-       VALUES (1, ?, ?, ?, ?)
+    `INSERT INTO tz_state (id, current_tz, home_tz, scheduler_tz, segments, schema_version)
+       VALUES (1, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        current_tz     = excluded.current_tz,
        home_tz        = excluded.home_tz,
        scheduler_tz   = excluded.scheduler_tz,
+       segments       = excluded.segments,
        schema_version = excluded.schema_version`,
   ).run(
     args.currentTz,
     args.homeTz ?? args.currentTz,
     args.schedulerTz ?? null,
-    args.schemaVersion ?? 1,
+    args.segments ?? null,
+    args.schemaVersion ?? SUPPORTED_TZ_STATE_SCHEMA_VERSION,
   );
 }
 
@@ -1794,6 +1809,212 @@ export function getCurrentTz(): string | null {
     return null;
   }
   return row.current_tz;
+}
+
+/**
+ * Single segment shape as emitted by `sync_tripit`'s stdout JSON
+ * (`result.segments` in `reclaim-tripit-timezones-sync/sync.mjs` —
+ * `from` / `to` are date-only `YYYY-MM-DD` strings produced by
+ * `lib/tripit.mjs::formatDate`, which slices `toISOString()` to 10
+ * chars). Lexicographic comparison of these strings is equivalent to
+ * date comparison, so the walker can use plain string `<=`/`<`.
+ */
+export interface TripitSegment {
+  timezone: string;
+  from: string;
+  to: string;
+  label?: string;
+}
+
+/**
+ * Pure walker: pick the IANA zone name covering `now` from a segments
+ * timeline, falling back to `homeTz` if no segment covers it.
+ *
+ * Match rule: `from <= todayUtc < to`. The upstream's `formatDate`
+ * encodes both ends as UTC-derived `YYYY-MM-DD`, so comparing against
+ * `now.toISOString().slice(0, 10)` keeps the encoding consistent.
+ *
+ * Edge cases (covered by unit tests):
+ *   - Empty / non-array `segments` → `homeTz` (silent fallback).
+ *   - Gap between trips (no covering segment) → `homeTz`.
+ *   - `from === to` → never matches (degenerate segment); skipped.
+ *   - Empty / non-string `timezone` → segment skipped (the upstream
+ *     drops these via `result.segments` already, but defend against a
+ *     malformed payload anyway).
+ *   - Overlapping segments → first match wins (matches the natural
+ *     "segments are produced in chronological order, lodging-primary
+ *     first" upstream invariant).
+ *   - `to === todayUtc` → segment ends today; the next segment (or
+ *     home fallback) takes over.
+ */
+export function walkTzSegments(
+  segments: readonly TripitSegment[] | null | undefined,
+  now: Date,
+  homeTz: string,
+): string {
+  if (!Array.isArray(segments) || segments.length === 0) return homeTz;
+  const todayUtc = now.toISOString().slice(0, 10);
+  for (const seg of segments) {
+    if (
+      typeof seg?.timezone !== 'string' ||
+      seg.timezone.length === 0 ||
+      typeof seg.from !== 'string' ||
+      typeof seg.to !== 'string'
+    ) {
+      continue;
+    }
+    if (seg.from <= todayUtc && todayUtc < seg.to) return seg.timezone;
+  }
+  return homeTz;
+}
+
+/**
+ * #542 — Persist `sync_tripit` stdout's `segments[]` onto the
+ * singleton `tz_state` row and recompute `current_tz` from the
+ * segment timeline (or fall back to `home_tz` for gaps between
+ * trips).
+ *
+ * Writes `schema_version = 2` explicitly to satisfy the post-#542
+ * reader gate (`SUPPORTED_TZ_STATE_SCHEMA_VERSION = 2`). The row
+ * MUST already exist — `home_tz` is NOT NULL on `tz_state` and isn't
+ * derivable from the TripIt payload, so the host can't synthesize a
+ * row from scratch. This is by design: `tz_state.home_tz` is set by
+ * the historical JSON migration / first-time setup and is never
+ * touched by `sync_tripit`. If the row is absent, the helper logs a
+ * warning and exits without writing — the caller's run is still
+ * counted as a successful TripIt sync (segments were fetched and
+ * parsed) so the user gets the upstream success reaction; the
+ * follow-up heartbeat advisory will pick up the segments on the next
+ * tick once the row exists.
+ *
+ * Returns the resolved `{ prev, next, changed }` so the caller can
+ * audit-log the flip — the `sync_tripit` call site logs at info /
+ * warn levels on the orchestrator's structured logger; there is no
+ * separate audit-log table per `coding-policy: stateful-artifacts`'s
+ * "what counts" section (state files vs. orchestrator logs).
+ */
+export function applyTripitSegmentsToTzState(
+  stdoutJson: { segments?: readonly TripitSegment[] | null } | null,
+  now: Date = new Date(),
+): { prev: string | null; next: string | null; changed: boolean } {
+  const segments =
+    stdoutJson && Array.isArray(stdoutJson.segments) ? stdoutJson.segments : [];
+
+  const row = db
+    .prepare('SELECT current_tz, home_tz FROM tz_state WHERE id = 1')
+    .get() as { current_tz: string; home_tz: string } | undefined;
+  if (!row) {
+    logger.warn(
+      { segmentCount: segments.length },
+      'applyTripitSegmentsToTzState: tz_state row missing — skipping (home_tz must be seeded by JSON migration / first-time setup before sync_tripit can persist segments)',
+    );
+    return { prev: null, next: null, changed: false };
+  }
+
+  const next = walkTzSegments(segments, now, row.home_tz);
+  const segmentsJson = JSON.stringify(segments);
+
+  // Plain UPDATE rather than UPSERT: the row-existence check above
+  // already proved the singleton is present, and an UPSERT's INSERT
+  // arm would clobber `scheduler_tz` (which the JSON migration
+  // legitimately populates as `informational only`) on a hypothetical
+  // concurrent-delete race. Plain UPDATE on a missing row is a
+  // no-op which is the safer failure mode.
+  //
+  // `schema_version` is bound through `SUPPORTED_TZ_STATE_SCHEMA_VERSION`
+  // (rather than a SQL literal) so a future state-NNN bump only has to
+  // touch the constant — every writer in this file picks up the new
+  // value automatically.
+  db.prepare(
+    `UPDATE tz_state
+        SET current_tz     = ?,
+            segments       = ?,
+            schema_version = ?
+      WHERE id = 1`,
+  ).run(next, segmentsJson, SUPPORTED_TZ_STATE_SCHEMA_VERSION);
+
+  const changed = row.current_tz !== next;
+  if (changed) {
+    logger.info(
+      { prev: row.current_tz, next, segmentCount: segments.length },
+      'tz_state.current_tz flipped via sync_tripit segment walk (#542)',
+    );
+  }
+  return { prev: row.current_tz, next, changed };
+}
+
+/**
+ * #542 — Heartbeat advisory walker. Re-walks the cached `segments`
+ * timeline against wall-clock `now` without re-fetching iCal. Called
+ * from a 30-min `setInterval` in `src/index.ts`; on flip, the caller
+ * sends a chat message via the main group's channel.
+ *
+ * Returns `{ prev, next }` only when the cached timeline produces a
+ * different zone than `current_tz`; null on every other path (no row,
+ * stale `schema_version`, null/empty `segments`, malformed JSON, or
+ * computed value matches `current_tz`). On flip, `current_tz` is
+ * updated in place and `segments` / `home_tz` are left untouched.
+ */
+export function runTzHeartbeatAdvisory(
+  now: Date = new Date(),
+): { prev: string; next: string } | null {
+  const row = db
+    .prepare(
+      'SELECT current_tz, home_tz, segments, schema_version FROM tz_state WHERE id = 1',
+    )
+    .get() as
+    | {
+        current_tz: string;
+        home_tz: string;
+        segments: string | null;
+        schema_version: number;
+      }
+    | undefined;
+  if (!row) return null;
+  if (row.schema_version !== SUPPORTED_TZ_STATE_SCHEMA_VERSION) {
+    // Same contract as `getCurrentTz` — an unfamiliar version is "no
+    // usable prior state". The walker fires every 30 min, so this
+    // emits one warn per tick until the operator drops the bad row;
+    // there's no log-once dedup. Two tradeoffs in play: (a) a stuck
+    // mid-migration row in production is a load-bearing alert that
+    // should keep paging until cleared (silencing it would let an
+    // operator forget about it for hours), and (b) a 30-min cadence
+    // doesn't pollute the structured log meaningfully — twice an
+    // hour is far below the heartbeat noise floor on this surface.
+    logger.warn(
+      {
+        observed: row.schema_version,
+        supported: SUPPORTED_TZ_STATE_SCHEMA_VERSION,
+      },
+      'runTzHeartbeatAdvisory: tz_state schema_version unfamiliar — skipping',
+    );
+    return null;
+  }
+  if (!row.segments) return null;
+
+  let parsed: readonly TripitSegment[];
+  try {
+    const decoded = JSON.parse(row.segments) as unknown;
+    if (!Array.isArray(decoded)) return null;
+    parsed = decoded as readonly TripitSegment[];
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
+    logger.warn(
+      { err: err.message },
+      'runTzHeartbeatAdvisory: tz_state.segments is malformed JSON — skipping (will recover on next sync_tripit run)',
+    );
+    return null;
+  }
+
+  const next = walkTzSegments(parsed, now, row.home_tz);
+  if (next === row.current_tz) return null;
+
+  db.prepare('UPDATE tz_state SET current_tz = ? WHERE id = 1').run(next);
+  logger.info(
+    { prev: row.current_tz, next },
+    'tz_state.current_tz flipped via heartbeat advisory walker (#542)',
+  );
+  return { prev: row.current_tz, next };
 }
 
 export function updateTaskAfterRun(
@@ -4154,17 +4375,23 @@ function resolveFollowMeTaskShape(
  * Both writes use `ON CONFLICT(...) DO UPDATE` (UPSERT) — NEVER
  * `INSERT OR REPLACE`, which is delete+insert in SQLite and would
  * silently reset defaulted columns like `schema_version` on every
- * re-import. The schema-doc on state-010 spells this out as the
- * contract; the multi-group test in
- * `task-tz-state-json-migration.test.ts` pins it down by manually
+ * re-import. The multi-group test in
+ * `task-tz-state-json-migration.test.ts` pins this down by manually
  * bumping `schema_version` between two group imports and asserting
- * the bump survives the second import's UPSERT.
+ * the post-#542 writer's known shape (currently 2) is what lands on
+ * the second import — anything else (1 or the manually-bumped value)
+ * would signal either a `INSERT OR REPLACE` regression (1) or that
+ * the writer dropped its explicit `schema_version` bind (manual
+ * bump survives, gate rejects the row).
  *
- * `tz_state` UPSERT deliberately omits `schema_version` from the
- * column list: the column's `DEFAULT 1` fires on insert; on conflict
- * the `DO UPDATE SET` clause only touches the three timezone scalars,
- * so an existing `schema_version` is preserved (the migration is data
- * backfill, not a schema upgrade).
+ * `tz_state` UPSERT writes `schema_version` explicitly through
+ * `SUPPORTED_TZ_STATE_SCHEMA_VERSION` (post-#542): a fresh-DB import
+ * would otherwise land at the state-010 column default of 1, and the
+ * reader gate (currently 2) would reject the imported row as
+ * "unfamiliar schema_version" until `applyTripitSegmentsToTzState`
+ * rewrote it on the next nightly `sync_tripit` run. The explicit
+ * bind keeps the JSON-import's row shape coherent with the writer
+ * gate from the moment it lands.
  *
  * `follow_me_tasks` UPSERT re-stamps `updated_at = CURRENT_TIMESTAMP`
  * in the conflict branch so a re-import shows up as a fresh row
@@ -4184,19 +4411,26 @@ function migrateTaskTzStateJsonFiles(): MigrationSummary {
   const groupFolders = listGroupFoldersForMigration();
   if (groupFolders.length === 0) return summary;
 
-  // tz_state UPSERT: column list deliberately excludes
-  // `schema_version` so the schema's `DEFAULT 1` fires on insert and
-  // the existing value is preserved on conflict. CHECK(id=1) makes
-  // tz_state a true singleton — the second group's import updates
-  // the same row in place rather than landing id=2 (which would also
-  // fail loudly via the CHECK).
+  // tz_state UPSERT: writes `schema_version` explicitly via
+  // `SUPPORTED_TZ_STATE_SCHEMA_VERSION` so the backfilled row matches
+  // the reader gate. Without the explicit bind, a fresh-DB import
+  // would land at the state-010 column default of 1 — state-012's
+  // `UPDATE … WHERE id = 1` runs before this migration but is a
+  // no-op when the row doesn't yet exist, and every reader would
+  // then reject the imported row as "unfamiliar schema_version".
+  // `segments` stays NULL on import — the column gets populated on
+  // the next `sync_tripit` run via `applyTripitSegmentsToTzState`.
+  // CHECK(id=1) makes tz_state a true singleton — the second
+  // group's import updates the same row in place rather than landing
+  // id=2 (which would also fail loudly via the CHECK).
   const upsertTzState = db.prepare(
-    `INSERT INTO tz_state (id, current_tz, home_tz, scheduler_tz)
-     VALUES (1, ?, ?, ?)
+    `INSERT INTO tz_state (id, current_tz, home_tz, scheduler_tz, schema_version)
+     VALUES (1, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
-       current_tz   = excluded.current_tz,
-       home_tz      = excluded.home_tz,
-       scheduler_tz = excluded.scheduler_tz`,
+       current_tz     = excluded.current_tz,
+       home_tz        = excluded.home_tz,
+       scheduler_tz   = excluded.scheduler_tz,
+       schema_version = excluded.schema_version`,
   );
 
   // follow_me_tasks UPSERT: re-stamp `updated_at` on conflict so the
@@ -4342,7 +4576,12 @@ function migrateTaskTzStateJsonFiles(): MigrationSummary {
     };
     try {
       const importFile = db.transaction(() => {
-        const tzResult = upsertTzState.run(currentTz, homeTz, schedulerTz);
+        const tzResult = upsertTzState.run(
+          currentTz,
+          homeTz,
+          schedulerTz,
+          SUPPORTED_TZ_STATE_SCHEMA_VERSION,
+        );
         if (tzResult.changes > 0) {
           if (tzStateExistsBefore) counts.tz_state_refreshed++;
           else counts.tz_state_inserted++;
