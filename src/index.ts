@@ -3333,18 +3333,33 @@ async function main(): Promise<void> {
     }
     const mainChannel = findChannel(channels, mainJid);
     if (!mainChannel || !mainChannel.isConnected()) return;
-    // Fire-and-forget chat notify: matches the existing circuit-
-    // breaker notification pattern at the top of `processGroup`. The
-    // DB row already reflects the flip, so a chat-send failure
-    // means "user doesn't see the message this tick" — non-fatal;
-    // the next 30-min tick will not re-notify because the second
-    // walk produces `next === current_tz` (the flip already
-    // committed). Any rejection surfaces as an unhandled-rejection
-    // warning, which the orchestrator's process supervisor logs.
-    void mainChannel.sendMessage(
-      mainJid,
-      `📍 Timezone changed: ${flip.prev} → ${flip.next}`,
-    );
+    // Chat notify: best-effort. The DB row already reflects the
+    // flip, so a chat-send failure means "user doesn't see the
+    // message this tick" — non-fatal; the next 30-min tick will not
+    // re-notify because the second walk produces `next ===
+    // current_tz` (the flip already committed). The `.catch`
+    // converts rejection into a structured warn with mainJid
+    // context — `void`-ing the promise would let the rejection
+    // bubble up as an unhandled-rejection warning that newer Node
+    // versions can terminate the orchestrator over.
+    const flipForLog = flip;
+    mainChannel
+      .sendMessage(
+        mainJid,
+        `📍 Timezone changed: ${flipForLog.prev} → ${flipForLog.next}`,
+      )
+      .catch((err: unknown) => {
+        if (!(err instanceof Error)) throw err;
+        logger.warn(
+          {
+            err: err.message,
+            mainJid,
+            prev: flipForLog.prev,
+            next: flipForLog.next,
+          },
+          'tz heartbeat advisory: chat notify failed (DB row already updated)',
+        );
+      });
   }, TZ_HEARTBEAT_INTERVAL_MS).unref();
 
   startMessageLoop().catch((err) => {

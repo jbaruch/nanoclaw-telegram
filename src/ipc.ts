@@ -3273,11 +3273,21 @@ export async function processTaskIpc(
                 parsed = JSON.parse(stdout) as { segments?: unknown };
               } catch (parseErr) {
                 if (!(parseErr instanceof SyntaxError)) throw parseErr;
+                // Per `coding-policy: no-secrets`: the script runs
+                // with `TRIPIT_ICAL_URL` / `RECLAIM_API_TOKEN` /
+                // Google OAuth in its environment, and a malformed-
+                // stdout payload can carry credential-bearing URLs
+                // or token fragments (e.g. an unhandled-error stack
+                // that captured the full request context). Log only
+                // non-sensitive shape diagnostics — length and the
+                // SyntaxError's parser-reported position — so an
+                // operator has enough to triage without paging the
+                // script's raw bytes through structured logs.
                 logger.warn(
                   {
                     sourceGroup,
                     err: parseErr.message,
-                    stdoutHead: stdout.slice(0, 200),
+                    stdoutLen: stdout.length,
                   },
                   'sync_tripit: stdout did not parse as JSON — segments not persisted (heartbeat advisory will recover on next good run)',
                 );
