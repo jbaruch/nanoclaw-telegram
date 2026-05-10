@@ -160,14 +160,22 @@ export function getInstalledTiles(): string[] | null {
  *
  * Returns a fresh set; the input `originalBlocklist` is not mutated.
  *
- * Failure modes are silent (best-effort): a missing source dir, a
- * skill subdir without a SKILL.md, or an unreadable file all
- * collapse to "this skill contributes no references" — the closure
- * skips that node, the install loop's existing per-tile / per-skill
- * checks below still surface real layout problems. The closure can
- * never produce a more-restrictive blocklist than the input, so a
- * pre-scan miss is always a safe failure: the original blocklist is
- * the worst-case applied filter.
+ * Failure modes:
+ *   - Missing source dir (`ENOENT` on `readdirSync`) — best-effort
+ *     skip. Tiles legitimately ship without skills, groups
+ *     legitimately ship without staging, the host repo always has
+ *     `<cwd>/container/skills/` so an absent dir there would be a
+ *     real bug, but we still skip rather than crash.
+ *   - Missing `SKILL.md` inside a skill subdir (`ENOENT` on
+ *     `readFileSync`) — same. A subdir without a SKILL.md
+ *     contributes no references; nothing to walk.
+ *   - Other errno (`EACCES`, `EIO`, `ENOTDIR`, fs corruption) —
+ *     PROPAGATES per `coding-policy: error-handling`. A perms /
+ *     IO failure on the skill source dirs is operator-actionable
+ *     drift; failing the spawn loudly here surfaces it instead of
+ *     silently shipping a degraded blocklist that could
+ *     reintroduce the runtime "Unknown skill" failure the closure
+ *     exists to prevent.
  */
 function computeEffectiveSkillBlocklistForSpawn(
   originalBlocklist: ReadonlySet<string>,
