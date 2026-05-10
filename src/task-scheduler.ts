@@ -543,13 +543,16 @@ async function runTask(
 
   try {
     // Pre-resume artifact pruning (#538) for maintenance-session
-    // task fires that resume a persisted session_id.
-    if (sessionId) {
+    // task fires that resume a persisted session_id. Source PR
+    // referenced `sessionId`; this fork's per-task session-reuse
+    // path (from #336) names it `startingSessionId` — same value,
+    // local rename only.
+    if (startingSessionId) {
       const retention = pruneSessionArtifacts({
         dataDir: DATA_DIR,
         groupFolder: task.group_folder,
         sessionName: MAINTENANCE_SESSION_NAME,
-        sessionId,
+        sessionId: startingSessionId,
         config: resolveSessionArtifactRetentionConfig(),
       });
       if (
@@ -561,7 +564,7 @@ async function runTask(
           {
             taskId: task.id,
             groupFolder: task.group_folder,
-            sessionId,
+            sessionId: startingSessionId,
             transcriptPath: retention.transcriptPath,
             imageBlocksReplaced: retention.imageBlocksReplaced,
             toolResultRefsReplaced: retention.toolResultRefsReplaced,
