@@ -39,6 +39,7 @@ import {
   stripAnsi,
 } from './host-logs.js';
 import { logger } from './logger.js';
+import { computeEffectiveBlocklist } from './skill-dep-closure.js';
 import { onAgentLine } from './observer.js';
 import {
   CONTAINER_HOST_GATEWAY,
@@ -144,6 +145,94 @@ export function getInstalledTiles(): string[] | null {
     .filter((e) => e.isDirectory())
     .map((e) => e.name)
     .sort();
+}
+
+/**
+ * #544b — pre-scan helper for the maintenance skill blocklist.
+ *
+ * Walks the same three skill source directories the install loop
+ * below visits — tile skills under each `tilesToInstall[i]/skills/`,
+ * built-in skills under `<cwd>/container/skills/`, and AyeAye-staged
+ * skills under `<groupDir>/skills/` — collecting every present
+ * `SKILL.md`'s text content. Then runs `computeEffectiveBlocklist`
+ * to walk the transitive `Skill(skill: "...")` reference graph from
+ * every non-blocklisted skill and exempt anything reachable.
+ *
+ * Returns a fresh set; the input `originalBlocklist` is not mutated.
+ *
+ * Failure modes:
+ *   - Missing source dir (`ENOENT` on `readdirSync`) — best-effort
+ *     skip. Tiles legitimately ship without skills, groups
+ *     legitimately ship without staging, the host repo always has
+ *     `<cwd>/container/skills/` so an absent dir there would be a
+ *     real bug, but we still skip rather than crash.
+ *   - Missing `SKILL.md` inside a skill subdir (`ENOENT` on
+ *     `readFileSync`) — same. A subdir without a SKILL.md
+ *     contributes no references; nothing to walk.
+ *   - Other errno (`EACCES`, `EIO`, `ENOTDIR`, fs corruption) —
+ *     PROPAGATES per `coding-policy: error-handling`. A perms /
+ *     IO failure on the skill source dirs is operator-actionable
+ *     drift; failing the spawn loudly here surfaces it instead of
+ *     silently shipping a degraded blocklist that could
+ *     reintroduce the runtime "Unknown skill" failure the closure
+ *     exists to prevent.
+ */
+function computeEffectiveSkillBlocklistForSpawn(
+  originalBlocklist: ReadonlySet<string>,
+  tilesToInstall: readonly string[],
+  registryTiles: string,
+  groupDir: string,
+): Set<string> {
+  const sources = new Map<string, string>();
+
+  const ingestSkillDir = (skillsRoot: string) => {
+    // Per `coding-policy: error-handling` the catches below are
+    // narrowed to ENOENT only. ENOENT on a skill source dir is
+    // expected — tile-without-skills, group without `<groupDir>/
+    // skills/` (no staging skills), or a SKILL.md missing on a
+    // non-skill subdir all hit ENOENT legitimately. Any other errno
+    // (EACCES, EIO, ENOTDIR, fs corruption) is operator-actionable
+    // drift the install loop's own per-tile checks below would also
+    // surface; let it propagate so the spawn fails loudly rather
+    // than silently under-including the closure and reintroducing
+    // the `Unknown skill` runtime failure the closure exists to
+    // prevent.
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(skillsRoot);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      return;
+    }
+    for (const skillDir of entries) {
+      const skillPath = path.join(skillsRoot, skillDir);
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(skillPath);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        continue;
+      }
+      if (!stat.isDirectory()) continue;
+      const skillMdPath = path.join(skillPath, 'SKILL.md');
+      try {
+        sources.set(skillDir, fs.readFileSync(skillMdPath, 'utf8'));
+      } catch (err) {
+        // ENOENT on SKILL.md is normal for non-skill subdirs (rare
+        // but possible). Other errno propagates per the same
+        // rationale as readdir above.
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+    }
+  };
+
+  for (const tileName of tilesToInstall) {
+    ingestSkillDir(path.join(registryTiles, tileName, 'skills'));
+  }
+  ingestSkillDir(path.join(process.cwd(), 'container', 'skills'));
+  ingestSkillDir(path.join(groupDir, 'skills'));
+
+  return computeEffectiveBlocklist(originalBlocklist, sources);
 }
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -1708,7 +1797,25 @@ export function buildVolumeMounts(
   // single emitted log line aggregates filtered names across all three.
   const isMaintenance = sessionName === MAINTENANCE_SESSION_NAME;
   const ruleBlocklist = isMaintenance ? MAINTENANCE_RULE_BLOCKLIST : null;
-  const skillBlocklist = isMaintenance ? MAINTENANCE_SKILL_BLOCKLIST : null;
+  // #544b — compute the EFFECTIVE skill blocklist by walking the
+  // transitive `Skill(skill: "...")` reference graph from every
+  // non-blocklisted skill. Anything reachable from a loaded skill
+  // gets exempted so nested invocations resolve at agent runtime.
+  // Reference incident: 2026-05-10 wiki-lint (root) failed with
+  // "Unknown skill: wiki" because wiki was blocklisted but invoked
+  // from wiki-lint's SKILL.md. The pre-scan walks the same three
+  // skill sources the install loop below visits (tile skills,
+  // built-in skills, staging skills) so the closure sees the full
+  // graph the agent will actually load. Default-session spawns skip
+  // the work entirely (no blocklist to adjust).
+  const skillBlocklist = isMaintenance
+    ? computeEffectiveSkillBlocklistForSpawn(
+        MAINTENANCE_SKILL_BLOCKLIST,
+        tilesToInstall,
+        registryTiles,
+        groupDir,
+      )
+    : null;
   const filteredRules: string[] = [];
   const filteredSkills: string[] = [];
 
