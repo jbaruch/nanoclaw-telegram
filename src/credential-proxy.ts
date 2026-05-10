@@ -28,6 +28,7 @@ import {
   resolveUsageLogPath,
   type ContainerContext,
 } from './usage-log.js';
+import { applyPromptCacheTtl } from './prompt-cache-ttl.js';
 import { applyWireToolFilter, isMessagesEndpoint } from './wire-tool-filter.js';
 
 export type AuthMode = 'api-key' | 'oauth';
@@ -121,7 +122,7 @@ export function startCredentialProxy(
             );
           },
         );
-        const body = filterResult.body;
+        let body = filterResult.body;
         if (filterResult.applied) {
           // Logged at DEBUG, not INFO. The SDK ships the full catalog
           // on every /v1/messages, so an INFO line per request would
@@ -139,6 +140,44 @@ export function startCredentialProxy(
           );
         }
 
+        // Prompt-cache TTL extension (#537): for configured idle-prone
+        // main DM containers, upgrade SDK-emitted ephemeral cache
+        // breakpoints to the 1h tier. Runs after tool filtering so the
+        // forwarded body, request dumps, and usage accounting all agree.
+        const ttlResult = applyPromptCacheTtl(
+          upstreamPath,
+          req.method,
+          body,
+          containerCtx,
+          process.env,
+          (err) => {
+            logger.warn(
+              { err, url: upstreamPath, group: containerCtx?.group },
+              'Prompt-cache TTL rewrite: body parse failed, forwarding unchanged',
+            );
+          },
+        );
+        body = ttlResult.body;
+        if (ttlResult.applied) {
+          // DEBUG, not INFO — this fires on every applicable
+          // /v1/messages, which would dominate the log stream in
+          // steady state. Matches the wire-tool interceptor's
+          // log level above. Per-request visibility is available via
+          // DUMP_API_REQUESTS (#467) when needed.
+          logger.debug(
+            {
+              url: upstreamPath,
+              group: containerCtx?.group,
+              tier: containerCtx?.tier,
+              session: containerCtx?.session,
+              ttlApplied: ttlResult.stats.ttlApplied,
+            },
+            'Prompt-cache TTL rewrite active',
+          );
+        }
+
+        // Optional request capture for prompt/tool-catalog inspection.
+        // Set DUMP_API_REQUESTS=<dir> in the orchestrator env to enable.
         // Default OFF; never enable in long-running production — the
         // captured request bodies contain user prompts and the SDK's
         // full system prompt + tool catalog, which is sensitive
