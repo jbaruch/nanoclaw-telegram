@@ -70,6 +70,10 @@ import {
   parseScriptOutput,
   type ScriptResult,
 } from './script-output-parse.js';
+import {
+  decideHardExitWatchdog,
+  HARD_EXIT_IDLE_BUDGET_MS,
+} from './hard-exit-watchdog.js';
 import { shouldSynthesizeSilentStop } from './silent-stop-synthesis.js';
 import { isStaleSessionError } from './stale-session.js';
 import {
@@ -2922,6 +2926,15 @@ async function runQuery(
   // has been read into a string that becomes the next runQuery's prompt.
   let ipcPolling = true;
   let closedDuringQuery = false;
+  // #545 — last-activity timestamp on the SDK message stream. Stamped
+  // inside the `for await (const message of query(...))` loop below
+  // so the post-close hard-exit watchdog can distinguish a stuck SDK
+  // iterator (no events flowing) from a working agent that's
+  // legitimately mid-compose. Initialised to `Date.now()` so the
+  // first watchdog check after close has a sensible baseline if
+  // nothing has flowed yet (e.g. close detected immediately after
+  // prompt enqueue, before the first assistant turn).
+  let lastSdkActivityAt = Date.now();
   const pollIpcDuringQuery = () => {
     if (!ipcPolling) return;
     if (shouldClose()) {
@@ -2929,22 +2942,32 @@ async function runQuery(
       closedDuringQuery = true;
       stream.end();
       ipcPolling = false;
-      // #461 — hard-exit watchdog. After `stream.end()`, the SDK
-      // iterator is supposed to drain promptly so main() can return
-      // and the natural `process.exit(0)` at the bottom of the file
-      // fires. If the SDK hangs (open keepalive, lingering Promise,
-      // pending tool_result it expects to never arrive), the
-      // container would stay alive against the host's hard timeout.
-      // Force-exit 30s after we observe `_close` so the slot drains
-      // regardless. The natural exit path runs first when healthy —
-      // process.exit synchronously terminates, so this timer's
-      // callback only fires when something is actually stuck.
-      setTimeout(() => {
-        log(
-          'Hard-exit watchdog: 30s elapsed since _close with no natural drain — process.exit(0)',
-        );
-        process.exit(0);
-      }, 30_000).unref();
+      // #461 + #545 — activity-aware hard-exit watchdog. The
+      // decision (`exit` vs `rearm`) lives in
+      // `hard-exit-watchdog.ts` so the boundary semantics
+      // (idleMs >= budget exits, otherwise re-arm with remaining
+      // budget) are unit-testable as a pure function. The natural
+      // exit path still runs first when healthy — `process.exit`
+      // synchronously terminates, so this timer's callback only
+      // fires when nothing has come out of the SDK for the full
+      // idle budget.
+      const checkIdleAndExitOrRearm = () => {
+        const decision = decideHardExitWatchdog(Date.now(), lastSdkActivityAt);
+        if (decision.action === 'exit') {
+          log(
+            `Hard-exit watchdog: ${Math.round(decision.idleMs / 1000)}s idle since last SDK event after _close — process.exit(0)`,
+          );
+          process.exit(0);
+        }
+        // Activity has reset the clock; re-arm to fire when the
+        // remaining idle window would next elapse. The helper
+        // returns `rearmInMs = budget - idleMs`, so a chatty agent
+        // that emits one event per 25s still trips the watchdog
+        // after ~30s of "true silence within the budget window",
+        // not never.
+        setTimeout(checkIdleAndExitOrRearm, decision.rearmInMs).unref();
+      };
+      setTimeout(checkIdleAndExitOrRearm, HARD_EXIT_IDLE_BUDGET_MS).unref();
       return;
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
@@ -3683,6 +3706,15 @@ async function runQuery(
     },
   })) {
     messageCount++;
+    // #545 — every SDK event resets the post-close hard-exit
+    // watchdog's idleness clock. Stamping unconditionally (not gated
+    // on `closedDuringQuery`) means the timestamp also stays current
+    // through the pre-close window; the watchdog only consults it
+    // after close detection. Includes assistant turns, tool_use,
+    // tool_result, system/init, and result events — anything the SDK
+    // emits proves the iterator is alive and the agent is making
+    // progress.
+    lastSdkActivityAt = Date.now();
     const msgType =
       message.type === 'system'
         ? `system/${(message as { subtype?: string }).subtype}`
