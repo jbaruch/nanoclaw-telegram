@@ -3487,33 +3487,43 @@ export async function processTaskIpc(
           break;
         }
 
-        const groupDir = path.join(GROUPS_DIR, sourceGroup);
-        const backupDir = path.join(groupDir, 'backup-repo');
+        const backupDir = path.join(GROUPS_DIR, sourceGroup, 'backup-repo');
         const dbPath = path.join(STORE_DIR, 'messages.db');
         const resultPath = scriptResultPath(sourceGroup, data);
 
         // Sync live group state into backup-repo BEFORE git plumbing.
-        // After the state-001…state-010 epic, the JSON state files
-        // that the previous pipeline relied on stopped existing on
-        // disk (state lives in store/messages.db now), so `git add
-        // -A` had nothing to stage and the daily commit was a no-op
-        // for 18 days. The sync step copies MEMORY.md /
-        // daily_discoveries.md, mirrors memory/, and dumps the
-        // SQLite state-table surface into backup-repo/state/<table>.sql
-        // so per-day diffs become meaningful again. See #397.
-        // syncBackupRepo also validates groupDir / backupDir existence
-        // and throws an actionable error if either is missing — the
-        // catch block below converts that into a structured
-        // `{ error, stage: 'sync' }` envelope.
+        // The sync mirrors groups/global/ and every non-hidden
+        // groups/<name>/ subdir into backup-repo/{global,groups/<name>}
+        // with delete-on-missing semantics, and dumps the SQLite
+        // state-table surface into backup-repo/state/<table>.sql.
+        // Policy: back up everything under groups/ that the runtime
+        // mutates and that ISN'T reproducible from deploy or
+        // `tessl install` — see `src/backup-sync.ts` for the denylist
+        // (.tessl, .claude, node_modules, dist, logs, tmp,
+        // conversations, *.bak-*, etc.).
+        // syncBackupRepo also validates groupsRoot / backupDir
+        // existence and throws an actionable error if either is
+        // missing — the catch block below converts that into a
+        // structured `{ error, stage: 'sync' }` envelope.
         let syncSummary: SyncResult;
         try {
-          syncSummary = syncBackupRepo({ groupDir, backupDir, dbPath });
+          syncSummary = syncBackupRepo({
+            groupsRoot: GROUPS_DIR,
+            backupDir,
+            dbPath,
+          });
         } catch (e) {
           // Non-Error throws (TypeScript allows `throw 42`) bubble up
           // — those indicate a bug, not an operational sync failure.
           if (!(e instanceof Error)) throw e;
           logger.error(
-            { sourceGroup, groupDir, backupDir, dbPath, error: e.message },
+            {
+              sourceGroup,
+              groupsRoot: GROUPS_DIR,
+              backupDir,
+              dbPath,
+              error: e.message,
+            },
             'github_backup sync failed',
           );
           fs.writeFileSync(
