@@ -130,6 +130,53 @@ otherField: x
     expect(parseRequiresFrontmatter(md)).toEqual(['foo', 'bar']);
   });
 
+  it('strips an inline YAML comment after a bare value', () => {
+    // `requires: schedule-task # optional` — the comment must not be
+    // part of the parsed value. Without comment-stripping the bare
+    // branch would return `['schedule-task # optional']` which never
+    // matches a real skill and silently filters the rule. Matches the
+    // standard YAML semantic and `cadence-registry.ts` convention.
+    const md =
+      '---\nrequires: schedule-task # optional, lifted out for #552\n---\n\n# Rule\n';
+    expect(parseRequiresFrontmatter(md)).toEqual(['schedule-task']);
+  });
+
+  it('strips an inline YAML comment after an inline list', () => {
+    // `requires: [foo] # comment` — same shape as the bare case but
+    // the bracket-form parse must also tolerate trailing comments.
+    const md = '---\nrequires: [foo, bar] # any-of\n---\n\n# Rule\n';
+    expect(parseRequiresFrontmatter(md)).toEqual(['foo', 'bar']);
+  });
+
+  it('returns null for a bare value that fails the skill-name shape', () => {
+    // Punctuation outside `[a-zA-Z0-9_-]` (e.g. dots, slashes,
+    // accidentally-pasted text) shouldn't produce an unmatchable
+    // scalar that silently filters the rule. Safety contract:
+    // ambiguity → load unconditionally.
+    const md = '---\nrequires: not.a.real.skill/name\n---\n\n# Rule\n';
+    expect(parseRequiresFrontmatter(md)).toBeNull();
+  });
+
+  it('filters bracket-list entries that fail the skill-name shape (keeps valid ones)', () => {
+    // Mixed shape: one valid name, one with an embedded `#` (illegal
+    // per the skill-name pattern). The valid entry survives; the
+    // invalid one is dropped rather than producing an unmatchable
+    // scalar inside the list.
+    const md = '---\nrequires: [valid-name, bad#name]\n---\n\n# Rule\n';
+    expect(parseRequiresFrontmatter(md)).toEqual(['valid-name']);
+  });
+
+  it('returns null for a block-list `requires:` with no items (operator typo)', () => {
+    // `requires:` alone with no `- foo` lines is the most common
+    // authoring mistake. Per the safety contract this is treated as
+    // "no constraint, load unconditionally" rather than as an
+    // explicit "never load" — that intent is reserved for the
+    // explicit `requires: []` inline-empty form.
+    const md =
+      '---\nalwaysApply: true\nrequires:\notherField: x\n---\n\n# Rule\n';
+    expect(parseRequiresFrontmatter(md)).toBeNull();
+  });
+
   it('only matches a top-level requires: line (not nested mappings)', () => {
     // `nested.requires:` at sub-indentation isn't a top-level
     // constraint. The parser's regex anchors on line start with no

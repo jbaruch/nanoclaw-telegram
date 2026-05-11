@@ -76,7 +76,32 @@ export function parseRequiresFrontmatter(content: string): string[] | null {
     // support nested mappings here.
     const m = line.match(/^requires:\s*(.*?)\s*$/);
     if (!m) continue;
-    const inline = m[1];
+    const raw = m[1];
+
+    // Strip a YAML inline comment (`  # ...`) from a bare/unquoted
+    // value before further parsing. Matches the standard YAML semantic
+    // and the convention in `cadence-registry.ts:parseSkillFrontmatter`.
+    // We only strip comments outside of a `[...]` inline-list block —
+    // a literal `#` inside brackets is preserved by the inline-list
+    // branch's split-on-comma logic, which is sufficient since skill
+    // names match `[a-zA-Z0-9_-]+` and `#` can't appear in a real name.
+    let inline = raw;
+    if (!inline.startsWith('[')) {
+      const commentIdx = inline.search(/\s+#/);
+      if (commentIdx >= 0) inline = inline.slice(0, commentIdx).trimEnd();
+    } else {
+      // Inline-list form: only strip a comment that comes AFTER the
+      // closing `]`. A `#` before the close bracket is treated as part
+      // of the (rejected) name and filtered by the name-shape check.
+      const closeIdx = inline.lastIndexOf(']');
+      if (closeIdx >= 0) {
+        const tail = inline.slice(closeIdx + 1);
+        const commentInTail = tail.search(/\s*#/);
+        if (commentInTail >= 0) {
+          inline = inline.slice(0, closeIdx + 1 + commentInTail).trimEnd();
+        }
+      }
+    }
 
     // Inline list: requires: [a, b, c]
     if (inline.startsWith('[') && inline.endsWith(']')) {
@@ -85,30 +110,41 @@ export function parseRequiresFrontmatter(content: string): string[] | null {
       return inner
         .split(',')
         .map((s) => stripQuotes(s.trim()))
-        .filter((s) => s.length > 0);
+        .filter((s) => s.length > 0 && SKILL_NAME_PATTERN.test(s));
     }
 
     // Single bare value: requires: foo
     if (inline.length > 0) {
-      return [stripQuotes(inline)];
+      const name = stripQuotes(inline);
+      // Bare value must match the documented skill-name shape; an
+      // unparseable value (e.g. accidental punctuation, a typo'd YAML
+      // list) falls back to null = load unconditionally rather than
+      // returning an unmatchable scalar that silently filters the rule.
+      return SKILL_NAME_PATTERN.test(name) ? [name] : null;
     }
 
-    // Block list: requires: <empty>, followed by `  - foo` lines
+    // Block list: requires: <empty>, followed by `  - foo` lines.
+    // If NO `- foo` lines follow (operator wrote `requires:` with no
+    // value and no block items), fall back to null per the
+    // "ambiguity → load unconditionally" safety contract. An author
+    // wanting the never-load semantic uses the explicit `requires: []`
+    // inline-empty form.
     const items: string[] = [];
     for (let j = i + 1; j < lines.length; j++) {
       const sub = lines[j];
       const subMatch = sub.match(/^\s*-\s+(.+?)\s*$/);
-      if (!subMatch) {
-        // First non-list line ends the block. Empty lines also end it
-        // — block-list YAML doesn't allow gaps.
-        break;
-      }
-      items.push(stripQuotes(subMatch[1]));
+      if (!subMatch) break;
+      const name = stripQuotes(subMatch[1]);
+      if (SKILL_NAME_PATTERN.test(name)) items.push(name);
     }
-    return items;
+    return items.length === 0 ? null : items;
   }
   return null;
 }
+
+// Skill names per the convention extracted in `skill-dep-closure.ts`'s
+// `Skill()` invocation regex — kebab-case, snake_case, or alphanumeric.
+const SKILL_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
 /**
  * Strip a single layer of surrounding single or double quotes from a

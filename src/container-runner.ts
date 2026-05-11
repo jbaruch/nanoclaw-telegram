@@ -1892,9 +1892,14 @@ export function buildVolumeMounts(
             );
             continue;
           }
+          // Write the rule from the in-memory content we already read
+          // for the frontmatter parse, rather than a second `cpSync`
+          // that re-reads the same bytes off disk. Saves one read per
+          // rule per spawn — small per-rule but multiplied by every
+          // rule in every installed tile on every spawn.
           const ruleDst = path.join(dstTileDir, 'rules', ruleFile);
           fs.mkdirSync(path.dirname(ruleDst), { recursive: true });
-          fs.cpSync(ruleSrcFile, ruleDst);
+          fs.writeFileSync(ruleDst, ruleSrcContent);
           rulesContent.push(ruleSrcContent);
         }
       }

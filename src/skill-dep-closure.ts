@@ -70,11 +70,19 @@ export function extractSkillDeps(skillMdContent: string): Set<string> {
  *   - `effectiveBlocklist` — the subset of `originalBlocklist` that
  *     remains after exempting any skill reachable from a live root.
  *     This is what callers feed back into the per-tile copy loop.
- *   - `reachableSkills` — the positive presence set: every skill
- *     whose prompt will actually load into the agent's context for
- *     this spawn (roots + transitively-referenced exemptions).
+ *   - `reachableSkills` — the names the agent's loaded skill graph
+ *     reaches: live roots + transitively-referenced exemptions. Note
+ *     that this also includes names referenced via `Skill()` from a
+ *     loaded skill but absent from `skillSources` (typo, retired
+ *     skill) — those names DON'T have a prompt to load, but they're
+ *     reachable in the graph sense. The agent's runtime "Unknown
+ *     skill" error surfaces the absence at invocation time.
  *     #552 uses this for rule `requires:` filtering — a rule loads
  *     iff at least one of its declared gating skills is in this set.
+ *     A dead `requires: [retired-name]` reference would therefore
+ *     match a `Skill("retired-name")` from a loaded skill; the
+ *     publish-time tile lint catches that case so dead refs don't
+ *     accumulate.
  *
  * Algorithm: BFS starting from every NON-blocklisted skill (the
  * "roots" — these load into the agent's context unconditionally).
