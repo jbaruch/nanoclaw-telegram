@@ -166,6 +166,39 @@ otherField: x
     expect(parseRequiresFrontmatter(md)).toEqual(['valid-name']);
   });
 
+  it('returns null for a bracket list whose entries ALL fail the shape check', () => {
+    // `requires: [bad#name]` has content but no valid entries. This
+    // is distinct from the explicit `requires: []` literal-empty form
+    // (which means "never load"). The author clearly intended to
+    // declare a constraint; the content just doesn't parse. Per the
+    // ambiguity-fallback contract, return null (= load unconditionally)
+    // rather than collapsing to the explicit empty-list semantic and
+    // silently parking the rule.
+    const md = '---\nrequires: [bad#name]\n---\n\n# Rule\n';
+    expect(parseRequiresFrontmatter(md)).toBeNull();
+  });
+
+  it('returns null for a bracket list of only commas (operator typo)', () => {
+    // `requires: [,,]` splits into three empty strings, all filtered
+    // out. Same logic as the all-shape-invalid case: distinct from
+    // the literal `[]` empty form; load unconditionally.
+    const md = '---\nrequires: [,,]\n---\n\n# Rule\n';
+    expect(parseRequiresFrontmatter(md)).toBeNull();
+  });
+
+  it('preserves the literal `[]` never-load semantic (not affected by the fallback)', () => {
+    // The literal empty list — whitespace-only inner content — is
+    // the author's explicit "never load" form. Round-trips through
+    // shouldIncludeRule as `empty-requires`, distinct from the
+    // ambiguity-fallback `no-requires` of the malformed cases above.
+    expect(
+      parseRequiresFrontmatter('---\nrequires: []\n---\n\n# Rule\n'),
+    ).toEqual([]);
+    expect(
+      parseRequiresFrontmatter('---\nrequires: [   ]\n---\n\n# Rule\n'),
+    ).toEqual([]);
+  });
+
   it('returns null for a block-list `requires:` with no items (operator typo)', () => {
     // `requires:` alone with no `- foo` lines is the most common
     // authoring mistake. Per the safety contract this is treated as

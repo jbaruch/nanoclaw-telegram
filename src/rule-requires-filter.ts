@@ -106,11 +106,26 @@ export function parseRequiresFrontmatter(content: string): string[] | null {
     // Inline list: requires: [a, b, c]
     if (inline.startsWith('[') && inline.endsWith(']')) {
       const inner = inline.slice(1, -1).trim();
+      // Literal `[]` (or `[   ]` whitespace-only inner) is the
+      // author's explicit "never load" form — distinct from a list
+      // with content that happened to parse to zero valid entries.
       if (!inner) return [];
-      return inner
-        .split(',')
-        .map((s) => stripQuotes(s.trim()))
-        .filter((s) => s.length > 0 && SKILL_NAME_PATTERN.test(s));
+      const candidates = inner.split(',').map((s) => stripQuotes(s.trim()));
+      const valid = candidates.filter(
+        (s) => s.length > 0 && SKILL_NAME_PATTERN.test(s),
+      );
+      // If the author wrote a bracket list with content (e.g.
+      // `[bad#name]` or `[,,]`) but every entry was rejected by the
+      // name-shape check or by the empty-entry filter, return null
+      // (= no constraint, load unconditionally) rather than collapsing
+      // to the explicit-empty-list semantic. The "ambiguity → load"
+      // safety contract applies here: the author's intent was clearly
+      // NOT `requires: []` literal — they just wrote something we
+      // can't make sense of. Distinguishing these prevents a typo'd
+      // requires list from silently parking a rule the same way an
+      // explicit empty does.
+      if (valid.length === 0) return null;
+      return valid;
     }
 
     // Single bare value: requires: foo
