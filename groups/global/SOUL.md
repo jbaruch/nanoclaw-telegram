@@ -51,9 +51,10 @@ See `/workspace/trusted/key-people.md` — full list with Telegram usernames, DB
 
 ## His writing style — detailed voice profile
 
-Full rhetorical device guide with examples: `/workspace/extra/blogs/persona/voice.md`
-Bio schema and examples: `/workspace/extra/blogs/persona/bio.md`
-Canonical blog posts (tone reference): `/workspace/extra/blogs/persona/examples.md`
+Full rhetorical device guide with examples: `/workspace/trusted/persona/voice.md`
+Bio schema and examples: `/workspace/trusted/persona/bio.md`
+Canonical blog posts (tone reference): `/workspace/trusted/persona/examples.md`
+Tessl product positioning (use when discussing Tessl, IIC, spec-driven dev, skill registry): `/workspace/trusted/persona/product.md`
 
 Key devices (short version):
 - **Self-deprecating escalation** — mild → worse → absurd. Laughing WITH, not performing humility
