@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 
 import {
   computeEffectiveBlocklist,
+  computeEffectiveSkillContext,
   extractSkillDeps,
 } from './skill-dep-closure.js';
 
@@ -212,5 +213,80 @@ describe('computeEffectiveBlocklist (#544)', () => {
     // Original must be untouched — caller may share the set across
     // multiple spawns and would not expect side effects.
     expect(original).toEqual(new Set(['blocked']));
+  });
+});
+
+describe('computeEffectiveSkillContext (#552 — reachable surface)', () => {
+  // The context-returning form exposes the positive presence set
+  // (every skill whose prompt loads into the agent's context) so
+  // the #552 rule `requires:` filter can decide whether a rule's
+  // gating skill is actually available for this spawn.
+
+  it('reachable set contains every non-blocklisted root with no references', () => {
+    // No `Skill()` invocations anywhere — the reachable set is
+    // exactly the non-blocklisted roots.
+    const original = new Set(['blocked']);
+    const sources = new Map([
+      ['root-a', '# leaf\n'],
+      ['root-b', '# leaf\n'],
+      ['blocked', '# leaf\n'],
+    ]);
+    const ctx = computeEffectiveSkillContext(original, sources);
+    expect(ctx.reachableSkills).toEqual(new Set(['root-a', 'root-b']));
+    expect(ctx.effectiveBlocklist).toEqual(new Set(['blocked']));
+  });
+
+  it('reachable set includes transitively-referenced blocked skills', () => {
+    // A (root) → B (blocked) → C (blocked). Both B and C are
+    // reachable; the rule filter can therefore satisfy a rule that
+    // requires B or C.
+    const original = new Set(['b', 'c']);
+    const sources = new Map([
+      ['a', '`Skill(skill: "tessl__b")`\n'],
+      ['b', '`Skill(skill: "tessl__c")`\n'],
+      ['c', '# leaf\n'],
+    ]);
+    const ctx = computeEffectiveSkillContext(original, sources);
+    expect(ctx.reachableSkills).toEqual(new Set(['a', 'b', 'c']));
+    expect(ctx.effectiveBlocklist).toEqual(new Set());
+  });
+
+  it('reachable set excludes blocked skills with no live referrer', () => {
+    // blocked-a → blocked-b — neither is a root, so blocked-a's
+    // prompt never loads, so blocked-b is unreachable too. Live
+    // root has no references; reachable = {live-root}.
+    const original = new Set(['blocked-a', 'blocked-b']);
+    const sources = new Map([
+      ['live-root', '# leaf\n'],
+      ['blocked-a', '`Skill(skill: "tessl__blocked-b")`\n'],
+      ['blocked-b', '# leaf\n'],
+    ]);
+    const ctx = computeEffectiveSkillContext(original, sources);
+    expect(ctx.reachableSkills).toEqual(new Set(['live-root']));
+    expect(ctx.effectiveBlocklist).toEqual(new Set(['blocked-a', 'blocked-b']));
+  });
+
+  it('default-class spawn (empty blocklist) produces reachable = every present skill', () => {
+    // The common case for #552: the spawn isn't maintenance, so no
+    // blocklist applies, and every skill loads. The rule filter
+    // operates against the full skill surface.
+    const original = new Set<string>();
+    const sources = new Map([
+      ['skill-a', '# leaf\n'],
+      ['skill-b', '`Skill(skill: "tessl__skill-c")`\n'],
+      ['skill-c', '# leaf\n'],
+    ]);
+    const ctx = computeEffectiveSkillContext(original, sources);
+    expect(ctx.reachableSkills).toEqual(
+      new Set(['skill-a', 'skill-b', 'skill-c']),
+    );
+    expect(ctx.effectiveBlocklist).toEqual(new Set());
+  });
+
+  it('empty skillSources produces empty reachable and unchanged blocklist', () => {
+    const original = new Set(['x', 'y']);
+    const ctx = computeEffectiveSkillContext(original, new Map());
+    expect(ctx.reachableSkills).toEqual(new Set());
+    expect(ctx.effectiveBlocklist).toEqual(new Set(['x', 'y']));
   });
 });

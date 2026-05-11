@@ -39,7 +39,8 @@ import {
   stripAnsi,
 } from './host-logs.js';
 import { logger } from './logger.js';
-import { computeEffectiveBlocklist } from './skill-dep-closure.js';
+import { computeEffectiveSkillContext } from './skill-dep-closure.js';
+import { shouldIncludeRule } from './rule-requires-filter.js';
 import { onAgentLine } from './observer.js';
 import {
   CONTAINER_HOST_GATEWAY,
@@ -177,12 +178,17 @@ export function getInstalledTiles(): string[] | null {
  *     reintroduce the runtime "Unknown skill" failure the closure
  *     exists to prevent.
  */
-function computeEffectiveSkillBlocklistForSpawn(
+interface EffectiveSpawnSkillContext {
+  effectiveBlocklist: Set<string>;
+  reachableSkills: Set<string>;
+}
+
+function computeEffectiveSkillContextForSpawn(
   originalBlocklist: ReadonlySet<string>,
   tilesToInstall: readonly string[],
   registryTiles: string,
   groupDir: string,
-): Set<string> {
+): EffectiveSpawnSkillContext {
   const sources = new Map<string, string>();
 
   const ingestSkillDir = (skillsRoot: string) => {
@@ -232,7 +238,7 @@ function computeEffectiveSkillBlocklistForSpawn(
   ingestSkillDir(path.join(process.cwd(), 'container', 'skills'));
   ingestSkillDir(path.join(groupDir, 'skills'));
 
-  return computeEffectiveBlocklist(originalBlocklist, sources);
+  return computeEffectiveSkillContext(originalBlocklist, sources);
 }
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -1806,16 +1812,24 @@ export function buildVolumeMounts(
   // from wiki-lint's SKILL.md. The pre-scan walks the same three
   // skill sources the install loop below visits (tile skills,
   // built-in skills, staging skills) so the closure sees the full
-  // graph the agent will actually load. Default-session spawns skip
-  // the work entirely (no blocklist to adjust).
-  const skillBlocklist = isMaintenance
-    ? computeEffectiveSkillBlocklistForSpawn(
-        MAINTENANCE_SKILL_BLOCKLIST,
-        tilesToInstall,
-        registryTiles,
-        groupDir,
-      )
-    : null;
+  // graph the agent will actually load.
+  //
+  // #552 — the same pre-scan also produces the positive `reachable`
+  // set used by the rule `requires:` filter below. Default-session
+  // spawns compute against an empty blocklist (no skills filtered),
+  // so `reachableSkills` is simply "every skill present in any
+  // installed tile, plus built-in and staging skills" — the input
+  // the rule filter needs. The cost is one BFS per spawn over the
+  // skill reference graph; previously skipped on default-session
+  // spawns, now run unconditionally so the rule filter can decide.
+  const skillContext = computeEffectiveSkillContextForSpawn(
+    isMaintenance ? MAINTENANCE_SKILL_BLOCKLIST : new Set<string>(),
+    tilesToInstall,
+    registryTiles,
+    groupDir,
+  );
+  const skillBlocklist = isMaintenance ? skillContext.effectiveBlocklist : null;
+  const presentSkills = skillContext.reachableSkills;
   const filteredRules: string[] = [];
   const filteredSkills: string[] = [];
 
@@ -1862,10 +1876,31 @@ export function buildVolumeMounts(
             continue;
           }
           const ruleSrcFile = path.join(rulesDir, ruleFile);
+          const ruleSrcContent = fs.readFileSync(ruleSrcFile, 'utf8');
+          // #552 — apply the rule `requires:` filter against the
+          // spawn's effective skill presence set. A rule with no
+          // `requires:` declaration always loads (current default).
+          // A rule whose `requires:` lists no skill present in the
+          // spawn is filtered out — its content is omitted from
+          // both the per-tile mirror copy and the aggregated
+          // RULES.md, and the filtered name is logged alongside
+          // the existing maintenance-blocklist filtered names.
+          const filterResult = shouldIncludeRule(ruleSrcContent, presentSkills);
+          if (!filterResult.include) {
+            filteredRules.push(
+              `${tileName}/${ruleFile} (requires: ${filterResult.requires.join(', ') || '<empty>'})`,
+            );
+            continue;
+          }
+          // Write the rule from the in-memory content we already read
+          // for the frontmatter parse, rather than a second `cpSync`
+          // that re-reads the same bytes off disk. Saves one read per
+          // rule per spawn — small per-rule but multiplied by every
+          // rule in every installed tile on every spawn.
           const ruleDst = path.join(dstTileDir, 'rules', ruleFile);
           fs.mkdirSync(path.dirname(ruleDst), { recursive: true });
-          fs.cpSync(ruleSrcFile, ruleDst);
-          rulesContent.push(fs.readFileSync(ruleSrcFile, 'utf8'));
+          fs.writeFileSync(ruleDst, ruleSrcContent);
+          rulesContent.push(ruleSrcContent);
         }
       }
 

@@ -63,8 +63,26 @@ export function extractSkillDeps(skillMdContent: string): Set<string> {
 }
 
 /**
- * Pure: compute the effective blocklist for a spawn given the
+ * Pure: compute the effective skill context for a spawn given the
  * original blocklist and a map of every skill's SKILL.md content.
+ *
+ * Returns both:
+ *   - `effectiveBlocklist` — the subset of `originalBlocklist` that
+ *     remains after exempting any skill reachable from a live root.
+ *     This is what callers feed back into the per-tile copy loop.
+ *   - `reachableSkills` — the names the agent's loaded skill graph
+ *     reaches: live roots + transitively-referenced exemptions. Note
+ *     that this also includes names referenced via `Skill()` from a
+ *     loaded skill but absent from `skillSources` (typo, retired
+ *     skill) — those names DON'T have a prompt to load, but they're
+ *     reachable in the graph sense. The agent's runtime "Unknown
+ *     skill" error surfaces the absence at invocation time.
+ *     #552 uses this for rule `requires:` filtering — a rule loads
+ *     iff at least one of its declared gating skills is in this set.
+ *     A dead `requires: [retired-name]` reference would therefore
+ *     match a `Skill("retired-name")` from a loaded skill; the
+ *     publish-time tile lint catches that case so dead refs don't
+ *     accumulate.
  *
  * Algorithm: BFS starting from every NON-blocklisted skill (the
  * "roots" — these load into the agent's context unconditionally).
@@ -74,23 +92,30 @@ export function extractSkillDeps(skillMdContent: string): Set<string> {
  * resolve. Continues transitively — A → B → C all get exempted if A
  * is a root and B is referenced by A and C is referenced by B.
  *
- * Returns a new set; the input `originalBlocklist` is not mutated.
+ * Returns fresh sets; the input `originalBlocklist` is not mutated.
  *
  * Edge cases:
  *   - A skill referencing itself (`Skill(skill: "self")`) is a no-op
  *     (already in the reachable set; the BFS doesn't re-enqueue).
  *   - A reference to a name that doesn't exist in `skillSources`
- *     (typo, retired skill name) is silently dropped — the BFS
- *     can't traverse what it can't read. The agent's runtime
- *     "Unknown skill" error surfaces this case at invocation time;
- *     this helper doesn't try to validate references.
+ *     (typo, retired skill name) is added to `reachableSkills` (the
+ *     agent WILL try to load it and fail loudly at invocation time;
+ *     the closure mirrors that intent) but not enqueued for further
+ *     BFS, since there's no content to walk. For #552 `requires:`
+ *     filtering this means a rule declaring a dead skill name would
+ *     still match — caught by the publish-time lint, not at runtime.
  *   - Empty `skillSources` produces an effective blocklist equal to
- *     the original (no roots, no closure).
+ *     the original (no roots, no closure) and an empty reachable set.
  */
-export function computeEffectiveBlocklist(
+export interface EffectiveSkillContext {
+  effectiveBlocklist: Set<string>;
+  reachableSkills: Set<string>;
+}
+
+export function computeEffectiveSkillContext(
   originalBlocklist: ReadonlySet<string>,
   skillSources: ReadonlyMap<string, string>,
-): Set<string> {
+): EffectiveSkillContext {
   const reachable = new Set<string>();
   const queue: string[] = [];
 
@@ -123,5 +148,19 @@ export function computeEffectiveBlocklist(
   for (const skill of originalBlocklist) {
     if (!reachable.has(skill)) effective.add(skill);
   }
-  return effective;
+  return { effectiveBlocklist: effective, reachableSkills: reachable };
+}
+
+/**
+ * Back-compat wrapper around {@link computeEffectiveSkillContext} for
+ * callers that only need the blocklist piece. New callers should
+ * prefer the context-returning form so the positive presence set is
+ * available for downstream filters (rule `requires:` per #552).
+ */
+export function computeEffectiveBlocklist(
+  originalBlocklist: ReadonlySet<string>,
+  skillSources: ReadonlyMap<string, string>,
+): Set<string> {
+  return computeEffectiveSkillContext(originalBlocklist, skillSources)
+    .effectiveBlocklist;
 }
