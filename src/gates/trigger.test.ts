@@ -179,6 +179,38 @@ describe('triggerGate — keyword kind', () => {
     );
     expect(result.decision).toBe('deny');
   });
+
+  // #566: keyword matcher used `\b` (ASCII-only word boundary), so
+  // Cyrillic / Hebrew / Arabic / CJK keywords never matched and every
+  // miss paid the Stage 2 Haiku tax. Fixed by switching to a
+  // Unicode-aware negative lookahead with the `u` flag.
+  it('matches Cyrillic keyword at start of message (#566)', () => {
+    const result = triggerGate(
+      ctx(
+        'ботики накидайте @saabeilin как экономтиь на токенах',
+        {},
+        cfg(pattern('keyword', 'ботики')),
+      ),
+    );
+    expect(result.decision).toBe('allow');
+  });
+
+  it('matches Cyrillic keyword after whitespace (#566)', () => {
+    const result = triggerGate(
+      ctx('эй ботики помогите', {}, cfg(pattern('keyword', 'ботики'))),
+    );
+    expect(result.decision).toBe('allow');
+  });
+
+  it('does not match Cyrillic keyword inside a longer Cyrillic word (#566)', () => {
+    // Unicode-aware boundary must reject `ботики` inside `ботикичто`
+    // (substring continuation) just as `\b` rejected ASCII `@andybot`
+    // for the `@andy` pattern.
+    const result = triggerGate(
+      ctx('ботикичто-то ещё', {}, cfg(pattern('keyword', 'ботики'))),
+    );
+    expect(result.decision).toBe('deny');
+  });
 });
 
 describe('triggerGate — mention kind', () => {

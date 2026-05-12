@@ -366,7 +366,15 @@ function escapeRegex(str: string): string {
 }
 
 export function buildTriggerPattern(trigger: string): RegExp {
-  return new RegExp(`(?:^|\\s)${escapeRegex(trigger.trim())}\\b`, 'i');
+  // Unicode-aware trailing boundary: `\b` only recognises ASCII word
+  // characters, so non-ASCII triggers (e.g. Cyrillic `ботики`) never
+  // produced a boundary transition and silently failed to match
+  // (#566). Kept in lock-step with `buildKeywordRegex` in
+  // src/gates/trigger.ts per the comment there.
+  return new RegExp(
+    `(?:^|\\s)${escapeRegex(trigger.trim())}(?![\\p{L}\\p{N}_])`,
+    'iu',
+  );
 }
 
 export const DEFAULT_TRIGGER = `@${ASSISTANT_NAME}`;
