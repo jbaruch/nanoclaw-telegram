@@ -8,7 +8,7 @@ import type { NewMessage } from './types.js';
 import type { SessionCommandDeps } from './session-commands.js';
 
 describe('extractSessionCommand', () => {
-  const trigger = /^@Andy\b/i;
+  const trigger = /^@Andy(?![\p{L}\p{N}_])/iu;
 
   it('detects bare /compact', () => {
     expect(extractSessionCommand('/compact', trigger)).toBe('/compact');
@@ -89,7 +89,7 @@ function makeDeps(
   };
 }
 
-const trigger = /^@Andy\b/i;
+const trigger = /^@Andy(?![\p{L}\p{N}_])/iu;
 
 describe('handleSessionCommand', () => {
   it('returns handled:false when no session command found', async () => {

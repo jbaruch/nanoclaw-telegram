@@ -11,15 +11,19 @@ vi.mock('../env.js', () => ({ readEnvFile: vi.fn(() => ({})) }));
 // Mock config
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
-  TRIGGER_PATTERN: /(?:^|\s)@Andy\b/i,
-  // Mirror the real builder's word-boundary semantics so trigger-gate
-  // tests exercise the same shape the orchestrator does.
+  // Mirror the real builder's Unicode-aware boundary semantics
+  // (`(?![\p{L}\p{N}_])` + `u` flag, see `buildTriggerPattern` in
+  // src/config.ts) so Telegram-channel tests exercise the same shape
+  // the orchestrator does. The two used to drift on the ASCII-only
+  // `\b` boundary, which silently masked the non-ASCII keyword bug
+  // fixed in #566.
+  TRIGGER_PATTERN: /(?:^|\s)@Andy(?![\p{L}\p{N}_])/iu,
   getTriggerPattern: (trigger?: string) => {
     const t = (trigger?.trim() || '@Andy').replace(
       /[.*+?^${}()|[\]\\]/g,
       '\\$&',
     );
-    return new RegExp(`(?:^|\\s)${t}\\b`, 'i');
+    return new RegExp(`(?:^|\\s)${t}(?![\\p{L}\\p{N}_])`, 'iu');
   },
 }));
 
