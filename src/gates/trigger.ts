@@ -51,9 +51,20 @@ function escapeRegex(str: string): string {
  * `buildTriggerPattern` in src/config.ts. Keep them in lock-step —
  * any divergence here surfaces as a behaviour change for groups
  * still on the legacy path.
+ *
+ * Trailing boundary is a Unicode-aware negative lookahead instead of
+ * `\b`: JavaScript's `\b` only treats `[A-Za-z0-9_]` as word
+ * characters, so Cyrillic / Hebrew / Arabic / CJK keywords like
+ * `ботики` produced no `\b` transition and silently failed to match
+ * (#566). `(?![\p{L}\p{N}_])` plus the `u` flag rejects continuation
+ * by a letter, number, or underscore in any script, preserving the
+ * substring-rejection semantics universally.
  */
 function buildKeywordRegex(keyword: string): RegExp {
-  return new RegExp(`(?:^|\\s)${escapeRegex(keyword.trim())}\\b`, 'i');
+  return new RegExp(
+    `(?:^|\\s)${escapeRegex(keyword.trim())}(?![\\p{L}\\p{N}_])`,
+    'iu',
+  );
 }
 
 function matchKeyword(text: string, pattern: string): boolean {
