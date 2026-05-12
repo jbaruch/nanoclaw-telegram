@@ -9,9 +9,10 @@ skill-side mirror lives at
 through the staging→promote pipeline alongside the SKILL.md rewrites
 that retire the JSON path.
 
-The TypeScript files `state-010-tz-state.ts` and (post-#542)
-`state-012-tz-state-segments.ts` are the source of truth for the SQL
-— this Markdown only describes the contract.
+The TypeScript files `state-010-tz-state.ts`, (post-#542)
+`state-012-tz-state-segments.ts`, and (post-jbaruch/nanoclaw-admin#229)
+`state-013-tz-state-segments-datetime.ts` are the source of truth for
+the SQL — this Markdown only describes the contract.
 
 ## Owner skill
 
@@ -40,13 +41,14 @@ Five-plus reader skills consume the rows:
 | `current_tz`     | TEXT    | no       | —       | IANA zone name; load-bearing                                                                |
 | `home_tz`        | TEXT    | no       | —       | IANA zone name; reference for jet-lag                                                       |
 | `scheduler_tz`   | TEXT    | yes      | NULL    | Informational only; not load-bearing                                                        |
-| `segments`       | TEXT    | yes      | NULL    | (state-012, #542) JSON-stringified `[{timezone, from, to, label}]` from `sync_tripit`       |
-| `schema_version` | INTEGER | no       | `1`     | Column default still `1`; rows are written at the gate's current value (currently `2`)      |
+| `segments`       | TEXT    | yes      | NULL    | (state-012, #542 / state-013, #229) JSON-stringified `[{timezone, from, to, from_dt?, to_dt?, label}]` from `sync_tripit` |
+| `schema_version` | INTEGER | no       | `1`     | Column default still `1`; rows are written at the gate's current value (currently `3`)      |
 
 Read pattern: `SELECT current_tz, home_tz FROM tz_state WHERE id = 1`.
 Heartbeat advisory walker also reads `segments, schema_version`.
 
-`segments` shape:
+`segments` shape (post-jbaruch/nanoclaw-admin#229 +
+reclaim-tripit-timezones-sync#13):
 
 ```json
 [
@@ -54,17 +56,31 @@ Heartbeat advisory walker also reads `segments, schema_version`.
     "timezone": "Europe/Berlin",
     "from": "2026-05-12",
     "to": "2026-05-19",
+    "from_dt": "2026-05-12T13:30:00.000Z",
+    "to_dt": "2026-05-19T15:00:00.000Z",
     "label": "Devoxx UK 2026 - London"
   }
 ]
 ```
 
-`from` / `to` are date-only `YYYY-MM-DD` strings produced upstream by
-`reclaim-tripit-timezones-sync/lib/tripit.mjs::formatDate` (UTC-derived
-ISO date slice). Lex compare is equivalent to date compare, so the
-walker uses plain string `<=`/`<`. The match rule is `from <= today <
-to` — strict inequality on the right edge, so a return-flight day flips
-back to `home_tz` instead of holding the destination zone.
+`from` / `to` are date-only `YYYY-MM-DD` strings (the original pre-#229
+shape). `from_dt` / `to_dt` (added in #229) are ISO 8601 UTC strings
+preserving the underlying flight arrival / lodging check-in / check-out
+wall-clock. Both shapes are produced upstream in
+`reclaim-tripit-timezones-sync/lib/tripit.mjs` — the date-only fields
+slice `toISOString()` to 10 chars; the datetime fields ARE
+`toISOString()` of the same Date object. Lex compare on either shape
+is equivalent to chrono compare, so the walker uses plain string
+`<=`/`<`.
+
+The walker (`walkTzSegments` in `src/db.ts`) prefers `from_dt` /
+`to_dt` per segment when both are present and falls back to date-only
+`from` / `to` otherwise. Per-segment fallback handles the mixed-shape
+transient between a host deploy (when an older row may still be cached
+on disk) and the next `sync_tripit` rewrite. The match rule on either
+path keeps strict inequality on the right edge — a return-flight
+arrival at exactly `to_dt` (or a return-day `to === todayUtc`) flips
+back to `home_tz` rather than holding the destination zone.
 
 Write pattern after #542 (host-side `applyTripitSegmentsToTzState`,
 called from `sync_tripit`'s success path):
@@ -73,7 +89,7 @@ called from `sync_tripit`'s success path):
 UPDATE tz_state
    SET current_tz     = ?,
        segments       = ?,
-       schema_version = 2
+       schema_version = ?  -- SUPPORTED_TZ_STATE_SCHEMA_VERSION
  WHERE id = 1;
 ```
 
@@ -83,11 +99,11 @@ returns silently if the singleton is absent. First-time setup / the
 JSON migration backfill seeds the row with `home_tz`, then the next
 `sync_tripit` run takes over the steady-state writes.
 
-`schema_version` is written explicitly as `2` to satisfy the reader
-gate (`SUPPORTED_TZ_STATE_SCHEMA_VERSION = 2` in `src/db.ts`). The
-state-010 column default of `1` is preserved on the schema for
-historical compatibility, but every writer post-#542 writes `2`
-directly.
+`schema_version` is written through `SUPPORTED_TZ_STATE_SCHEMA_VERSION`
+in `src/db.ts` (currently `3` post-jbaruch/nanoclaw-admin#229; was `2`
+between #542 and #229). The state-010 column default of `1` is
+preserved on the schema for historical compatibility, but every writer
+binds the constant.
 
 ## `follow_me_tasks`
 

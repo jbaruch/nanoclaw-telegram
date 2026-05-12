@@ -351,15 +351,17 @@ describe('task-tz-state.json → SQLite migration (#302)', () => {
     // Pre-#542 the writer omitted `schema_version` from its column
     // list, so an already-bumped value survived. Post-#542 the writer
     // is expected to STAY in sync with the reader gate
-    // (SUPPORTED_TZ_STATE_SCHEMA_VERSION = 2 in src/db.ts) by writing
-    // the current shape's value explicitly. The thing we're still
-    // catching: a regression to `INSERT OR REPLACE`, which is delete+
-    // insert in SQLite and would reset schema_version to the schema's
-    // `DEFAULT 1`. So we manually bump to 5 between imports, run the
-    // second import, and assert the result equals the writer's known
-    // shape (2) — anything else (5, 1, or undefined) signals either a
-    // delete+insert regression (1) or that the manual UPDATE isn't
-    // being touched at all (5).
+    // (`SUPPORTED_TZ_STATE_SCHEMA_VERSION` in src/db.ts — currently 3
+    // post-jbaruch/nanoclaw-admin#229; was 2 between #542 and #229)
+    // by writing the constant's current value explicitly. The thing
+    // we're still catching: a regression to `INSERT OR REPLACE`,
+    // which is delete+insert in SQLite and would reset schema_version
+    // to the schema's `DEFAULT 1`. So we manually bump to 5 between
+    // imports, run the second import, and assert the result equals
+    // the writer's known shape (the constant's current value) —
+    // anything else (5, 1, or undefined) signals either a delete+
+    // insert regression (1) or that the manual UPDATE isn't being
+    // touched at all (5).
     //
     // To stage the manual bump in the middle of the migration pass,
     // we run the migration once with only the first group's file
@@ -430,7 +432,8 @@ describe('task-tz-state.json → SQLite migration (#302)', () => {
             home_tz: 'Europe/Berlin',
           });
           // Load-bearing: schema_version equals the writer's known
-          // shape (2 post-#542 in lock-step with the reader gate). If
+          // shape (3 post-jbaruch/nanoclaw-admin#229 in lock-step with
+          // the reader gate; was 2 between #542 and #229). If
           // the writer ever drifts to `INSERT OR REPLACE`, the result
           // would be `1` (delete+insert in SQLite resets to the
           // schema's `DEFAULT 1`); if the writer ever drops the
@@ -438,7 +441,7 @@ describe('task-tz-state.json → SQLite migration (#302)', () => {
           // bump survives). Either drift breaks the singleton's
           // shape contract — assert exactly the current writer's
           // shape value.
-          expect(tzRows[0].schema_version).toBe(2);
+          expect(tzRows[0].schema_version).toBe(3);
         } finally {
           db.close();
         }

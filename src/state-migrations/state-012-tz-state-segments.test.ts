@@ -86,10 +86,12 @@ describe('state-012-tz-state-segments', () => {
     // Mid-migration scenario: a deployment that ran state-010 + state-
     // 011 already has a tz_state row at schema_version=1 written by
     // _seedTzStateForTests / migrateTaskTzStateJsonFiles. The state-
-    // 012 UPDATE must bump that row to 2 so the existing reader gate
-    // (SUPPORTED_TZ_STATE_SCHEMA_VERSION = 2) recognizes it on first
-    // read after the migration. Otherwise getCurrentTz() would return
-    // null until the next sync_tripit run rewrote the row.
+    // 012 UPDATE must bump that row to 2; subsequent state-013 takes
+    // it 2 → 3 to land at the post-#229 reader gate
+    // (`SUPPORTED_TZ_STATE_SCHEMA_VERSION` was 2 between #542 and
+    // #229, currently 3). This test pins state-012's own
+    // contribution at 2 in isolation; the chained 1 → 2 → 3 path is
+    // covered in `state-013-tz-state-segments-datetime.test.ts`.
     const database = new Database(':memory:');
     try {
       applyStateMigrations(database, PRIOR);
@@ -150,7 +152,8 @@ describe('state-012-tz-state-segments', () => {
       // change the default, only the existing row's value. Future
       // inserts go through `_seedTzStateForTests` (test path) or
       // `applyTripitSegmentsToTzState` (production path), both of
-      // which write `schema_version = 2` explicitly.
+      // which write the current `SUPPORTED_TZ_STATE_SCHEMA_VERSION`
+      // (3 post-#229; was 2 between #542 and #229) explicitly.
       database
         .prepare(
           `INSERT INTO tz_state (id, current_tz, home_tz, scheduler_tz)

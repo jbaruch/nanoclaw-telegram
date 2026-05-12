@@ -12,6 +12,7 @@ import { STATE_009_PHASE_COMPLETIONS } from './state-009-phase-completions.js';
 import { STATE_010_TZ_STATE } from './state-010-tz-state.js';
 import { STATE_011_SESSION_LENGTH_CAP } from './state-011-session-length-cap.js';
 import { STATE_012_TZ_STATE_SEGMENTS } from './state-012-tz-state-segments.js';
+import { STATE_013_TZ_STATE_SEGMENTS_DATETIME } from './state-013-tz-state-segments-datetime.js';
 
 /**
  * Registered state-table migrations, applied in order at orchestrator
@@ -36,4 +37,5 @@ export const STATE_MIGRATIONS: readonly StateMigration[] = [
   STATE_010_TZ_STATE,
   STATE_011_SESSION_LENGTH_CAP,
   STATE_012_TZ_STATE_SEGMENTS,
+  STATE_013_TZ_STATE_SEGMENTS_DATETIME,
 ];

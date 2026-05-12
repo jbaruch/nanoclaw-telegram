@@ -50,8 +50,11 @@ import type { StateMigration } from '../db.js';
  *
  * `schema_version` bumps 1 → 2. Per `coding-policy: stateful-artifacts`
  * the `tz_state` reader gate (`SUPPORTED_TZ_STATE_SCHEMA_VERSION` in
- * `src/db.ts`) advances in lock-step so the gate matches the new
- * shape. Owner skill is now the host orchestrator
+ * `src/db.ts`) advanced 1 → 2 in lock-step with this migration so
+ * the gate matched the new shape at the time. Subsequent state-013
+ * (jbaruch/nanoclaw-admin#229) advanced the gate again, 2 → 3, to
+ * carry per-segment datetime resolution; state-012 itself remains
+ * the 1 → 2 step. Owner skill is now the host orchestrator
  * (`applyTripitSegmentsToTzState` in `src/db.ts`); the prior owner
  * (`nanoclaw-admin/skills/task-tz-sync`) retires in
  * jbaruch/nanoclaw-admin#223 (the tile-side cleanup PR).

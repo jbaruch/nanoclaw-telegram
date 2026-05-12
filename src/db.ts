@@ -1703,11 +1703,14 @@ export function getDueTasks(): ScheduledTask[] {
 // Per `coding-policy: stateful-artifacts`, readers that observe a higher
 // `schema_version` must treat the row as "no usable prior state" rather
 // than guess. Bumped to 2 by state-012 (#542) when the host took over
-// as the writer of `tz_state` and added the `segments` column. The
-// state-012 migration's `UPDATE tz_state SET schema_version = 2 WHERE
-// id = 1` runs before this gate is consulted, so any row that existed
-// at v1 has already been bumped by the time `getCurrentTz` reads.
-const SUPPORTED_TZ_STATE_SCHEMA_VERSION = 2;
+// as the writer of `tz_state` and added the `segments` column; bumped
+// to 3 by state-013 (jbaruch/nanoclaw-admin#229) when `walkTzSegments`
+// gained per-segment ISO-datetime resolution (consuming the upstream
+// `reclaim-tripit-timezones-sync#13` parser fix). The state-NNN
+// migrations run before this gate is consulted, so any row that
+// existed at a prior version has already been bumped by the time
+// `getCurrentTz` reads.
+const SUPPORTED_TZ_STATE_SCHEMA_VERSION = 3;
 
 /**
  * Test-only helper: seed a `follow_me_tasks` row directly. The
@@ -1813,16 +1816,29 @@ export function getCurrentTz(): string | null {
 
 /**
  * Single segment shape as emitted by `sync_tripit`'s stdout JSON
- * (`result.segments` in `reclaim-tripit-timezones-sync/sync.mjs` —
- * `from` / `to` are date-only `YYYY-MM-DD` strings produced by
- * `lib/tripit.mjs::formatDate`, which slices `toISOString()` to 10
- * chars). Lexicographic comparison of these strings is equivalent to
- * date comparison, so the walker can use plain string `<=`/`<`.
+ * (`result.segments` in `reclaim-tripit-timezones-sync/sync.mjs`).
+ *
+ * `from` / `to` are date-only `YYYY-MM-DD` strings — the original
+ * shape from before reclaim-tripit-timezones-sync#13. Lexicographic
+ * comparison of these strings is equivalent to date comparison, so
+ * the walker can use plain string `<=`/`<` when datetime fields are
+ * absent.
+ *
+ * `from_dt` / `to_dt` (jbaruch/nanoclaw-admin#229,
+ * reclaim-tripit-timezones-sync#13) are ISO 8601 UTC strings derived
+ * from the same underlying `Date` objects in `lib/tripit.mjs` — they
+ * preserve flight arrival / lodging check-in wall-clock instead of
+ * collapsing to UTC midnight. Optional because (a) a row written by
+ * a pre-deploy `applyTripitSegmentsToTzState` carries the old shape
+ * until the next `sync_tripit` rewrites it, and (b) the upstream
+ * parser may legitimately omit them on edge paths.
  */
 export interface TripitSegment {
   timezone: string;
   from: string;
   to: string;
+  from_dt?: string;
+  to_dt?: string;
   label?: string;
 }
 
@@ -1830,22 +1846,48 @@ export interface TripitSegment {
  * Pure walker: pick the IANA zone name covering `now` from a segments
  * timeline, falling back to `homeTz` if no segment covers it.
  *
- * Match rule: `from <= todayUtc < to`. The upstream's `formatDate`
- * encodes both ends as UTC-derived `YYYY-MM-DD`, so comparing against
- * `now.toISOString().slice(0, 10)` keeps the encoding consistent.
+ * Match rule: per-segment, prefer ISO-datetime resolution when the
+ * segment carries `from_dt` / `to_dt` (post-#229); fall through to
+ * date-only `from` / `to` otherwise. The match keeps strict
+ * inequality on the right edge in both shapes — a traveler whose
+ * return-flight arrival is `to_dt` should see the next segment (or
+ * `homeTz`) take over the instant the flight lands, not hold the
+ * destination zone for the rest of that second.
+ *
+ * Why per-segment, not array-wide: a single segments array can mix
+ * shapes across deploys — a row written by a pre-deploy
+ * `applyTripitSegmentsToTzState` is date-only until the next
+ * `sync_tripit` rewrites it; in the transient between the upstream
+ * parser bump (rtts#13) and the next sync, an array can also carry
+ * one shape exclusively. Per-segment fallback handles every case
+ * with one walk.
+ *
+ * `from_dt` and `to_dt` are both required for the datetime path —
+ * if only one is present (malformed payload), the segment falls
+ * back to date-only on its own row rather than the walker emitting
+ * a one-sided datetime compare against the missing end.
+ *
+ * String compare on ISO 8601 UTC strings is equivalent to chrono
+ * compare, the same property the date-only path relies on. Both
+ * shapes use `now.toISOString()` (`...T...Z`) or its 10-char prefix
+ * for `today`, so each path is internally consistent.
  *
  * Edge cases (covered by unit tests):
  *   - Empty / non-array `segments` → `homeTz` (silent fallback).
  *   - Gap between trips (no covering segment) → `homeTz`.
- *   - `from === to` → never matches (degenerate segment); skipped.
+ *   - `from === to` (date or datetime) → never matches (degenerate
+ *     segment); skipped.
  *   - Empty / non-string `timezone` → segment skipped (the upstream
- *     drops these via `result.segments` already, but defend against a
- *     malformed payload anyway).
+ *     drops these via `result.segments` already, but defend against
+ *     a malformed payload anyway).
  *   - Overlapping segments → first match wins (matches the natural
  *     "segments are produced in chronological order, lodging-primary
  *     first" upstream invariant).
- *   - `to === todayUtc` → segment ends today; the next segment (or
+ *   - `to_dt === now.toISOString()` (or `to === todayUtc` on the
+ *     date-only path) → segment ends now; the next segment (or
  *     home fallback) takes over.
+ *   - Mixed array (some segments with `from_dt`/`to_dt`, some
+ *     without) → each segment uses its own shape.
  */
 export function walkTzSegments(
   segments: readonly TripitSegment[] | null | undefined,
@@ -1853,7 +1895,8 @@ export function walkTzSegments(
   homeTz: string,
 ): string {
   if (!Array.isArray(segments) || segments.length === 0) return homeTz;
-  const todayUtc = now.toISOString().slice(0, 10);
+  const nowIso = now.toISOString();
+  const todayUtc = nowIso.slice(0, 10);
   for (const seg of segments) {
     if (
       typeof seg?.timezone !== 'string' ||
@@ -1861,6 +1904,13 @@ export function walkTzSegments(
       typeof seg.from !== 'string' ||
       typeof seg.to !== 'string'
     ) {
+      continue;
+    }
+    // Datetime path: both `from_dt` and `to_dt` must be present and
+    // strings. Partial-shape segments fall through to the date-only
+    // path on their own row.
+    if (typeof seg.from_dt === 'string' && typeof seg.to_dt === 'string') {
+      if (seg.from_dt <= nowIso && nowIso < seg.to_dt) return seg.timezone;
       continue;
     }
     if (seg.from <= todayUtc && todayUtc < seg.to) return seg.timezone;
@@ -1874,8 +1924,10 @@ export function walkTzSegments(
  * segment timeline (or fall back to `home_tz` for gaps between
  * trips).
  *
- * Writes `schema_version = 2` explicitly to satisfy the post-#542
- * reader gate (`SUPPORTED_TZ_STATE_SCHEMA_VERSION = 2`). The row
+ * Writes `schema_version = SUPPORTED_TZ_STATE_SCHEMA_VERSION` (3
+ * post-jbaruch/nanoclaw-admin#229; was 2 between #542 and #229).
+ * The constant is the source of truth so every writer in this file
+ * picks up future state-NNN bumps automatically. The row
  * MUST already exist — `home_tz` is NOT NULL on `tz_state` and isn't
  * derivable from the TripIt payload, so the host can't synthesize a
  * row from scratch. This is by design: `tz_state.home_tz` is set by
@@ -4378,20 +4430,21 @@ function resolveFollowMeTaskShape(
  * re-import. The multi-group test in
  * `task-tz-state-json-migration.test.ts` pins this down by manually
  * bumping `schema_version` between two group imports and asserting
- * the post-#542 writer's known shape (currently 2) is what lands on
- * the second import — anything else (1 or the manually-bumped value)
+ * the writer's known shape (`SUPPORTED_TZ_STATE_SCHEMA_VERSION`,
+ * currently 3 post-jbaruch/nanoclaw-admin#229) is what lands on the
+ * second import — anything else (1 or the manually-bumped value)
  * would signal either a `INSERT OR REPLACE` regression (1) or that
  * the writer dropped its explicit `schema_version` bind (manual
  * bump survives, gate rejects the row).
  *
  * `tz_state` UPSERT writes `schema_version` explicitly through
- * `SUPPORTED_TZ_STATE_SCHEMA_VERSION` (post-#542): a fresh-DB import
- * would otherwise land at the state-010 column default of 1, and the
- * reader gate (currently 2) would reject the imported row as
- * "unfamiliar schema_version" until `applyTripitSegmentsToTzState`
- * rewrote it on the next nightly `sync_tripit` run. The explicit
- * bind keeps the JSON-import's row shape coherent with the writer
- * gate from the moment it lands.
+ * `SUPPORTED_TZ_STATE_SCHEMA_VERSION` (3 post-#229; was 2 between
+ * #542 and #229): a fresh-DB import would otherwise land at the
+ * state-010 column default of 1, and the reader gate would reject
+ * the imported row as "unfamiliar schema_version" until
+ * `applyTripitSegmentsToTzState` rewrote it on the next nightly
+ * `sync_tripit` run. The explicit bind keeps the JSON-import's row
+ * shape coherent with the writer gate from the moment it lands.
  *
  * `follow_me_tasks` UPSERT re-stamps `updated_at = CURRENT_TIMESTAMP`
  * in the conflict branch so a re-import shows up as a fresh row
