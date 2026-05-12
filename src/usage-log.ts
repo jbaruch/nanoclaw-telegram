@@ -216,7 +216,10 @@ export interface TokenCounts {
 }
 
 /**
- * Compute cost in microcents (integer; multiply by 1e-6 to get dollars).
+ * Compute cost in microcents (integer; multiply by 1e-8 to get dollars,
+ * i.e. divide by 1e8). The field is named `cost_micro` historically but
+ * the unit is microcents, NOT micro-USD — see derivation below. Consumers
+ * that read this value MUST divide by 1e8, not 1e6.
  *
  * Derivation:
  *   $ = sum(tokens_i * price_i_per_MTok / 1e6)
@@ -282,6 +285,7 @@ export interface UsageRecord {
   cache_r: number;
   cache_c_5m: number;
   cache_c_1h: number;
+  /** Cost in microcents (1e-8 USD per unit). Divide by 1e8 for dollars. */
   cost_micro: number;
   dur_ms: number;
   /**
