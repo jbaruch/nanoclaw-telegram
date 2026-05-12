@@ -51,6 +51,10 @@ describe('SECRET_CONTAINER_VARS', () => {
     expect(SECRET_CONTAINER_VARS.has('COMPOSIO_USER_ID')).toBe(true);
   });
 
+  it('lists GITHUB_TOKEN (`gh` CLI inside main/trusted containers — cost-monitor dashboard skills bypass the Composio MCP tool-schema cache_create tax; same env-file treatment as the Composio keys, OneCLI migration target jbaruch/nanoclaw#564)', () => {
+    expect(SECRET_CONTAINER_VARS.has('GITHUB_TOKEN')).toBe(true);
+  });
+
   it('does NOT include placeholder vars (proxied through OneCLI)', () => {
     expect(SECRET_CONTAINER_VARS.has('ANTHROPIC_API_KEY')).toBe(false);
     expect(SECRET_CONTAINER_VARS.has('CLAUDE_CODE_OAUTH_TOKEN')).toBe(false);

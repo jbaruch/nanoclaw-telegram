@@ -3,7 +3,16 @@
 
 FROM node:22-slim
 
-# Install system dependencies for Chromium
+# Install system dependencies for Chromium + GitHub CLI.
+# `gh` ships from GitHub's official apt repo (not in default debian-slim
+# sources). Used inside main/trusted-tier containers by the cost-monitor
+# dashboard skills (precheck-gating-monitor, session-cap-monitor,
+# daily-spend-rollup) to edit dashboard issues and post anomaly comments
+# directly via `gh issue edit/comment`, avoiding the cache_create tax of
+# routing through Composio's MCP GitHub catalog on every cold maintenance
+# spawn. CLI authenticates from GITHUB_TOKEN automatically (orchestrator
+# injects via --env-file per SECRET_CONTAINER_VARS in
+# src/container-runner.ts).
 RUN apt-get update && apt-get install -y \
     chromium \
     fonts-liberation \
@@ -24,7 +33,14 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     poppler-utils \
-    && rm -rf /var/lib/apt/lists/*
+ && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | tee /usr/share/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+ && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+ && apt-get update \
+ && apt-get install -y gh \
+ && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser and default screenshots to JPEG.
 # agent-browser falls back to PNG without these knobs, which bloats cached

@@ -477,6 +477,18 @@ export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
   // by `tessl__composio-fetch`'s precheck (admin tile, jbaruch/nanoclaw#509)
   // to do the fetch inline via Composio REST instead of waking the LLM.
   'COMPOSIO_USER_ID',
+  // Fine-grained GitHub PAT for the `gh` CLI inside main/trusted-tier
+  // containers. Same .env entry the host-side `github_backup` IPC
+  // handler uses for `git push`; forwarding it into the container lets
+  // skills run `gh issue list/edit/comment` directly without going
+  // through Composio's MCP catalog (avoids cache_create on the GitHub
+  // tool schemas for high-fire-count skills like the cost-monitor
+  // dashboard family — `precheck-gating-monitor`, `session-cap-monitor`,
+  // `daily-spend-rollup`). `gh` reads `GITHUB_TOKEN` automatically —
+  // no `gh auth login` needed inside the container. The fact that this
+  // still lives in the container's environ for the spawn lifetime is
+  // the OneCLI-proxy migration target tracked in jbaruch/nanoclaw#564.
+  'GITHUB_TOKEN',
 ]);
 
 /**
@@ -2618,17 +2630,32 @@ function buildContainerArgs(
   args.push('-e', `TZ=${TIMEZONE}`);
 
   // Credential tiers:
-  //   Main/Trusted: Composio only (handles Gmail, Calendar, Tasks, GitHub via OAuth)
-  //   Other:        nothing (Anthropic via proxy only)
+  //   Main/Trusted: Composio + GitHub. Composio handles Gmail, Calendar,
+  //                 Tasks, and GitHub-via-OAuth; GITHUB_TOKEN handles
+  //                 GitHub-via-`gh`-CLI for high-fire-count automation
+  //                 (the cost-monitor dashboard skills) that would
+  //                 otherwise pay cache_create on the Composio GitHub
+  //                 tool schemas every cold maintenance spawn.
+  //   Other:        nothing (Anthropic via proxy only).
   //
-  // All other credentials (GITHUB_TOKEN, GOOGLE_*, RECLAIM_*, TRIPIT_*, OPENAI_*)
-  // stay on the host. Scripts that need them run host-side via IPC.
+  // All other host-side credentials (GOOGLE_*, RECLAIM_*, TRIPIT_*,
+  // OPENAI_*) stay on the host. Scripts that need them run host-side
+  // via IPC.
   const isTrusted = group.containerConfig?.trusted === true;
 
   const CONTAINER_VARS = [
     'COMPOSIO_API_KEY',
     'COMPOSIO_MCP_KEY',
     'COMPOSIO_USER_ID',
+    // Forwarded into main/trusted containers so the `gh` CLI authenticates
+    // automatically. Same PAT the host-side github_backup handler uses
+    // — the operator must expand its scope to cover `Contents: write`
+    // (host-side git push) AND `Issues: write` + `Pull requests: write`
+    // (container-side `gh issue edit/comment` from the cost-monitor
+    // dashboard skills). See .env.example for the scope documentation.
+    // OneCLI migration target — see jbaruch/nanoclaw#564 for the path
+    // off the "secret-in-container-environ-for-spawn-lifetime" exposure.
+    'GITHUB_TOKEN',
   ];
 
   const varsToForward = isMain || isTrusted ? CONTAINER_VARS : [];
