@@ -1948,17 +1948,31 @@ export function walkTzSegments(
       // degenerate segments invisible to every code path here.
       if (seg.from_dt === seg.to_dt) continue;
       if (seg.from_dt <= nowIso && nowIso < seg.to_dt) return seg.timezone;
-      if (seg.to_dt <= nowIso) {
+      // Strict `<` for the prev-ended classification (mirror in the
+      // date-only path below): a segment whose `to_dt` exactly
+      // equals `now` is at the right-edge boundary and stays out of
+      // the gap-fallback's "previous" pool. The mixed-shape case
+      // (#229 regression guard) is the load-bearing reason: a
+      // legacy date-only segment with `to: 2026-05-12` and a
+      // datetime future segment at `from_dt: 2026-05-12T13:30Z`
+      // would otherwise let the walker return the future zone at
+      // `00:30Z` (departure morning) — same early-flip shape the
+      // #229 per-segment-datetime fix existed to prevent.
+      if (seg.to_dt < nowIso) {
         hasPrevEndedSeg = true;
       } else if (nowIso < seg.from_dt) {
         if (nextSegTz === null) nextSegTz = seg.timezone;
       }
       continue;
     }
-    // Date-only path — same degenerate-segment guard.
+    // Date-only path — same degenerate-segment guard + strict-`<`
+    // right edge for prev-ended classification. A date-only segment
+    // whose `to` equals today's UTC date is "ending today" but the
+    // user is still in it until UTC midnight rolls; treating it as
+    // already-past would flip mid-day for any later segment.
     if (seg.from === seg.to) continue;
     if (seg.from <= todayUtc && todayUtc < seg.to) return seg.timezone;
-    if (seg.to <= todayUtc) {
+    if (seg.to < todayUtc) {
       hasPrevEndedSeg = true;
     } else if (todayUtc < seg.from) {
       if (nextSegTz === null) nextSegTz = seg.timezone;

@@ -2084,19 +2084,61 @@ describe('walkTzSegments (#542)', () => {
         label: 'new-shape — current',
       },
     ];
-    // 00:30 UTC on 2026-05-12: legacy segment already ended (`to`
-    // is 2026-05-12, strict-< rule on todayUtc=2026-05-12 → no
-    // match, classifies as previous-ended). New-shape segment's
-    // from_dt is in the future → no match, classifies as next →
-    // walker is in an inter-segment gap (#571) and returns the
-    // arrival tz (NY).
+    // 00:30 UTC on 2026-05-12: legacy date-only segment is NOT
+    // classified as previous-ended (its `to` equals todayUtc, and
+    // the gap-fallback uses strict `<` per the #229 regression
+    // guard so a date-only segment ending today stays out of the
+    // gap-fallback pool). New-shape segment's `from_dt` is in the
+    // future → classifies as next. Walker has no prev_ended +
+    // future → falls back to `home_tz`. This preserves the #229
+    // outcome: the user is still in the legacy zone for the rest
+    // of the calendar day, NOT in the future zone yet.
     expect(
       walkTzSegments(segments, new Date('2026-05-12T00:30:00Z'), HOME),
-    ).toBe('America/New_York');
+    ).toBe(HOME);
     // 14:00 UTC same day: legacy segment still doesn't match;
     // new-shape segment's from_dt has passed → match NY.
     expect(
       walkTzSegments(segments, new Date('2026-05-12T14:00:00Z'), HOME),
+    ).toBe('America/New_York');
+  });
+
+  it('preserves #229 outcome on mixed-shape arrays — date-only `to === todayUtc` does not seed the gap fallback', () => {
+    // Boy-scout guard for the regression #229 fixed: a legacy
+    // date-only segment ending on today's UTC date with a datetime
+    // future segment at a later hour today must NOT trigger the
+    // gap fallback. The user is still physically in the legacy
+    // zone (e.g. Chicago morning) until the actual flight time
+    // (e.g. 13:30 UTC). Pre-fix `to <= todayUtc` would have set
+    // `hasPrevEndedSeg = true` and returned the future zone at
+    // 00:30Z — the exact early-flip shape #229 closed.
+    const segments = [
+      {
+        timezone: 'America/Chicago',
+        from: '2026-05-10',
+        to: '2026-05-12',
+        label: 'Chicago (legacy date-only)',
+      },
+      {
+        timezone: 'America/New_York',
+        from: '2026-05-12',
+        to: '2026-05-15',
+        from_dt: '2026-05-12T13:30:00.000Z',
+        to_dt: '2026-05-15T22:00:00.000Z',
+        label: 'NY (datetime)',
+      },
+    ];
+    // Pre-flight times throughout the morning UTC of departure day.
+    for (const now of [
+      '2026-05-12T00:00:00Z',
+      '2026-05-12T05:00:00Z',
+      '2026-05-12T13:29:59Z',
+    ]) {
+      expect(walkTzSegments(segments, new Date(now), HOME)).toBe(HOME);
+    }
+    // At from_dt+: NY's inside-match fires, walker returns NY.
+    expect(
+      walkTzSegments(segments, new Date('2026-05-12T13:30:00Z'), HOME),
     ).toBe('America/New_York');
   });
 });
