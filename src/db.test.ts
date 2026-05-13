@@ -1735,7 +1735,12 @@ describe('walkTzSegments (#542)', () => {
     ).toBe('Europe/Berlin');
   });
 
-  it('falls back to home_tz on the gap between trips', () => {
+  it('returns the arrival segment tz in inter-segment gaps (#571)', () => {
+    // #571: a heartbeat firing in the gap between two booked stays is
+    // mid-transit. Previously the walker fell back to home_tz, which
+    // is often physically impossible (mid-Atlantic) and never
+    // actionable. The walker now uses the NEXT segment's tz so the
+    // morning brief / scheduler think in the arrival zone.
     const segments = [
       {
         timezone: 'Europe/Berlin',
@@ -1753,7 +1758,132 @@ describe('walkTzSegments (#542)', () => {
     // 2026-05-25 is in the gap between the two trips.
     expect(
       walkTzSegments(segments, new Date('2026-05-25T12:00:00Z'), HOME),
+    ).toBe('America/New_York');
+  });
+
+  it('returns the arrival tz mid-flight between two adjacent datetime segments (#571 live repro)', () => {
+    // The exact 2026-05-13 production incident on the Geecon trip:
+    // Atlanta segment ended 02:40Z; Krakow segment starts 13:00Z. At
+    // 11:24Z the user was mid-flight (over the Atlantic), but the
+    // walker flipped `current_tz` to home_tz (America/Chicago) and
+    // fired a "Timezone changed" notification — wrong on both counts
+    // (user is neither in NY nor Chicago, and not actionable
+    // mid-flight). With the gap fix the walker returns the arrival
+    // tz (Europe/Berlin).
+    const segments = [
+      {
+        timezone: 'America/New_York',
+        from: '2026-05-12',
+        to: '2026-05-13',
+        from_dt: '2026-05-12T23:43:00.000Z',
+        to_dt: '2026-05-13T02:40:00.000Z',
+        label: 'Atlanta',
+      },
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-13',
+        to: '2026-05-15',
+        from_dt: '2026-05-13T13:00:00.000Z',
+        to_dt: '2026-05-15T09:00:00.000Z',
+        label: 'Krakow Airport hotel',
+      },
+    ];
+    expect(
+      walkTzSegments(segments, new Date('2026-05-13T11:24:00Z'), HOME),
+    ).toBe('Europe/Berlin');
+  });
+
+  it('returns home_tz after the last segment (post-trip, no future segment)', () => {
+    // A trip has fully ended and no future segment remains — the user
+    // is back at home_tz. Without this case, the gap-fallback could
+    // erroneously activate against a lone "previous" segment.
+    const segments = [
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-12',
+        to: '2026-05-19',
+        label: 'past trip',
+      },
+    ];
+    expect(
+      walkTzSegments(segments, new Date('2026-05-25T12:00:00Z'), HOME),
     ).toBe(HOME);
+  });
+
+  it('skips degenerate datetime segments in gap classification (#571 guard)', () => {
+    // Per the function contract, degenerate (`from_dt === to_dt`)
+    // segments are never a match. The gap-fallback classifier added
+    // for #571 would otherwise feed a degenerate segment into either
+    // `hasPrevEndedSeg` (if `to_dt <= nowIso`) or `nextSegTz` (if
+    // `nowIso < from_dt`) and let a malformed row drive resolution.
+    // The skip-before-classification guard prevents that.
+    const segments = [
+      {
+        timezone: 'America/New_York',
+        from: '2026-05-12',
+        to: '2026-05-13',
+        from_dt: '2026-05-12T23:43:00.000Z',
+        to_dt: '2026-05-13T02:40:00.000Z',
+        label: 'past Atlanta',
+      },
+      // Degenerate row: from_dt === to_dt. Must be skipped — without
+      // the guard, this would set `nextSegTz` to Mars/Phobos and the
+      // walker would return that nonsensical zone instead of the real
+      // future segment.
+      {
+        timezone: 'Mars/Phobos',
+        from: '2026-05-13',
+        to: '2026-05-13',
+        from_dt: '2026-05-13T13:30:00.000Z',
+        to_dt: '2026-05-13T13:30:00.000Z',
+        label: 'degenerate',
+      },
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-13',
+        to: '2026-05-15',
+        from_dt: '2026-05-13T14:00:00.000Z',
+        to_dt: '2026-05-15T09:00:00.000Z',
+        label: 'real future Krakow',
+      },
+    ];
+    // 11:24Z is in the gap between Atlanta (ended 02:40Z) and Krakow
+    // (starts 14:00Z) — gap fallback should return Krakow, NOT the
+    // degenerate Mars/Phobos row even though that row falls earlier
+    // in iteration order on the "future" side.
+    expect(
+      walkTzSegments(segments, new Date('2026-05-13T11:24:00Z'), HOME),
+    ).toBe('Europe/Berlin');
+  });
+
+  it('skips degenerate date-only segments in gap classification (#571 guard)', () => {
+    // Same guard, date-only path. A `from === to` legacy row between
+    // two real segments must not become the gap fallback's "next".
+    const segments = [
+      {
+        timezone: 'America/New_York',
+        from: '2026-05-10',
+        to: '2026-05-12',
+        label: 'past NY',
+      },
+      // Degenerate date-only row (no `from_dt`/`to_dt`, falls into
+      // the date path where `from === to` short-circuits).
+      {
+        timezone: 'Mars/Phobos',
+        from: '2026-05-15',
+        to: '2026-05-15',
+        label: 'degenerate',
+      },
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-18',
+        to: '2026-05-25',
+        label: 'real future',
+      },
+    ];
+    expect(
+      walkTzSegments(segments, new Date('2026-05-16T12:00:00Z'), HOME),
+    ).toBe('Europe/Berlin');
   });
 
   it('treats `to === todayUtc` as past the segment (segment ended today)', () => {
@@ -1954,10 +2084,15 @@ describe('walkTzSegments (#542)', () => {
         label: 'new-shape — current',
       },
     ];
-    // 00:30 UTC on 2026-05-12: legacy segment already ended (`to`
-    // is 2026-05-12, strict-< rule on todayUtc=2026-05-12 → no
-    // match). New-shape segment's from_dt is in the future → no
-    // match. Walker returns home.
+    // 00:30 UTC on 2026-05-12: legacy date-only segment is NOT
+    // classified as previous-ended (its `to` equals todayUtc, and
+    // the gap-fallback uses strict `<` per the #229 regression
+    // guard so a date-only segment ending today stays out of the
+    // gap-fallback pool). New-shape segment's `from_dt` is in the
+    // future → classifies as next. Walker has no prev_ended +
+    // future → falls back to `home_tz`. This preserves the #229
+    // outcome: the user is still in the legacy zone for the rest
+    // of the calendar day, NOT in the future zone yet.
     expect(
       walkTzSegments(segments, new Date('2026-05-12T00:30:00Z'), HOME),
     ).toBe(HOME);
@@ -1965,6 +2100,45 @@ describe('walkTzSegments (#542)', () => {
     // new-shape segment's from_dt has passed → match NY.
     expect(
       walkTzSegments(segments, new Date('2026-05-12T14:00:00Z'), HOME),
+    ).toBe('America/New_York');
+  });
+
+  it('preserves #229 outcome on mixed-shape arrays — date-only `to === todayUtc` does not seed the gap fallback', () => {
+    // Boy-scout guard for the regression #229 fixed: a legacy
+    // date-only segment ending on today's UTC date with a datetime
+    // future segment at a later hour today must NOT trigger the
+    // gap fallback. The user is still physically in the legacy
+    // zone (e.g. Chicago morning) until the actual flight time
+    // (e.g. 13:30 UTC). Pre-fix `to <= todayUtc` would have set
+    // `hasPrevEndedSeg = true` and returned the future zone at
+    // 00:30Z — the exact early-flip shape #229 closed.
+    const segments = [
+      {
+        timezone: 'America/Chicago',
+        from: '2026-05-10',
+        to: '2026-05-12',
+        label: 'Chicago (legacy date-only)',
+      },
+      {
+        timezone: 'America/New_York',
+        from: '2026-05-12',
+        to: '2026-05-15',
+        from_dt: '2026-05-12T13:30:00.000Z',
+        to_dt: '2026-05-15T22:00:00.000Z',
+        label: 'NY (datetime)',
+      },
+    ];
+    // Pre-flight times throughout the morning UTC of departure day.
+    for (const now of [
+      '2026-05-12T00:00:00Z',
+      '2026-05-12T05:00:00Z',
+      '2026-05-12T13:29:59Z',
+    ]) {
+      expect(walkTzSegments(segments, new Date(now), HOME)).toBe(HOME);
+    }
+    // At from_dt+: NY's inside-match fires, walker returns NY.
+    expect(
+      walkTzSegments(segments, new Date('2026-05-12T13:30:00Z'), HOME),
     ).toBe('America/New_York');
   });
 });
