@@ -1939,6 +1939,14 @@ export function walkTzSegments(
     // strings. Partial-shape segments fall through to the date-only
     // path on their own row.
     if (typeof seg.from_dt === 'string' && typeof seg.to_dt === 'string') {
+      // Degenerate (`from_dt === to_dt`) segments are skipped per the
+      // function's documented contract — the inside-check already
+      // rejects them via `nowIso < seg.to_dt`, but the gap-fallback
+      // classifier (#571) would otherwise feed them into
+      // `hasPrevEndedSeg` / `nextSegTz` and let a malformed row drive
+      // the resolution. Skip BEFORE the gap classifier to keep
+      // degenerate segments invisible to every code path here.
+      if (seg.from_dt === seg.to_dt) continue;
       if (seg.from_dt <= nowIso && nowIso < seg.to_dt) return seg.timezone;
       if (seg.to_dt <= nowIso) {
         hasPrevEndedSeg = true;
@@ -1947,6 +1955,8 @@ export function walkTzSegments(
       }
       continue;
     }
+    // Date-only path — same degenerate-segment guard.
+    if (seg.from === seg.to) continue;
     if (seg.from <= todayUtc && todayUtc < seg.to) return seg.timezone;
     if (seg.to <= todayUtc) {
       hasPrevEndedSeg = true;

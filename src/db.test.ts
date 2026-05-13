@@ -1810,6 +1810,82 @@ describe('walkTzSegments (#542)', () => {
     ).toBe(HOME);
   });
 
+  it('skips degenerate datetime segments in gap classification (#571 guard)', () => {
+    // Per the function contract, degenerate (`from_dt === to_dt`)
+    // segments are never a match. The gap-fallback classifier added
+    // for #571 would otherwise feed a degenerate segment into either
+    // `hasPrevEndedSeg` (if `to_dt <= nowIso`) or `nextSegTz` (if
+    // `nowIso < from_dt`) and let a malformed row drive resolution.
+    // The skip-before-classification guard prevents that.
+    const segments = [
+      {
+        timezone: 'America/New_York',
+        from: '2026-05-12',
+        to: '2026-05-13',
+        from_dt: '2026-05-12T23:43:00.000Z',
+        to_dt: '2026-05-13T02:40:00.000Z',
+        label: 'past Atlanta',
+      },
+      // Degenerate row: from_dt === to_dt. Must be skipped — without
+      // the guard, this would set `nextSegTz` to Mars/Phobos and the
+      // walker would return that nonsensical zone instead of the real
+      // future segment.
+      {
+        timezone: 'Mars/Phobos',
+        from: '2026-05-13',
+        to: '2026-05-13',
+        from_dt: '2026-05-13T13:30:00.000Z',
+        to_dt: '2026-05-13T13:30:00.000Z',
+        label: 'degenerate',
+      },
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-13',
+        to: '2026-05-15',
+        from_dt: '2026-05-13T14:00:00.000Z',
+        to_dt: '2026-05-15T09:00:00.000Z',
+        label: 'real future Krakow',
+      },
+    ];
+    // 11:24Z is in the gap between Atlanta (ended 02:40Z) and Krakow
+    // (starts 14:00Z) — gap fallback should return Krakow, NOT the
+    // degenerate Mars/Phobos row even though that row falls earlier
+    // in iteration order on the "future" side.
+    expect(
+      walkTzSegments(segments, new Date('2026-05-13T11:24:00Z'), HOME),
+    ).toBe('Europe/Berlin');
+  });
+
+  it('skips degenerate date-only segments in gap classification (#571 guard)', () => {
+    // Same guard, date-only path. A `from === to` legacy row between
+    // two real segments must not become the gap fallback's "next".
+    const segments = [
+      {
+        timezone: 'America/New_York',
+        from: '2026-05-10',
+        to: '2026-05-12',
+        label: 'past NY',
+      },
+      // Degenerate date-only row (no `from_dt`/`to_dt`, falls into
+      // the date path where `from === to` short-circuits).
+      {
+        timezone: 'Mars/Phobos',
+        from: '2026-05-15',
+        to: '2026-05-15',
+        label: 'degenerate',
+      },
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-18',
+        to: '2026-05-25',
+        label: 'real future',
+      },
+    ];
+    expect(
+      walkTzSegments(segments, new Date('2026-05-16T12:00:00Z'), HOME),
+    ).toBe('Europe/Berlin');
+  });
+
   it('treats `to === todayUtc` as past the segment (segment ended today)', () => {
     // The match rule is `from <= today < to` — strict inequality on
     // the right edge. A traveler whose return-flight day is today
