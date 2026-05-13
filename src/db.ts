@@ -1874,7 +1874,21 @@ export interface TripitSegment {
  *
  * Edge cases (covered by unit tests):
  *   - Empty / non-array `segments` → `homeTz` (silent fallback).
- *   - Gap between trips (no covering segment) → `homeTz`.
+ *   - Inter-segment gap (transit between two booked stays) → the
+ *     ARRIVAL segment's tz (#571). Segments are built from lodging /
+ *     ground stays; flight legs are gaps by design. When the heartbeat
+ *     fires mid-flight, the user is travelling TOWARDS the next
+ *     booked stay, so returning that segment's tz lets the morning
+ *     brief / scheduler think in the arrival zone the user is about
+ *     to land in. `home_tz` was wrong for this case: it's often
+ *     physically impossible (mid-Atlantic on a Europe-bound leg)
+ *     and the user can't act on a "you're home" signal while in the
+ *     air.
+ *   - Before the first segment (all segments are future) → `homeTz`.
+ *   - After the last segment (no future segment remaining) →
+ *     `homeTz`. This is the post-trip case: the user has returned
+ *     and the next `sync_tripit` will eventually clear the row, but
+ *     until then home is the right answer.
  *   - `from === to` (date or datetime) → never matches (degenerate
  *     segment); skipped.
  *   - Empty / non-string `timezone` → segment skipped (the upstream
@@ -1884,10 +1898,12 @@ export interface TripitSegment {
  *     "segments are produced in chronological order, lodging-primary
  *     first" upstream invariant).
  *   - `to_dt === now.toISOString()` (or `to === todayUtc` on the
- *     date-only path) → segment ends now; the next segment (or
- *     home fallback) takes over.
+ *     date-only path) → segment ends now; the next segment (or the
+ *     gap / home fallback) takes over.
  *   - Mixed array (some segments with `from_dt`/`to_dt`, some
- *     without) → each segment uses its own shape.
+ *     without) → each segment uses its own shape; the gap-fallback
+ *     classification (ended-before-now / starts-after-now) also uses
+ *     each segment's own shape against `nowIso` / `todayUtc`.
  */
 export function walkTzSegments(
   segments: readonly TripitSegment[] | null | undefined,
@@ -1897,6 +1913,19 @@ export function walkTzSegments(
   if (!Array.isArray(segments) || segments.length === 0) return homeTz;
   const nowIso = now.toISOString();
   const todayUtc = nowIso.slice(0, 10);
+
+  // #571 — classify each non-covering segment as "ended before now"
+  // or "starts after now". When BOTH classes appear in the same
+  // walk, the user is in an inter-segment gap (mid-flight between
+  // two booked stays); the arrival segment (first future one in
+  // chronological order — lodging-primary upstream invariant) is the
+  // best guess for the heartbeat's tz. No cross-shape datetime-vs-
+  // date comparison is needed because we only track presence, plus
+  // the FIRST future segment's tz under the chronological-order
+  // invariant.
+  let hasPrevEndedSeg = false;
+  let nextSegTz: string | null = null;
+
   for (const seg of segments) {
     if (
       typeof seg?.timezone !== 'string' ||
@@ -1911,10 +1940,25 @@ export function walkTzSegments(
     // path on their own row.
     if (typeof seg.from_dt === 'string' && typeof seg.to_dt === 'string') {
       if (seg.from_dt <= nowIso && nowIso < seg.to_dt) return seg.timezone;
+      if (seg.to_dt <= nowIso) {
+        hasPrevEndedSeg = true;
+      } else if (nowIso < seg.from_dt) {
+        if (nextSegTz === null) nextSegTz = seg.timezone;
+      }
       continue;
     }
     if (seg.from <= todayUtc && todayUtc < seg.to) return seg.timezone;
+    if (seg.to <= todayUtc) {
+      hasPrevEndedSeg = true;
+    } else if (todayUtc < seg.from) {
+      if (nextSegTz === null) nextSegTz = seg.timezone;
+    }
   }
+
+  // In-gap: previous-ended AND future segment both exist — user is
+  // travelling towards the next booked stay. Return the arrival tz.
+  if (hasPrevEndedSeg && nextSegTz !== null) return nextSegTz;
+  // Before-first or after-last: fall back to home_tz.
   return homeTz;
 }
 
