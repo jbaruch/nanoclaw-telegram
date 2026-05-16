@@ -2,7 +2,6 @@ import os from 'os';
 import path from 'path';
 
 import { readEnvFile } from './env.js';
-import { logger } from './logger.js';
 import { isValidTimezone } from './timezone.js';
 
 // Read config values from .env (falls back to process.env).
@@ -124,6 +123,16 @@ export const ASSISTANT_OWNER_HANDLE =
 // = location-first cascade is skipped and the heartbeat advisory
 // falls back to walker-only behaviour (the pre-Phase-2 contract,
 // preserved for zero-config installs).
+// Validation: see `resolveAgentAutoCompactWindow` below for the
+// established pattern — stderr-only, never log the raw value. The
+// raw env content for ASSISTANT_OWNER_TG_USER_ID is operator-supplied
+// and could be a paste-mistake holding a credential / token (the
+// adjacent ASSISTANT_OWNER_HANDLE / ASSISTANT_OWNER_NAME / various
+// API keys live in the same .env), so logging it under any condition
+// — even a few bytes — risks leaking it to `coding-policy: no-secrets`.
+// `logger` is intentionally NOT imported in this file (config.ts is
+// below logger.ts in the import graph and a logger import would close
+// a circular dep through host-logs.ts, surfacing as a startup crash).
 function resolveOwnerTgUserId(): string | undefined {
   const raw =
     process.env.ASSISTANT_OWNER_TG_USER_ID ||
@@ -136,21 +145,23 @@ function resolveOwnerTgUserId(): string | undefined {
   // a config typo).
   const trimmed = raw.trim().replace(/^['"]+|['"]+$/g, '');
   if (trimmed.length === 0) {
-    logger.warn(
-      "ASSISTANT_OWNER_TG_USER_ID is set but empty after trim — treating as unset (#574 Phase 2 location-first cascade will be skipped). Set to the owner's Telegram numeric user_id.",
+    process.stderr.write(
+      "[config] ASSISTANT_OWNER_TG_USER_ID is set but empty after trim — treating as unset (#574 Phase 2 location-first cascade will be skipped). Set to the owner's Telegram numeric user_id.\n",
     );
     return undefined;
   }
   // Telegram user_ids are unsigned integers, currently up to 64-bit
   // (Bot API documents them as numbers ≥ 2^53-eligible in theory).
   // Reject anything that doesn't parse as a positive whole-number
-  // string — a config swap with `ASSISTANT_OWNER_HANDLE` (a
-  // @-handle / non-digit username) is the most common mistake and
-  // would otherwise silently make the cascade never match a row.
+  // string — a config swap with `ASSISTANT_OWNER_HANDLE` (a @-handle
+  // / non-digit username) is the most common mistake and would
+  // otherwise silently make the cascade never match a row.
   if (!/^[1-9][0-9]{0,18}$/.test(trimmed)) {
-    logger.warn(
-      { raw: trimmed.slice(0, 32) },
-      'ASSISTANT_OWNER_TG_USER_ID does not look like a positive numeric Telegram user_id — likely a config typo (was @-handle swapped in?). Treating as unset; the #574 Phase 2 location-first cascade will be skipped.',
+    // Report the LENGTH only, never the bytes — the raw could be a
+    // credential paste-mistake, and `coding-policy: no-secrets`
+    // forbids logging operator-supplied env content at any level.
+    process.stderr.write(
+      `[config] ASSISTANT_OWNER_TG_USER_ID (length=${trimmed.length}) does not look like a positive numeric Telegram user_id — likely a config typo (was @-handle swapped in?). Treating as unset; the #574 Phase 2 location-first cascade will be skipped.\n`,
     );
     return undefined;
   }
