@@ -1645,10 +1645,17 @@ export class TelegramChannel implements Channel {
       const chatJid = `tg:${ctx.chat.id}`;
       if (!this.opts.registeredGroups()[chatJid]) return;
       if (!loc || !this.opts.onLocation) return;
+      // `sender` is the Phase 2 resolver's filter key — an empty
+      // string would coalesce unrelated anonymous-admin / channel-post
+      // location events into one unattributable bucket. Skip the row
+      // if `ctx.from?.id` is missing rather than store telemetry that
+      // can never be queried correctly.
+      const senderId = ctx.from?.id?.toString();
+      if (!senderId) return;
       const livePeriod = loc.live_period ?? 0;
       this.opts.onLocation({
         chat_jid: chatJid,
-        sender: ctx.from?.id?.toString() || '',
+        sender: senderId,
         message_id: ctx.message.message_id.toString(),
         latitude: loc.latitude,
         longitude: loc.longitude,
@@ -1679,13 +1686,17 @@ export class TelegramChannel implements Channel {
       storeNonText(ctx, `[Venue "${safeTitle}" ${latitude},${longitude}]`);
 
       // Phase 3: venues are static (no live_period). Same write
-      // contract as `message:location` static pins.
+      // contract as `message:location` static pins, same skip-on-no-sender
+      // guard (an empty `sender` would be unqueryable by the Phase 2
+      // resolver and would coalesce unrelated anonymous events).
       const chatJid = `tg:${ctx.chat.id}`;
       if (!this.opts.registeredGroups()[chatJid]) return;
       if (!this.opts.onLocation) return;
+      const senderId = ctx.from?.id?.toString();
+      if (!senderId) return;
       this.opts.onLocation({
         chat_jid: chatJid,
-        sender: ctx.from?.id?.toString() || '',
+        sender: senderId,
         message_id: ctx.message.message_id.toString(),
         latitude,
         longitude,
@@ -1711,16 +1722,36 @@ export class TelegramChannel implements Channel {
       const chatJid = `tg:${ctx.chat.id}`;
       if (!this.opts.registeredGroups()[chatJid]) return;
       if (!loc || !this.opts.onLocation) return;
-      const editDate = edited.edit_date ?? edited.date;
+      // `edit_date` is the tick time and is load-bearing for the
+      // Phase 2 freshness gate. Per the Bot API, `edit_date` is
+      // present on every `edited_message` update — but if it's
+      // genuinely missing on the wire (Telegram protocol bug,
+      // upstream-library drift), falling back to `date` would
+      // freeze `recorded_at` at the original share time and the
+      // resolver would think the position is hours newer than it
+      // is. Skip + log instead of inserting a misleading row.
+      if (typeof edited.edit_date !== 'number') {
+        logger.warn(
+          {
+            chatJid,
+            message_id: edited.message_id,
+            from_id: ctx.from?.id,
+          },
+          'edited_message:location missing edit_date — skipping row to avoid stale-recorded_at corruption (#574 Phase 3)',
+        );
+        return;
+      }
+      const senderId = ctx.from?.id?.toString();
+      if (!senderId) return;
       this.opts.onLocation({
         chat_jid: chatJid,
-        sender: ctx.from?.id?.toString() || '',
+        sender: senderId,
         message_id: edited.message_id.toString(),
         latitude: loc.latitude,
         longitude: loc.longitude,
         accuracy_m: loc.horizontal_accuracy ?? null,
         source: 'live_update',
-        recorded_at: new Date(editDate * 1000).toISOString(),
+        recorded_at: new Date(edited.edit_date * 1000).toISOString(),
         live_period: loc.live_period ?? null,
       });
     });

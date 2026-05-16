@@ -1164,6 +1164,50 @@ describe('TelegramChannel', () => {
 
       expect(opts.onLocation).not.toHaveBeenCalled();
     });
+
+    it('edited_message:location skips when edit_date is missing (#574)', async () => {
+      // edit_date is the tick time and load-bearing for the Phase 2
+      // freshness gate. Falling back to `date` (the original share
+      // time the Bot API echoes on every edit) would freeze
+      // recorded_at and the resolver would treat a stale position as
+      // fresh — exactly the bug Phase 3 exists to prevent. Skip the
+      // row instead of writing a misleading one.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createEditedLocationCtx({
+        messageId: 99,
+        location: { latitude: 50.1, longitude: 20.0 },
+      });
+      // Force edit_date to be missing on the wire. Type system pretends
+      // it's always present but Telegram protocol can drift; this is
+      // the row the new guard exists to catch.
+      (ctx.editedMessage as { edit_date?: number }).edit_date = undefined;
+      await triggerEditedLocation(ctx);
+
+      expect(opts.onLocation).not.toHaveBeenCalled();
+    });
+
+    it('message:location skips when ctx.from.id is missing (#574)', async () => {
+      // Anonymous-admin / channel-post events can lack `from`. An
+      // empty-string sender would coalesce those into a single
+      // unattributable bucket and break the Phase 2 sender-filtered
+      // lookup. Skip-on-no-sender keeps the locations table queryable.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        extra: { location: { latitude: 0, longitude: 0 } },
+      });
+      // Wipe the synthetic `from` the helper provides; some Telegram
+      // event shapes really do arrive without one.
+      (ctx as { from?: unknown }).from = undefined;
+      await triggerMediaMessage('message:location', ctx);
+
+      expect(opts.onLocation).not.toHaveBeenCalled();
+    });
   });
 
   // --- sendMessage ---

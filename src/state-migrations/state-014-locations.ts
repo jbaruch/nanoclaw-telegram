@@ -48,7 +48,17 @@ export const STATE_014_LOCATIONS: StateMigration = {
       latitude    REAL    NOT NULL,
       longitude   REAL    NOT NULL,
       accuracy_m  REAL,
-      source      TEXT    NOT NULL,
+      -- CHECK constraint keeps the four-value LocationSource enum
+      -- honest at the DB layer instead of relying on every caller's
+      -- discipline; an INSERT with an out-of-set source value fails
+      -- loudly instead of silently breaking the Phase 2 resolver's
+      -- source-aware logic. Keep this in lock-step with the
+      -- LocationSource union in src/types.ts — any new source value
+      -- ships in a follow-up state-NNN migration that recreates the
+      -- table with the expanded set (SQLite has no ALTER TABLE
+      -- equivalent for CHECK constraints).
+      source      TEXT    NOT NULL
+        CHECK (source IN ('static', 'venue', 'live_initial', 'live_update')),
       recorded_at TEXT    NOT NULL,
       live_period INTEGER
     );

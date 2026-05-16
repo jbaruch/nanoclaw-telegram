@@ -979,10 +979,21 @@ export function storeLocation(record: LocationRecord): void {
 export function getLatestLocationForSender(
   sender: string,
 ): LocationRecord | null {
+  // Stable tie-breaker on `id DESC` matters because `recorded_at` is
+  // second-resolution (Telegram `date` / `edit_date` are both Unix
+  // timestamps in seconds). When two ticks land in the same second
+  // — common during a fast-moving live share — sorting only by
+  // recorded_at gives SQLite implementation-defined ordering and the
+  // resolver can flap between two coords for the same instant. `id`
+  // is monotonic INTEGER PRIMARY KEY AUTOINCREMENT, so the composite
+  // sort is deterministic; the `idx_locations_sender_time` index
+  // still satisfies the leading columns and `id DESC` is a small
+  // per-group sort after the index scan.
   const row = db
     .prepare(
       `SELECT chat_jid, sender, message_id, latitude, longitude, accuracy_m, source, recorded_at, live_period
-       FROM locations WHERE sender = ? ORDER BY recorded_at DESC LIMIT 1`,
+       FROM locations WHERE sender = ?
+       ORDER BY recorded_at DESC, id DESC LIMIT 1`,
     )
     .get(sender) as
     | {
