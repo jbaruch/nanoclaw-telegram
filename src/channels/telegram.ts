@@ -1606,7 +1606,45 @@ export class TelegramChannel implements Channel {
       const emoji = ctx.message.sticker?.emoji || '';
       storeNonText(ctx, `[Sticker ${emoji}]`);
     });
-    this.bot.on('message:location', (ctx) => storeNonText(ctx, '[Location]'));
+    // Location / venue messages carry `latitude`/`longitude` payloads
+    // the bridge previously discarded (#574). Capture them inline in
+    // the placeholder text — the downstream TZ resolver (Phase 2) reads
+    // most-recent coords from `messages.content` and reverse-geocodes
+    // to an IANA tz, replacing the TripIt-segment walker that lives
+    // in `db.ts::walkTzSegments`. Format is regex-parseable:
+    //   `[Location <lat>,<lng>]`
+    //   `[Venue "<title>" <lat>,<lng>]`
+    // Lat/lng are emitted with grammY's full Telegram precision (up to
+    // 6 decimal places, ~10 cm) — the resolver can downsample as
+    // needed; storing full precision keeps storage decoupled from any
+    // future precision policy.
+    this.bot.on('message:location', (ctx) => {
+      const loc = ctx.message.location;
+      const placeholder = loc
+        ? `[Location ${loc.latitude},${loc.longitude}]`
+        : '[Location]';
+      storeNonText(ctx, placeholder);
+    });
+    // `message:venue` was never wired before — it isn't a sub-type of
+    // `message:location` in grammY, so venues currently fall through
+    // every existing handler and store nothing. The venue payload
+    // wraps a `location` + adds `title` + `address` (per Bot API).
+    this.bot.on('message:venue', (ctx) => {
+      const venue = ctx.message.venue;
+      if (!venue) {
+        storeNonText(ctx, '[Venue]');
+        return;
+      }
+      // Venue title may contain quotes / newlines / arbitrary text.
+      // Strip newlines (keep placeholder on one line) and escape any
+      // embedded `"` so the regex contract stays unambiguous. Don't
+      // truncate — full title is useful operator context.
+      const safeTitle = (venue.title || '')
+        .replace(/[\r\n]+/g, ' ')
+        .replace(/"/g, '\\"');
+      const { latitude, longitude } = venue.location;
+      storeNonText(ctx, `[Venue "${safeTitle}" ${latitude},${longitude}]`);
+    });
     this.bot.on('message:contact', (ctx) => storeNonText(ctx, '[Contact]'));
 
     // Handle emoji reactions
