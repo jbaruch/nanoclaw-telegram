@@ -172,44 +172,6 @@ function createSchema(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_messages_fromme_chat
       ON messages(chat_jid, is_from_me, timestamp);
 
-    -- Location telemetry from chat channels (#574 Phase 3). Static
-    -- pins, venue shares, and live-location ticks all land here.
-    -- Kept SEPARATE from messages because: (1) live-location updates
-    -- fire ~once per minute for the entire live_period (up to 8 hours
-    -- per Telegram share), and routing them through messages would
-    -- flood the agent's chat-history context with position lines that
-    -- carry no conversational signal; (2) the host-side TZ resolver
-    -- (#574 Phase 2) reads "most-recent owner coords" via a clean SQL
-    -- query against this table, and filtering against the
-    -- messages-with-placeholder pattern would couple the resolver to
-    -- the placeholder format. The source column discriminates the
-    -- four shapes Telegram delivers (static, venue, live_initial,
-    -- live_update); see LocationSource in src/types.ts for the
-    -- canonical list. No FK to chats — locations are auxiliary
-    -- telemetry and aren't tied to the registered-groups lifecycle
-    -- (a row from a since-unregistered chat still carries valid TZ
-    -- signal until pruned).
-    CREATE TABLE IF NOT EXISTS locations (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      chat_jid TEXT NOT NULL,
-      sender TEXT NOT NULL,
-      message_id TEXT NOT NULL,
-      latitude REAL NOT NULL,
-      longitude REAL NOT NULL,
-      accuracy_m REAL,
-      source TEXT NOT NULL,
-      recorded_at TEXT NOT NULL,
-      live_period INTEGER
-    );
-    -- The TZ resolver's hot query is "most recent for this sender":
-    -- (sender, recorded_at DESC) is the index that satisfies it
-    -- without a table scan. chat_jid is unindexed because the
-    -- resolver doesn't filter on it (Telegram broadcasts the same
-    -- live-share to every chat the owner enables it in, and we want
-    -- the freshest signal regardless of which chat surfaced it).
-    CREATE INDEX IF NOT EXISTS idx_locations_sender_time
-      ON locations(sender, recorded_at DESC);
-
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
       group_folder TEXT NOT NULL,
