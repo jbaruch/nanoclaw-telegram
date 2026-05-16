@@ -302,6 +302,7 @@ describe('TelegramChannel', () => {
       expect(currentBot().filterHandlers.has('message:document')).toBe(true);
       expect(currentBot().filterHandlers.has('message:sticker')).toBe(true);
       expect(currentBot().filterHandlers.has('message:location')).toBe(true);
+      expect(currentBot().filterHandlers.has('message:venue')).toBe(true);
       expect(currentBot().filterHandlers.has('message:contact')).toBe(true);
     });
 
@@ -848,7 +849,33 @@ describe('TelegramChannel', () => {
       );
     });
 
-    it('stores location with placeholder', async () => {
+    it('stores location with inline lat/lng coordinates (#574)', async () => {
+      // Pre-#574 the handler stored a bare `[Location]` placeholder
+      // and the lat/lng payload Telegram delivered was discarded —
+      // forcing the host's TZ stack to *guess* where the user was
+      // from TripIt itinerary instead. The capture format is
+      // regex-parseable (`[Location <lat>,<lng>]`) so the Phase 2
+      // resolver can extract coords without a schema migration.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        extra: { location: { latitude: 36.0234, longitude: -86.782 } },
+      });
+      await triggerMediaMessage('message:location', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({ content: '[Location 36.0234,-86.782]' }),
+      );
+    });
+
+    it('falls back to bare [Location] when location payload is missing', async () => {
+      // Defensive: grammY's typing says ctx.message.location is
+      // always present on `message:location`, but a malformed update
+      // (unlikely but possible) shouldn't crash the bridge — emit
+      // the legacy placeholder and continue.
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
@@ -859,6 +886,63 @@ describe('TelegramChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
         expect.objectContaining({ content: '[Location]' }),
+      );
+    });
+
+    it('stores venue with title + coordinates (#574)', async () => {
+      // `message:venue` had no handler before #574 — venues fell
+      // through silently. The handler captures the same lat/lng the
+      // bare location handler does, plus the venue title so the
+      // operator has context beyond raw coords.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        extra: {
+          venue: {
+            location: { latitude: 51.5007, longitude: -0.1246 },
+            title: 'Big Ben',
+            address: 'Westminster, London',
+          },
+        },
+      });
+      await triggerMediaMessage('message:venue', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content: '[Venue "Big Ben" 51.5007,-0.1246]',
+        }),
+      );
+    });
+
+    it('escapes quotes and strips newlines in venue title', async () => {
+      // The placeholder format puts the title inside double quotes
+      // so the regex contract is unambiguous — a title carrying its
+      // own `"` or `\n` would otherwise break the parser. Newlines
+      // get collapsed to a single space (placeholder must stay on
+      // one line); embedded quotes get backslash-escaped.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        extra: {
+          venue: {
+            location: { latitude: 0, longitude: 0 },
+            title: 'Pub "The\nCrown"',
+            address: 'anywhere',
+          },
+        },
+      });
+      await triggerMediaMessage('message:venue', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content: '[Venue "Pub \\"The Crown\\"" 0,0]',
+        }),
       );
     });
 
