@@ -517,7 +517,6 @@ export interface LocationRecord {
   //     would freeze recorded_at and defeat the Phase 2 freshness gate)
   recorded_at: string;
   live_period?: number | null; // seconds; populated only when source ∈ {live_initial, live_update}
-  live_period?: number | null; // seconds; populated only when source ∈ {live_initial, live_update}
 }
 
 export type OnLocation = (record: LocationRecord) => void;
