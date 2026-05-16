@@ -159,6 +159,7 @@ function createTestOpts(
   return {
     onMessage: vi.fn(),
     onChatMetadata: vi.fn(),
+    onLocation: vi.fn(),
     registeredGroups: vi.fn(() => ({
       'tg:100200300': {
         name: 'Test Group',
@@ -239,6 +240,36 @@ function createMediaCtx(overrides: {
   };
 }
 
+// Mirror of `createMediaCtx` for `edited_message:*` filters (#574
+// Phase 3). Telegram delivers live-location updates as `editedMessage`
+// (not `message`) with an `edit_date` field; the handler reads
+// `ctx.editedMessage.location` and uses `edit_date` for `recorded_at`.
+function createEditedLocationCtx(overrides: {
+  chatId?: number;
+  fromId?: number;
+  messageId?: number;
+  date?: number;
+  editDate?: number;
+  location?: Record<string, any>;
+}) {
+  const chatId = overrides.chatId ?? 100200300;
+  return {
+    chat: { id: chatId, type: 'group', title: 'Test Group' },
+    from: {
+      id: overrides.fromId ?? 99001,
+      first_name: 'Alice',
+      username: 'alice_user',
+    },
+    editedMessage: {
+      date: overrides.date ?? Math.floor(Date.now() / 1000) - 60,
+      edit_date: overrides.editDate ?? Math.floor(Date.now() / 1000),
+      message_id: overrides.messageId ?? 1,
+      location: overrides.location,
+    },
+    me: { username: 'andy_ai_bot' },
+  };
+}
+
 function currentBot() {
   return botRef.current;
 }
@@ -253,6 +284,14 @@ async function triggerMediaMessage(
   ctx: ReturnType<typeof createMediaCtx>,
 ) {
   const handlers = currentBot().filterHandlers.get(filter) || [];
+  for (const h of handlers) await h(ctx);
+}
+
+async function triggerEditedLocation(
+  ctx: ReturnType<typeof createEditedLocationCtx>,
+) {
+  const handlers =
+    currentBot().filterHandlers.get('edited_message:location') || [];
   for (const h of handlers) await h(ctx);
 }
 
@@ -303,6 +342,10 @@ describe('TelegramChannel', () => {
       expect(currentBot().filterHandlers.has('message:sticker')).toBe(true);
       expect(currentBot().filterHandlers.has('message:location')).toBe(true);
       expect(currentBot().filterHandlers.has('message:venue')).toBe(true);
+      // #574 Phase 3: live-location updates land via edited_message:location.
+      expect(currentBot().filterHandlers.has('edited_message:location')).toBe(
+        true,
+      );
       expect(currentBot().filterHandlers.has('message:contact')).toBe(true);
     });
 
@@ -861,7 +904,15 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       const ctx = createMediaCtx({
-        extra: { location: { latitude: 36.0234, longitude: -86.782 } },
+        date: 1700000000,
+        messageId: 42,
+        extra: {
+          location: {
+            latitude: 36.0234,
+            longitude: -86.782,
+            horizontal_accuracy: 15,
+          },
+        },
       });
       await triggerMediaMessage('message:location', ctx);
 
@@ -869,6 +920,74 @@ describe('TelegramChannel', () => {
         'tg:100200300',
         expect.objectContaining({ content: '[Location 36.0234,-86.782]' }),
       );
+      // Phase 3: same event also lands a row in the locations table
+      // (the canonical source for the TZ resolver). No `live_period`
+      // on a static pin.
+      expect(opts.onLocation).toHaveBeenCalledWith({
+        chat_jid: 'tg:100200300',
+        sender: '99001',
+        message_id: '42',
+        latitude: 36.0234,
+        longitude: -86.782,
+        accuracy_m: 15,
+        source: 'static',
+        recorded_at: '2023-11-14T22:13:20.000Z',
+        live_period: null,
+      });
+    });
+
+    it('classifies message:location with live_period > 0 as live_initial (#574)', async () => {
+      // The same `message:location` event with `live_period > 0` is
+      // the START of a live-location share — subsequent movement
+      // ticks arrive via `edited_message:location` on the same
+      // message_id. Source label discriminates so the Phase 2
+      // resolver can reason about live-share state vs one-off pins.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        date: 1700000000,
+        messageId: 99,
+        extra: {
+          location: {
+            latitude: 50.0647,
+            longitude: 19.945,
+            live_period: 28800, // 8h share
+          },
+        },
+      });
+      await triggerMediaMessage('message:location', ctx);
+
+      expect(opts.onLocation).toHaveBeenCalledWith({
+        chat_jid: 'tg:100200300',
+        sender: '99001',
+        message_id: '99',
+        latitude: 50.0647,
+        longitude: 19.945,
+        accuracy_m: null,
+        source: 'live_initial',
+        recorded_at: '2023-11-14T22:13:20.000Z',
+        live_period: 28800,
+      });
+    });
+
+    it('does NOT emit onLocation for unregistered chats (#574)', async () => {
+      // The `messages` write path already short-circuits on
+      // unregistered chats via storeNonText's `group` lookup;
+      // the locations path uses the same guard so location
+      // telemetry from random chats doesn't leak into the DB.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        chatId: 999999,
+        extra: { location: { latitude: 0, longitude: 0 } },
+      });
+      await triggerMediaMessage('message:location', ctx);
+
+      expect(opts.onLocation).not.toHaveBeenCalled();
     });
 
     it('falls back to bare [Location] when location payload is missing', async () => {
@@ -899,6 +1018,8 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       const ctx = createMediaCtx({
+        date: 1700000000,
+        messageId: 7,
         extra: {
           venue: {
             location: { latitude: 51.5007, longitude: -0.1246 },
@@ -915,6 +1036,20 @@ describe('TelegramChannel', () => {
           content: '[Venue "Big Ben" 51.5007,-0.1246]',
         }),
       );
+      // Phase 3: venues are static (no live_period). Same locations
+      // row contract as a one-time pin, with source='venue' so the
+      // resolver can preserve venue-vs-pin distinction if needed.
+      expect(opts.onLocation).toHaveBeenCalledWith({
+        chat_jid: 'tg:100200300',
+        sender: '99001',
+        message_id: '7',
+        latitude: 51.5007,
+        longitude: -0.1246,
+        accuracy_m: null,
+        source: 'venue',
+        recorded_at: '2023-11-14T22:13:20.000Z',
+        live_period: null,
+      });
     });
 
     it('escapes quotes and strips newlines in venue title', async () => {
@@ -969,6 +1104,109 @@ describe('TelegramChannel', () => {
       await triggerMediaMessage('message:photo', ctx);
 
       expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('edited_message:location appends a live_update row, no message rewrite (#574)', async () => {
+      // Telegram delivers each live-location movement tick as an
+      // `edited_message:location` event with the SAME message_id as
+      // the original `live_initial` share. We append to locations
+      // and DO NOT rewrite the `messages` row — flooding chat history
+      // with one row per minute of movement is exactly what the
+      // separate locations table exists to avoid.
+      //
+      // `recorded_at` MUST come from `edit_date` (the tick time),
+      // not `date` (the original share time the Bot API echoes on
+      // every edit) — using `date` would freeze recorded_at and
+      // break the freshness gate in the Phase 2 resolver.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createEditedLocationCtx({
+        messageId: 99,
+        date: 1700000000, // original live_initial share time
+        editDate: 1700003600, // tick time, 1h later
+        location: {
+          latitude: 50.1,
+          longitude: 20.0,
+          live_period: 28800,
+          horizontal_accuracy: 8,
+        },
+      });
+      await triggerEditedLocation(ctx);
+
+      // No messages row rewrite — onMessage stays untouched. Only
+      // onLocation fires, with edit_date as recorded_at.
+      expect(opts.onMessage).not.toHaveBeenCalled();
+      expect(opts.onLocation).toHaveBeenCalledWith({
+        chat_jid: 'tg:100200300',
+        sender: '99001',
+        message_id: '99',
+        latitude: 50.1,
+        longitude: 20.0,
+        accuracy_m: 8,
+        source: 'live_update',
+        recorded_at: '2023-11-14T23:13:20.000Z', // 1h after the live_initial
+        live_period: 28800,
+      });
+    });
+
+    it('edited_message:location is ignored for unregistered chats (#574)', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createEditedLocationCtx({
+        chatId: 999999,
+        location: { latitude: 0, longitude: 0 },
+      });
+      await triggerEditedLocation(ctx);
+
+      expect(opts.onLocation).not.toHaveBeenCalled();
+    });
+
+    it('edited_message:location skips when edit_date is missing (#574)', async () => {
+      // edit_date is the tick time and load-bearing for the Phase 2
+      // freshness gate. Falling back to `date` (the original share
+      // time the Bot API echoes on every edit) would freeze
+      // recorded_at and the resolver would treat a stale position as
+      // fresh — exactly the bug Phase 3 exists to prevent. Skip the
+      // row instead of writing a misleading one.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createEditedLocationCtx({
+        messageId: 99,
+        location: { latitude: 50.1, longitude: 20.0 },
+      });
+      // Force edit_date to be missing on the wire. Type system pretends
+      // it's always present but Telegram protocol can drift; this is
+      // the row the new guard exists to catch.
+      (ctx.editedMessage as { edit_date?: number }).edit_date = undefined;
+      await triggerEditedLocation(ctx);
+
+      expect(opts.onLocation).not.toHaveBeenCalled();
+    });
+
+    it('message:location skips when ctx.from.id is missing (#574)', async () => {
+      // Anonymous-admin / channel-post events can lack `from`. An
+      // empty-string sender would coalesce those into a single
+      // unattributable bucket and break the Phase 2 sender-filtered
+      // lookup. Skip-on-no-sender keeps the locations table queryable.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        extra: { location: { latitude: 0, longitude: 0 } },
+      });
+      // Wipe the synthetic `from` the helper provides; some Telegram
+      // event shapes really do arrive without one.
+      (ctx as { from?: unknown }).from = undefined;
+      await triggerMediaMessage('message:location', ctx);
+
+      expect(opts.onLocation).not.toHaveBeenCalled();
     });
   });
 

@@ -81,6 +81,7 @@ import {
   setRouterState,
   setSession,
   storeChatMetadata,
+  storeLocation,
   storeMessage,
 } from './db.js';
 import {
@@ -2668,6 +2669,7 @@ async function main(): Promise<void> {
       channel?: string,
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
+    onLocation: storeLocation,
     registeredGroups: () => registeredGroups,
   };
 

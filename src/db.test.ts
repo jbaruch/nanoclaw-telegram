@@ -20,6 +20,7 @@ import {
   getBotMessageByTelegramId,
   getChatByJid,
   getLastBotMessageTimestamp,
+  getLatestLocationForSender,
   getMessageById,
   getMessagesSince,
   getNewMessages,
@@ -31,6 +32,7 @@ import {
   setRegisteredGroup,
   setTriggerPatterns,
   storeChatMetadata,
+  storeLocation,
   storeMessage,
   updateTask,
   walkTzSegments,
@@ -2559,5 +2561,141 @@ describe('task_run_logs FK cascade (#530)', () => {
     } finally {
       database.close();
     }
+  });
+});
+
+// --- storeLocation / getLatestLocationForSender (#574 Phase 3) ---
+
+describe('storeLocation / getLatestLocationForSender', () => {
+  it('round-trips a static location row', () => {
+    storeLocation({
+      chat_jid: 'tg:-100',
+      sender: '99001',
+      message_id: '42',
+      latitude: 36.0234,
+      longitude: -86.782,
+      accuracy_m: 15,
+      source: 'static',
+      recorded_at: '2026-05-16T14:56:28.000Z',
+      live_period: null,
+    });
+
+    expect(getLatestLocationForSender('99001')).toEqual({
+      chat_jid: 'tg:-100',
+      sender: '99001',
+      message_id: '42',
+      latitude: 36.0234,
+      longitude: -86.782,
+      accuracy_m: 15,
+      source: 'static',
+      recorded_at: '2026-05-16T14:56:28.000Z',
+      live_period: null,
+    });
+  });
+
+  it('returns null when no rows match the sender', () => {
+    storeLocation({
+      chat_jid: 'tg:-100',
+      sender: '99001',
+      message_id: '1',
+      latitude: 0,
+      longitude: 0,
+      source: 'static',
+      recorded_at: '2026-05-16T00:00:00.000Z',
+    });
+    // Different sender → no match. Distinguishes "owner hasn't shared"
+    // from "owner shared but resolver was misconfigured" in the Phase 2
+    // cascade.
+    expect(getLatestLocationForSender('77777')).toBeNull();
+  });
+
+  it('returns the most recent row by recorded_at, across chats', () => {
+    // Live-share scenario: owner shares to two chats, movement ticks
+    // arrive in both. The TZ resolver wants the freshest signal
+    // regardless of which chat surfaced it.
+    storeLocation({
+      chat_jid: 'tg:-100',
+      sender: '99001',
+      message_id: '1',
+      latitude: 36.0,
+      longitude: -86.0,
+      source: 'live_initial',
+      recorded_at: '2026-05-16T12:00:00.000Z',
+      live_period: 28800,
+    });
+    storeLocation({
+      chat_jid: 'tg:-200', // different chat
+      sender: '99001',
+      message_id: '1',
+      latitude: 50.0,
+      longitude: 20.0,
+      source: 'live_update',
+      recorded_at: '2026-05-16T15:00:00.000Z',
+      live_period: 28800,
+    });
+    storeLocation({
+      chat_jid: 'tg:-100',
+      sender: '99001',
+      message_id: '1',
+      latitude: 36.5,
+      longitude: -86.5,
+      source: 'live_update',
+      recorded_at: '2026-05-16T13:00:00.000Z', // OLDER than the second
+      live_period: 28800,
+    });
+
+    const latest = getLatestLocationForSender('99001');
+    expect(latest?.latitude).toBe(50.0);
+    expect(latest?.recorded_at).toBe('2026-05-16T15:00:00.000Z');
+    expect(latest?.chat_jid).toBe('tg:-200');
+  });
+
+  it('handles NULL accuracy_m and live_period correctly', () => {
+    // Static pins and venues have neither field. The reader contract
+    // returns explicit `null`, not `undefined` — keeps the JSON shape
+    // stable for downstream consumers.
+    storeLocation({
+      chat_jid: 'tg:-100',
+      sender: '99001',
+      message_id: '7',
+      latitude: 51.5,
+      longitude: -0.1,
+      source: 'venue',
+      recorded_at: '2026-05-16T14:00:00.000Z',
+      // accuracy_m and live_period intentionally omitted
+    });
+
+    const row = getLatestLocationForSender('99001');
+    expect(row?.accuracy_m).toBeNull();
+    expect(row?.live_period).toBeNull();
+    expect(row?.source).toBe('venue');
+  });
+
+  it('filters by sender even when other senders have fresher rows', () => {
+    // Multi-user group: non-owner shares location, owner does too
+    // earlier. Resolver must return the owner's coords (sender filter),
+    // not "whoever shared most recently in this group".
+    storeLocation({
+      chat_jid: 'tg:-100',
+      sender: '99001', // owner
+      message_id: '1',
+      latitude: 36.0,
+      longitude: -86.0,
+      source: 'static',
+      recorded_at: '2026-05-16T10:00:00.000Z',
+    });
+    storeLocation({
+      chat_jid: 'tg:-100',
+      sender: '88888', // someone else, later
+      message_id: '2',
+      latitude: 0,
+      longitude: 0,
+      source: 'static',
+      recorded_at: '2026-05-16T18:00:00.000Z',
+    });
+
+    const ownerLatest = getLatestLocationForSender('99001');
+    expect(ownerLatest?.latitude).toBe(36.0);
+    expect(ownerLatest?.recorded_at).toBe('2026-05-16T10:00:00.000Z');
   });
 });

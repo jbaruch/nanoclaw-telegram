@@ -476,6 +476,51 @@ export interface Channel {
 // Callback type that channels use to deliver inbound messages
 export type OnInboundMessage = (chatJid: string, message: NewMessage) => void;
 
+// Location capture (#574 Phase 3). Channels emit one event per
+// location share or live-location update; the orchestrator persists
+// to the `locations` table. Decoupled from `OnInboundMessage` because
+// `edited_message:location` updates from Telegram's live-location
+// stream are not conversational "messages" — they shouldn't pollute
+// chat history, but they ARE the freshest signal of where the owner
+// is for the host-side TZ resolver (replaces the TripIt-segment
+// walker fallback path; Phase 2).
+//
+// `source` discriminates the four channel-level shapes:
+//   - 'static' — one-time location pin (no live_period)
+//   - 'venue'  — Telegram `message:venue` with `location` nested
+//   - 'live_initial' — first event of a live share (`message:location`
+//                       with `live_period > 0`)
+//   - 'live_update'  — `edited_message:location` updates against an
+//                       active live share; same `message_id` as
+//                       the corresponding `live_initial` row
+export type LocationSource =
+  | 'static'
+  | 'venue'
+  | 'live_initial'
+  | 'live_update';
+
+export interface LocationRecord {
+  chat_jid: string;
+  sender: string;
+  message_id: string;
+  latitude: number;
+  longitude: number;
+  accuracy_m?: number | null;
+  source: LocationSource;
+  // ISO-8601 UTC, NOT a wall-clock at receive time. The source field
+  // determines which Telegram timestamp this maps to:
+  //   - 'static' / 'venue' / 'live_initial' → `message.date`
+  //     (original send time of the location/venue/share message)
+  //   - 'live_update' → `editedMessage.edit_date`
+  //     (the movement-tick time; `editedMessage.date` is the original
+  //     share time the Bot API echoes on every edit, and using it
+  //     would freeze recorded_at and defeat the Phase 2 freshness gate)
+  recorded_at: string;
+  live_period?: number | null; // seconds; populated only when source ∈ {live_initial, live_update}
+}
+
+export type OnLocation = (record: LocationRecord) => void;
+
 // Callback for chat metadata discovery.
 // name is optional — channels that deliver names inline (Telegram) pass it here;
 // channels that sync names separately (via syncGroups) omit it.

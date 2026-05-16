@@ -24,6 +24,7 @@ import { logger } from './logger.js';
 import { STATE_MIGRATIONS } from './state-migrations/index.js';
 import {
   ContainerConfig,
+  LocationRecord,
   NewMessage,
   RegisteredGroup,
   ScheduledTask,
@@ -935,6 +936,90 @@ export function storeMessage(msg: NewMessage): void {
     msg.reply_to_sender_name ?? null,
     msg.telegram_message_id ?? null,
   );
+}
+
+/**
+ * Append a location row (#574 Phase 3). Always INSERT, never UPDATE —
+ * live-location updates carry the same `message_id` as the initial
+ * share, but each tick is a fresh observation worth persisting (the
+ * Phase 2 resolver's "most-recent wins" rule operates on `recorded_at`,
+ * not on per-message_id state).
+ *
+ * Callers don't need to deduplicate; Telegram itself only fires
+ * `edited_message:location` when the location actually changed, so
+ * the natural rate is bounded by movement, not by polling cadence.
+ */
+export function storeLocation(record: LocationRecord): void {
+  db.prepare(
+    `INSERT INTO locations (chat_jid, sender, message_id, latitude, longitude, accuracy_m, source, recorded_at, live_period) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    record.chat_jid,
+    record.sender,
+    record.message_id,
+    record.latitude,
+    record.longitude,
+    record.accuracy_m ?? null,
+    record.source,
+    record.recorded_at,
+    record.live_period ?? null,
+  );
+}
+
+/**
+ * Most-recent location for a given sender across every chat. Used by
+ * the #574 Phase 2 TZ resolver as the canonical "where is the owner"
+ * query — `sender` is the owner's channel-specific user id (Telegram
+ * numeric id; the orchestrator resolves it once via
+ * `ASSISTANT_OWNER_TG_USER_ID`).
+ *
+ * Returns `null` when no rows match (first deploy, owner-id wrong,
+ * etc.) — caller falls through to the TripIt walker per the Phase 2
+ * cascade.
+ */
+export function getLatestLocationForSender(
+  sender: string,
+): LocationRecord | null {
+  // Stable tie-breaker on `id DESC` matters because `recorded_at` is
+  // second-resolution (Telegram `date` / `edit_date` are both Unix
+  // timestamps in seconds). When two ticks land in the same second
+  // — common during a fast-moving live share — sorting only by
+  // recorded_at gives SQLite implementation-defined ordering and the
+  // resolver can flap between two coords for the same instant. `id`
+  // is monotonic INTEGER PRIMARY KEY AUTOINCREMENT, so the composite
+  // sort is deterministic; the `idx_locations_sender_time` index
+  // still satisfies the leading columns and `id DESC` is a small
+  // per-group sort after the index scan.
+  const row = db
+    .prepare(
+      `SELECT chat_jid, sender, message_id, latitude, longitude, accuracy_m, source, recorded_at, live_period
+       FROM locations WHERE sender = ?
+       ORDER BY recorded_at DESC, id DESC LIMIT 1`,
+    )
+    .get(sender) as
+    | {
+        chat_jid: string;
+        sender: string;
+        message_id: string;
+        latitude: number;
+        longitude: number;
+        accuracy_m: number | null;
+        source: string;
+        recorded_at: string;
+        live_period: number | null;
+      }
+    | undefined;
+  if (!row) return null;
+  return {
+    chat_jid: row.chat_jid,
+    sender: row.sender,
+    message_id: row.message_id,
+    latitude: row.latitude,
+    longitude: row.longitude,
+    accuracy_m: row.accuracy_m,
+    source: row.source as LocationRecord['source'],
+    recorded_at: row.recorded_at,
+    live_period: row.live_period,
+  };
 }
 
 /**

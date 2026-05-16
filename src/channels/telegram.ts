@@ -19,12 +19,17 @@ import {
   Channel,
   OnChatMetadata,
   OnInboundMessage,
+  OnLocation,
   RegisteredGroup,
 } from '../types.js';
 
 export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
+  // Optional (#574 Phase 3). When set, the bridge emits one event per
+  // static pin, venue share, live-location initial, or live-location
+  // tick. Tests that don't care about location capture omit it.
+  onLocation?: OnLocation;
   registeredGroups: () => Record<string, RegisteredGroup>;
 }
 
@@ -1607,11 +1612,17 @@ export class TelegramChannel implements Channel {
       storeNonText(ctx, `[Sticker ${emoji}]`);
     });
     // Location / venue messages carry `latitude`/`longitude` payloads
-    // the bridge previously discarded (#574). Capture them inline in
-    // the placeholder text — the downstream TZ resolver (Phase 2) reads
-    // most-recent coords from `messages.content` and reverse-geocodes
-    // to an IANA tz, replacing the TripIt-segment walker that lives
-    // in `db.ts::walkTzSegments`. Format is regex-parseable:
+    // the bridge previously discarded (#574). Two writes per event:
+    //   1. `storeNonText` → `messages.content` placeholder (Phase 1).
+    //      Keeps the agent's chat-history view non-empty: it sees
+    //      "user shared a location" as one line.
+    //   2. `opts.onLocation` → `locations` table (Phase 3). The
+    //      host-side TZ resolver reads "most recent owner coords"
+    //      from this table; live-location updates from
+    //      `edited_message:location` land here only (NOT in messages)
+    //      to avoid flooding chat history with ~once-per-minute
+    //      position ticks during a live share.
+    // Placeholder format is regex-parseable for backward compat:
     //   `[Location <lat>,<lng>]`
     //   `[Venue "<title>" <lat>,<lng>]`
     // Lat/lng are emitted with grammY's full Telegram precision (up to
@@ -1624,6 +1635,35 @@ export class TelegramChannel implements Channel {
         ? `[Location ${loc.latitude},${loc.longitude}]`
         : '[Location]';
       storeNonText(ctx, placeholder);
+
+      // Phase 3: persist to the locations table.
+      // `live_period > 0` on the INITIAL message means the user
+      // started a live share; subsequent movement ticks arrive as
+      // `edited_message:location` updates on the same `message_id`
+      // (handled separately below). `live_period` absent or 0 means
+      // a one-time static pin.
+      const chatJid = `tg:${ctx.chat.id}`;
+      if (!this.opts.registeredGroups()[chatJid]) return;
+      if (!loc || !this.opts.onLocation) return;
+      // `sender` is the Phase 2 resolver's filter key — an empty
+      // string would coalesce unrelated anonymous-admin / channel-post
+      // location events into one unattributable bucket. Skip the row
+      // if `ctx.from?.id` is missing rather than store telemetry that
+      // can never be queried correctly.
+      const senderId = ctx.from?.id?.toString();
+      if (!senderId) return;
+      const livePeriod = loc.live_period ?? 0;
+      this.opts.onLocation({
+        chat_jid: chatJid,
+        sender: senderId,
+        message_id: ctx.message.message_id.toString(),
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        accuracy_m: loc.horizontal_accuracy ?? null,
+        source: livePeriod > 0 ? 'live_initial' : 'static',
+        recorded_at: new Date(ctx.message.date * 1000).toISOString(),
+        live_period: livePeriod > 0 ? livePeriod : null,
+      });
     });
     // `message:venue` was never wired before — it isn't a sub-type of
     // `message:location` in grammY, so venues currently fall through
@@ -1644,6 +1684,76 @@ export class TelegramChannel implements Channel {
         .replace(/"/g, '\\"');
       const { latitude, longitude } = venue.location;
       storeNonText(ctx, `[Venue "${safeTitle}" ${latitude},${longitude}]`);
+
+      // Phase 3: venues are static (no live_period). Same write
+      // contract as `message:location` static pins, same skip-on-no-sender
+      // guard (an empty `sender` would be unqueryable by the Phase 2
+      // resolver and would coalesce unrelated anonymous events).
+      const chatJid = `tg:${ctx.chat.id}`;
+      if (!this.opts.registeredGroups()[chatJid]) return;
+      if (!this.opts.onLocation) return;
+      const senderId = ctx.from?.id?.toString();
+      if (!senderId) return;
+      this.opts.onLocation({
+        chat_jid: chatJid,
+        sender: senderId,
+        message_id: ctx.message.message_id.toString(),
+        latitude,
+        longitude,
+        accuracy_m: null,
+        source: 'venue',
+        recorded_at: new Date(ctx.message.date * 1000).toISOString(),
+        live_period: null,
+      });
+    });
+    // Live-location updates (#574 Phase 3). Telegram delivers movement
+    // ticks against an active live share as `edited_message:location`
+    // events with the same `message_id` as the original `live_initial`
+    // share. We DON'T re-emit a `messages` row for each update — the
+    // initial share already wrote one and re-writing per tick would
+    // flood the agent's context. Only the `locations` table gets the
+    // append. The `date` field on an edited message reflects the
+    // ORIGINAL send time per the Bot API; `edit_date` is the
+    // tick time — that's what we want as `recorded_at`.
+    this.bot.on('edited_message:location', (ctx) => {
+      const edited = ctx.editedMessage;
+      if (!edited) return;
+      const loc = edited.location;
+      const chatJid = `tg:${ctx.chat.id}`;
+      if (!this.opts.registeredGroups()[chatJid]) return;
+      if (!loc || !this.opts.onLocation) return;
+      // `edit_date` is the tick time and is load-bearing for the
+      // Phase 2 freshness gate. Per the Bot API, `edit_date` is
+      // present on every `edited_message` update — but if it's
+      // genuinely missing on the wire (Telegram protocol bug,
+      // upstream-library drift), falling back to `date` would
+      // freeze `recorded_at` at the original share time and the
+      // resolver would think the position is hours newer than it
+      // is. Skip + log instead of inserting a misleading row.
+      if (typeof edited.edit_date !== 'number') {
+        logger.warn(
+          {
+            chatJid,
+            message_id: edited.message_id,
+            from_id: ctx.from?.id,
+          },
+          'edited_message:location missing edit_date — skipping row to avoid stale-recorded_at corruption (#574 Phase 3)',
+        );
+        return;
+      }
+      const senderId = ctx.from?.id?.toString();
+      if (!senderId) return;
+      this.opts.onLocation({
+        chat_jid: chatJid,
+        sender: senderId,
+        message_id: edited.message_id.toString(),
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        accuracy_m: loc.horizontal_accuracy ?? null,
+        source: 'live_update',
+        recorded_at: new Date(edited.edit_date * 1000).toISOString(),
+        live_period: loc.live_period ?? null,
+      });
     });
     this.bot.on('message:contact', (ctx) => storeNonText(ctx, '[Contact]'));
 
