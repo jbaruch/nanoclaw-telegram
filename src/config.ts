@@ -2,6 +2,7 @@ import os from 'os';
 import path from 'path';
 
 import { readEnvFile } from './env.js';
+import { logger } from './logger.js';
 import { isValidTimezone } from './timezone.js';
 
 // Read config values from .env (falls back to process.env).
@@ -123,10 +124,39 @@ export const ASSISTANT_OWNER_HANDLE =
 // = location-first cascade is skipped and the heartbeat advisory
 // falls back to walker-only behaviour (the pre-Phase-2 contract,
 // preserved for zero-config installs).
-export const ASSISTANT_OWNER_TG_USER_ID =
-  process.env.ASSISTANT_OWNER_TG_USER_ID ||
-  envConfig.ASSISTANT_OWNER_TG_USER_ID ||
-  undefined;
+function resolveOwnerTgUserId(): string | undefined {
+  const raw =
+    process.env.ASSISTANT_OWNER_TG_USER_ID ||
+    envConfig.ASSISTANT_OWNER_TG_USER_ID ||
+    undefined;
+  if (raw === undefined) return undefined;
+  // Strip surrounding whitespace + matching quotes the env file
+  // parser may not have stripped (the Telegram user_id is digits,
+  // never quoted in legitimate configs; whitespace / quotes signal
+  // a config typo).
+  const trimmed = raw.trim().replace(/^['"]+|['"]+$/g, '');
+  if (trimmed.length === 0) {
+    logger.warn(
+      "ASSISTANT_OWNER_TG_USER_ID is set but empty after trim — treating as unset (#574 Phase 2 location-first cascade will be skipped). Set to the owner's Telegram numeric user_id.",
+    );
+    return undefined;
+  }
+  // Telegram user_ids are unsigned integers, currently up to 64-bit
+  // (Bot API documents them as numbers ≥ 2^53-eligible in theory).
+  // Reject anything that doesn't parse as a positive whole-number
+  // string — a config swap with `ASSISTANT_OWNER_HANDLE` (a
+  // @-handle / non-digit username) is the most common mistake and
+  // would otherwise silently make the cascade never match a row.
+  if (!/^[1-9][0-9]{0,18}$/.test(trimmed)) {
+    logger.warn(
+      { raw: trimmed.slice(0, 32) },
+      'ASSISTANT_OWNER_TG_USER_ID does not look like a positive numeric Telegram user_id — likely a config typo (was @-handle swapped in?). Treating as unset; the #574 Phase 2 location-first cascade will be skipped.',
+    );
+    return undefined;
+  }
+  return trimmed;
+}
+export const ASSISTANT_OWNER_TG_USER_ID = resolveOwnerTgUserId();
 
 export const TELEGRAM_BOT_POOL = (
   process.env.TELEGRAM_BOT_POOL ||

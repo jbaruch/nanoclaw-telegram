@@ -2539,6 +2539,91 @@ describe('runTzHeartbeatAdvisory — location-first cascade (#574 Phase 2)', () 
     expect(stamp).toBeNull();
   });
 
+  it('cooldown PRESERVED during the 4-12h stale-but-no-warning band', () => {
+    // Regression guard for the cooldown-reset bug Copilot flagged on
+    // PR #578: an earlier draft cleared `last_stale_warning_at`
+    // whenever `warning === null`, which included the 4 h ≤ age <
+    // 12 h band where the cascade has flipped off the fresh path but
+    // no warning is due yet. That made the cooldown re-fire on the
+    // very next ≥ 12 h tick, defeating the whole point of the 12 h
+    // window. Reset only happens on `source === 'fresh_location'`.
+    const priorStamp = new Date(
+      NOW.getTime() - 6 * 60 * 60 * 1000,
+    ).toISOString();
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      schemaVersion: 4,
+      lastStaleWarningAt: priorStamp,
+    });
+    seedLocationAtAge(8, 50.0647, 19.945); // stale-for-TZ, not warning-due
+    runTzHeartbeatAdvisory(NOW, OWNER);
+    const stamp = _rawQueryForTests<{ last_stale_warning_at: string | null }>(
+      'SELECT last_stale_warning_at FROM tz_state WHERE id = 1',
+    )[0]?.last_stale_warning_at;
+    // Stamp UNCHANGED — neither cleared (location isn't fresh) nor
+    // refreshed (warning isn't due).
+    expect(stamp).toBe(priorStamp);
+  });
+
+  it('walker-only path with NO segments AND NO location: pre-Phase-2 no-op preserved', () => {
+    // Regression guard for the Copilot-flagged "bit-for-bit" claim
+    // on PR #578: pre-Phase-2 the advisory returned null when
+    // `row.segments` was empty (no walker call, no flip). An
+    // earlier draft of the resolver-composition called
+    // `walkTzSegments(null, ...)` which returns `home_tz`, and on a
+    // `current_tz !== home_tz` row would silently flip back to home
+    // — unwanted for zero-config installs before sync_tripit has
+    // run for the first time.
+    _seedTzStateForTests({
+      currentTz: 'Europe/Warsaw',
+      homeTz: 'America/Chicago',
+      schemaVersion: 4,
+      // segments omitted → null
+    });
+    // No location seeded for any sender.
+    const result = runTzHeartbeatAdvisory(NOW, OWNER);
+    expect(result).toEqual({ flip: null, warningToFire: null });
+    // current_tz must be untouched.
+    expect(getCurrentTz()).toBe('Europe/Warsaw');
+  });
+
+  it('malformed segments JSON + NO location: pre-Phase-2 no-op preserved', () => {
+    // Symmetric guard: the malformed-JSON path (segments column has
+    // bytes but they don't parse) also needs to be a no-op when no
+    // location can drive the cascade, matching the pre-Phase-2
+    // narrowed `SyntaxError` early-return.
+    _seedTzStateForTests({
+      currentTz: 'Europe/Warsaw',
+      homeTz: 'America/Chicago',
+      segments: '{not valid JSON',
+      schemaVersion: 4,
+    });
+    const result = runTzHeartbeatAdvisory(NOW, OWNER);
+    expect(result).toEqual({ flip: null, warningToFire: null });
+    expect(getCurrentTz()).toBe('Europe/Warsaw');
+  });
+
+  it('fresh location drives a flip even with broken segments JSON', () => {
+    // The other half of the no-op guard: a fresh location should
+    // STILL drive a flip even when segments are unparseable. The
+    // resolver doesn't need segments to compute `tz_from_coords`,
+    // and falling back to the pre-Phase-2 no-op here would defeat
+    // the entire point of the location-first cascade.
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      segments: '{not valid JSON',
+      schemaVersion: 4,
+    });
+    seedLocationAtAge(0.5, 50.0647, 19.945); // Krakow, fresh
+    const result = runTzHeartbeatAdvisory(NOW, OWNER);
+    expect(result.flip).toEqual({
+      prev: 'America/Chicago',
+      next: 'Europe/Warsaw',
+    });
+  });
+
   it('no owner id → walker-only path (pre-Phase-2 contract preserved)', () => {
     _seedTzStateForTests({
       currentTz: 'America/Chicago',

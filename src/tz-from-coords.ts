@@ -30,6 +30,21 @@ import { find as findTz } from 'geo-tz';
 
 import { logger } from './logger.js';
 
+// Warm the `geo-tz` shapefile cache at module load. `geo-tz` lazily
+// reads the timezone-boundary-builder dataset (~900 kB of GeoJSON +
+// quadtree indices) on the FIRST `find()` call, blocking the event
+// loop while it streams the file in. The resolver's first reach into
+// this module is from the 30-min heartbeat advisory's setInterval —
+// without the warm-up the first tick after process start pays a
+// hundreds-of-ms-to-seconds stall on the main thread. A dummy
+// `findTz(0, 0)` call here forces the load at orchestrator startup
+// where the latency is invisible. The Atlantic-Ocean coords are
+// chosen so the warm-up doesn't pretend a real lookup happened.
+//
+// If `geo-tz` ever changes to load eagerly on import, this becomes a
+// harmless no-op; if it gains an explicit prewarm API, swap to that.
+findTz(0, 0);
+
 const VALID_LATITUDE_MIN = -90;
 const VALID_LATITUDE_MAX = 90;
 const VALID_LONGITUDE_MIN = -180;

@@ -2238,6 +2238,7 @@ export function runTzHeartbeatAdvisory(
   }
 
   let parsed: readonly TripitSegment[] | null = null;
+  let segmentsMalformed = false;
   if (row.segments) {
     try {
       const decoded = JSON.parse(row.segments) as unknown;
@@ -2250,10 +2251,7 @@ export function runTzHeartbeatAdvisory(
         { err: err.message },
         'runTzHeartbeatAdvisory: tz_state.segments is malformed JSON — falling through (will recover on next sync_tripit run)',
       );
-      // Non-fatal: the resolver still resolves via the location row
-      // OR home_tz fallback. Pre-Phase-2 we returned null here; now
-      // a fresh location can still drive a flip even when the
-      // walker side is broken.
+      segmentsMalformed = true;
     }
   }
 
@@ -2265,6 +2263,23 @@ export function runTzHeartbeatAdvisory(
     ? getLatestLocationForSender(ownerSenderId)
     : null;
 
+  // Pre-Phase-2 contract preservation: when there's NO usable input
+  // for the cascade (no segments OR malformed segments) AND no
+  // location row, the advisory was a no-op (`current_tz` untouched,
+  // null return). Phase 2's resolver would otherwise call
+  // `walkTzSegments(null, ...)` and silently flip `current_tz` to
+  // `home_tz`, which is a behavioural change for zero-config installs
+  // where `ASSISTANT_OWNER_TG_USER_ID` is unset and the segments
+  // cache hasn't been populated yet. Early-return preserves the
+  // pre-Phase-2 no-op exactly. NOTE: this guard sits AFTER the
+  // location read so an owner with stale-but-existent location data
+  // can still drive the cascade through the walker-fallback path
+  // (and possibly fire a stale_no_share warning) when segments are
+  // broken.
+  if (latestLocation === null && (parsed === null || segmentsMalformed)) {
+    return { flip: null, warningToFire: null };
+  }
+
   const resolved = resolveCurrentTz({
     now,
     latestLocation,
@@ -2274,9 +2289,14 @@ export function runTzHeartbeatAdvisory(
 
   // Cooldown for the stale-location warning. We fire `stale_no_share`
   // at most once per STALE_WARNING_HOURS window so an owner who travels
-  // for a weekend doesn't get the same nag 48 times across 24 h. When
-  // the resolver says the location is NOT stale, clear the cooldown so
-  // the NEXT stale window gets a fresh notification at its start.
+  // for a weekend doesn't get the same nag 48 times across 24 h. Reset
+  // the cooldown stamp ONLY when the resolver reports
+  // `source: 'fresh_location'` — that's the unambiguous signal that
+  // the owner has shared again. Resetting on any `warning === null`
+  // would erase the cooldown during the 4 h ≤ age < 12 h band (where
+  // the location is stale-for-cascade but not yet warning-eligible)
+  // and re-fire the nag on the first ≥ 12 h tick after — defeating
+  // the cooldown's purpose.
   let warningToFire: 'stale_no_share' | null = null;
   let nextLastWarning: string | null | undefined = undefined;
   if (resolved.warning === 'stale_no_share') {
@@ -2290,9 +2310,12 @@ export function runTzHeartbeatAdvisory(
       warningToFire = 'stale_no_share';
       nextLastWarning = now.toISOString();
     }
-  } else if (row.last_stale_warning_at !== null) {
-    // Owner has shared again (location now fresh) — reset cooldown
-    // so the next stale window starts clean.
+  } else if (
+    resolved.source === 'fresh_location' &&
+    row.last_stale_warning_at !== null
+  ) {
+    // Owner has genuinely shared again — clear the cooldown so the
+    // next stale window starts clean.
     nextLastWarning = null;
   }
 
