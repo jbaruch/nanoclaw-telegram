@@ -13,6 +13,7 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'ASSISTANT_OWNER_NAME',
   'ASSISTANT_OWNER_HANDLE',
+  'ASSISTANT_OWNER_TG_USER_ID',
   'TZ',
   'TELEGRAM_BOT_POOL',
   'TILE_OWNER',
@@ -111,6 +112,62 @@ export const ASSISTANT_OWNER_HANDLE =
   process.env.ASSISTANT_OWNER_HANDLE ||
   envConfig.ASSISTANT_OWNER_HANDLE ||
   undefined;
+// Telegram numeric user_id of the owner (the human whose location
+// drives the #574 Phase 2 TZ resolver). Numeric IDs are forever-
+// stable, unlike `ASSISTANT_OWNER_HANDLE` (the username can change
+// any time the owner edits their Telegram profile). Stored as a
+// string because Telegram user_ids fit in JS number range today but
+// the Bot API officially types them as numbers ≥ 2^53-eligible;
+// we hand it through to the `locations.sender` column which is
+// TEXT, and the resolver's lookup keys off the string form. Unset
+// = location-first cascade is skipped and the heartbeat advisory
+// falls back to walker-only behaviour (the pre-Phase-2 contract,
+// preserved for zero-config installs).
+// Validation: see `resolveAgentAutoCompactWindow` below for the
+// established pattern — stderr-only, never log the raw value. The
+// raw env content for ASSISTANT_OWNER_TG_USER_ID is operator-supplied
+// and could be a paste-mistake holding a credential / token (the
+// adjacent ASSISTANT_OWNER_HANDLE / ASSISTANT_OWNER_NAME / various
+// API keys live in the same .env), so logging it under any condition
+// — even a few bytes — risks leaking it to `coding-policy: no-secrets`.
+// `logger` is intentionally NOT imported in this file (config.ts is
+// below logger.ts in the import graph and a logger import would close
+// a circular dep through host-logs.ts, surfacing as a startup crash).
+function resolveOwnerTgUserId(): string | undefined {
+  const raw =
+    process.env.ASSISTANT_OWNER_TG_USER_ID ||
+    envConfig.ASSISTANT_OWNER_TG_USER_ID ||
+    undefined;
+  if (raw === undefined) return undefined;
+  // Strip surrounding whitespace + matching quotes the env file
+  // parser may not have stripped (the Telegram user_id is digits,
+  // never quoted in legitimate configs; whitespace / quotes signal
+  // a config typo).
+  const trimmed = raw.trim().replace(/^['"]+|['"]+$/g, '');
+  if (trimmed.length === 0) {
+    process.stderr.write(
+      "[config] ASSISTANT_OWNER_TG_USER_ID is set but empty after trim — treating as unset (#574 Phase 2 location-first cascade will be skipped). Set to the owner's Telegram numeric user_id.\n",
+    );
+    return undefined;
+  }
+  // Telegram user_ids are unsigned integers, currently up to 64-bit
+  // (Bot API documents them as numbers ≥ 2^53-eligible in theory).
+  // Reject anything that doesn't parse as a positive whole-number
+  // string — a config swap with `ASSISTANT_OWNER_HANDLE` (a @-handle
+  // / non-digit username) is the most common mistake and would
+  // otherwise silently make the cascade never match a row.
+  if (!/^[1-9][0-9]{0,18}$/.test(trimmed)) {
+    // Report the LENGTH only, never the bytes — the raw could be a
+    // credential paste-mistake, and `coding-policy: no-secrets`
+    // forbids logging operator-supplied env content at any level.
+    process.stderr.write(
+      `[config] ASSISTANT_OWNER_TG_USER_ID (length=${trimmed.length}) does not look like a positive numeric Telegram user_id — likely a config typo (was @-handle swapped in?). Treating as unset; the #574 Phase 2 location-first cascade will be skipped.\n`,
+    );
+    return undefined;
+  }
+  return trimmed;
+}
+export const ASSISTANT_OWNER_TG_USER_ID = resolveOwnerTgUserId();
 
 export const TELEGRAM_BOT_POOL = (
   process.env.TELEGRAM_BOT_POOL ||

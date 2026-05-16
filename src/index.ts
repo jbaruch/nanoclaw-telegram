@@ -5,6 +5,7 @@ import { SqliteError } from 'better-sqlite3';
 
 import {
   ASSISTANT_NAME,
+  ASSISTANT_OWNER_TG_USER_ID,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   DEFAULT_TRIGGER,
@@ -70,6 +71,7 @@ import {
   markSessionForReset,
   recordSessionTurn,
   runTzHeartbeatAdvisory,
+  TzAdvisoryResult,
   createTask,
   deleteTask,
   getNewMessages,
@@ -3291,9 +3293,9 @@ async function main(): Promise<void> {
   // change (matches the circuit-breaker notify pattern).
   const TZ_HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000;
   setInterval(() => {
-    let flip: { prev: string; next: string } | null;
+    let advisory: TzAdvisoryResult;
     try {
-      flip = runTzHeartbeatAdvisory();
+      advisory = runTzHeartbeatAdvisory(new Date(), ASSISTANT_OWNER_TG_USER_ID);
     } catch (err) {
       // Narrowed to transient SQLite contention codes only —
       // SQLITE_BUSY / SQLITE_LOCKED can fire under WAL contention
@@ -3321,47 +3323,65 @@ async function main(): Promise<void> {
       );
       return;
     }
-    if (!flip) return;
+    if (!advisory.flip && !advisory.warningToFire) return;
     const mainJid = Object.keys(registeredGroups).find(
       (jid) => registeredGroups[jid].isMain,
     );
     if (!mainJid) {
-      // No main group registered — the flip already landed on the
-      // DB row; the next time a main group is registered, the user
-      // will see the right `current_tz` without a separate
-      // notification. Skipping the chat send here is the right
-      // failure mode (chat delivery would have nothing to target).
+      // No main group registered — the flip + cooldown stamp already
+      // landed on the DB row; the next time a main group is
+      // registered, the user will see the right `current_tz` without
+      // a separate notification. Skipping the chat send here is the
+      // right failure mode (chat delivery would have nothing to
+      // target).
       return;
     }
     const mainChannel = findChannel(channels, mainJid);
     if (!mainChannel || !mainChannel.isConnected()) return;
+
     // Chat notify: best-effort. The DB row already reflects the
-    // flip, so a chat-send failure means "user doesn't see the
-    // message this tick" — non-fatal; the next 30-min tick will not
-    // re-notify because the second walk produces `next ===
-    // current_tz` (the flip already committed). The `.catch`
-    // converts rejection into a structured warn with mainJid
-    // context — `void`-ing the promise would let the rejection
-    // bubble up as an unhandled-rejection warning that newer Node
-    // versions can terminate the orchestrator over.
-    const flipForLog = flip;
-    mainChannel
-      .sendMessage(
-        mainJid,
-        `📍 Timezone changed: ${flipForLog.prev} → ${flipForLog.next}`,
-      )
-      .catch((err: unknown) => {
-        if (!(err instanceof Error)) throw err;
-        logger.warn(
-          {
-            err: err.message,
-            mainJid,
-            prev: flipForLog.prev,
-            next: flipForLog.next,
-          },
-          'tz heartbeat advisory: chat notify failed (DB row already updated)',
-        );
-      });
+    // flip / cooldown stamp, so a chat-send failure means "user
+    // doesn't see the message this tick" — non-fatal. Each notify
+    // gets its own `.catch` to convert rejection into a structured
+    // warn instead of bubbling as an unhandled-rejection warning
+    // that newer Node versions can terminate the orchestrator over.
+    if (advisory.flip) {
+      const flipForLog = advisory.flip;
+      mainChannel
+        .sendMessage(
+          mainJid,
+          `📍 Timezone changed: ${flipForLog.prev} → ${flipForLog.next}`,
+        )
+        .catch((err: unknown) => {
+          if (!(err instanceof Error)) throw err;
+          logger.warn(
+            {
+              err: err.message,
+              mainJid,
+              prev: flipForLog.prev,
+              next: flipForLog.next,
+            },
+            'tz heartbeat advisory: chat notify failed (DB row already updated)',
+          );
+        });
+    }
+    if (advisory.warningToFire === 'stale_no_share') {
+      // Cooldown is already enforced inside runTzHeartbeatAdvisory
+      // (state-015 column `last_stale_warning_at`); reaching here
+      // means a real fire is due, not a per-tick spam.
+      mainChannel
+        .sendMessage(
+          mainJid,
+          `⚠️ I haven't seen your location in 12 h+. If you're traveling, share your live location so TZ tracking stays accurate (#574 Phase 2).`,
+        )
+        .catch((err: unknown) => {
+          if (!(err instanceof Error)) throw err;
+          logger.warn(
+            { err: err.message, mainJid },
+            'tz heartbeat advisory: stale-location nag failed (DB cooldown stamp already updated; next 12 h tick will retry)',
+          );
+        });
+    }
   }, TZ_HEARTBEAT_INTERVAL_MS).unref();
 
   startMessageLoop().catch((err) => {

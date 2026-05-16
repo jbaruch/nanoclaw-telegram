@@ -10,9 +10,10 @@ through the staging→promote pipeline alongside the SKILL.md rewrites
 that retire the JSON path.
 
 The TypeScript files `state-010-tz-state.ts`, (post-#542)
-`state-012-tz-state-segments.ts`, and (post-jbaruch/nanoclaw-admin#229)
-`state-013-tz-state-segments-datetime.ts` are the source of truth for
-the SQL — this Markdown only describes the contract.
+`state-012-tz-state-segments.ts`, (post-jbaruch/nanoclaw-admin#229)
+`state-013-tz-state-segments-datetime.ts`, and (post-#574 Phase 2)
+`state-015-tz-state-stale-warning.ts` are the source of truth for the
+SQL — this Markdown only describes the contract.
 
 ## Owner skill
 
@@ -35,17 +36,19 @@ Five-plus reader skills consume the rows:
 
 ## `tz_state` (singleton)
 
-| Column           | Type    | Nullable | Default | Notes                                                                                       |
-| ---------------- | ------- | -------- | ------- | ------------------------------------------------------------------------------------------- |
-| `id`             | INTEGER | no       | —       | PK with `CHECK(id = 1)` — singleton                                                         |
-| `current_tz`     | TEXT    | no       | —       | IANA zone name; load-bearing                                                                |
-| `home_tz`        | TEXT    | no       | —       | IANA zone name; reference for jet-lag                                                       |
-| `scheduler_tz`   | TEXT    | yes      | NULL    | Informational only; not load-bearing                                                        |
-| `segments`       | TEXT    | yes      | NULL    | (state-012, #542 / state-013, #229) JSON-stringified `[{timezone, from, to, from_dt?, to_dt?, label}]` from `sync_tripit` |
-| `schema_version` | INTEGER | no       | `1`     | Column default still `1`; rows are written at the gate's current value (currently `3`)      |
+| Column                  | Type    | Nullable | Default | Notes                                                                                       |
+| ----------------------- | ------- | -------- | ------- | ------------------------------------------------------------------------------------------- |
+| `id`                    | INTEGER | no       | —       | PK with `CHECK(id = 1)` — singleton                                                         |
+| `current_tz`            | TEXT    | no       | —       | IANA zone name; load-bearing                                                                |
+| `home_tz`               | TEXT    | no       | —       | IANA zone name; reference for jet-lag                                                       |
+| `scheduler_tz`          | TEXT    | yes      | NULL    | Informational only; not load-bearing                                                        |
+| `segments`              | TEXT    | yes      | NULL    | (state-012, #542 / state-013, #229) JSON-stringified `[{timezone, from, to, from_dt?, to_dt?, label}]` from `sync_tripit` |
+| `schema_version`        | INTEGER | no       | `1`     | Column default still `1`; rows are written at the gate's current value (currently `4`)      |
+| `last_stale_warning_at` | TEXT    | yes      | NULL    | (state-015, #574 Phase 2) ISO-8601 UTC of the last `stale_no_share` chat nag; cooldown stamp |
 
 Read pattern: `SELECT current_tz, home_tz FROM tz_state WHERE id = 1`.
-Heartbeat advisory walker also reads `segments, schema_version`.
+Heartbeat advisory walker also reads `segments, schema_version,
+last_stale_warning_at`.
 
 `segments` shape (post-jbaruch/nanoclaw-admin#229 +
 reclaim-tripit-timezones-sync#13):
@@ -100,10 +103,28 @@ JSON migration backfill seeds the row with `home_tz`, then the next
 `sync_tripit` run takes over the steady-state writes.
 
 `schema_version` is written through `SUPPORTED_TZ_STATE_SCHEMA_VERSION`
-in `src/db.ts` (currently `3` post-jbaruch/nanoclaw-admin#229; was `2`
-between #542 and #229). The state-010 column default of `1` is
-preserved on the schema for historical compatibility, but every writer
-binds the constant.
+in `src/db.ts` (currently `4` post-#574 Phase 2; was `3` between #229
+and #574, `2` between #542 and #229). The state-010 column default of
+`1` is preserved on the schema for historical compatibility, but every
+writer binds the constant.
+
+`last_stale_warning_at` is owned by `runTzHeartbeatAdvisory` in
+`src/db.ts` (post-#574 Phase 2). It is written atomically alongside
+any `current_tz` flip on each 30-min advisory tick:
+
+- Set to `now.toISOString()` when the resolver reports
+  `warning: 'stale_no_share'` AND the cooldown window
+  (`STALE_WARNING_HOURS = 12 h`) has elapsed since the prior fire
+  (or the prior fire is NULL). The advisory then emits a
+  `warningToFire: 'stale_no_share'` signal to the orchestrator's
+  setInterval, which sends a one-shot chat nag to the main group.
+- Reset to NULL when the resolver reports `source: 'fresh_location'`
+  (owner has genuinely shared again, not merely "warning no longer
+  fires"). Reset on `source: 'walker_stale_location'` would erase
+  the cooldown stamp during the 4 h ≤ age < 12 h band and re-fire
+  the nag on the first ≥ 12 h tick after — undesirable.
+- Left unchanged in every other path (no warning due, not freshly
+  shared either).
 
 ## `follow_me_tasks`
 

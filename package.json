@@ -24,6 +24,7 @@
     "@anthropic-ai/sdk": "^0.92.0",
     "better-sqlite3": "11.10.0",
     "cron-parser": "5.5.0",
+    "geo-tz": "^8.1.7",
     "grammy": "^1.39.3",
     "openai": "^6.33.0"
   },

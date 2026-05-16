@@ -22,6 +22,7 @@ import {
 } from './json-state-import.js';
 import { logger } from './logger.js';
 import { STATE_MIGRATIONS } from './state-migrations/index.js';
+import { resolveCurrentTz, STALE_WARNING_HOURS } from './tz-resolver.js';
 import {
   ContainerConfig,
   LocationRecord,
@@ -1791,11 +1792,13 @@ export function getDueTasks(): ScheduledTask[] {
 // as the writer of `tz_state` and added the `segments` column; bumped
 // to 3 by state-013 (jbaruch/nanoclaw-admin#229) when `walkTzSegments`
 // gained per-segment ISO-datetime resolution (consuming the upstream
-// `reclaim-tripit-timezones-sync#13` parser fix). The state-NNN
-// migrations run before this gate is consulted, so any row that
-// existed at a prior version has already been bumped by the time
-// `getCurrentTz` reads.
-const SUPPORTED_TZ_STATE_SCHEMA_VERSION = 3;
+// `reclaim-tripit-timezones-sync#13` parser fix); bumped to 4 by
+// state-015 (#574 Phase 2) when the row gained
+// `last_stale_warning_at` for the stale-location warning cooldown.
+// The state-NNN migrations run before this gate is consulted, so any
+// row that existed at a prior version has already been bumped by the
+// time `getCurrentTz` reads.
+const SUPPORTED_TZ_STATE_SCHEMA_VERSION = 4;
 
 /**
  * Test-only helper: seed a `follow_me_tasks` row directly. The
@@ -1852,22 +1855,29 @@ export function _seedTzStateForTests(args: {
   schedulerTz?: string | null;
   segments?: string | null;
   schemaVersion?: number;
+  // ISO-8601 UTC; null clears the stamp (the resolver treats null as
+  // "cooldown expired, may fire on next stale check"). Defaults to
+  // null so existing tests that don't care about cooldown behave
+  // as if no warning has ever fired.
+  lastStaleWarningAt?: string | null;
 }): void {
   db.prepare(
-    `INSERT INTO tz_state (id, current_tz, home_tz, scheduler_tz, segments, schema_version)
-       VALUES (1, ?, ?, ?, ?, ?)
+    `INSERT INTO tz_state (id, current_tz, home_tz, scheduler_tz, segments, schema_version, last_stale_warning_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
-       current_tz     = excluded.current_tz,
-       home_tz        = excluded.home_tz,
-       scheduler_tz   = excluded.scheduler_tz,
-       segments       = excluded.segments,
-       schema_version = excluded.schema_version`,
+       current_tz            = excluded.current_tz,
+       home_tz               = excluded.home_tz,
+       scheduler_tz          = excluded.scheduler_tz,
+       segments              = excluded.segments,
+       schema_version        = excluded.schema_version,
+       last_stale_warning_at = excluded.last_stale_warning_at`,
   ).run(
     args.currentTz,
     args.homeTz ?? args.currentTz,
     args.schedulerTz ?? null,
     args.segments ?? null,
     args.schemaVersion ?? SUPPORTED_TZ_STATE_SCHEMA_VERSION,
+    args.lastStaleWarningAt ?? null,
   );
 }
 
@@ -2149,23 +2159,53 @@ export function applyTripitSegmentsToTzState(
 }
 
 /**
- * #542 — Heartbeat advisory walker. Re-walks the cached `segments`
- * timeline against wall-clock `now` without re-fetching iCal. Called
- * from a 30-min `setInterval` in `src/index.ts`; on flip, the caller
- * sends a chat message via the main group's channel.
+ * #542 / #574 Phase 2 — Heartbeat advisory. Re-evaluates `current_tz`
+ * against (a) the owner's most-recent location row, falling through to
+ * (b) the cached TripIt segments walker. Called from a 30-min
+ * `setInterval` in `src/index.ts`; on flip, the caller sends a chat
+ * message via the main group's channel. On stale-location warning,
+ * the caller sends a "please re-share" notice — bounded by a 12h
+ * cooldown stored in `tz_state.last_stale_warning_at`.
  *
- * Returns `{ prev, next }` only when the cached timeline produces a
- * different zone than `current_tz`; null on every other path (no row,
- * stale `schema_version`, null/empty `segments`, malformed JSON, or
- * computed value matches `current_tz`). On flip, `current_tz` is
- * updated in place and `segments` / `home_tz` are left untouched.
+ * `ownerSenderId` is the channel-specific owner identifier (Telegram
+ * numeric user_id today; the orchestrator resolves it once from
+ * `ASSISTANT_OWNER_TG_USER_ID` and threads it in). When null /
+ * undefined / unset, the location-first path is skipped and the
+ * function falls back to the pre-Phase-2 walker-only behaviour
+ * (zero-config installs keep working unchanged).
+ *
+ * Returns `{ flip, warningToFire }`:
+ *   - `flip` carries the `{ prev, next }` zone change when the
+ *     computed tz differs from `current_tz`; null otherwise.
+ *   - `warningToFire` is `'stale_no_share'` only when the resolver
+ *     reports the latest location is ≥12 h old AND the cooldown
+ *     window has elapsed since the last warning; null otherwise.
+ *     The DB column `last_stale_warning_at` is updated atomically
+ *     with the decision so a concurrent advisory can't double-fire.
+ *
+ * Skip paths (return `{ flip: null, warningToFire: null }`):
+ *   - tz_state row missing
+ *   - tz_state row at an unfamiliar schema_version (warned + skipped)
+ *   - tz_state.segments malformed JSON (warned + skipped; recovers
+ *     on next sync_tripit)
+ *
+ * Lock-step contract with state-015: this function reads / writes
+ * `last_stale_warning_at`. A row that hasn't been migrated to v4
+ * trips the schema_version gate above and skips, so the column
+ * absence is structurally impossible inside the hot path.
  */
+export interface TzAdvisoryResult {
+  flip: { prev: string; next: string } | null;
+  warningToFire: 'stale_no_share' | null;
+}
+
 export function runTzHeartbeatAdvisory(
   now: Date = new Date(),
-): { prev: string; next: string } | null {
+  ownerSenderId?: string | null,
+): TzAdvisoryResult {
   const row = db
     .prepare(
-      'SELECT current_tz, home_tz, segments, schema_version FROM tz_state WHERE id = 1',
+      'SELECT current_tz, home_tz, segments, schema_version, last_stale_warning_at FROM tz_state WHERE id = 1',
     )
     .get() as
     | {
@@ -2173,9 +2213,10 @@ export function runTzHeartbeatAdvisory(
         home_tz: string;
         segments: string | null;
         schema_version: number;
+        last_stale_warning_at: string | null;
       }
     | undefined;
-  if (!row) return null;
+  if (!row) return { flip: null, warningToFire: null };
   if (row.schema_version !== SUPPORTED_TZ_STATE_SCHEMA_VERSION) {
     // Same contract as `getCurrentTz` — an unfamiliar version is "no
     // usable prior state". The walker fires every 30 min, so this
@@ -2193,33 +2234,129 @@ export function runTzHeartbeatAdvisory(
       },
       'runTzHeartbeatAdvisory: tz_state schema_version unfamiliar — skipping',
     );
-    return null;
+    return { flip: null, warningToFire: null };
   }
-  if (!row.segments) return null;
 
-  let parsed: readonly TripitSegment[];
-  try {
-    const decoded = JSON.parse(row.segments) as unknown;
-    if (!Array.isArray(decoded)) return null;
-    parsed = decoded as readonly TripitSegment[];
-  } catch (err) {
-    if (!(err instanceof SyntaxError)) throw err;
-    logger.warn(
-      { err: err.message },
-      'runTzHeartbeatAdvisory: tz_state.segments is malformed JSON — skipping (will recover on next sync_tripit run)',
+  let parsed: readonly TripitSegment[] | null = null;
+  let segmentsMalformed = false;
+  if (row.segments) {
+    try {
+      const decoded = JSON.parse(row.segments) as unknown;
+      if (Array.isArray(decoded)) {
+        parsed = decoded as readonly TripitSegment[];
+      }
+    } catch (err) {
+      if (!(err instanceof SyntaxError)) throw err;
+      logger.warn(
+        { err: err.message },
+        'runTzHeartbeatAdvisory: tz_state.segments is malformed JSON — falling through (will recover on next sync_tripit run)',
+      );
+      segmentsMalformed = true;
+    }
+  }
+
+  // Read the owner's most-recent location only when the orchestrator
+  // told us who the owner is. Empty / null / undefined `ownerSenderId`
+  // skips the location-first path entirely (walker-only, pre-Phase-2
+  // behaviour).
+  const latestLocation = ownerSenderId
+    ? getLatestLocationForSender(ownerSenderId)
+    : null;
+
+  // Pre-Phase-2 contract preservation: when there's NO usable input
+  // for the cascade (no segments OR malformed segments) AND no
+  // location row, the advisory was a no-op (`current_tz` untouched,
+  // null return). Phase 2's resolver would otherwise call
+  // `walkTzSegments(null, ...)` and silently flip `current_tz` to
+  // `home_tz`, which is a behavioural change for zero-config installs
+  // where `ASSISTANT_OWNER_TG_USER_ID` is unset and the segments
+  // cache hasn't been populated yet. Early-return preserves the
+  // pre-Phase-2 no-op exactly. NOTE: this guard sits AFTER the
+  // location read so an owner with stale-but-existent location data
+  // can still drive the cascade through the walker-fallback path
+  // (and possibly fire a stale_no_share warning) when segments are
+  // broken.
+  if (latestLocation === null && (parsed === null || segmentsMalformed)) {
+    return { flip: null, warningToFire: null };
+  }
+
+  const resolved = resolveCurrentTz({
+    now,
+    latestLocation,
+    segments: parsed,
+    home_tz: row.home_tz,
+  });
+
+  // Cooldown for the stale-location warning. We fire `stale_no_share`
+  // at most once per STALE_WARNING_HOURS window so an owner who travels
+  // for a weekend doesn't get the same nag 48 times across 24 h. Reset
+  // the cooldown stamp ONLY when the resolver reports
+  // `source: 'fresh_location'` — that's the unambiguous signal that
+  // the owner has shared again. Resetting on any `warning === null`
+  // would erase the cooldown during the 4 h ≤ age < 12 h band (where
+  // the location is stale-for-cascade but not yet warning-eligible)
+  // and re-fire the nag on the first ≥ 12 h tick after — defeating
+  // the cooldown's purpose.
+  let warningToFire: 'stale_no_share' | null = null;
+  let nextLastWarning: string | null | undefined = undefined;
+  if (resolved.warning === 'stale_no_share') {
+    const lastWarn = row.last_stale_warning_at
+      ? Date.parse(row.last_stale_warning_at)
+      : NaN;
+    const cooldownExpired =
+      !Number.isFinite(lastWarn) ||
+      now.getTime() - lastWarn >= STALE_WARNING_HOURS * 60 * 60 * 1000;
+    if (cooldownExpired) {
+      warningToFire = 'stale_no_share';
+      nextLastWarning = now.toISOString();
+    }
+  } else if (
+    resolved.source === 'fresh_location' &&
+    row.last_stale_warning_at !== null
+  ) {
+    // Owner has genuinely shared again — clear the cooldown so the
+    // next stale window starts clean.
+    nextLastWarning = null;
+  }
+
+  // Single UPDATE batches the current_tz flip and the cooldown stamp
+  // so a concurrent advisory can't see a half-applied state. SQLite's
+  // single-writer model already serialises this, but the batch keeps
+  // the read-then-write window tight.
+  const flip =
+    resolved.tz !== row.current_tz
+      ? { prev: row.current_tz, next: resolved.tz }
+      : null;
+
+  if (flip !== null || nextLastWarning !== undefined) {
+    const setClauses: string[] = [];
+    const bindings: (string | null)[] = [];
+    if (flip !== null) {
+      setClauses.push('current_tz = ?');
+      bindings.push(resolved.tz);
+    }
+    if (nextLastWarning !== undefined) {
+      setClauses.push('last_stale_warning_at = ?');
+      bindings.push(nextLastWarning);
+    }
+    db.prepare(`UPDATE tz_state SET ${setClauses.join(', ')} WHERE id = 1`).run(
+      ...bindings,
     );
-    return null;
   }
 
-  const next = walkTzSegments(parsed, now, row.home_tz);
-  if (next === row.current_tz) return null;
+  if (flip) {
+    logger.info(
+      {
+        prev: row.current_tz,
+        next: resolved.tz,
+        source: resolved.source,
+        latest_location_age_seconds: resolved.latest_location_age_seconds,
+      },
+      'tz_state.current_tz flipped via heartbeat advisory (#574 Phase 2)',
+    );
+  }
 
-  db.prepare('UPDATE tz_state SET current_tz = ? WHERE id = 1').run(next);
-  logger.info(
-    { prev: row.current_tz, next },
-    'tz_state.current_tz flipped via heartbeat advisory walker (#542)',
-  );
-  return { prev: row.current_tz, next };
+  return { flip, warningToFire };
 }
 
 export function updateTaskAfterRun(
