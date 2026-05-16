@@ -432,16 +432,16 @@ describe('task-tz-state.json → SQLite migration (#302)', () => {
             home_tz: 'Europe/Berlin',
           });
           // Load-bearing: schema_version equals the writer's known
-          // shape (3 post-jbaruch/nanoclaw-admin#229 in lock-step with
-          // the reader gate; was 2 between #542 and #229). If
-          // the writer ever drifts to `INSERT OR REPLACE`, the result
-          // would be `1` (delete+insert in SQLite resets to the
-          // schema's `DEFAULT 1`); if the writer ever drops the
-          // explicit column, the result would be `5` (the manual
-          // bump survives). Either drift breaks the singleton's
-          // shape contract — assert exactly the current writer's
-          // shape value.
-          expect(tzRows[0].schema_version).toBe(3);
+          // shape (4 post-#574 Phase 2 in lock-step with the reader
+          // gate; was 3 between #229 and #574 Phase 2, 2 between #542
+          // and #229). If the writer ever drifts to `INSERT OR
+          // REPLACE`, the result would be `1` (delete+insert in
+          // SQLite resets to the schema's `DEFAULT 1`); if the writer
+          // ever drops the explicit column, the result would be `5`
+          // (the manual bump survives). Either drift breaks the
+          // singleton's shape contract — assert exactly the current
+          // writer's shape value.
+          expect(tzRows[0].schema_version).toBe(4);
         } finally {
           db.close();
         }

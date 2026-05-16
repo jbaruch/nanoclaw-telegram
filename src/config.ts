@@ -13,6 +13,7 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'ASSISTANT_OWNER_NAME',
   'ASSISTANT_OWNER_HANDLE',
+  'ASSISTANT_OWNER_TG_USER_ID',
   'TZ',
   'TELEGRAM_BOT_POOL',
   'TILE_OWNER',
@@ -110,6 +111,21 @@ export const ASSISTANT_OWNER_NAME =
 export const ASSISTANT_OWNER_HANDLE =
   process.env.ASSISTANT_OWNER_HANDLE ||
   envConfig.ASSISTANT_OWNER_HANDLE ||
+  undefined;
+// Telegram numeric user_id of the owner (the human whose location
+// drives the #574 Phase 2 TZ resolver). Numeric IDs are forever-
+// stable, unlike `ASSISTANT_OWNER_HANDLE` (the username can change
+// any time the owner edits their Telegram profile). Stored as a
+// string because Telegram user_ids fit in JS number range today but
+// the Bot API officially types them as numbers ≥ 2^53-eligible;
+// we hand it through to the `locations.sender` column which is
+// TEXT, and the resolver's lookup keys off the string form. Unset
+// = location-first cascade is skipped and the heartbeat advisory
+// falls back to walker-only behaviour (the pre-Phase-2 contract,
+// preserved for zero-config installs).
+export const ASSISTANT_OWNER_TG_USER_ID =
+  process.env.ASSISTANT_OWNER_TG_USER_ID ||
+  envConfig.ASSISTANT_OWNER_TG_USER_ID ||
   undefined;
 
 export const TELEGRAM_BOT_POOL = (

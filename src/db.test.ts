@@ -1682,22 +1682,22 @@ describe('getCurrentTz (#456)', () => {
   });
 
   it('returns current_tz when seeded with supported schema_version', () => {
-    _seedTzStateForTests({ currentTz: 'America/Chicago', schemaVersion: 3 });
+    _seedTzStateForTests({ currentTz: 'America/Chicago', schemaVersion: 4 });
     expect(getCurrentTz()).toBe('America/Chicago');
   });
 
   it('reflects updates without staleness across calls', () => {
-    _seedTzStateForTests({ currentTz: 'America/Chicago', schemaVersion: 3 });
+    _seedTzStateForTests({ currentTz: 'America/Chicago', schemaVersion: 4 });
     expect(getCurrentTz()).toBe('America/Chicago');
-    _seedTzStateForTests({ currentTz: 'Europe/Amsterdam', schemaVersion: 3 });
+    _seedTzStateForTests({ currentTz: 'Europe/Amsterdam', schemaVersion: 4 });
     expect(getCurrentTz()).toBe('Europe/Amsterdam');
   });
 
   it('returns null and warns on unfamiliar schema_version', () => {
-    // Bumped past the supported gate (3 post-#229) — any future
-    // state-NNN that reshapes `tz_state` must lock-step the gate to
-    // match.
-    _seedTzStateForTests({ currentTz: 'America/Chicago', schemaVersion: 4 });
+    // Bumped past the supported gate (4 post-#574 Phase 2) — any
+    // future state-NNN that reshapes `tz_state` must lock-step the
+    // gate to match.
+    _seedTzStateForTests({ currentTz: 'America/Chicago', schemaVersion: 5 });
     // Reader contract per `coding-policy: stateful-artifacts`: unfamiliar
     // schema_version means "no usable prior state" — fall back rather
     // than guess at the new shape.
@@ -2168,7 +2168,7 @@ describe('applyTripitSegmentsToTzState (#542)', () => {
     _seedTzStateForTests({
       currentTz: 'America/Chicago',
       homeTz: 'America/Chicago',
-      schemaVersion: 3,
+      schemaVersion: 4,
     });
     const segments = [
       {
@@ -2198,7 +2198,7 @@ describe('applyTripitSegmentsToTzState (#542)', () => {
     _seedTzStateForTests({
       currentTz: 'Europe/Berlin',
       homeTz: 'America/Chicago',
-      schemaVersion: 3,
+      schemaVersion: 4,
     });
     const segments = [
       {
@@ -2220,7 +2220,7 @@ describe('applyTripitSegmentsToTzState (#542)', () => {
     _seedTzStateForTests({
       currentTz: 'Europe/Berlin',
       homeTz: 'America/Chicago',
-      schemaVersion: 3,
+      schemaVersion: 4,
     });
     const segments = [
       {
@@ -2248,7 +2248,7 @@ describe('applyTripitSegmentsToTzState (#542)', () => {
       'SELECT current_tz, segments, schema_version FROM tz_state WHERE id = 1',
     )[0];
     expect(stored!.current_tz).toBe('America/Chicago');
-    expect(stored!.schema_version).toBe(3);
+    expect(stored!.schema_version).toBe(4);
     expect(JSON.parse(stored!.segments)).toEqual(segments);
   });
 
@@ -2256,7 +2256,7 @@ describe('applyTripitSegmentsToTzState (#542)', () => {
     _seedTzStateForTests({
       currentTz: 'Europe/Berlin',
       homeTz: 'America/Chicago',
-      schemaVersion: 3,
+      schemaVersion: 4,
     });
     const result = applyTripitSegmentsToTzState(
       { segments: null },
@@ -2275,7 +2275,7 @@ describe('applyTripitSegmentsToTzState (#542)', () => {
       currentTz: 'America/Chicago',
       homeTz: 'America/Chicago',
       schedulerTz: 'America/Chicago',
-      schemaVersion: 3,
+      schemaVersion: 4,
     });
     applyTripitSegmentsToTzState(
       {
@@ -2298,28 +2298,42 @@ describe('applyTripitSegmentsToTzState (#542)', () => {
   });
 });
 
-describe('runTzHeartbeatAdvisory (#542)', () => {
-  it('returns null when tz_state row is absent', () => {
-    expect(runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'))).toBeNull();
+describe('runTzHeartbeatAdvisory (#542, #574 Phase 2)', () => {
+  // The function now returns `{flip, warningToFire}` so the old
+  // null-return contract from the #542 days expands into shape
+  // assertions on both fields. Walker-only behaviour (no
+  // `ownerSenderId` passed) keeps every pre-Phase-2 outcome
+  // identical, just wrapped in the new envelope; the location-first
+  // path is exercised in the dedicated Phase 2 describe block below.
+  const NOOP = { flip: null, warningToFire: null };
+
+  it('returns NOOP shape when tz_state row is absent', () => {
+    expect(runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'))).toEqual(
+      NOOP,
+    );
   });
 
-  it('returns null on null / empty segments (silent skip)', () => {
+  it('returns NOOP on null / empty segments AND no fresh location (silent skip)', () => {
     _seedTzStateForTests({
       currentTz: 'America/Chicago',
       homeTz: 'America/Chicago',
-      schemaVersion: 3,
+      schemaVersion: 4,
     });
-    expect(runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'))).toBeNull();
+    expect(runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'))).toEqual(
+      NOOP,
+    );
   });
 
-  it('returns null and warns on malformed JSON segments column', () => {
+  it('returns NOOP and warns on malformed JSON segments column', () => {
     _seedTzStateForTests({
       currentTz: 'America/Chicago',
       homeTz: 'America/Chicago',
       segments: '{not valid JSON',
-      schemaVersion: 3,
+      schemaVersion: 4,
     });
-    expect(runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'))).toBeNull();
+    expect(runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'))).toEqual(
+      NOOP,
+    );
     // current_tz must not have been touched — a malformed cache row
     // should not erase the prior good value.
     expect(getCurrentTz()).toBe('America/Chicago');
@@ -2336,17 +2350,17 @@ describe('runTzHeartbeatAdvisory (#542)', () => {
           to: '2026-05-19',
         },
       ]),
-      schemaVersion: 3,
+      schemaVersion: 4,
     });
     const result = runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'));
     expect(result).toEqual({
-      prev: 'America/Chicago',
-      next: 'Europe/Berlin',
+      flip: { prev: 'America/Chicago', next: 'Europe/Berlin' },
+      warningToFire: null,
     });
     expect(getCurrentTz()).toBe('Europe/Berlin');
   });
 
-  it('returns null when computed matches current_tz (no flip)', () => {
+  it('returns NOOP when computed matches current_tz (no flip)', () => {
     _seedTzStateForTests({
       currentTz: 'Europe/Berlin',
       homeTz: 'America/Chicago',
@@ -2357,9 +2371,11 @@ describe('runTzHeartbeatAdvisory (#542)', () => {
           to: '2026-05-19',
         },
       ]),
-      schemaVersion: 3,
+      schemaVersion: 4,
     });
-    expect(runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'))).toBeNull();
+    expect(runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'))).toEqual(
+      NOOP,
+    );
   });
 
   it('flips back to home_tz on the day the trip ends (`to === today`)', () => {
@@ -2373,11 +2389,11 @@ describe('runTzHeartbeatAdvisory (#542)', () => {
           to: '2026-05-19',
         },
       ]),
-      schemaVersion: 3,
+      schemaVersion: 4,
     });
     expect(runTzHeartbeatAdvisory(new Date('2026-05-19T00:00:00Z'))).toEqual({
-      prev: 'Europe/Berlin',
-      next: 'America/Chicago',
+      flip: { prev: 'Europe/Berlin', next: 'America/Chicago' },
+      warningToFire: null,
     });
     expect(getCurrentTz()).toBe('America/Chicago');
   });
@@ -2394,7 +2410,7 @@ describe('runTzHeartbeatAdvisory (#542)', () => {
       currentTz: 'America/Chicago',
       homeTz: 'America/Chicago',
       segments: segmentsJson,
-      schemaVersion: 3,
+      schemaVersion: 4,
     });
     runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'));
     const stored = _rawQueryForTests<{
@@ -2405,13 +2421,142 @@ describe('runTzHeartbeatAdvisory (#542)', () => {
     expect(stored!.segments).toBe(segmentsJson);
   });
 
-  it('returns null on unfamiliar schema_version', () => {
+  it('returns NOOP on unfamiliar schema_version', () => {
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      schemaVersion: 5,
+    });
+    expect(runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'))).toEqual(
+      NOOP,
+    );
+  });
+});
+
+describe('runTzHeartbeatAdvisory — location-first cascade (#574 Phase 2)', () => {
+  const NOW = new Date('2026-05-16T12:00:00Z');
+  const OWNER = '99001';
+
+  function seedLocationAtAge(hoursOld: number, lat: number, lng: number): void {
+    const recordedAt = new Date(
+      NOW.getTime() - hoursOld * 60 * 60 * 1000,
+    ).toISOString();
+    storeLocation({
+      chat_jid: 'tg:-100',
+      sender: OWNER,
+      message_id: 'm1',
+      latitude: lat,
+      longitude: lng,
+      source: 'live_update',
+      recorded_at: recordedAt,
+      live_period: 28800,
+    });
+  }
+
+  it('fresh location (< 4 h) → tz_from_coords drives the flip', () => {
     _seedTzStateForTests({
       currentTz: 'America/Chicago',
       homeTz: 'America/Chicago',
       schemaVersion: 4,
     });
-    expect(runTzHeartbeatAdvisory(new Date('2026-05-15T12:00:00Z'))).toBeNull();
+    // Krakow coordinates → Europe/Warsaw per geo-tz.
+    seedLocationAtAge(1, 50.0647, 19.945);
+    const result = runTzHeartbeatAdvisory(NOW, OWNER);
+    expect(result.flip).toEqual({
+      prev: 'America/Chicago',
+      next: 'Europe/Warsaw',
+    });
+    expect(result.warningToFire).toBeNull();
+    expect(getCurrentTz()).toBe('Europe/Warsaw');
+  });
+
+  it('stale location (4h ≤ age < 12h) falls through to walker', () => {
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      segments: JSON.stringify([
+        { timezone: 'Europe/Berlin', from: '2026-05-12', to: '2026-05-19' },
+      ]),
+      schemaVersion: 4,
+    });
+    // 6h old: stale for TZ purposes but still under the warning window.
+    seedLocationAtAge(6, 50.0647, 19.945);
+    const result = runTzHeartbeatAdvisory(NOW, OWNER);
+    // Walker covers today's segment → Europe/Berlin (NOT the
+    // Europe/Warsaw the stale coords would imply).
+    expect(result.flip).toEqual({
+      prev: 'America/Chicago',
+      next: 'Europe/Berlin',
+    });
+    expect(result.warningToFire).toBeNull();
+  });
+
+  it('very stale (≥ 12h) fires stale-no-share warning when cooldown clear', () => {
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      schemaVersion: 4,
+    });
+    seedLocationAtAge(13, 50.0647, 19.945);
+    const result = runTzHeartbeatAdvisory(NOW, OWNER);
+    expect(result.warningToFire).toBe('stale_no_share');
+    // Cooldown stamp updated atomically with the fire decision.
+    const stamp = _rawQueryForTests<{ last_stale_warning_at: string | null }>(
+      'SELECT last_stale_warning_at FROM tz_state WHERE id = 1',
+    )[0]?.last_stale_warning_at;
+    expect(stamp).toBe(NOW.toISOString());
+  });
+
+  it('very stale + warning fired < 12h ago: suppress (cooldown active)', () => {
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      schemaVersion: 4,
+      // 1 h ago — far inside the 12 h cooldown.
+      lastStaleWarningAt: new Date(
+        NOW.getTime() - 1 * 60 * 60 * 1000,
+      ).toISOString(),
+    });
+    seedLocationAtAge(13, 50.0647, 19.945);
+    const result = runTzHeartbeatAdvisory(NOW, OWNER);
+    expect(result.warningToFire).toBeNull();
+  });
+
+  it('fresh location after a prior stale warning clears the cooldown stamp', () => {
+    _seedTzStateForTests({
+      currentTz: 'Europe/Warsaw',
+      homeTz: 'America/Chicago',
+      schemaVersion: 4,
+      lastStaleWarningAt: new Date(
+        NOW.getTime() - 5 * 60 * 60 * 1000,
+      ).toISOString(),
+    });
+    seedLocationAtAge(0.5, 50.0647, 19.945);
+    runTzHeartbeatAdvisory(NOW, OWNER);
+    const stamp = _rawQueryForTests<{ last_stale_warning_at: string | null }>(
+      'SELECT last_stale_warning_at FROM tz_state WHERE id = 1',
+    )[0]?.last_stale_warning_at;
+    expect(stamp).toBeNull();
+  });
+
+  it('no owner id → walker-only path (pre-Phase-2 contract preserved)', () => {
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      segments: JSON.stringify([
+        { timezone: 'Europe/Berlin', from: '2026-05-12', to: '2026-05-19' },
+      ]),
+      schemaVersion: 4,
+    });
+    seedLocationAtAge(0.1, 50.0647, 19.945);
+    // Same call shape as pre-Phase-2 (`runTzHeartbeatAdvisory(now)`) —
+    // location is NOT consulted; walker resolves.
+    const result = runTzHeartbeatAdvisory(NOW);
+    expect(result.flip).toEqual({
+      prev: 'America/Chicago',
+      next: 'Europe/Berlin',
+    });
+    expect(result.warningToFire).toBeNull();
   });
 });
 
