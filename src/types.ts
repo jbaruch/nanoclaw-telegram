@@ -507,7 +507,16 @@ export interface LocationRecord {
   longitude: number;
   accuracy_m?: number | null;
   source: LocationSource;
-  recorded_at: string; // ISO-8601 UTC; the message/edit `date` field, NOT a wall-clock at receive time
+  // ISO-8601 UTC, NOT a wall-clock at receive time. The source field
+  // determines which Telegram timestamp this maps to:
+  //   - 'static' / 'venue' / 'live_initial' → `message.date`
+  //     (original send time of the location/venue/share message)
+  //   - 'live_update' → `editedMessage.edit_date`
+  //     (the movement-tick time; `editedMessage.date` is the original
+  //     share time the Bot API echoes on every edit, and using it
+  //     would freeze recorded_at and defeat the Phase 2 freshness gate)
+  recorded_at: string;
+  live_period?: number | null; // seconds; populated only when source ∈ {live_initial, live_update}
   live_period?: number | null; // seconds; populated only when source ∈ {live_initial, live_update}
 }
 
