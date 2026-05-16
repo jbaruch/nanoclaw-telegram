@@ -24,6 +24,7 @@ import { logger } from './logger.js';
 import { STATE_MIGRATIONS } from './state-migrations/index.js';
 import {
   ContainerConfig,
+  LocationRecord,
   NewMessage,
   RegisteredGroup,
   ScheduledTask,
@@ -170,6 +171,44 @@ function createSchema(database: Database.Database): void {
     -- SQLite satisfy ORDER BY directly from the index.
     CREATE INDEX IF NOT EXISTS idx_messages_fromme_chat
       ON messages(chat_jid, is_from_me, timestamp);
+
+    -- Location telemetry from chat channels (#574 Phase 3). Static
+    -- pins, venue shares, and live-location ticks all land here.
+    -- Kept SEPARATE from messages because: (1) live-location updates
+    -- fire ~once per minute for the entire live_period (up to 8 hours
+    -- per Telegram share), and routing them through messages would
+    -- flood the agent's chat-history context with position lines that
+    -- carry no conversational signal; (2) the host-side TZ resolver
+    -- (#574 Phase 2) reads "most-recent owner coords" via a clean SQL
+    -- query against this table, and filtering against the
+    -- messages-with-placeholder pattern would couple the resolver to
+    -- the placeholder format. The source column discriminates the
+    -- four shapes Telegram delivers (static, venue, live_initial,
+    -- live_update); see LocationSource in src/types.ts for the
+    -- canonical list. No FK to chats — locations are auxiliary
+    -- telemetry and aren't tied to the registered-groups lifecycle
+    -- (a row from a since-unregistered chat still carries valid TZ
+    -- signal until pruned).
+    CREATE TABLE IF NOT EXISTS locations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_jid TEXT NOT NULL,
+      sender TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      latitude REAL NOT NULL,
+      longitude REAL NOT NULL,
+      accuracy_m REAL,
+      source TEXT NOT NULL,
+      recorded_at TEXT NOT NULL,
+      live_period INTEGER
+    );
+    -- The TZ resolver's hot query is "most recent for this sender":
+    -- (sender, recorded_at DESC) is the index that satisfies it
+    -- without a table scan. chat_jid is unindexed because the
+    -- resolver doesn't filter on it (Telegram broadcasts the same
+    -- live-share to every chat the owner enables it in, and we want
+    -- the freshest signal regardless of which chat surfaced it).
+    CREATE INDEX IF NOT EXISTS idx_locations_sender_time
+      ON locations(sender, recorded_at DESC);
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
@@ -935,6 +974,79 @@ export function storeMessage(msg: NewMessage): void {
     msg.reply_to_sender_name ?? null,
     msg.telegram_message_id ?? null,
   );
+}
+
+/**
+ * Append a location row (#574 Phase 3). Always INSERT, never UPDATE —
+ * live-location updates carry the same `message_id` as the initial
+ * share, but each tick is a fresh observation worth persisting (the
+ * Phase 2 resolver's "most-recent wins" rule operates on `recorded_at`,
+ * not on per-message_id state).
+ *
+ * Callers don't need to deduplicate; Telegram itself only fires
+ * `edited_message:location` when the location actually changed, so
+ * the natural rate is bounded by movement, not by polling cadence.
+ */
+export function storeLocation(record: LocationRecord): void {
+  db.prepare(
+    `INSERT INTO locations (chat_jid, sender, message_id, latitude, longitude, accuracy_m, source, recorded_at, live_period) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    record.chat_jid,
+    record.sender,
+    record.message_id,
+    record.latitude,
+    record.longitude,
+    record.accuracy_m ?? null,
+    record.source,
+    record.recorded_at,
+    record.live_period ?? null,
+  );
+}
+
+/**
+ * Most-recent location for a given sender across every chat. Used by
+ * the #574 Phase 2 TZ resolver as the canonical "where is the owner"
+ * query — `sender` is the owner's channel-specific user id (Telegram
+ * numeric id; the orchestrator resolves it once via
+ * `ASSISTANT_OWNER_TG_USER_ID`).
+ *
+ * Returns `null` when no rows match (first deploy, owner-id wrong,
+ * etc.) — caller falls through to the TripIt walker per the Phase 2
+ * cascade.
+ */
+export function getLatestLocationForSender(
+  sender: string,
+): LocationRecord | null {
+  const row = db
+    .prepare(
+      `SELECT chat_jid, sender, message_id, latitude, longitude, accuracy_m, source, recorded_at, live_period
+       FROM locations WHERE sender = ? ORDER BY recorded_at DESC LIMIT 1`,
+    )
+    .get(sender) as
+    | {
+        chat_jid: string;
+        sender: string;
+        message_id: string;
+        latitude: number;
+        longitude: number;
+        accuracy_m: number | null;
+        source: string;
+        recorded_at: string;
+        live_period: number | null;
+      }
+    | undefined;
+  if (!row) return null;
+  return {
+    chat_jid: row.chat_jid,
+    sender: row.sender,
+    message_id: row.message_id,
+    latitude: row.latitude,
+    longitude: row.longitude,
+    accuracy_m: row.accuracy_m,
+    source: row.source as LocationRecord['source'],
+    recorded_at: row.recorded_at,
+    live_period: row.live_period,
+  };
 }
 
 /**
