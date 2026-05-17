@@ -14,12 +14,35 @@ export function escapeXml(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
+/**
+ * Per-invocation context options for the formatted agent prompt.
+ *
+ * - `timezone` is the wall-clock zone used for the per-message
+ *   `<message time="...">` display (pre-existing behaviour).
+ * - `contextTag` is the pre-built `<context ... />` header line.
+ *   Optional for backward compatibility — when omitted, the legacy
+ *   single-attribute `<context timezone="..." />` is emitted (the
+ *   pre-#576 shape). The orchestrator's main message-handling paths
+ *   build the enriched tag via `agent-context.ts` and pass it
+ *   through; legacy / test paths that just need a plain timezone
+ *   keep calling with a string.
+ */
+export interface MessageFormatContext {
+  timezone: string;
+  contextTag?: string;
+}
+
 export function formatMessages(
   messages: NewMessage[],
-  timezone: string,
+  ctxOrTimezone: string | MessageFormatContext,
 ): string {
+  const ctx: MessageFormatContext =
+    typeof ctxOrTimezone === 'string'
+      ? { timezone: ctxOrTimezone }
+      : ctxOrTimezone;
+
   const lines = messages.map((m) => {
-    const displayTime = formatLocalTime(m.timestamp, timezone);
+    const displayTime = formatLocalTime(m.timestamp, ctx.timezone);
     const idAttr = m.id ? ` id="${escapeXml(m.id)}"` : '';
     const replyAttr = m.reply_to_message_id
       ? ` reply_to="${escapeXml(m.reply_to_message_id)}"`
@@ -31,9 +54,10 @@ export function formatMessages(
     return `<message${idAttr} sender="${escapeXml(m.sender_name)}" time="${escapeXml(displayTime)}"${replyAttr}>${replySnippet}${escapeXml(m.content)}</message>`;
   });
 
-  const header = `<context timezone="${escapeXml(timezone)}" />\n`;
+  const contextTag =
+    ctx.contextTag ?? `<context timezone="${escapeXml(ctx.timezone)}" />`;
 
-  return `${header}<messages>\n${lines.join('\n')}\n</messages>`;
+  return `${contextTag}\n<messages>\n${lines.join('\n')}\n</messages>`;
 }
 
 export function stripInternalTags(text: string): string {

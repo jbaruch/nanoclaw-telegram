@@ -100,6 +100,10 @@ import { resolveGroupFolderPath } from './group-folder.js';
 import { initBotPool } from './channels/telegram.js';
 import { shouldStoreBotMessage, startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  buildAgentContextFromDb,
+  formatAgentContextTag,
+} from './agent-context.js';
 import { ChannelType } from './text-styles.js';
 import {
   restoreRemoteControl,
@@ -1546,7 +1550,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     allowedMessageId = missedMessages[missedMessages.length - 1]?.id;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  // #576 — build the enriched `<context>` tag for this invocation
+  // (local_datetime, weekday, location, timezone_source). Falls back
+  // to container_default when tz_state isn't seeded or no segments /
+  // location are available. The same resolved tz drives per-message
+  // `time=` display so the header and message timestamps agree.
+  const agentCtx = buildAgentContextFromDb({
+    ownerSenderId: ASSISTANT_OWNER_TG_USER_ID,
+    containerTimezone: TIMEZONE,
+  });
+  const prompt = formatMessages(missedMessages, {
+    timezone: agentCtx.timezone,
+    contextTag: formatAgentContextTag(agentCtx),
+  });
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -2384,7 +2400,16 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend, TIMEZONE);
+          // #576 — enriched context tag, same shape as the main
+          // pre-spawn path above.
+          const pipeAgentCtx = buildAgentContextFromDb({
+            ownerSenderId: ASSISTANT_OWNER_TG_USER_ID,
+            containerTimezone: TIMEZONE,
+          });
+          const formatted = formatMessages(messagesToSend, {
+            timezone: pipeAgentCtx.timezone,
+            contextTag: formatAgentContextTag(pipeAgentCtx),
+          });
 
           const lastMsgId = messagesToSend[messagesToSend.length - 1]?.id;
           // Per-pipe addressed-ness for the agent-runner's react-first

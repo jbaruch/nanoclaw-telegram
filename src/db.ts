@@ -2222,6 +2222,61 @@ export interface TzAdvisoryResult {
   warningToFire: 'stale_no_share' | null;
 }
 
+/**
+ * Read-only snapshot of `tz_state` for the `<context>`-tag builder
+ * in `agent-context.ts`. Returns `home_tz` plus the decoded
+ * `segments` array (or `null` when the column is empty / malformed
+ * JSON). Does NOT mutate any state, NOT write warnings to the log,
+ * and NOT run the resolver — those side effects belong to
+ * `runTzHeartbeatAdvisory`, not the per-prompt context builder.
+ *
+ * Returns `null` when the singleton row is missing entirely (no
+ * `tz_state` seeded yet) so the caller can fall through to the
+ * container-default context shape per `agent-context.ts`'s "no
+ * usable input" early-return.
+ */
+export interface TzStateForContext {
+  home_tz: string;
+  segments: readonly TripitSegment[] | null;
+}
+
+export function readTzStateForContext(): TzStateForContext | null {
+  const row = db
+    .prepare(
+      'SELECT home_tz, segments, schema_version FROM tz_state WHERE id = 1',
+    )
+    .get() as
+    | {
+        home_tz: string;
+        segments: string | null;
+        schema_version: number;
+      }
+    | undefined;
+  if (!row) return null;
+  // Mirror `runTzHeartbeatAdvisory`'s schema-version gate. A row at
+  // an unfamiliar version is "no usable prior state" — return null
+  // here so the context builder falls back to container_default
+  // rather than feeding stale-shape data into the resolver.
+  if (row.schema_version !== SUPPORTED_TZ_STATE_SCHEMA_VERSION) return null;
+
+  let segments: readonly TripitSegment[] | null = null;
+  if (row.segments) {
+    try {
+      const decoded = JSON.parse(row.segments) as unknown;
+      if (Array.isArray(decoded)) {
+        segments = decoded as readonly TripitSegment[];
+      }
+    } catch (err) {
+      if (!(err instanceof SyntaxError)) throw err;
+      // Malformed segments JSON: fall back to null. The
+      // `runTzHeartbeatAdvisory` walker fires every 30 min and will
+      // log this case; no need to re-emit on every agent prompt.
+      segments = null;
+    }
+  }
+  return { home_tz: row.home_tz, segments };
+}
+
 export function runTzHeartbeatAdvisory(
   now: Date = new Date(),
   ownerSenderId?: string | null,

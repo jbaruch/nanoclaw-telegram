@@ -182,6 +182,60 @@ describe('formatMessages', () => {
     expect(result).toContain('PM');
     expect(result).toContain('<context timezone="America/New_York" />');
   });
+
+  // --- #576: new MessageFormatContext shape ---
+  //
+  // The object form lets a caller pass a pre-built `<context ... />`
+  // tag (built via `agent-context.ts`) so the agent prompt carries
+  // the enriched anchor (local_datetime / weekday / location_*)
+  // instead of just the bare timezone. The new path runs alongside
+  // the legacy 2-arg form (still used by session-commands' /compact
+  // pre-prompt and every pre-existing test); these tests pin the
+  // contract: when `contextTag` is supplied, the legacy single-attr
+  // tag is NOT emitted, and the supplied tag lands verbatim in the
+  // header line.
+
+  it('object form embeds the supplied contextTag verbatim', () => {
+    const enrichedTag =
+      '<context utc_datetime="2026-05-16T13:40:00Z" local_datetime="2026-05-16T08:40:00-05:00" local_date="2026-05-16" weekday="Saturday" timezone="America/Chicago" timezone_source="container_default" />';
+    const result = formatMessages([makeMsg()], {
+      timezone: 'America/Chicago',
+      contextTag: enrichedTag,
+    });
+    expect(result).toContain(enrichedTag);
+    // The legacy single-attribute tag MUST NOT also appear — that
+    // would double-stamp the context header and confuse the agent.
+    expect(result).not.toContain('<context timezone="America/Chicago" />');
+    // The enriched tag occupies the first line; messages follow.
+    expect(result.startsWith(enrichedTag + '\n<messages>')).toBe(true);
+  });
+
+  it('object form without contextTag falls back to legacy header', () => {
+    const result = formatMessages([makeMsg()], {
+      timezone: 'America/New_York',
+    });
+    expect(result).toContain('<context timezone="America/New_York" />');
+  });
+
+  it('object form still uses ctx.timezone for per-message times', () => {
+    // The per-message `<message time=...>` formatter must read
+    // `ctx.timezone`, not parse it out of the supplied contextTag.
+    // Pass an intentionally mismatched contextTag to prove the
+    // separation: header carries one anchor, message-time formatting
+    // uses ctx.timezone.
+    const enrichedTag =
+      '<context utc_datetime="2024-01-01T18:30:00Z" timezone="UTC" timezone_source="container_default" />';
+    const result = formatMessages(
+      [makeMsg({ timestamp: '2024-01-01T18:30:00.000Z' })],
+      { timezone: 'America/New_York', contextTag: enrichedTag },
+    );
+    expect(result).toContain(enrichedTag);
+    // Per-message time renders in America/New_York (EST 1:30 PM),
+    // proving ctx.timezone — not the tag's `timezone="UTC"` —
+    // drove the time formatter.
+    expect(result).toContain('1:30');
+    expect(result).toContain('PM');
+  });
 });
 
 // --- TRIGGER_PATTERN ---
