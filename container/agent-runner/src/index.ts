@@ -109,6 +109,7 @@ import {
   decideExternalFileSummary,
   runExternalFileSummary,
 } from './external-file-summary.js';
+import { formatErrorResult } from './format-error-result.js';
 import {
   decideCapabilityAclIterable,
   walkBackIterableForProvenance,
@@ -4004,25 +4005,19 @@ async function runQuery(
             `num_turns=${errMsg.num_turns ?? 'n/a'} ` +
             `cost=$${errMsg.total_cost_usd ?? 'n/a'}`,
         );
-        // Pick the most-informative source for the human-readable
-        // summary, falling through to `textResult` (the SDK sometimes
-        // puts the only readable error there) before settling for the
-        // bare subtype. Cap to 500 chars and collapse newlines so a
-        // verbose error string can't blow up the IPC marker JSON we
-        // write to stdout — that JSON gets parsed by the orchestrator
-        // and excessively large strings have caused buffer issues
-        // before.
-        const rawSummary =
-          errMsg.terminal_reason ||
-          (errMsg.errors && errMsg.errors[0]) ||
-          textResult ||
-          subtype;
-        const summary = String(rawSummary).replace(/\s+/g, ' ').slice(0, 500);
+        // #582 — the structured error string preserves every SDK
+        // classification field (subtype, is_error, terminal_reason,
+        // stop_reason, plus a derived summary) so the DB error column
+        // stays diagnostic when the SDK returns a contradictory
+        // result shape like `subtype: 'success'` with `is_error: true`
+        // — the legacy `${subtype}: ${summary}` form collapsed that to
+        // a useless `"success: completed"`. The 500-char cap and
+        // whitespace collapse live in the helper.
         writeOutput({
           status: 'error',
           result: null,
           newSessionId,
-          error: `${subtype}: ${summary}`,
+          error: formatErrorResult(errMsg, textResult ?? null),
           usage: latestUsage,
         });
         sawErrorResult = true;
