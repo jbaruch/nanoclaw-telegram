@@ -1812,6 +1812,110 @@ describe('walkTzSegments (#542)', () => {
     ).toBe(HOME);
   });
 
+  it('returns home_tz in a home-bounded gap (#573 live repro — Geecon return → Stockholm departure)', () => {
+    // #573: the 2026-05-16 production incident. Baruch flew back to
+    // Nashville (Geecon return segment ended 2026-05-16T05:00Z) and
+    // was sitting at home until the Stockholm departure
+    // (2026-05-17T22:10Z, ~41h later). At 11:53Z the walker returned
+    // Stockholm's `Europe/Berlin` per the #571 arrival-tz rule —
+    // morning brief rendered events with a +7h offset (Saturday
+    // 07:30 CT meet showed as 14:30). The MOST RECENT prev-ended
+    // segment IS `home_tz`, which is the "you're home now" signal
+    // the walker must respect. Three segments: a foreign-zone Krakow
+    // stay (Geecon outbound), the inbound Nashville segment that
+    // marks the landing, and the future Stockholm trip. Last
+    // prev-ended in iteration order = Nashville = home_tz → home_tz.
+    const segments = [
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-13',
+        to: '2026-05-15',
+        label: 'Geecon — Krakow Airport hotel',
+      },
+      {
+        timezone: 'America/Chicago',
+        from: '2026-05-15',
+        to: '2026-05-16',
+        from_dt: '2026-05-15T18:10:00.000Z',
+        to_dt: '2026-05-16T05:00:00.000Z',
+        label: 'Geecon — Nashville return',
+      },
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-17',
+        to: '2026-05-22',
+        from_dt: '2026-05-17T22:10:00.000Z',
+        to_dt: '2026-05-22T20:00:00.000Z',
+        label: 'AI Fokus + KotlinConf — Stockholm',
+      },
+    ];
+    expect(
+      walkTzSegments(segments, new Date('2026-05-16T11:53:00Z'), HOME),
+    ).toBe(HOME);
+  });
+
+  it('returns home_tz in a home-bounded gap (date-only path)', () => {
+    // Date-only equivalent of the #573 shape: an inbound home
+    // segment ends before today's UTC date, with a future foreign
+    // trip ahead. Same reasoning — the last prev-ended segment's tz
+    // IS home_tz, so the walker is in a home-bounded gap, not a
+    // transit gap.
+    const segments = [
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-10',
+        to: '2026-05-13',
+        label: 'past foreign trip',
+      },
+      {
+        timezone: 'America/Chicago',
+        from: '2026-05-13',
+        to: '2026-05-15',
+        label: 'home segment',
+      },
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-20',
+        to: '2026-05-25',
+        label: 'future foreign trip',
+      },
+    ];
+    expect(
+      walkTzSegments(segments, new Date('2026-05-17T12:00:00Z'), HOME),
+    ).toBe(HOME);
+  });
+
+  it('returns home_tz when the future segment IS home (foreign trip ending into a future home segment)', () => {
+    // Symmetric edge case: the foreign trip has fully ended and the
+    // next booked segment is the home segment itself (not yet
+    // started). The user is conceptually already home — return
+    // home_tz. No new branch is needed: nextSegTz IS home_tz, so
+    // the arrival-tz fallback returns the right answer naturally.
+    // This test pins that behavior so a future refactor of the
+    // gap-fallback can't regress it.
+    const segments = [
+      {
+        timezone: 'Europe/Berlin',
+        from: '2026-05-10',
+        to: '2026-05-13',
+        from_dt: '2026-05-10T08:00:00.000Z',
+        to_dt: '2026-05-13T05:00:00.000Z',
+        label: 'past foreign trip',
+      },
+      {
+        timezone: 'America/Chicago',
+        from: '2026-05-15',
+        to: '2026-05-20',
+        from_dt: '2026-05-15T10:00:00.000Z',
+        to_dt: '2026-05-20T22:00:00.000Z',
+        label: 'future home segment',
+      },
+    ];
+    expect(
+      walkTzSegments(segments, new Date('2026-05-14T12:00:00Z'), HOME),
+    ).toBe(HOME);
+  });
+
   it('skips degenerate datetime segments in gap classification (#571 guard)', () => {
     // Per the function contract, degenerate (`from_dt === to_dt`)
     // segments are never a match. The gap-fallback classifier added
