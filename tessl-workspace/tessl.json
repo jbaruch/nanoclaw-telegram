@@ -19,6 +19,9 @@
     },
     "jbaruch/nanoclaw-host": {
       "version": "latest"
+    },
+    "jbaruch/nanoclaw-flight-assist": {
+      "version": "latest"
     }
   }
 }
