@@ -489,6 +489,15 @@ export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
   // still lives in the container's environ for the spawn lifetime is
   // the OneCLI-proxy migration target tracked in jbaruch/nanoclaw#564.
   'GITHUB_TOKEN',
+  // byAir personal MCP link with API key inline (URL form, but the
+  // query string is the credential) — read by
+  // `jbaruch/nanoclaw-flight-assist`'s precheck. Treated as secret so
+  // the URL with embedded key doesn't appear on `ps`/`docker ps`. See
+  // CONTAINER_VARS for the consumer-side context.
+  'BYAIR_MCP_URL',
+  // Google Maps Distance Matrix API key — read by the same tile.
+  // Standard `AIzaSy...` shape, ~$10/1000 requests at our usage.
+  'GOOGLE_MAPS_API_KEY',
 ]);
 
 /**
@@ -2656,6 +2665,20 @@ function buildContainerArgs(
     // OneCLI migration target — see jbaruch/nanoclaw#564 for the path
     // off the "secret-in-container-environ-for-spawn-lifetime" exposure.
     'GITHUB_TOKEN',
+    // Forwarded for the `jbaruch/nanoclaw-flight-assist` per-chat overlay
+    // tile (added via `containerConfig.additionalTiles`). The precheck
+    // reads `BYAIR_MCP_URL` (personal MCP link from
+    // https://byairapp.com/mcp/, includes the API key inline) to poll
+    // flight status via the byAir streamable-HTTP endpoint. Marked
+    // SECRET below so it goes through `--env-file` instead of `-e KEY=...`.
+    'BYAIR_MCP_URL',
+    // Same tile. The precheck reads `GOOGLE_MAPS_API_KEY` to query the
+    // Distance Matrix API for traffic-aware time-to-leave
+    // (`departure_time=now`, `traffic_model=best_guess`). Generated at
+    // https://console.cloud.google.com/apis/credentials with the
+    // Distance Matrix API enabled on a billing-attached project. Marked
+    // SECRET below.
+    'GOOGLE_MAPS_API_KEY',
   ];
 
   const varsToForward = isMain || isTrusted ? CONTAINER_VARS : [];

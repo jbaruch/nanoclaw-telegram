@@ -55,6 +55,14 @@ describe('SECRET_CONTAINER_VARS', () => {
     expect(SECRET_CONTAINER_VARS.has('GITHUB_TOKEN')).toBe(true);
   });
 
+  it('lists BYAIR_MCP_URL (personal MCP link with API key inline — read by jbaruch/nanoclaw-flight-assist precheck for byAir flight-status polling)', () => {
+    expect(SECRET_CONTAINER_VARS.has('BYAIR_MCP_URL')).toBe(true);
+  });
+
+  it('lists GOOGLE_MAPS_API_KEY (Distance Matrix API key — read by jbaruch/nanoclaw-flight-assist precheck for traffic-aware time-to-leave)', () => {
+    expect(SECRET_CONTAINER_VARS.has('GOOGLE_MAPS_API_KEY')).toBe(true);
+  });
+
   it('does NOT include placeholder vars (proxied through OneCLI)', () => {
     expect(SECRET_CONTAINER_VARS.has('ANTHROPIC_API_KEY')).toBe(false);
     expect(SECRET_CONTAINER_VARS.has('CLAUDE_CODE_OAUTH_TOKEN')).toBe(false);
