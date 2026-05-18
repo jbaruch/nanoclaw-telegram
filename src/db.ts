@@ -222,7 +222,17 @@ function createSchema(database: Database.Database): void {
       -- the ALTER block below for the value set and ownership semantics.
       -- 'schedule-task' is the default so unmigrated callers (the
       -- existing schedule-task IPC path) keep their semantics unchanged.
-      source TEXT NOT NULL DEFAULT 'schedule-task'
+      source TEXT NOT NULL DEFAULT 'schedule-task',
+      -- Per-task AGENT_MODEL override for #509 Phase 3. NULL = no per-task
+      -- override; fall through to the Phase 2 ladder. When non-null AND
+      -- the resolved value differs from the session-level fallback, the
+      -- spawn routes through it and the audit log emits source =
+      -- task_override; unknown-prefix or matches-session values still
+      -- get stored here but the audit log shows the session-level
+      -- source (no effective routing change). See
+      -- src/container-runner.ts resolveSessionAgentModel for the
+      -- precedence rules.
+      agent_model TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
     CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
@@ -382,6 +392,22 @@ function createSchema(database: Database.Database): void {
     database.exec(
       `ALTER TABLE scheduled_tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'schedule-task'`,
     );
+  }
+
+  // Add agent_model column for #509 Phase 3 — per-task AGENT_MODEL override.
+  // NULL on existing rows; populated either declaratively via the
+  // cadence-registry's `agentModel:` frontmatter on the next per-spawn
+  // rebuild, or imperatively via the `set_task_agent_model` IPC handler.
+  // Resolution at spawn time is: per-row agent_model → maintenanceAgentModel
+  // (maintenance session) → group agentModel → AGENT_MODEL env →
+  // DEFAULT_AGENT_MODEL — see `resolveSessionAgentModel` in
+  // src/container-runner.ts. PRAGMA-gated rather than try/catch per the
+  // no-error-suppression rule.
+  const agentModelCols = database
+    .prepare('PRAGMA table_info(scheduled_tasks)')
+    .all() as Array<{ name: string }>;
+  if (!agentModelCols.some((c) => c.name === 'agent_model')) {
+    database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN agent_model TEXT`);
   }
 
   // Switch task_run_logs.task_id FK to ON DELETE CASCADE. Without this,
@@ -1433,8 +1459,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, schedule_timezone, context_mode, next_run, status, created_at, created_by_role, continuation_cycle_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, schedule_timezone, context_mode, next_run, status, created_at, created_by_role, continuation_cycle_id, agent_model)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -1451,6 +1477,7 @@ export function createTask(
     task.created_at,
     task.created_by_role,
     task.continuation_cycle_id || null,
+    task.agent_model || null,
   );
 }
 
@@ -1526,6 +1553,7 @@ export function updateTask(
       | 'schedule_timezone'
       | 'next_run'
       | 'status'
+      | 'agent_model'
     >
   >,
 ): void {
@@ -1560,6 +1588,14 @@ export function updateTask(
     fields.push('status = ?');
     values.push(updates.status);
   }
+  if (updates.agent_model !== undefined) {
+    // updates.agent_model === null is a legitimate clear of the
+    // per-task override (fall back to the Phase 2 ladder). Distinguish
+    // it from `undefined` (caller didn't touch this field) so passing
+    // `null` writes the column even though falsy.
+    fields.push('agent_model = ?');
+    values.push(updates.agent_model);
+  }
 
   if (fields.length === 0) return;
 
@@ -1567,6 +1603,34 @@ export function updateTask(
   db.prepare(
     `UPDATE scheduled_tasks SET ${fields.join(', ')} WHERE id = ?`,
   ).run(...values);
+}
+
+/**
+ * Set or clear the per-task AGENT_MODEL override for #509 Phase 3.
+ * Thin wrapper over `updateTask` exposed as a named function so the
+ * IPC handler (`set_task_agent_model` in src/ipc.ts) and the operator-
+ * facing helper share one writer. Pass `null` to clear the override
+ * (fall back to the Phase 2 ladder); pass a non-empty string to
+ * install one. The string is NOT validated here — `resolvePerGroupAgentModel`
+ * at spawn time does the prefix check and falls back if it doesn't
+ * recognise the shape, so a typo never silently routes to the global
+ * default without an audit-log warning. Returns whether the row
+ * existed (so the IPC handler can distinguish "no-op" from "task not
+ * found" without a second SELECT).
+ */
+export function setTaskAgentModel(
+  id: string,
+  agentModel: string | null,
+): boolean {
+  const row = db
+    .prepare('SELECT 1 FROM scheduled_tasks WHERE id = ?')
+    .get(id) as { 1: number } | undefined;
+  if (!row) return false;
+  db.prepare('UPDATE scheduled_tasks SET agent_model = ? WHERE id = ?').run(
+    agentModel,
+    id,
+  );
+  return true;
 }
 
 export function deleteTask(id: string): void {

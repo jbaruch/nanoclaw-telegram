@@ -612,6 +612,12 @@ async function runTask(
         // `if (continuationCycleId)` in buildContainerArgs would treat the
         // string `"null"` as truthy if a stringification slipped in.
         continuationCycleId: task.continuation_cycle_id ?? undefined,
+        // Per-task AGENT_MODEL override (#509 Phase 3). Read directly
+        // from the scheduled_tasks row; `resolveSessionAgentModel`
+        // treats undefined / null / empty as "no override" and falls
+        // through to the Phase 2 ladder (maintenanceAgentModel → group
+        // agentModel → AGENT_MODEL env → DEFAULT_AGENT_MODEL).
+        taskAgentModel: task.agent_model ?? undefined,
       },
       (proc, containerName) =>
         deps.onProcess(

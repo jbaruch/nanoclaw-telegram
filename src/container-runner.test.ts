@@ -1535,6 +1535,116 @@ describe('resolveSessionAgentModel', () => {
       ),
     ).toEqual({ effective: 'sonnet', source: 'group_override' });
   });
+
+  // ----------------------------------------------------------------------
+  // Phase 3 (#509) — per-task taskAgentModel beats every other knob.
+  // The composio-fetch use case: a maintenance row pinned to Haiku
+  // shouldn't pull heartbeat down with it, and the bare maintenance
+  // override stays in force when no per-task value is set.
+  // ----------------------------------------------------------------------
+
+  it('Phase 3: taskAgentModel on a maintenance row → task_override beats maintenanceAgentModel', () => {
+    // Swarm group's real config post-PR#511: user-facing on opus[1m],
+    // maintenance dropped to sonnet. composio-fetch sets the per-row
+    // override to haiku → task wins. Heartbeat in the same maintenance
+    // session is unaffected (it runs without the per-row value).
+    expect(
+      resolveSessionAgentModel(
+        { agentModel: 'claude-opus-4-7[1m]', maintenanceAgentModel: 'sonnet' },
+        true,
+        GLOBAL,
+        'haiku',
+      ),
+    ).toEqual({ effective: 'haiku', source: 'task_override' });
+  });
+
+  it('Phase 3: taskAgentModel on a non-maintenance spawn also wins → task_override', () => {
+    // Phase 3 is per-row, not per-session-slot. A user-facing spawn
+    // carrying a per-task value (in practice rare — scheduled tasks
+    // always run maintenance — but the resolver shouldn't assume) gets
+    // the same routing.
+    expect(
+      resolveSessionAgentModel(
+        { agentModel: 'sonnet' },
+        false,
+        GLOBAL,
+        'haiku',
+      ),
+    ).toEqual({ effective: 'haiku', source: 'task_override' });
+  });
+
+  it('Phase 3: taskAgentModel absent / null / empty / whitespace → fall through to session-level', () => {
+    // Sole writer in production: task-scheduler reading
+    // scheduled_tasks.agent_model. NULL column reads as null at the JS
+    // layer; empty string + whitespace mean the same as "no override
+    // set". All four shapes must yield the same effective resolution
+    // and source so the audit log doesn't lie.
+    const cfg = {
+      agentModel: 'claude-opus-4-7[1m]',
+      maintenanceAgentModel: 'sonnet',
+    };
+    const expected = { effective: 'sonnet', source: 'maintenance_override' };
+    expect(resolveSessionAgentModel(cfg, true, GLOBAL, undefined)).toEqual(
+      expected,
+    );
+    expect(resolveSessionAgentModel(cfg, true, GLOBAL, null)).toEqual(expected);
+    expect(resolveSessionAgentModel(cfg, true, GLOBAL, '')).toEqual(expected);
+    expect(resolveSessionAgentModel(cfg, true, GLOBAL, '   ')).toEqual(
+      expected,
+    );
+  });
+
+  it('Phase 3: unknown-prefix taskAgentModel falls back to session-level value, NOT to global default', () => {
+    // The whole point of the session-level fallback: a typo in a
+    // per-task override on a maintenance row whose group already set
+    // maintenance to sonnet should land on sonnet (the session-level
+    // value), NOT on the global default (which is opus). Without this,
+    // an operator pinning a fleet to sonnet for cost would see typos
+    // silently route specific tasks back to the expensive default.
+    expect(
+      resolveSessionAgentModel(
+        { agentModel: 'claude-opus-4-7[1m]', maintenanceAgentModel: 'sonnet' },
+        true,
+        GLOBAL,
+        'haik', // typo
+      ),
+    ).toEqual({ effective: 'sonnet', source: 'maintenance_override' });
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ agentModel: 'haik', fallback: 'sonnet' }),
+      expect.stringContaining(
+        'Per-group AGENT_MODEL override does not look like a Claude model ID',
+      ),
+    );
+  });
+
+  it('Phase 3: taskAgentModel matching the session-level value → source reflects session, not task', () => {
+    // Operator deliberately set the per-row value to the same model
+    // the session-level lane already resolves to. There's no effective
+    // task-specific routing, so the audit log reports the session-
+    // level source (maintenance_override here).
+    expect(
+      resolveSessionAgentModel(
+        { agentModel: 'opus', maintenanceAgentModel: 'sonnet' },
+        true,
+        GLOBAL,
+        'sonnet',
+      ),
+    ).toEqual({ effective: 'sonnet', source: 'maintenance_override' });
+  });
+
+  it('Phase 3: taskAgentModel with no per-group config of any kind → task_override beats global default', () => {
+    // No group_override, no maintenance_override — the per-task value
+    // is the only override in play. Source is task_override; effective
+    // is the per-task value.
+    expect(resolveSessionAgentModel(undefined, true, GLOBAL, 'haiku')).toEqual({
+      effective: 'haiku',
+      source: 'task_override',
+    });
+    expect(resolveSessionAgentModel({}, true, GLOBAL, 'haiku')).toEqual({
+      effective: 'haiku',
+      source: 'task_override',
+    });
+  });
 });
 
 // ----------------------------------------------------------------------
@@ -1821,6 +1931,92 @@ describe('maintenanceAgentModel override on container spawn (#509)', () => {
         agentModel: DEFAULT_AGENT_MODEL,
         sessionName: 'maintenance',
         source: 'global_default',
+      }),
+    );
+  });
+
+  // -------------------------------------------------------------------
+  // Phase 3 (#509): per-task taskAgentModel flows through the
+  // ContainerInput → buildContainerArgs → docker `-e AGENT_MODEL=…`
+  // path. Covers the actual production wire-up that ships the value
+  // from scheduled_tasks.agent_model to the running container.
+  // -------------------------------------------------------------------
+  it('maintenance spawn with taskAgentModel beats maintenanceAgentModel on the docker arg', async () => {
+    // Real composio-fetch shape: group already on opus[1m]/sonnet from
+    // Phase 2; per-row override demotes the spawn to haiku.
+    const swarmGroup: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: {
+        agentModel: 'claude-opus-4-7[1m]',
+        maintenanceAgentModel: 'sonnet',
+      },
+    };
+    const maintInput = {
+      ...testInput,
+      sessionName: 'maintenance',
+      taskAgentModel: 'haiku',
+    };
+    const promise = runContainerAgent(swarmGroup, maintInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).toContain('AGENT_MODEL=haiku');
+    expect(args).not.toContain('AGENT_MODEL=sonnet');
+    expect(args).not.toContain('AGENT_MODEL=claude-opus-4-7[1m]');
+
+    const infoCalls = vi
+      .mocked(logger.info)
+      .mock.calls.filter(
+        (c) =>
+          typeof c[1] === 'string' &&
+          c[1].includes('Container spawn AGENT_MODEL resolved'),
+      );
+    expect(infoCalls.length).toBe(1);
+    expect(infoCalls[0]![0]).toEqual(
+      expect.objectContaining({
+        agentModel: 'haiku',
+        sessionName: 'maintenance',
+        source: 'task_override',
+        taskAgentModel: 'haiku',
+      }),
+    );
+  });
+
+  it('maintenance spawn without taskAgentModel still routes through maintenanceAgentModel', async () => {
+    // Co-tenant invariant: heartbeat (no per-row override) shares the
+    // same maintenance slot as composio-fetch but does NOT inherit
+    // composio's haiku — its spawn stays on the session-level sonnet.
+    const swarmGroup: RegisteredGroup = {
+      ...testGroup,
+      containerConfig: {
+        agentModel: 'claude-opus-4-7[1m]',
+        maintenanceAgentModel: 'sonnet',
+      },
+    };
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const promise = runContainerAgent(swarmGroup, maintInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).toContain('AGENT_MODEL=sonnet');
+    expect(args).not.toContain('AGENT_MODEL=haiku');
+
+    const infoCalls = vi
+      .mocked(logger.info)
+      .mock.calls.filter(
+        (c) =>
+          typeof c[1] === 'string' &&
+          c[1].includes('Container spawn AGENT_MODEL resolved'),
+      );
+    expect(infoCalls[0]![0]).toEqual(
+      expect.objectContaining({
+        agentModel: 'sonnet',
+        source: 'maintenance_override',
+        taskAgentModel: null,
       }),
     );
   });

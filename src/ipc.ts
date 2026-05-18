@@ -36,6 +36,7 @@ import {
   getLastFromMeMessages,
   getTaskById,
   getTasksForGroup,
+  setTaskAgentModel,
   storeMessage,
   updateTask,
   type TripitSegment,
@@ -1969,6 +1970,98 @@ export async function processTaskIpc(
         isMain,
         availableGroups,
         new Set(Object.keys(registeredGroups)),
+      );
+      break;
+    }
+
+    case 'set_task_agent_model': {
+      // Per-task AGENT_MODEL override for #509 Phase 3. Writes
+      // scheduled_tasks.agent_model directly; the row is the source of
+      // truth, no in-memory registry to refresh. Authorization mirrors
+      // set_maintenance_agent_model — owner-of-bill: a non-main caller
+      // can only touch tasks belonging to its own group_folder.
+      // Re-uses getTaskById's existing row shape rather than a
+      // separate ownership-only query so a non-existent taskId surfaces
+      // as a clean "not found" error to the caller instead of a 403.
+      const taskId = typeof data.taskId === 'string' ? data.taskId.trim() : '';
+      if (!taskId) {
+        logger.warn(
+          { data },
+          'Invalid set_task_agent_model request - missing/empty taskId',
+        );
+        break;
+      }
+      // `agentModel` accepts string (set/replace) or null (clear). Anything
+      // else (number, object, undefined) is rejected.
+      if (typeof data.agentModel !== 'string' && data.agentModel !== null) {
+        logger.warn(
+          { data },
+          'Invalid set_task_agent_model request - agentModel must be string or null',
+        );
+        break;
+      }
+      const task = getTaskById(taskId);
+      if (!task) {
+        logger.warn({ taskId }, 'set_task_agent_model: task not found');
+        break;
+      }
+      // Owner-of-bill auth — non-main caller can only touch its own folder.
+      if (!isMain && task.group_folder !== sourceGroup) {
+        logger.warn(
+          { sourceGroup, taskGroupFolder: task.group_folder, taskId },
+          'Unauthorized set_task_agent_model attempt blocked',
+        );
+        break;
+      }
+      // Cadence-registry rows are declarative state — their shape
+      // (including agent_model) is owned by the SKILL.md frontmatter
+      // and reasserted on every per-spawn rebuild
+      // (rebuildCadenceRegistry in src/cadence-registry.ts). An
+      // imperative IPC write to such a row would silently revert on
+      // the next tile-touching spawn, exactly the "looks fine, isn't"
+      // failure mode this fleet's host-conventions and OpenAI's review
+      // on PR #587 called out. Reject loudly and point the operator at
+      // the durable surface (SKILL.md agentModel: frontmatter).
+      // Non-cadence rows (source = 'schedule-task' — operator-
+      // initiated reminders, ad-hoc monitors, the schedule-task IPC
+      // surface) accept the imperative write because they have no
+      // declarative source to argue with.
+      const taskSource = (task as { source?: string }).source;
+      if (taskSource === 'cadence-registry') {
+        logger.warn(
+          { taskId, source: taskSource },
+          'set_task_agent_model: refusing to write to cadence-registry-owned row — modify the skill SKILL.md `agentModel:` frontmatter and republish the tile instead',
+        );
+        break;
+      }
+      // Normalise: `null` and empty-after-trim both mean "clear the
+      // override" (fall back to the Phase 2 ladder). Trim non-empty
+      // strings to match the existing knobs' shape.
+      let nextValue: string | null;
+      if (data.agentModel === null) {
+        nextValue = null;
+      } else {
+        const trimmed = data.agentModel.trim();
+        nextValue = trimmed.length === 0 ? null : trimmed;
+      }
+      const ok = setTaskAgentModel(taskId, nextValue);
+      if (!ok) {
+        // Race: row existed at getTaskById time but was deleted before
+        // the UPDATE. Surfaces as a no-op for the operator.
+        logger.warn(
+          { taskId },
+          'set_task_agent_model: task disappeared between check and update',
+        );
+        break;
+      }
+      logger.info(
+        {
+          taskId,
+          groupFolder: task.group_folder,
+          agentModel: nextValue,
+          source: sourceGroup,
+        },
+        'set_task_agent_model: updated per-task agent_model override',
       );
       break;
     }

@@ -47,7 +47,8 @@ function makeDb(): Database.Database {
       created_by_role TEXT NOT NULL DEFAULT 'owner',
       continuation_cycle_id TEXT,
       session_id TEXT,
-      source TEXT NOT NULL DEFAULT 'schedule-task'
+      source TEXT NOT NULL DEFAULT 'schedule-task',
+      agent_model TEXT
     );
   `);
   return db;
@@ -202,6 +203,7 @@ describe('validateCadenceDeclaration', () => {
         cadence: '*/30 * * * *',
         priority: 0,
         script: null,
+        agentModel: null,
       });
   });
 
@@ -303,6 +305,47 @@ describe('validateCadenceDeclaration', () => {
     expect(r.ok).toBe(false);
     if (!r.ok)
       expect(r.errors[0]).toContain("'script:' must be a non-empty string");
+  });
+
+  // #509 Phase 3: agentModel: frontmatter parsed into declaration.agentModel
+  it('extracts agentModel from frontmatter and trims whitespace', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', agentModel: '  haiku  ' },
+      'tessl__composio-fetch',
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok && r.declaration) expect(r.declaration.agentModel).toBe('haiku');
+  });
+
+  it('omits agentModel → declaration.agentModel === null', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *' },
+      'tessl__heartbeat',
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok && r.declaration) expect(r.declaration.agentModel).toBeNull();
+  });
+
+  it('rejects an empty agentModel: value with a skill-tagged error', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', agentModel: '' },
+      'tessl__composio-fetch',
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.errors[0]).toContain('tessl__composio-fetch');
+      expect(r.errors[0]).toContain("'agentModel:' must be a non-empty string");
+    }
+  });
+
+  it('rejects a whitespace-only agentModel: value', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', agentModel: '   ' },
+      'tessl__hb',
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok)
+      expect(r.errors[0]).toContain("'agentModel:' must be a non-empty string");
   });
 });
 
@@ -724,6 +767,136 @@ describe('rebuildCadenceRegistry', () => {
       .prepare('SELECT script FROM scheduled_tasks WHERE id = ?')
       .get('cadence-registry::g1::tessl__heartbeat');
     expect(row).toEqual({ script: null });
+  });
+
+  // #509 Phase 3: agentModel frontmatter flows to scheduled_tasks.agent_model
+  it('populates scheduled_tasks.agent_model when frontmatter declares agentModel:', () => {
+    const skills = path.join(tmpRoot, 'skills');
+    writeSkill(
+      skills,
+      'tessl__composio-fetch',
+      'cadence: "*/30 * * * *"\nagentModel: "haiku"',
+    );
+    const db = makeDb();
+    const r = rebuildCadenceRegistry({
+      db,
+      groupFolder: 'g1',
+      chatJid: 'g1@chat',
+      createdByRole: 'owner',
+      skillsDir: skills,
+      computeNextRun: () => PINNED_NEXT_RUN,
+      now: () => PINNED_NOW,
+    });
+    expect(r.inserted).toBe(1);
+    expect(r.errors).toEqual([]);
+    const row = db
+      .prepare('SELECT agent_model FROM scheduled_tasks WHERE id = ?')
+      .get('cadence-registry::g1::tessl__composio-fetch');
+    expect(row).toEqual({ agent_model: 'haiku' });
+  });
+
+  it('leaves agent_model NULL when frontmatter omits agentModel:', () => {
+    const skills = path.join(tmpRoot, 'skills');
+    writeSkill(skills, 'tessl__heartbeat', 'cadence: "*/30 * * * *"');
+    const db = makeDb();
+    rebuildCadenceRegistry({
+      db,
+      groupFolder: 'g1',
+      chatJid: 'g1@chat',
+      createdByRole: 'owner',
+      skillsDir: skills,
+      computeNextRun: () => PINNED_NEXT_RUN,
+      now: () => PINNED_NOW,
+    });
+    const row = db
+      .prepare('SELECT agent_model FROM scheduled_tasks WHERE id = ?')
+      .get('cadence-registry::g1::tessl__heartbeat');
+    expect(row).toEqual({ agent_model: null });
+  });
+
+  it('treats an agentModel: change as a shape change and updates the column', () => {
+    const skills = path.join(tmpRoot, 'skills');
+    // First rebuild — register with `agentModel: haiku`.
+    writeSkill(
+      skills,
+      'tessl__composio-fetch',
+      'cadence: "*/30 * * * *"\nagentModel: "haiku"',
+    );
+    const db = makeDb();
+    const deps = {
+      db,
+      groupFolder: 'g1',
+      chatJid: 'g1@chat',
+      createdByRole: 'owner' as const,
+      skillsDir: skills,
+      computeNextRun: () => PINNED_NEXT_RUN,
+      now: () => PINNED_NOW,
+    };
+    rebuildCadenceRegistry(deps);
+    // Rewrite SKILL.md to bump agentModel → sonnet, then rebuild.
+    writeSkill(
+      skills,
+      'tessl__composio-fetch',
+      'cadence: "*/30 * * * *"\nagentModel: "sonnet"',
+    );
+    const r2 = rebuildCadenceRegistry(deps);
+    expect(r2).toMatchObject({ inserted: 0, updated: 1, preserved: 0 });
+    const row = db
+      .prepare('SELECT agent_model FROM scheduled_tasks WHERE id = ?')
+      .get('cadence-registry::g1::tessl__composio-fetch');
+    expect(row).toEqual({ agent_model: 'sonnet' });
+  });
+
+  it('treats removing agentModel: as a shape change and clears the column', () => {
+    const skills = path.join(tmpRoot, 'skills');
+    writeSkill(
+      skills,
+      'tessl__composio-fetch',
+      'cadence: "*/30 * * * *"\nagentModel: "haiku"',
+    );
+    const db = makeDb();
+    const deps = {
+      db,
+      groupFolder: 'g1',
+      chatJid: 'g1@chat',
+      createdByRole: 'owner' as const,
+      skillsDir: skills,
+      computeNextRun: () => PINNED_NEXT_RUN,
+      now: () => PINNED_NOW,
+    };
+    rebuildCadenceRegistry(deps);
+    writeSkill(skills, 'tessl__composio-fetch', 'cadence: "*/30 * * * *"');
+    const r2 = rebuildCadenceRegistry(deps);
+    expect(r2).toMatchObject({ inserted: 0, updated: 1, preserved: 0 });
+    const row = db
+      .prepare('SELECT agent_model FROM scheduled_tasks WHERE id = ?')
+      .get('cadence-registry::g1::tessl__composio-fetch');
+    expect(row).toEqual({ agent_model: null });
+  });
+
+  it('preserves the row (no UPDATE) when agentModel: is unchanged across rebuilds', () => {
+    // Invariant: agent_model in the shape-change check matches null
+    // and string identity. A second rebuild with identical frontmatter
+    // including agentModel must land in preserved, not updated.
+    const skills = path.join(tmpRoot, 'skills');
+    writeSkill(
+      skills,
+      'tessl__composio-fetch',
+      'cadence: "*/30 * * * *"\nagentModel: "haiku"',
+    );
+    const db = makeDb();
+    const deps = {
+      db,
+      groupFolder: 'g1',
+      chatJid: 'g1@chat',
+      createdByRole: 'owner' as const,
+      skillsDir: skills,
+      computeNextRun: () => PINNED_NEXT_RUN,
+      now: () => PINNED_NOW,
+    };
+    rebuildCadenceRegistry(deps);
+    const r2 = rebuildCadenceRegistry(deps);
+    expect(r2).toMatchObject({ inserted: 0, updated: 0, preserved: 1 });
   });
 
   it('errors and skips the row when script: references a missing file', () => {

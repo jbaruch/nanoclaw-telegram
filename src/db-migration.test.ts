@@ -342,6 +342,92 @@ describe('database migrations', () => {
     }
   });
 
+  // #509 Phase 3 — `agent_model` column for per-task AGENT_MODEL
+  // override. Pre-existing scheduled_tasks tables (every install
+  // before this change) lack the column. The migration must add it
+  // PRAGMA-gated; legacy rows then read back with agent_model = NULL,
+  // which the resolveSessionAgentModel call site treats as "no
+  // override" (falls through to the Phase 2 ladder).
+  it('adds agent_model column to a pre-existing scheduled_tasks table (#509 Phase 3)', async () => {
+    const repoRoot = process.cwd();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-db-test-'));
+
+    try {
+      process.chdir(tempDir);
+      fs.mkdirSync(path.join(tempDir, 'store'), { recursive: true });
+
+      const dbPath = path.join(tempDir, 'store', 'messages.db');
+      const legacyDb = new Database(dbPath);
+      // Legacy shape: scheduled_tasks WITHOUT agent_model. Mirrors a
+      // post-Phase-2 install (#509 Phase 2 / PR #511 shipped on
+      // 2026-05-05; Phase 3 adds the column).
+      legacyDb.exec(`
+        CREATE TABLE scheduled_tasks (
+          id TEXT PRIMARY KEY,
+          group_folder TEXT NOT NULL,
+          chat_jid TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          schedule_type TEXT NOT NULL,
+          schedule_value TEXT NOT NULL,
+          next_run TEXT,
+          last_run TEXT,
+          last_result TEXT,
+          status TEXT DEFAULT 'active',
+          created_at TEXT NOT NULL,
+          created_by_role TEXT NOT NULL DEFAULT 'owner',
+          continuation_cycle_id TEXT,
+          session_id TEXT,
+          source TEXT NOT NULL DEFAULT 'schedule-task'
+        );
+      `);
+      legacyDb
+        .prepare(
+          `INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, status, created_at, created_by_role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'pre-509p3-task',
+          'main',
+          'main@g.us',
+          'pre-Phase-3 task',
+          'cron',
+          '*/30 * * * *',
+          'active',
+          '2026-05-17T00:00:00.000Z',
+          'owner',
+        );
+      legacyDb.close();
+
+      vi.resetModules();
+      const { initDatabase, getTaskById, _closeDatabase } =
+        await import('./db.js');
+
+      initDatabase();
+
+      const upgradedDb = new Database(dbPath);
+      const cols = upgradedDb
+        .prepare('PRAGMA table_info(scheduled_tasks)')
+        .all() as Array<{ name: string; dflt_value: unknown }>;
+      const agentModelCol = cols.find((c) => c.name === 'agent_model');
+      expect(agentModelCol).toBeDefined();
+      // No backfill DEFAULT — a non-null default would silently change
+      // model routing on every legacy row at upgrade time. NULL keeps
+      // the Phase 2 ladder authoritative for existing rows.
+      expect(agentModelCol!.dflt_value).toBeNull();
+      upgradedDb.close();
+
+      // Pre-existing row reads back with agent_model = NULL — same
+      // shape as the continuation_cycle_id migration's invariant.
+      const legacyTask = getTaskById('pre-509p3-task');
+      expect(legacyTask).toBeDefined();
+      expect(legacyTask!.agent_model).toBeNull();
+
+      _closeDatabase();
+    } finally {
+      process.chdir(repoRoot);
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('drops the dormant tg:1698969 / telegram_main row on initDatabase (#159)', async () => {
     const repoRoot = process.cwd();
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-db-test-'));

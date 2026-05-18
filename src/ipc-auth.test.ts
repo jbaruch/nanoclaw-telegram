@@ -2376,6 +2376,228 @@ describe('set_maintenance_agent_model', () => {
   });
 });
 
+// --- set_task_agent_model (#509 Phase 3) ---
+//
+// Per-task AGENT_MODEL override that pins a single scheduled_tasks
+// row to a specific model, beating every session-level / group-level
+// knob in resolveSessionAgentModel. Authorization mirrors
+// set_maintenance_agent_model — main can target any task; non-main
+// can target only tasks belonging to its own folder. Persistence
+// hits scheduled_tasks.agent_model directly via the setTaskAgentModel
+// DB helper (no in-memory registry to refresh — the row is the
+// source of truth and the task-scheduler reads it on every fire).
+
+describe('set_task_agent_model', () => {
+  function seedTask(id: string, groupFolder: string): void {
+    createTask({
+      id,
+      group_folder: groupFolder,
+      chat_jid: groupFolder === 'whatsapp_main' ? 'main@g.us' : 'other@g.us',
+      prompt: 'Skill(skill: "tessl__composio-fetch")',
+      schedule_type: 'cron',
+      schedule_value: '*/30 * * * *',
+      context_mode: 'isolated',
+      next_run: '2026-05-18T00:30:00.000Z',
+      status: 'active',
+      created_at: '2026-05-18T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+  }
+
+  it('main group can set agent_model on any task', async () => {
+    seedTask('task-am-other', 'other-group');
+    await processTaskIpc(
+      {
+        type: 'set_task_agent_model',
+        taskId: 'task-am-other',
+        agentModel: 'haiku',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    expect(getTaskById('task-am-other')!.agent_model).toBe('haiku');
+  });
+
+  it('non-main group can set agent_model on a task in its own folder', async () => {
+    seedTask('task-am-own', 'other-group');
+    await processTaskIpc(
+      {
+        type: 'set_task_agent_model',
+        taskId: 'task-am-own',
+        agentModel: 'sonnet',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+    expect(getTaskById('task-am-own')!.agent_model).toBe('sonnet');
+  });
+
+  it('non-main group cannot set agent_model on a task in another folder', async () => {
+    seedTask('task-am-cross', 'whatsapp_main');
+    await processTaskIpc(
+      {
+        type: 'set_task_agent_model',
+        taskId: 'task-am-cross',
+        agentModel: 'haiku',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+    expect(getTaskById('task-am-cross')!.agent_model).toBeNull();
+  });
+
+  it('clears agent_model when payload is null', async () => {
+    seedTask('task-am-clear', 'other-group');
+    // Pre-populate via the same handler so the test exercises the
+    // happy path before clearing.
+    await processTaskIpc(
+      {
+        type: 'set_task_agent_model',
+        taskId: 'task-am-clear',
+        agentModel: 'haiku',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    expect(getTaskById('task-am-clear')!.agent_model).toBe('haiku');
+    await processTaskIpc(
+      {
+        type: 'set_task_agent_model',
+        taskId: 'task-am-clear',
+        agentModel: null,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    expect(getTaskById('task-am-clear')!.agent_model).toBeNull();
+  });
+
+  it('treats empty/whitespace agentModel as a clear', async () => {
+    seedTask('task-am-ws', 'other-group');
+    await processTaskIpc(
+      {
+        type: 'set_task_agent_model',
+        taskId: 'task-am-ws',
+        agentModel: 'haiku',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    expect(getTaskById('task-am-ws')!.agent_model).toBe('haiku');
+    await processTaskIpc(
+      {
+        type: 'set_task_agent_model',
+        taskId: 'task-am-ws',
+        agentModel: '   ',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    expect(getTaskById('task-am-ws')!.agent_model).toBeNull();
+  });
+
+  it('rejects missing taskId', async () => {
+    seedTask('task-am-missing-id', 'other-group');
+    await processTaskIpc(
+      // taskId omitted
+      {
+        type: 'set_task_agent_model',
+        agentModel: 'haiku',
+      } as Parameters<typeof processTaskIpc>[0],
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    // Row untouched.
+    expect(getTaskById('task-am-missing-id')!.agent_model).toBeNull();
+  });
+
+  it('rejects non-string non-null agentModel (defense vs malformed payload)', async () => {
+    seedTask('task-am-bad-shape', 'other-group');
+    await processTaskIpc(
+      {
+        type: 'set_task_agent_model',
+        taskId: 'task-am-bad-shape',
+        // 42 is neither a string nor null — must be rejected, not coerced.
+        agentModel: 42 as unknown as string,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    expect(getTaskById('task-am-bad-shape')!.agent_model).toBeNull();
+  });
+
+  it('set_task_agent_model on unknown taskId is a no-op (no row materialised)', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_task_agent_model',
+        taskId: 'task-am-never-existed',
+        agentModel: 'haiku',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+    expect(getTaskById('task-am-never-existed')).toBeUndefined();
+  });
+
+  // PR #587 review feedback: cadence-registry rows are declarative state
+  // owned by SKILL.md frontmatter; the rebuild's shape-change UPDATE
+  // would silently revert any imperative override on the next tile-
+  // touching spawn. Reject those writes loudly at the IPC instead of
+  // shipping a "looks fine, isn't" failure mode.
+  it('refuses to write to cadence-registry-owned rows (leaves agent_model untouched)', async () => {
+    // Seed via the test-only `_execRawForTests` helper so we can pin
+    // `source = 'cadence-registry'` — `createTask` always writes the
+    // default `source = 'schedule-task'`. The helper talks to the
+    // same DB handle the IPC handler reads from, so the source filter
+    // sees the seeded row.
+    const { _execRawForTests } = await import('./db.js');
+    _execRawForTests(
+      `INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, status, created_at, created_by_role, source, agent_model)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'cadence-registry', NULL)`,
+      [
+        'cadence-registry::other-group::tessl__composio-fetch',
+        'other-group',
+        'other@g.us',
+        'Skill(skill: "tessl__composio-fetch")',
+        'cron',
+        '*/30 * * * *',
+        'active',
+        '2026-05-18T00:00:00.000Z',
+        'owner',
+      ],
+    );
+
+    await processTaskIpc(
+      {
+        type: 'set_task_agent_model',
+        taskId: 'cadence-registry::other-group::tessl__composio-fetch',
+        agentModel: 'haiku',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const task = getTaskById(
+      'cadence-registry::other-group::tessl__composio-fetch',
+    );
+    expect(task).toBeDefined();
+    // Refused — column unchanged. Operator must change SKILL.md
+    // frontmatter, not the row directly.
+    expect(task!.agent_model).toBeNull();
+  });
+});
+
 // --- promote_learned_trigger (#451 item 1) ---
 //
 // Flips a learned proposal's `enabled: false → true` so the trigger

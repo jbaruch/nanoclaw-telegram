@@ -30,6 +30,7 @@ import {
   messageExistsInDifferentChat,
   runTzHeartbeatAdvisory,
   setRegisteredGroup,
+  setTaskAgentModel,
   setTriggerPatterns,
   storeChatMetadata,
   storeLocation,
@@ -857,6 +858,82 @@ describe('task CRUD', () => {
     // the optional-string ContainerInput field, so any non-null result
     // here would silently emit continuation env vars on a fresh task.
     expect(task!.continuation_cycle_id).toBeNull();
+  });
+
+  // --- agent_model (#509 Phase 3) ---
+  //
+  // Per-task AGENT_MODEL override. NULL on existing rows (default);
+  // set via cadence-registry frontmatter at rebuild time or via the
+  // set_task_agent_model IPC at runtime.
+  it('persists agent_model when supplied on createTask', () => {
+    createTask({
+      id: 'task-am-1',
+      group_folder: 'main',
+      chat_jid: 'group@g.us',
+      prompt: 'composio fetch',
+      schedule_type: 'cron',
+      schedule_value: '*/30 * * * *',
+      context_mode: 'isolated',
+      next_run: '2026-05-18T00:00:30.000Z',
+      status: 'active',
+      created_at: '2026-05-18T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+      agent_model: 'haiku',
+    });
+    const task = getTaskById('task-am-1');
+    expect(task).toBeDefined();
+    expect(task!.agent_model).toBe('haiku');
+  });
+
+  it('stores agent_model as NULL when omitted', () => {
+    createTask({
+      id: 'task-am-2',
+      group_folder: 'main',
+      chat_jid: 'group@g.us',
+      prompt: 'heartbeat',
+      schedule_type: 'cron',
+      schedule_value: '*/30 * * * *',
+      context_mode: 'isolated',
+      next_run: '2026-05-18T00:00:30.000Z',
+      status: 'active',
+      created_at: '2026-05-18T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    const task = getTaskById('task-am-2');
+    expect(task).toBeDefined();
+    expect(task!.agent_model).toBeNull();
+  });
+
+  it('setTaskAgentModel installs and clears the per-task override', () => {
+    createTask({
+      id: 'task-am-3',
+      group_folder: 'main',
+      chat_jid: 'group@g.us',
+      prompt: 'composio fetch',
+      schedule_type: 'cron',
+      schedule_value: '*/30 * * * *',
+      context_mode: 'isolated',
+      next_run: '2026-05-18T00:00:30.000Z',
+      status: 'active',
+      created_at: '2026-05-18T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    // Install
+    expect(setTaskAgentModel('task-am-3', 'haiku')).toBe(true);
+    expect(getTaskById('task-am-3')!.agent_model).toBe('haiku');
+    // Replace
+    expect(setTaskAgentModel('task-am-3', 'sonnet')).toBe(true);
+    expect(getTaskById('task-am-3')!.agent_model).toBe('sonnet');
+    // Clear via null — back to the Phase 2 ladder
+    expect(setTaskAgentModel('task-am-3', null)).toBe(true);
+    expect(getTaskById('task-am-3')!.agent_model).toBeNull();
+  });
+
+  it('setTaskAgentModel returns false when the task does not exist', () => {
+    // Distinguishes "no-op on a real task" (true) from "task missing"
+    // (false) so the IPC handler can surface a clean error to the
+    // operator instead of silently succeeding.
+    expect(setTaskAgentModel('task-am-missing', 'haiku')).toBe(false);
   });
 });
 

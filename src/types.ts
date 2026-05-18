@@ -406,6 +406,29 @@ export interface ScheduledTask {
    * different rows hence different sessions hence no bleed.
    */
   session_id?: string | null;
+  /**
+   * Per-task AGENT_MODEL override for #509 Phase 3. NULL/undefined =
+   * no override; fall through to the Phase 2 ladder
+   * (`maintenanceAgentModel` → group `agentModel` → `AGENT_MODEL` env →
+   * `DEFAULT_AGENT_MODEL`). When set AND the resolved value differs
+   * from the session-level fallback, the spawn routes through it and
+   * the audit log emits `source: 'task_override'`. When the value is
+   * unknown-prefix (typo) or deliberately matches the session-level
+   * fallback, `resolveSessionAgentModel` returns the session-level
+   * source instead — the column is set but had no effective routing
+   * impact, so the audit log doesn't lie about what changed the spawn.
+   * Accepts the same shape the existing knobs accept (full ID like
+   * `'claude-haiku-4-5-20251001'` or alias like `'haiku'` /
+   * `'sonnet[1m]'`); unknown-prefix values fall back to the session-
+   * level value (NOT the global default) via `resolvePerGroupAgentModel`.
+   * Populated by cadence-registry's `agentModel:` frontmatter
+   * (declarative — the rebuild is authoritative for `source =
+   * 'cadence-registry'` rows; the IPC handler refuses writes to those
+   * rows so a runtime override can't silently revert on the next
+   * tile-touching spawn) or via the `set_task_agent_model` IPC
+   * (imperative — only valid for `source = 'schedule-task'` rows).
+   */
+  agent_model?: string | null;
 }
 
 export interface TaskRunLog {

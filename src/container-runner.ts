@@ -694,9 +694,18 @@ export function resolvePerGroupAgentModel(
   const trimmed = typeof raw === 'string' ? raw.trim() : '';
   if (!trimmed) return fallback;
   if (!KNOWN_MODEL_PREFIX_RE.test(trimmed)) {
+    // Phase 3 (#509) callers pass `fallback` = the session-level value
+    // (e.g. `maintenanceAgentModel` resolved against the user-facing
+    // value), not the global default. The warn message intentionally
+    // says "the caller-supplied fallback" rather than "global default"
+    // — debugging "I set task X to haik and got Sonnet" is harder when
+    // the log claims the value was sent to the global default while
+    // the actual fallback was the maintenance override. The `fallback`
+    // field in the log payload carries the actual value the caller
+    // will route to.
     logger.warn(
       { agentModel: trimmed, fallback },
-      'Per-group AGENT_MODEL override does not look like a Claude model ID — falling back to global default. Expected forms: full ID like "claude-opus-4-7[1m]" or alias like "opus" / "sonnet[1m]".',
+      'Per-group AGENT_MODEL override does not look like a Claude model ID — falling back to the caller-supplied fallback (see `fallback` field). Expected forms: full ID like "claude-opus-4-7[1m]" or alias like "opus" / "sonnet[1m]".',
     );
     return fallback;
   }
@@ -705,32 +714,35 @@ export function resolvePerGroupAgentModel(
 
 /**
  * Resolve the effective AGENT_MODEL for a single spawn given the
- * session slot (#509). Per-session-slot model tier — currently only
- * the maintenance slot has its own override; user-facing `'default'`
- * (and any future named slot) falls through to `agentModel` →
- * AGENT_MODEL → DEFAULT_AGENT_MODEL.
+ * session slot (#509). Per-session-slot model tier with optional
+ * per-task override (Phase 3) — currently only the maintenance slot
+ * has its own session-level override; user-facing `'default'` (and
+ * any future named slot) falls through to `agentModel` → AGENT_MODEL
+ * → DEFAULT_AGENT_MODEL.
  *
- * Resolution order for a maintenance spawn:
- *   1. `containerConfig.maintenanceAgentModel` (validated through
- *      `resolvePerGroupAgentModel` against the user-facing-resolved
- *      value as the fallback — so a fat-fingered maintenance value
- *      doesn't silently route maintenance through the global default
- *      when the operator already set a deliberate per-group user-facing
- *      override).
- *   2. `containerConfig.agentModel` (resolved against `globalDefault`).
- *   3. `globalDefault` (the global `AGENT_MODEL`).
+ * Resolution order (highest precedence first):
+ *   1. `taskAgentModel` (Phase 3) — per-row override from the
+ *      `scheduled_tasks.agent_model` column. Beats every other knob;
+ *      fires for any spawn that carries a task-level value (in
+ *      practice always a maintenance-session scheduled-task fire).
+ *      Validated through `resolvePerGroupAgentModel` against the
+ *      maintenance/user-facing-resolved value as the fallback so a
+ *      typo doesn't silently jump past the operator's session-level
+ *      override.
+ *   2. `containerConfig.maintenanceAgentModel` (Phase 2) — applies
+ *      only to maintenance spawns. Validated against the
+ *      user-facing-resolved value as the fallback.
+ *   3. `containerConfig.agentModel` (#395) — per-group override.
+ *      Validated against `globalDefault`.
+ *   4. `globalDefault` — the orchestrator's `AGENT_MODEL` env.
  *
- * Resolution order for a non-maintenance spawn:
- *   1. `containerConfig.agentModel` (resolved against `globalDefault`).
- *   2. `globalDefault`.
- *
- * Both paths return the user-facing-resolved value when no override
- * applies — invariant: a non-maintenance spawn behaves byte-identically
- * to the pre-#509 ladder.
+ * Non-maintenance spawns skip step 2 but otherwise follow the same
+ * ladder.
  *
  * Returns `{ effective, source }` so the per-spawn audit log line
  * (#418) can attribute the value to the right config layer without
- * the caller re-deriving the comparison.
+ * the caller re-deriving the comparison. `task_override` is the
+ * new Phase 3 source-tag; the prior three values are unchanged.
  */
 export function resolveSessionAgentModel(
   containerConfig:
@@ -738,9 +750,14 @@ export function resolveSessionAgentModel(
     | undefined,
   isMaintenance: boolean,
   globalDefault: string,
+  taskAgentModel?: string | null,
 ): {
   effective: string;
-  source: 'global_default' | 'group_override' | 'maintenance_override';
+  source:
+    | 'global_default'
+    | 'group_override'
+    | 'maintenance_override'
+    | 'task_override';
 } {
   const userFacingRaw = containerConfig?.agentModel;
   const userFacingResolved = userFacingRaw
@@ -749,33 +766,50 @@ export function resolveSessionAgentModel(
   const userFacingSource: 'group_override' | 'global_default' =
     userFacingResolved !== globalDefault ? 'group_override' : 'global_default';
 
-  if (!isMaintenance) {
-    return { effective: userFacingResolved, source: userFacingSource };
+  // Compute the session-level value first (step 2 if maintenance, else
+  // step 3) so the per-task override has a coherent fallback when its
+  // own raw value fails resolvePerGroupAgentModel's prefix check.
+  let sessionLevelResolved = userFacingResolved;
+  let sessionLevelSource:
+    | 'group_override'
+    | 'global_default'
+    | 'maintenance_override' = userFacingSource;
+  if (isMaintenance) {
+    const maintenanceRaw = containerConfig?.maintenanceAgentModel;
+    if (maintenanceRaw && maintenanceRaw.trim()) {
+      const maintenanceResolved = resolvePerGroupAgentModel(
+        maintenanceRaw,
+        userFacingResolved,
+      );
+      if (maintenanceResolved !== userFacingResolved) {
+        sessionLevelResolved = maintenanceResolved;
+        sessionLevelSource = 'maintenance_override';
+      }
+      // else: unknown-prefix fall-through warned by resolvePerGroupAgentModel,
+      // OR maintenance value deliberately matches user-facing — either way
+      // there's no effective maintenance-specific routing, so leave the
+      // session-level pair at the user-facing values.
+    }
   }
 
-  const maintenanceRaw = containerConfig?.maintenanceAgentModel;
-  if (!maintenanceRaw || !maintenanceRaw.trim()) {
-    // No maintenance-specific override — maintenance uses the same
-    // resolved value as the user-facing slot (the existing pre-#509
-    // behavior). `source` reflects the user-facing source so the
-    // audit log doesn't claim a maintenance override that wasn't set.
-    return { effective: userFacingResolved, source: userFacingSource };
+  // Step 1 — per-task override beats everything else. A typo / unknown
+  // prefix falls back through resolvePerGroupAgentModel to the
+  // session-level value, NOT all the way to globalDefault — so an
+  // operator who already set a deliberate maintenance override sees a
+  // bad per-task value land on maintenance, not on the global default.
+  if (taskAgentModel && taskAgentModel.trim()) {
+    const taskResolved = resolvePerGroupAgentModel(
+      taskAgentModel,
+      sessionLevelResolved,
+    );
+    if (taskResolved !== sessionLevelResolved) {
+      return { effective: taskResolved, source: 'task_override' };
+    }
+    // Unknown-prefix or deliberately-matches-session — no effective
+    // task-specific routing happening; emit the session-level pair.
   }
 
-  const maintenanceResolved = resolvePerGroupAgentModel(
-    maintenanceRaw,
-    userFacingResolved,
-  );
-  if (maintenanceResolved === userFacingResolved) {
-    // Either the maintenance value was unknown-prefix (warn already
-    // logged by `resolvePerGroupAgentModel`) and fell back to the
-    // user-facing value, OR the operator deliberately set the
-    // maintenance value to match user-facing. Either way the audit
-    // log should reflect the user-facing source — there's no
-    // *effective* maintenance-specific routing happening.
-    return { effective: userFacingResolved, source: userFacingSource };
-  }
-  return { effective: maintenanceResolved, source: 'maintenance_override' };
+  return { effective: sessionLevelResolved, source: sessionLevelSource };
 }
 
 const AGENT_MODEL = resolveAgentModel(process.env.AGENT_MODEL);
@@ -1129,6 +1163,18 @@ export interface ContainerInput {
    * therefore never silently bypasses the two-phase lock acquisition.
    */
   continuationCycleId?: string;
+  /**
+   * Per-task AGENT_MODEL override for #509 Phase 3. Set by the
+   * task-scheduler from `scheduled_tasks.agent_model` on this row.
+   * When present and non-empty after trim, beats every other knob in
+   * the resolveSessionAgentModel ladder (maintenanceAgentModel,
+   * group agentModel, AGENT_MODEL env, DEFAULT_AGENT_MODEL); audit
+   * log emits `task_override` as the source. Unknown-prefix values
+   * fall back to the session-level value via `resolvePerGroupAgentModel`
+   * — never silently jump to the global default. Undefined for
+   * non-scheduled-task spawns (interactive inbound, IPC scripts).
+   */
+  taskAgentModel?: string | null;
 }
 
 export interface ContainerOutput {
@@ -2602,6 +2648,7 @@ function buildContainerArgs(
   chatJid?: string,
   continuationCycleId?: string,
   attributionToken?: string,
+  taskAgentModel?: string | null,
 ): BuildContainerArgsResult {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -2730,12 +2777,24 @@ function buildContainerArgs(
   // `maintenanceAgentModel` first, then fall through to the existing
   // `agentModel` → AGENT_MODEL ladder. Non-maintenance spawns are
   // unchanged byte-for-byte from the pre-#509 behavior.
+  // Phase 3 (#509): per-task override beats session-level when
+  // `input.taskAgentModel` is set AND its resolved value differs from
+  // the session-level fallback (sole writer: task-scheduler.ts plumbs
+  // `task.agent_model` here). The audit-log `source` field is
+  // `task_override` ONLY in that "different from session" case;
+  // unknown-prefix values and per-row values that deliberately match
+  // the session-level fallback fall through to the session-level
+  // source so the log doesn't claim a routing change that didn't
+  // happen. Unknown-prefix falls back to the session-level value
+  // (NOT the global default), so a typo on a maintenance-pinned
+  // group lands on the maintenance value, not Opus.
   const isMaintenanceSpawn = sessionName === MAINTENANCE_SESSION_NAME;
   const { effective: effectiveAgentModel, source: agentModelSource } =
     resolveSessionAgentModel(
       group.containerConfig,
       isMaintenanceSpawn,
       AGENT_MODEL,
+      taskAgentModel,
     );
   logger.info(
     {
@@ -2744,6 +2803,11 @@ function buildContainerArgs(
       agentModel: effectiveAgentModel,
       globalDefault: AGENT_MODEL,
       source: agentModelSource,
+      // Include the per-task raw value so an unknown-prefix fallback
+      // shows up next to the resolved value in the audit log — this
+      // is the diagnostic surface for "I set task X to haiku but the
+      // spawn still ran on sonnet".
+      taskAgentModel: taskAgentModel ?? null,
     },
     'Container spawn AGENT_MODEL resolved',
   );
@@ -3139,6 +3203,7 @@ export async function runContainerAgent(
         input.chatJid,
         input.continuationCycleId,
         attributionToken,
+        input.taskAgentModel,
       );
 
     logger.debug(

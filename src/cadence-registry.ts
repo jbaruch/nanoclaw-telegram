@@ -74,6 +74,20 @@ export interface CadenceDeclaration {
    * the LLM unconditionally — the legacy Phase 2a/2b shape.
    */
   script: string | null;
+  /**
+   * Per-task AGENT_MODEL override for #509 Phase 3. When non-null,
+   * the cadence-registry's idempotent rebuild writes this value into
+   * `scheduled_tasks.agent_model`; the task-scheduler plumbs it
+   * through to `resolveSessionAgentModel`'s `taskAgentModel` param at
+   * fire time, where it beats every other knob (maintenanceAgentModel,
+   * group agentModel, AGENT_MODEL env, DEFAULT_AGENT_MODEL).
+   * Accepts the same shape the existing model knobs accept — full ID
+   * (`'claude-haiku-4-5-20251001'`) or alias (`'haiku'`, `'sonnet[1m]'`);
+   * unknown-prefix values fall back at fire time via
+   * `resolvePerGroupAgentModel`. NULL = no override declared in
+   * frontmatter; the spawn falls through to the Phase 2 ladder.
+   */
+  agentModel: string | null;
 }
 
 interface ParsedSkill {
@@ -320,6 +334,28 @@ export function validateCadenceDeclaration(
       }
     }
   }
+  // #509 Phase 3: optional per-task AGENT_MODEL override. String or
+  // unset; NULL stored when unset so cadence-registry's idempotent
+  // rebuild can diff a row whose declaration moved from
+  // `agentModel: haiku` → omitted as a shape change. The value isn't
+  // validated against Claude's known prefixes here — the spawn-time
+  // `resolvePerGroupAgentModel` is the authoritative check and falls
+  // back with a warn on unknown shapes. Validating here would mean
+  // every model bump (new alias / new full-ID family) requires a
+  // cadence-registry release in addition to the orchestrator's
+  // pricing table, which trades a clean shape-as-of-now for a tighter
+  // update coupling — punt to fire-time validation.
+  let agentModel: string | null = null;
+  const rawAgentModel = frontmatter.agentModel;
+  if (rawAgentModel !== undefined) {
+    if (typeof rawAgentModel !== 'string' || rawAgentModel.trim() === '') {
+      errors.push(
+        `${skillName}: 'agentModel:' must be a non-empty string, got ${JSON.stringify(rawAgentModel)}`,
+      );
+    } else {
+      agentModel = rawAgentModel.trim();
+    }
+  }
   if (errors.length > 0) {
     return { ok: false, errors };
   }
@@ -329,6 +365,7 @@ export function validateCadenceDeclaration(
       cadence: typeof rawCadence === 'string' ? rawCadence : '',
       priority,
       script,
+      agentModel,
     },
   };
 }
@@ -448,6 +485,7 @@ export function rebuildCadenceRegistry(
     cron: string;
     tz: string | null;
     nextRun: string;
+    agentModel: string | null;
   }
   const desired: DesiredRow[] = [];
   for (const { skillName, declaration } of valid) {
@@ -492,7 +530,16 @@ export function rebuildCadenceRegistry(
       }
       script = composePrecheckScript(skillName, declaration.script);
     }
-    desired.push({ taskId, skillName, prompt, script, cron, tz, nextRun });
+    desired.push({
+      taskId,
+      skillName,
+      prompt,
+      script,
+      cron,
+      tz,
+      nextRun,
+      agentModel: declaration.agentModel,
+    });
   }
 
   const tx = deps.db.transaction(() => {
@@ -511,11 +558,12 @@ export function rebuildCadenceRegistry(
       prompt: string;
       script: string | null;
       next_run: string | null;
+      agent_model: string | null;
     }
     const existing = new Map<string, ExistingRow>();
     const existingRows = deps.db
       .prepare(
-        `SELECT id, schedule_value, schedule_timezone, prompt, script, next_run
+        `SELECT id, schedule_value, schedule_timezone, prompt, script, next_run, agent_model
          FROM scheduled_tasks
          WHERE source = 'cadence-registry' AND group_folder = ?`,
       )
@@ -527,18 +575,29 @@ export function rebuildCadenceRegistry(
         id, group_folder, chat_jid, prompt, script,
         schedule_type, schedule_value, schedule_timezone,
         context_mode, next_run, status, created_at,
-        created_by_role, continuation_cycle_id, source
-      ) VALUES (?, ?, ?, ?, ?, 'cron', ?, ?, 'isolated', ?, 'active', ?, ?, NULL, 'cadence-registry')
+        created_by_role, continuation_cycle_id, source, agent_model
+      ) VALUES (?, ?, ?, ?, ?, 'cron', ?, ?, 'isolated', ?, 'active', ?, ?, NULL, 'cadence-registry', ?)
     `);
     // Shape-change UPDATE: preserve session_id / last_run / last_result
     // (they're per-fire history, not declaration), recompute next_run
     // because the cron expression changed, refresh chat_jid /
     // created_by_role / created_at to match the current spawn.
+    // #509 Phase 3: agent_model is part of the declaration shape — a
+    // SKILL.md frontmatter that adds, removes, or changes `agentModel:`
+    // triggers an UPDATE so the spawn-time resolver sees the new value
+    // on the next fire. The IPC handler `set_task_agent_model` rejects
+    // writes to cadence-registry-sourced rows (see src/ipc.ts) for
+    // exactly the contention this rebuild's shape-change UPDATE would
+    // create — an imperative override on a cadence-owned row would
+    // silently revert here on the next spawn that touches the tile.
+    // Operator-initiated tasks (source = 'schedule-task') live on rows
+    // this rebuild's SELECT explicitly filters out (source =
+    // 'cadence-registry' at SELECT time) and stay outside this loop.
     const updateChangedStmt = deps.db.prepare(`
       UPDATE scheduled_tasks
          SET prompt = ?, script = ?, schedule_value = ?, schedule_timezone = ?,
              next_run = ?, chat_jid = ?, created_by_role = ?,
-             created_at = ?
+             created_at = ?, agent_model = ?
        WHERE id = ?
     `);
     const createdAt = deps.now().toISOString();
@@ -560,6 +619,7 @@ export function rebuildCadenceRegistry(
           row.nextRun,
           createdAt,
           deps.createdByRole,
+          row.agentModel,
         );
         inserted++;
         continue;
@@ -568,7 +628,8 @@ export function rebuildCadenceRegistry(
         prior.schedule_value !== row.cron ||
         prior.schedule_timezone !== row.tz ||
         prior.prompt !== row.prompt ||
-        (prior.script ?? null) !== (row.script ?? null);
+        (prior.script ?? null) !== (row.script ?? null) ||
+        (prior.agent_model ?? null) !== (row.agentModel ?? null);
       if (shapeChanged) {
         // Cadence declaration moved — recompute next_run, refresh the
         // declarative columns, but leave session_id / last_run /
@@ -582,6 +643,7 @@ export function rebuildCadenceRegistry(
           deps.chatJid,
           deps.createdByRole,
           createdAt,
+          row.agentModel,
           row.taskId,
         );
         updated++;
