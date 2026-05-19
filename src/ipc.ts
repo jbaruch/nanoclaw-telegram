@@ -45,6 +45,7 @@ import type { ContainerStatus } from './group-queue.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { stripInternalTags } from './router.js';
+import { recomputeLocalSchedules } from './task-scheduler.js';
 import {
   isValidTimezone,
   normalizeScheduleTimezone,
@@ -3389,7 +3390,20 @@ export async function processTaskIpc(
                 const segments: TripitSegment[] = Array.isArray(parsed.segments)
                   ? (parsed.segments as TripitSegment[])
                   : [];
-                applyTripitSegmentsToTzState({ segments });
+                // #584 — pass an `onTzFlipped` hook so a tz change
+                // resolved from the TripIt segment walk also
+                // invalidates cached `next_run` values on active
+                // `schedule_timezone='local'` rows. The recompute is
+                // wrapped inside the writer with a narrowed catch —
+                // only transient SQLite contention (`SQLITE_BUSY` /
+                // `SQLITE_LOCKED`) is swallowed-with-warn so the
+                // canonical `tz_state` UPDATE that already landed
+                // stays consistent; programming bugs, persistent DB
+                // failures, and unexpected throws propagate back to
+                // this IPC handler per `coding-policy: error-handling`.
+                applyTripitSegmentsToTzState({ segments }, new Date(), () => {
+                  recomputeLocalSchedules(getCurrentTz, new Date());
+                });
               }
               fs.writeFileSync(
                 resultPath,

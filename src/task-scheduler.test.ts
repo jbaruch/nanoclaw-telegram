@@ -19,10 +19,13 @@ vi.mock('./container-runner.js', () => ({
 }));
 
 import {
+  _execRawForTests,
   _initTestDatabase,
+  _rawQueryForTests,
   clearTaskSessionIdsForGroup,
   createTask,
   deleteTask,
+  getActiveLocalScheduledTasks,
   getAllChats,
   getLastBotMessageTimestamp,
   getSession,
@@ -30,6 +33,7 @@ import {
   pruneCompletedTasks,
   resurrectZombieTasks,
   setSession,
+  setTaskNextRun,
   setTaskSessionId,
   storeChatMetadata,
   updateTask,
@@ -46,10 +50,14 @@ import {
   computeNextRunDetailed,
   getCompletedTaskTtlMs,
   parseTaskSkill,
+  recomputeLocalSchedules,
+  startOfTodayInTz,
   startSchedulerLoop,
 } from './task-scheduler.js';
+import type { ScheduledTask } from './types.js';
 import { TIMEZONE } from './config.js';
 import { CronExpressionParser } from 'cron-parser';
+import { SqliteError } from 'better-sqlite3';
 import { logger } from './logger.js';
 import type { ContainerOutput } from './container-runner.js';
 import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
@@ -2999,5 +3007,743 @@ describe('interval cadence end-to-end (#438)', () => {
     expect(rows[0].status).toBe('success');
 
     await vi.advanceTimersByTimeAsync(10);
+  });
+});
+
+describe('recomputeLocalSchedules (#584)', () => {
+  // Validates the cache-invalidation surface that hooks tz_state's
+  // `current_tz` writers. When current_tz flips mid-slot, cached
+  // `next_run` values for `schedule_timezone='local'` rows must be
+  // recomputed against the NEW zone — without this, a 7am-local task
+  // fires at "what was 7am in the prior zone" until the row elapses.
+  //
+  // Fake timers freeze `Date.now()` so `computeNextRunDetailed`'s
+  // internal anchor lines up with the explicit `now` we pass to the
+  // helper — without this, cron-parser's `.next()` anchors on the
+  // real wall-clock and the assertion against an expected next-fire
+  // diverges from the helper's output.
+  const FROZEN_NOW = new Date('2026-03-10T00:00:00.000Z');
+
+  beforeEach(() => {
+    _initTestDatabase();
+    _resetSchedulerLoopForTests();
+    vi.useFakeTimers();
+    vi.setSystemTime(FROZEN_NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // A cron expression that fires every day at 07:00 wall-clock. Used
+  // across cases so the `next_run` advance is observable on any tz.
+  const SEVEN_AM_DAILY = '0 7 * * *';
+
+  function seedLocalRow(
+    id: string,
+    initialNextRun: string,
+    overrides: {
+      status?: 'active' | 'paused' | 'completed';
+      last_run?: string | null;
+      schedule_timezone?: string;
+    } = {},
+  ): void {
+    createTask({
+      id,
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      schedule_type: 'cron',
+      schedule_value: SEVEN_AM_DAILY,
+      schedule_timezone: overrides.schedule_timezone ?? 'local',
+      context_mode: 'isolated',
+      next_run: initialNextRun,
+      status: overrides.status ?? 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    if (overrides.last_run !== undefined) {
+      _execRawForTests(`UPDATE scheduled_tasks SET last_run = ? WHERE id = ?`, [
+        overrides.last_run,
+        id,
+      ]);
+    }
+  }
+
+  it("updates next_run for active 'local' rows when current_tz changes", () => {
+    // Cron-parser anchored to America/Chicago — next 7am Chicago.
+    // `.toISOString()` is typed `string | null`; assert non-null
+    // because we just produced the date a line ago.
+    const initial = CronExpressionParser.parse(SEVEN_AM_DAILY, {
+      tz: 'America/Chicago',
+      currentDate: FROZEN_NOW,
+    })
+      .next()
+      .toISOString()!;
+    // Seed last_run AFTER today's 7am-Tokyo prev occurrence so the
+    // catch-up path doesn't fire (this test exercises the
+    // "no catch-up, take future next_run" branch). FROZEN_NOW is
+    // 09:00 Tokyo on 2026-03-10; today's 7am Tokyo = 22:00 UTC prev
+    // day. last_run = 23:00 UTC prev day satisfies the gate.
+    seedLocalRow('local-row', initial, {
+      last_run: new Date('2026-03-09T23:00:00.000Z').toISOString(),
+    });
+
+    const result = recomputeLocalSchedules(() => 'Asia/Tokyo', FROZEN_NOW);
+    expect(result.recomputed).toBe(1);
+    expect(result.caughtUp).toBe(0);
+
+    const fresh = getTaskById('local-row');
+    expect(fresh).toBeDefined();
+    expect(fresh!.next_run).not.toBe(initial);
+    // Expected new next_run is the next 7am wall-clock in Tokyo from
+    // the freeze-point — verifies the recompute actually consulted
+    // the new tz rather than fallback-TIMEZONE.
+    const expected = CronExpressionParser.parse(SEVEN_AM_DAILY, {
+      tz: 'Asia/Tokyo',
+      currentDate: FROZEN_NOW,
+    })
+      .next()
+      .toISOString()!;
+    expect(fresh!.next_run).toBe(expected);
+  });
+
+  it("skips non-'local' rows", () => {
+    const initial = new Date('2099-01-01T07:00:00.000Z').toISOString();
+    seedLocalRow('chicago-row', initial, {
+      schedule_timezone: 'America/Chicago',
+    });
+
+    const result = recomputeLocalSchedules(() => 'Asia/Tokyo', FROZEN_NOW);
+    expect(result.recomputed).toBe(0);
+
+    const fresh = getTaskById('chicago-row');
+    expect(fresh!.next_run).toBe(initial);
+  });
+
+  it('skips non-active rows', () => {
+    const initial = new Date('2099-01-01T07:00:00.000Z').toISOString();
+    seedLocalRow('paused-row', initial, { status: 'paused' });
+    seedLocalRow('completed-row', initial, { status: 'completed' });
+
+    const result = recomputeLocalSchedules(() => 'Asia/Tokyo', FROZEN_NOW);
+    expect(result.recomputed).toBe(0);
+    expect(getTaskById('paused-row')!.next_run).toBe(initial);
+    expect(getTaskById('completed-row')!.next_run).toBe(initial);
+
+    // Sanity: getActiveLocalScheduledTasks should not return them
+    // either — the selector itself filters status.
+    expect(getActiveLocalScheduledTasks()).toHaveLength(0);
+  });
+
+  it('overrides next_run to now and emits catch-up when row missed today in new zone (real cron prev path)', () => {
+    // Production catch-up scenario from #584: owner lands in Tokyo at
+    // 14:00 local (05:00 UTC) where the 7am-local-daily brief should
+    // have fired 7h ago. cron-parser.next() returns 7am tomorrow in
+    // Tokyo (strictly future), so the missed occurrence is invisible
+    // to .next() alone. The recompute path asks cron-parser for the
+    // PREVIOUS occurrence in the new zone via decideCatchUp's
+    // .prev() call and, when it's missed-and-fireable, overrides
+    // next_run to `now` so the next scheduler tick fires the brief
+    // immediately rather than waiting 17h for tomorrow's slot.
+    const fakeNow = new Date('2026-03-10T05:00:00.000Z'); // 14:00 Tokyo
+    const fakeRow: ScheduledTask = {
+      id: 'catchup-overdue',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: '0 7 * * *',
+      schedule_timezone: 'local',
+      context_mode: 'isolated',
+      // Pre-flip next_run was for the prior zone; the recompute will
+      // produce a new value via the real production path.
+      next_run: new Date('2026-03-10T12:00:00.000Z').toISOString(),
+      last_run: null, // never fired → row is overdue-and-fireable
+      last_result: null,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    };
+
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const writes = new Map<string, string | null>();
+
+    const result = recomputeLocalSchedules(() => 'Asia/Tokyo', fakeNow, {
+      getActiveLocalScheduledTasks: () => [fakeRow],
+      setTaskNextRun: (id, nr) => {
+        writes.set(id, nr);
+      },
+    });
+
+    expect(result.recomputed).toBe(1);
+    expect(result.caughtUp).toBe(1);
+    // Critical assertion: next_run was overridden to `now`, so the
+    // next scheduler tick fires the row immediately. If the override
+    // hadn't taken, next_run would be the future 7am-tomorrow-Tokyo
+    // value from cron-parser.next() and the brief would skip ~17h.
+    expect(writes.get('catchup-overdue')).toBe(fakeNow.toISOString());
+    const catchupCalls = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[1] === 'string' &&
+        call[1].startsWith('recomputeLocalSchedules: catch-up'),
+    );
+    expect(catchupCalls).toHaveLength(1);
+    expect(catchupCalls[0][0]).toMatchObject({
+      taskId: 'catchup-overdue',
+      currentTz: 'Asia/Tokyo',
+    });
+
+    warnSpy.mockRestore();
+  });
+
+  it('does NOT emit catch-up when last_run is on/after the prev cron occurrence (real cron prev path)', () => {
+    // last_run AFTER today's 7am-Tokyo (= 22:00 UTC prev day) means
+    // the row already fired its missed slot. decideCatchUp returns
+    // shouldCatchUp=false and next_run takes cron-parser.next()'s
+    // future value (tomorrow's 7am Tokyo).
+    const fakeNow = new Date('2026-03-10T05:00:00.000Z'); // 14:00 Tokyo
+    const fakeRow: ScheduledTask = {
+      id: 'fired-today',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: '0 7 * * *',
+      schedule_timezone: 'local',
+      context_mode: 'isolated',
+      next_run: new Date('2026-03-10T12:00:00.000Z').toISOString(),
+      // 23:00 UTC on 2026-03-09 = 08:00 Tokyo on 2026-03-10. Today's
+      // 7am Tokyo prev occurrence = 22:00 UTC prev day; last_run is
+      // an hour AFTER that → row already fired today's slot.
+      last_run: new Date('2026-03-09T23:00:00.000Z').toISOString(),
+      last_result: 'prior-fire',
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    };
+
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const writes = new Map<string, string | null>();
+
+    const result = recomputeLocalSchedules(() => 'Asia/Tokyo', fakeNow, {
+      getActiveLocalScheduledTasks: () => [fakeRow],
+      setTaskNextRun: (id, nr) => {
+        writes.set(id, nr);
+      },
+    });
+    expect(result.recomputed).toBe(1);
+    expect(result.caughtUp).toBe(0);
+    // next_run is the future cron-parser.next() value, not `now`.
+    expect(writes.get('fired-today')).not.toBe(fakeNow.toISOString());
+    const written = writes.get('fired-today');
+    expect(written).toBeTruthy();
+    expect(Date.parse(written!)).toBeGreaterThan(fakeNow.getTime());
+    const catchupCalls = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[1] === 'string' &&
+        call[1].startsWith('recomputeLocalSchedules: catch-up'),
+    );
+    expect(catchupCalls).toHaveLength(0);
+
+    warnSpy.mockRestore();
+  });
+
+  it('does NOT emit catch-up when prev cron occurrence is older than 24h (stale window)', () => {
+    // Weekly Monday-7am cron, now is Wednesday — prev occurrence is
+    // ~48h old, outside the 24h catch-up window. decideCatchUp
+    // returns false; we don't force-fire a long-stale row even on a
+    // tz flip.
+    const fakeNow = new Date('2026-03-11T05:00:00.000Z'); // Wed 14:00 Tokyo
+    const fakeRow: ScheduledTask = {
+      id: 'weekly-stale',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: '0 7 * * 1', // Monday 07:00
+      schedule_timezone: 'local',
+      context_mode: 'isolated',
+      next_run: new Date('2026-03-15T22:00:00.000Z').toISOString(),
+      last_run: null,
+      last_result: null,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    };
+
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const writes = new Map<string, string | null>();
+
+    const result = recomputeLocalSchedules(() => 'Asia/Tokyo', fakeNow, {
+      getActiveLocalScheduledTasks: () => [fakeRow],
+      setTaskNextRun: (id, nr) => {
+        writes.set(id, nr);
+      },
+    });
+    expect(result.recomputed).toBe(1);
+    expect(result.caughtUp).toBe(0);
+    const catchupCalls = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[1] === 'string' &&
+        call[1].startsWith('recomputeLocalSchedules: catch-up'),
+    );
+    expect(catchupCalls).toHaveLength(0);
+
+    warnSpy.mockRestore();
+  });
+
+  it('skips catch-up entirely when startOfTodayInTz returns NaN', () => {
+    // Sentinel tz that throws inside Intl.DateTimeFormat → NaN
+    // midnight → gate unusable → catch-up branch skipped even when
+    // the row IS overdue. Matches the function contract for
+    // unparseable timezones.
+    const fakeNow = new Date('2026-03-10T05:00:00.000Z');
+    const fakeRow: ScheduledTask = {
+      id: 'gate-unusable',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: '0 7 * * *',
+      schedule_timezone: 'local',
+      context_mode: 'isolated',
+      next_run: new Date('2026-03-10T12:00:00.000Z').toISOString(),
+      last_run: null,
+      last_result: null,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    };
+
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const writes = new Map<string, string | null>();
+
+    const result = recomputeLocalSchedules(() => 'Not/A_Real_Zone', fakeNow, {
+      getActiveLocalScheduledTasks: () => [fakeRow],
+      setTaskNextRun: (id, nr) => {
+        writes.set(id, nr);
+      },
+    });
+    expect(result.recomputed).toBe(1);
+    expect(result.caughtUp).toBe(0);
+    const catchupCalls = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[1] === 'string' &&
+        call[1].startsWith('recomputeLocalSchedules: catch-up'),
+    );
+    expect(catchupCalls).toHaveLength(0);
+
+    warnSpy.mockRestore();
+  });
+
+  it('startOfTodayInTz returns expected UTC instant for a known zone', () => {
+    // 2026-03-10T05:00:00Z = 2026-03-10 14:00 Tokyo (UTC+9).
+    // Tokyo midnight on 2026-03-10 = 2026-03-09T15:00:00Z.
+    expect(
+      startOfTodayInTz('Asia/Tokyo', new Date('2026-03-10T05:00:00.000Z')),
+    ).toBe(Date.UTC(2026, 2, 9, 15, 0, 0));
+    // 2026-03-10T08:00:00Z = 2026-03-10 03:00 Chicago (UTC-5 since
+    // CDT starts on the second Sunday of March, 2026-03-08).
+    // Chicago midnight on 2026-03-10 = 2026-03-10T05:00:00Z.
+    expect(
+      startOfTodayInTz('America/Chicago', new Date('2026-03-10T08:00:00.000Z')),
+    ).toBe(Date.UTC(2026, 2, 10, 5, 0, 0));
+  });
+
+  it('returns NaN for unparseable tz string', () => {
+    expect(
+      startOfTodayInTz('Not/A_Real_Zone', new Date('2026-03-10T05:00:00.000Z')),
+    ).toBeNaN();
+  });
+
+  it('startOfTodayInTz resolves offset at intended midnight, not at now (DST spring-forward)', () => {
+    // 2026-03-08 in America/New_York: at 02:00 EST clocks jumped to
+    // 03:00 EDT. Offset at NY midnight (start of day) = UTC-5 (EST);
+    // offset at NY 10:00 (after the jump) = UTC-4 (EDT). The naive
+    // single-pass implementation that read the offset at `now` would
+    // compute midnight using UTC-4 and miss by 1h.
+    //
+    // NY 2026-03-08 midnight (00:00 EST) = 2026-03-08T05:00:00Z.
+    // We pass `now` = 10:00 EDT = 14:00 UTC.
+    const nowAfterSpringForward = new Date('2026-03-08T14:00:00.000Z');
+    expect(startOfTodayInTz('America/New_York', nowAfterSpringForward)).toBe(
+      Date.UTC(2026, 2, 8, 5, 0, 0),
+    );
+  });
+
+  it('startOfTodayInTz resolves offset at intended midnight, not at now (DST fall-back)', () => {
+    // 2026-11-01 in America/New_York: at 02:00 EDT clocks fell back
+    // to 01:00 EST. Offset at NY midnight (start of day) = UTC-4
+    // (EDT, pre-transition); offset at NY 10:00 (post-transition) =
+    // UTC-5 (EST). Naive single-pass would mis-compute by 1h.
+    //
+    // NY 2026-11-01 midnight (00:00 EDT) = 2026-11-01T04:00:00Z.
+    // We pass `now` = 10:00 EST = 15:00 UTC.
+    const nowAfterFallBack = new Date('2026-11-01T15:00:00.000Z');
+    expect(startOfTodayInTz('America/New_York', nowAfterFallBack)).toBe(
+      Date.UTC(2026, 10, 1, 4, 0, 0),
+    );
+  });
+
+  it('startOfTodayInTz handles tz-day-boundary crossing (UTC date != local date)', () => {
+    // 2026-03-10T05:00:00Z = 2026-03-10 14:00 Tokyo (UTC+9). The
+    // candidate Date.UTC(2026, 2, 10) = 2026-03-10T00:00Z, which in
+    // Tokyo is 09:00 on 2026-03-10. The formatter at that candidate
+    // shows hour=9 on the same calendar day → residual = 9h → true
+    // Tokyo midnight = candidate - 9h = 2026-03-09T15:00Z.
+    expect(
+      startOfTodayInTz('Asia/Tokyo', new Date('2026-03-10T05:00:00.000Z')),
+    ).toBe(Date.UTC(2026, 2, 9, 15, 0, 0));
+  });
+
+  it('end-to-end DB path: row that already fired today in new zone takes future next_run with no catch-up', () => {
+    // End-to-end integration: real createTask + real selector + real
+    // setTaskNextRun. Distinct from the dep-injection test above
+    // (which exercises decideCatchUp logic in isolation) — this one
+    // verifies the full DB round-trip doesn't trip the catch-up
+    // branch when last_run is on/after the prev cron occurrence.
+    const tz = 'Asia/Tokyo';
+    const now = new Date('2026-03-10T05:00:00.000Z'); // 14:00 in Tokyo
+    const initial = new Date('2026-03-15T00:00:00.000Z').toISOString();
+    // 23:00 UTC prev day = 08:00 Tokyo today (AFTER today's 7am-Tokyo
+    // prev occurrence at 22:00 UTC prev day) → row already fired.
+    seedLocalRow('fired-today-row', initial, {
+      last_run: new Date('2026-03-09T23:00:00.000Z').toISOString(),
+    });
+
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const result = recomputeLocalSchedules(() => tz, now);
+    expect(result.recomputed).toBe(1);
+    expect(result.caughtUp).toBe(0);
+    // Verify next_run was set to a future value (not `now`).
+    const fresh = getTaskById('fired-today-row');
+    expect(fresh!.next_run).toBeTruthy();
+    expect(Date.parse(fresh!.next_run!)).toBeGreaterThan(now.getTime());
+    const catchupCalls = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[1] === 'string' &&
+        call[1].includes('recomputeLocalSchedules: catch-up'),
+    );
+    expect(catchupCalls).toHaveLength(0);
+
+    warnSpy.mockRestore();
+  });
+});
+
+describe('setTaskNextRun (#584)', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  it('writes only next_run and leaves other fields intact', () => {
+    createTask({
+      id: 'narrow-update',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'original-prompt',
+      schedule_type: 'cron',
+      schedule_value: '0 7 * * *',
+      schedule_timezone: 'local',
+      context_mode: 'isolated',
+      next_run: new Date('2099-01-01T07:00:00.000Z').toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    // Seed last_result so we can verify it survives.
+    _execRawForTests(
+      `UPDATE scheduled_tasks SET last_result = ?, last_run = ? WHERE id = ?`,
+      ['prior-result', '2026-01-15T07:00:00.000Z', 'narrow-update'],
+    );
+
+    const newNextRun = new Date('2030-01-01T07:00:00.000Z').toISOString();
+    setTaskNextRun('narrow-update', newNextRun);
+
+    const fresh = getTaskById('narrow-update');
+    expect(fresh!.next_run).toBe(newNextRun);
+    // Everything else preserved.
+    expect(fresh!.prompt).toBe('original-prompt');
+    expect(fresh!.status).toBe('active');
+    expect(fresh!.last_result).toBe('prior-result');
+    expect(fresh!.last_run).toBe('2026-01-15T07:00:00.000Z');
+    expect(fresh!.schedule_value).toBe('0 7 * * *');
+    expect(fresh!.schedule_timezone).toBe('local');
+  });
+
+  it('accepts null next_run (paused-broken-cron remediation shape)', () => {
+    createTask({
+      id: 'null-next-run',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      schedule_type: 'cron',
+      schedule_value: '0 7 * * *',
+      schedule_timezone: 'local',
+      context_mode: 'isolated',
+      next_run: new Date('2099-01-01T07:00:00.000Z').toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    setTaskNextRun('null-next-run', null);
+    const fresh = getTaskById('null-next-run');
+    expect(fresh!.next_run).toBeNull();
+  });
+});
+
+describe('recomputeLocalSchedules error narrowing (#584 — error-handling)', () => {
+  // The recompute path has two failure surfaces — compute(row) and
+  // writeRow(row.id, nextRun) — that used to share a broad catch-all
+  // shape. Per `coding-policy: error-handling`, each is now narrowed:
+  //
+  // - compute(row): no catch-all. `computeNextRunDetailed` is
+  //   documented as resilient, so any throw signals a programming
+  //   bug and must propagate to the scheduler-tick boundary.
+  //
+  // - writeRow(...): narrowed to SqliteError with SQLITE_BUSY /
+  //   SQLITE_LOCKED only. Every other error propagates.
+  //
+  // These tests verify both narrowings hold: transient contention is
+  // swallowed with a warn, programming bugs propagate.
+
+  beforeEach(() => {
+    _initTestDatabase();
+    _resetSchedulerLoopForTests();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-10T00:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function makeFakeRow(id: string): ScheduledTask {
+    return {
+      id,
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: '0 7 * * *',
+      schedule_timezone: 'local',
+      context_mode: 'isolated',
+      next_run: new Date('2026-03-10T12:00:00.000Z').toISOString(),
+      last_run: new Date('2026-03-09T23:00:00.000Z').toISOString(),
+      last_result: 'prior-fire',
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    };
+  }
+
+  it('writeRow SQLITE_BUSY: logged and continues to next row', () => {
+    const rows = [makeFakeRow('busy-row'), makeFakeRow('healthy-row')];
+    const writes = new Map<string, string | null>();
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const result = recomputeLocalSchedules(
+      () => 'Asia/Tokyo',
+      new Date('2026-03-10T05:00:00.000Z'),
+      {
+        getActiveLocalScheduledTasks: () => rows,
+        setTaskNextRun: (id, nr) => {
+          if (id === 'busy-row') {
+            throw new SqliteError('database is locked', 'SQLITE_BUSY');
+          }
+          writes.set(id, nr);
+        },
+      },
+    );
+
+    // Only the healthy row counted; the BUSY-throwing row was skipped.
+    expect(result.recomputed).toBe(1);
+    expect(writes.get('healthy-row')).toBeTruthy();
+    expect(writes.has('busy-row')).toBe(false);
+
+    const transientWarns = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[1] === 'string' &&
+        call[1].startsWith(
+          'recomputeLocalSchedules: setTaskNextRun transient SQLite contention',
+        ),
+    );
+    expect(transientWarns).toHaveLength(1);
+    expect(transientWarns[0][0]).toMatchObject({
+      taskId: 'busy-row',
+      code: 'SQLITE_BUSY',
+    });
+
+    warnSpy.mockRestore();
+  });
+
+  it('writeRow SQLITE_LOCKED: logged and continues', () => {
+    const rows = [makeFakeRow('locked-row')];
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const result = recomputeLocalSchedules(
+      () => 'Asia/Tokyo',
+      new Date('2026-03-10T05:00:00.000Z'),
+      {
+        getActiveLocalScheduledTasks: () => rows,
+        setTaskNextRun: () => {
+          throw new SqliteError('table is locked', 'SQLITE_LOCKED');
+        },
+      },
+    );
+
+    expect(result.recomputed).toBe(0);
+    const transientWarns = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[1] === 'string' &&
+        call[1].startsWith(
+          'recomputeLocalSchedules: setTaskNextRun transient SQLite contention',
+        ),
+    );
+    expect(transientWarns).toHaveLength(1);
+    expect(transientWarns[0][0]).toMatchObject({ code: 'SQLITE_LOCKED' });
+
+    warnSpy.mockRestore();
+  });
+
+  it('writeRow generic TypeError PROPAGATES (programming bug)', () => {
+    const rows = [makeFakeRow('typo-row')];
+    expect(() =>
+      recomputeLocalSchedules(
+        () => 'Asia/Tokyo',
+        new Date('2026-03-10T05:00:00.000Z'),
+        {
+          getActiveLocalScheduledTasks: () => rows,
+          setTaskNextRun: () => {
+            // Simulates an undefined-property access inside a buggy
+            // writer wrapper — the kind of bug the broad catch used
+            // to hide.
+            throw new TypeError(
+              "Cannot read properties of undefined (reading 'id')",
+            );
+          },
+        },
+      ),
+    ).toThrow(TypeError);
+  });
+
+  it('writeRow SqliteError with non-transient code (SQLITE_CONSTRAINT) PROPAGATES', () => {
+    const rows = [makeFakeRow('fk-violation-row')];
+    expect(() =>
+      recomputeLocalSchedules(
+        () => 'Asia/Tokyo',
+        new Date('2026-03-10T05:00:00.000Z'),
+        {
+          getActiveLocalScheduledTasks: () => rows,
+          setTaskNextRun: () => {
+            throw new SqliteError(
+              'FOREIGN KEY constraint failed',
+              'SQLITE_CONSTRAINT_FOREIGNKEY',
+            );
+          },
+        },
+      ),
+    ).toThrow(SqliteError);
+  });
+
+  it('compute path: unexpected throw from computeNextRunDetailed PROPAGATES (programming bug)', () => {
+    // `computeNextRunDetailed` is documented as resilient — it handles
+    // every documented throw case internally (cron parse failures →
+    // `pause-broken-cron` remediation, invalid per-task tz →
+    // `clear-bad-timezone`, throwing resolver callbacks → TIMEZONE
+    // fallback, malformed intervals → 60s default). An unexpected
+    // throw therefore signals a programming bug (corrupted row shape,
+    // schema drift, undefined behaviour). Per
+    // `coding-policy: error-handling`, programming bugs must
+    // propagate — catching them here would hide the bug behind stale
+    // schedule state across the entire fleet of `'local'` rows.
+    //
+    // Trigger an unexpected throw via a Proxy that throws on a
+    // property `computeNextRunDetailed` reads. The throw must escape
+    // the loop, not be absorbed.
+    const buggyRow = new Proxy(makeFakeRow('proxy-row'), {
+      get(target, prop, receiver) {
+        if (prop === 'schedule_type') {
+          throw new TypeError("Cannot read 'schedule_type' from poisoned row");
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    expect(() =>
+      recomputeLocalSchedules(
+        () => 'Asia/Tokyo',
+        new Date('2026-03-10T05:00:00.000Z'),
+        {
+          getActiveLocalScheduledTasks: () => [buggyRow],
+          setTaskNextRun: () => {},
+        },
+      ),
+    ).toThrow(TypeError);
+  });
+
+  it('routes pause-broken-cron remediation through applyComputeNextRunRemediation (not setTaskNextRun(null))', () => {
+    // A row whose schedule_value is unparseable as cron AND whose
+    // schedule_timezone is 'local' returns
+    // `{nextRun: null, remediation: 'pause-broken-cron'}` from
+    // computeNextRunDetailed. The recompute MUST route through
+    // applyRemediation so the row's status flips to 'paused' — writing
+    // null to next_run while leaving status='active' would strand the
+    // row outside the scheduler's WHERE next_run <= ? due-task filter
+    // permanently (the policy reviewer's #592 concern).
+    const fakeNow = new Date('2026-03-10T05:00:00.000Z');
+    const fakeRow: ScheduledTask = {
+      id: 'broken-cron-row',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: 'NOT A CRON',
+      schedule_timezone: 'local',
+      context_mode: 'isolated',
+      next_run: new Date('2026-03-10T12:00:00.000Z').toISOString(),
+      last_run: null,
+      last_result: null,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    };
+
+    const writes = new Map<string, string | null>();
+    const remediations: Array<{
+      taskId: string;
+      remediation: string;
+      sv: string;
+      stz: string | null | undefined;
+    }> = [];
+
+    const result = recomputeLocalSchedules(() => 'Asia/Tokyo', fakeNow, {
+      getActiveLocalScheduledTasks: () => [fakeRow],
+      setTaskNextRun: (id, nr) => {
+        writes.set(id, nr);
+      },
+      applyRemediation: (taskId, remediation, sv, stz) => {
+        remediations.push({ taskId, remediation, sv, stz });
+      },
+    });
+
+    expect(result.recomputed).toBe(0);
+    expect(result.caughtUp).toBe(0);
+    expect(writes.has('broken-cron-row')).toBe(false);
+    expect(remediations).toEqual([
+      {
+        taskId: 'broken-cron-row',
+        remediation: 'pause-broken-cron',
+        sv: 'NOT A CRON',
+        stz: 'local',
+      },
+    ]);
   });
 });

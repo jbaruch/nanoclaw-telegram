@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import Database from 'better-sqlite3';
+import Database, { SqliteError } from 'better-sqlite3';
 
 import {
   _execRawForTests,
@@ -39,6 +39,7 @@ import {
   walkTzSegments,
 } from './db.js';
 import type { TriggerPatternConfig } from './types.js';
+import { logger } from './logger.js';
 import { formatMessages } from './router.js';
 
 beforeEach(() => {
@@ -3108,5 +3109,196 @@ describe('storeLocation / getLatestLocationForSender', () => {
     const ownerLatest = getLatestLocationForSender('99001');
     expect(ownerLatest?.latitude).toBe(36.0);
     expect(ownerLatest?.recorded_at).toBe('2026-05-16T10:00:00.000Z');
+  });
+});
+
+describe('tz_state writer onTzFlipped narrowing (#584 — error-handling)', () => {
+  // The two tz_state writers (`applyTripitSegmentsToTzState` and
+  // `runTzHeartbeatAdvisory`) accept an `onTzFlipped(prev, next)`
+  // callback that fires AFTER the canonical UPDATE landed. Per
+  // `coding-policy: error-handling`, the catch around the callback
+  // is narrowed to SqliteError with SQLITE_BUSY / SQLITE_LOCKED only —
+  // transient WAL contention is recoverable on the next scheduler
+  // tick. Every other throw (programming bug, persistent DB failure,
+  // malformed schema) propagates so real bugs surface instead of
+  // getting swallowed behind a warn.
+
+  beforeEach(() => {
+    _initTestDatabase();
+  });
+
+  // Shared fixtures: a tz_state row + segments payload that produces
+  // a flip from Chicago → Berlin, so onTzFlipped is invoked.
+  function seedFlipFixturesForTripit(): void {
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      schemaVersion: 4,
+    });
+  }
+  const FLIP_SEGMENTS = [
+    {
+      timezone: 'Europe/Berlin',
+      from: '2026-05-12',
+      to: '2026-05-19',
+    },
+  ];
+  const FLIP_NOW = new Date('2026-05-15T12:00:00Z');
+
+  it('applyTripitSegmentsToTzState: SQLITE_BUSY from onTzFlipped is logged and swallowed', () => {
+    seedFlipFixturesForTripit();
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const result = applyTripitSegmentsToTzState(
+      { segments: FLIP_SEGMENTS },
+      FLIP_NOW,
+      () => {
+        throw new SqliteError('database is locked', 'SQLITE_BUSY');
+      },
+    );
+
+    // The canonical UPDATE still landed; the callback fault was logged.
+    expect(result).toEqual({
+      prev: 'America/Chicago',
+      next: 'Europe/Berlin',
+      changed: true,
+    });
+    expect(getCurrentTz()).toBe('Europe/Berlin');
+
+    const transientWarns = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[1] === 'string' &&
+        call[1].startsWith(
+          'applyTripitSegmentsToTzState: onTzFlipped transient SQLite contention',
+        ),
+    );
+    expect(transientWarns).toHaveLength(1);
+    expect(transientWarns[0][0]).toMatchObject({
+      code: 'SQLITE_BUSY',
+      prev: 'America/Chicago',
+      next: 'Europe/Berlin',
+    });
+
+    warnSpy.mockRestore();
+  });
+
+  it('applyTripitSegmentsToTzState: SQLITE_LOCKED from onTzFlipped is logged and swallowed', () => {
+    seedFlipFixturesForTripit();
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const result = applyTripitSegmentsToTzState(
+      { segments: FLIP_SEGMENTS },
+      FLIP_NOW,
+      () => {
+        throw new SqliteError('database table is locked', 'SQLITE_LOCKED');
+      },
+    );
+
+    expect(result.changed).toBe(true);
+    expect(getCurrentTz()).toBe('Europe/Berlin');
+    const transientWarns = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[1] === 'string' &&
+        call[1].startsWith(
+          'applyTripitSegmentsToTzState: onTzFlipped transient SQLite contention',
+        ),
+    );
+    expect(transientWarns).toHaveLength(1);
+    expect(transientWarns[0][0]).toMatchObject({ code: 'SQLITE_LOCKED' });
+
+    warnSpy.mockRestore();
+  });
+
+  it('applyTripitSegmentsToTzState: generic TypeError from onTzFlipped PROPAGATES (programming bug)', () => {
+    seedFlipFixturesForTripit();
+    // No warn spy here — if narrowing is correct, the throw escapes
+    // BEFORE we'd warn-log.
+    expect(() =>
+      applyTripitSegmentsToTzState(
+        { segments: FLIP_SEGMENTS },
+        FLIP_NOW,
+        () => {
+          // The kind of bug the broad catch used to hide: typo on a
+          // property reference inside the recompute path.
+          throw new TypeError(
+            "Cannot read properties of undefined (reading 'id')",
+          );
+        },
+      ),
+    ).toThrow(TypeError);
+
+    // Even though the callback threw, the canonical UPDATE landed
+    // BEFORE the callback fired, so current_tz reflects the flip.
+    expect(getCurrentTz()).toBe('Europe/Berlin');
+  });
+
+  it('applyTripitSegmentsToTzState: SqliteError with non-transient code (SQLITE_CORRUPT) PROPAGATES', () => {
+    seedFlipFixturesForTripit();
+    // A genuine persistent DB failure must NOT be hidden behind the
+    // transient-contention warn.
+    expect(() =>
+      applyTripitSegmentsToTzState(
+        { segments: FLIP_SEGMENTS },
+        FLIP_NOW,
+        () => {
+          throw new SqliteError(
+            'database disk image is malformed',
+            'SQLITE_CORRUPT',
+          );
+        },
+      ),
+    ).toThrow(SqliteError);
+  });
+
+  it('runTzHeartbeatAdvisory: SQLITE_BUSY from onTzFlipped is logged and swallowed', () => {
+    // Seed a tz_state that will flip via the segment walker (the
+    // heartbeat advisory path that triggers onTzFlipped). `segments`
+    // is the JSON-encoded timeline as stored on the row.
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      schemaVersion: 4,
+      segments: JSON.stringify(FLIP_SEGMENTS),
+    });
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const result = runTzHeartbeatAdvisory(FLIP_NOW, undefined, () => {
+      throw new SqliteError('database is locked', 'SQLITE_BUSY');
+    });
+
+    expect(result.flip).toEqual({
+      prev: 'America/Chicago',
+      next: 'Europe/Berlin',
+    });
+    expect(getCurrentTz()).toBe('Europe/Berlin');
+    const transientWarns = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[1] === 'string' &&
+        call[1].startsWith(
+          'runTzHeartbeatAdvisory: onTzFlipped transient SQLite contention',
+        ),
+    );
+    expect(transientWarns).toHaveLength(1);
+    expect(transientWarns[0][0]).toMatchObject({ code: 'SQLITE_BUSY' });
+
+    warnSpy.mockRestore();
+  });
+
+  it('runTzHeartbeatAdvisory: generic TypeError from onTzFlipped PROPAGATES', () => {
+    _seedTzStateForTests({
+      currentTz: 'America/Chicago',
+      homeTz: 'America/Chicago',
+      schemaVersion: 4,
+      segments: JSON.stringify(FLIP_SEGMENTS),
+    });
+    expect(() =>
+      runTzHeartbeatAdvisory(FLIP_NOW, undefined, () => {
+        throw new TypeError(
+          "Cannot read properties of undefined (reading 'recompute')",
+        );
+      }),
+    ).toThrow(TypeError);
+    // Canonical UPDATE landed BEFORE the callback fired.
+    expect(getCurrentTz()).toBe('Europe/Berlin');
   });
 });

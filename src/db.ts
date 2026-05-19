@@ -34,6 +34,21 @@ import {
   TriggerPatternConfig,
 } from './types.js';
 
+/**
+ * #584 — SQLite error codes the `onTzFlipped` callback catches as
+ * recoverable contention. SQLITE_BUSY / SQLITE_LOCKED can fire under
+ * WAL contention with the orchestrator's other writers; the canonical
+ * `tz_state` UPDATE has already landed in the same transaction, and
+ * the next scheduler tick will retry the recompute against the
+ * stored `current_tz`. Every other error (programming bug, persistent
+ * DB failure, malformed schema) propagates. Mirrors the same set
+ * used in `src/index.ts` around `runTzHeartbeatAdvisory`.
+ */
+const TRANSIENT_SQLITE_CODES: ReadonlySet<string> = new Set([
+  'SQLITE_BUSY',
+  'SQLITE_LOCKED',
+]);
+
 let db: Database.Database;
 
 /**
@@ -1541,6 +1556,42 @@ export function getAllTasks(): ScheduledTask[] {
     .all() as ScheduledTask[];
 }
 
+/**
+ * #584 — Cron rows scheduled with `schedule_timezone = 'local'`
+ * resolve their effective tz at fire time via `tz_state.current_tz`.
+ * When `current_tz` flips mid-slot (operator moves zones), already-
+ * cached `next_run` values stay anchored to the prior zone until the
+ * row fires. The scheduler hooks `tz_state` writers via
+ * `recomputeLocalSchedules` (see `task-scheduler.ts`) and uses this
+ * selector to find the affected rows. Narrow filter (`'local'` +
+ * `'active'`) so a flip doesn't recompute the world.
+ */
+export function getActiveLocalScheduledTasks(): ScheduledTask[] {
+  return db
+    .prepare(
+      `SELECT * FROM scheduled_tasks
+        WHERE schedule_timezone = 'local'
+          AND status = 'active'`,
+    )
+    .all() as ScheduledTask[];
+}
+
+/**
+ * #584 — Focused next_run writer for `recomputeLocalSchedules`. The
+ * caller has just computed a fresh `next_run` for a `'local'`-scheduled
+ * row against the new `current_tz`; this writes ONLY `next_run` and
+ * leaves every other field alone (status, last_run, last_result,
+ * schedule_*). Distinct from `updateTaskAfterRun` (which also bumps
+ * `last_run` / `last_result` / status) and `updateTask` (which is the
+ * general-purpose multi-field updater used for user-facing IPC writes).
+ */
+export function setTaskNextRun(id: string, nextRun: string | null): void {
+  db.prepare('UPDATE scheduled_tasks SET next_run = ? WHERE id = ?').run(
+    nextRun,
+    id,
+  );
+}
+
 export function updateTask(
   id: string,
   updates: Partial<
@@ -2198,6 +2249,7 @@ export function walkTzSegments(
 export function applyTripitSegmentsToTzState(
   stdoutJson: { segments?: readonly TripitSegment[] | null } | null,
   now: Date = new Date(),
+  onTzFlipped?: (prev: string, next: string) => void,
 ): { prev: string | null; next: string | null; changed: boolean } {
   const segments =
     stdoutJson && Array.isArray(stdoutJson.segments) ? stdoutJson.segments : [];
@@ -2241,6 +2293,37 @@ export function applyTripitSegmentsToTzState(
       { prev: row.current_tz, next, segmentCount: segments.length },
       'tz_state.current_tz flipped via sync_tripit segment walk (#542)',
     );
+    // #584 — invoke the recompute hook AFTER the UPDATE landed, so a
+    // reader picking up the new current_tz sees the new value. Narrow
+    // the catch to transient SQLite contention codes only
+    // (SQLITE_BUSY / SQLITE_LOCKED) — those are genuinely recoverable
+    // against the orchestrator's other WAL writers and the next
+    // scheduler tick will re-anchor `next_run` against the now-canonical
+    // `current_tz`. Every other error (programming bug, persistent DB
+    // failure, malformed schema) propagates out per
+    // `coding-policy: error-handling`. Mirrors the narrowing pattern
+    // in `src/index.ts` around `runTzHeartbeatAdvisory`.
+    if (onTzFlipped) {
+      try {
+        onTzFlipped(row.current_tz, next);
+      } catch (err) {
+        if (
+          !(err instanceof SqliteError) ||
+          !TRANSIENT_SQLITE_CODES.has(err.code)
+        ) {
+          throw err;
+        }
+        logger.warn(
+          {
+            err: err.message,
+            code: err.code,
+            prev: row.current_tz,
+            next,
+          },
+          'applyTripitSegmentsToTzState: onTzFlipped transient SQLite contention — tz_state write landed, next scheduler tick will recompute',
+        );
+      }
+    }
   }
   return { prev: row.current_tz, next, changed };
 }
@@ -2344,6 +2427,7 @@ export function readTzStateForContext(): TzStateForContext | null {
 export function runTzHeartbeatAdvisory(
   now: Date = new Date(),
   ownerSenderId?: string | null,
+  onTzFlipped?: (prev: string, next: string) => void,
 ): TzAdvisoryResult {
   const row = db
     .prepare(
@@ -2496,6 +2580,32 @@ export function runTzHeartbeatAdvisory(
       },
       'tz_state.current_tz flipped via heartbeat advisory (#574 Phase 2)',
     );
+    // #584 — see `applyTripitSegmentsToTzState` for the rationale; same
+    // narrowing contract on the heartbeat-advisory writer. Catch only
+    // transient SQLite contention (SQLITE_BUSY / SQLITE_LOCKED); every
+    // other error propagates so programming bugs / persistent DB
+    // failures surface instead of getting swallowed as a warn.
+    if (onTzFlipped) {
+      try {
+        onTzFlipped(flip.prev, flip.next);
+      } catch (err) {
+        if (
+          !(err instanceof SqliteError) ||
+          !TRANSIENT_SQLITE_CODES.has(err.code)
+        ) {
+          throw err;
+        }
+        logger.warn(
+          {
+            err: err.message,
+            code: err.code,
+            prev: flip.prev,
+            next: flip.next,
+          },
+          'runTzHeartbeatAdvisory: onTzFlipped transient SQLite contention — tz_state write landed, next scheduler tick will recompute',
+        );
+      }
+    }
   }
 
   return { flip, warningToFire };

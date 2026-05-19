@@ -19,6 +19,7 @@ import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
 import { computeThresholds } from './threshold.js';
 import { emitSessionTokens } from './usage-telemetry.js';
 import {
+  getActiveLocalScheduledTasks,
   getAllTasks,
   getCurrentTz,
   getDormantRecurringTasks,
@@ -27,6 +28,7 @@ import {
   getTaskById,
   logTaskRun,
   pruneCompletedTasks,
+  setTaskNextRun,
   setTaskSessionId,
   storeChatMetadata,
   storeMessage,
@@ -276,6 +278,410 @@ export function applyComputeNextRunRemediation(
       'Dropped invalid schedule_timezone — falling back to TIMEZONE going forward',
     );
   }
+}
+
+/**
+ * #584 — Compute today's UTC midnight in the given IANA timezone. Used
+ * by `recomputeLocalSchedules` to gate the "already fired today"
+ * decision: a row whose `last_run` falls before today's midnight (in
+ * the NEW zone) is overdue and worth a catch-up warn; a row whose
+ * `last_run` falls on/after that midnight has already executed for
+ * today and is fine.
+ *
+ * Implementation note: `Intl.DateTimeFormat` with the target tz gives
+ * us each calendar field; we then back-construct a UTC instant for
+ * 00:00:00 of that calendar date in that zone via two-pass offset
+ * resolution. The naive single-pass approach (offset at `now`) is
+ * wrong on a DST-transition calendar day — if the offset at midnight
+ * differs from the offset at `now` (spring-forward or fall-back falls
+ * between them), the computed midnight-UTC instant is off by an hour.
+ *
+ * Algorithm:
+ *   1. Extract the calendar year/month/day in `tz` from `now`.
+ *   2. Take a candidate midnight-UTC instant `Date.UTC(year, month-1, day)`
+ *      and ask the formatter what wall-clock the target tz shows at
+ *      that instant.
+ *   3. The residual hours/minutes/seconds (and any day shift across
+ *      a tz day boundary) reveal the offset at intended midnight; the
+ *      true midnight-UTC is the candidate minus that residual.
+ *
+ * Returns NaN if the tz string is unparseable — caller treats that as
+ * "can't gate, skip the catch-up" rather than throwing.
+ */
+export function startOfTodayInTz(tz: string, now: Date): number {
+  let formatter: Intl.DateTimeFormat;
+  try {
+    formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+  } catch (err) {
+    // `Intl.DateTimeFormat` throws `RangeError` on an unparseable
+    // `timeZone` option (the contract for an unknown / malformed IANA
+    // zone string). That's the only expected failure mode here, and
+    // the caller treats NaN as "can't gate, skip the catch-up". Any
+    // other throw signals a programming bug (e.g. options shape error
+    // from a future refactor) and propagates per
+    // `coding-policy: error-handling`.
+    if (!(err instanceof RangeError)) throw err;
+    return NaN;
+  }
+  const nowParts = formatToPartsAsRecord(formatter, now);
+  if (!nowParts) return NaN;
+  const year = Number(nowParts.year);
+  const month = Number(nowParts.month);
+  const day = Number(nowParts.day);
+  if (
+    !Number.isFinite(year) ||
+    !Number.isFinite(month) ||
+    !Number.isFinite(day)
+  ) {
+    return NaN;
+  }
+  // Pass 2: ask the formatter what wall-clock the target tz reports at
+  // the candidate midnight-UTC instant. The residual (wall-clock minus
+  // 00:00:00 of the target calendar date) IS the offset at intended
+  // midnight — which is what we need, not the offset at `now`.
+  const candidateMidnightUtc = Date.UTC(year, month - 1, day);
+  const candidateParts = formatToPartsAsRecord(
+    formatter,
+    new Date(candidateMidnightUtc),
+  );
+  if (!candidateParts) return NaN;
+  const candYear = Number(candidateParts.year);
+  const candMonth = Number(candidateParts.month);
+  const candDay = Number(candidateParts.day);
+  // `hour` from a 24h `Intl.DateTimeFormat` formatter can come back as
+  // "24" at midnight in some locales/runtimes; normalise via mod so
+  // arithmetic below is sane.
+  const candHour = Number(candidateParts.hour) % 24;
+  const candMinute = Number(candidateParts.minute);
+  const candSecond = Number(candidateParts.second);
+  if (
+    !Number.isFinite(candYear) ||
+    !Number.isFinite(candMonth) ||
+    !Number.isFinite(candDay) ||
+    !Number.isFinite(candHour) ||
+    !Number.isFinite(candMinute) ||
+    !Number.isFinite(candSecond)
+  ) {
+    return NaN;
+  }
+  // Reconstruct the wall-clock instant the candidate produced in the
+  // target zone as a UTC time, then take the residual against the
+  // candidate. Uses Date.UTC across the full calendar fields so a tz
+  // boundary crossing (candidate maps to the prior/next calendar day in
+  // the target zone) is captured by the residual rather than lost.
+  const candWallAsUtcMs = Date.UTC(
+    candYear,
+    candMonth - 1,
+    candDay,
+    candHour,
+    candMinute,
+    candSecond,
+  );
+  const offsetAtMidnightMs = candWallAsUtcMs - candidateMidnightUtc;
+  return candidateMidnightUtc - offsetAtMidnightMs;
+}
+
+/**
+ * Helper: run `formatter.formatToParts(date)` and return a non-literal
+ * field lookup. Returns null if the formatter throws (e.g. on a
+ * pathological Date).
+ */
+function formatToPartsAsRecord(
+  formatter: Intl.DateTimeFormat,
+  date: Date,
+): Record<string, string> | null {
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = formatter.formatToParts(date);
+  } catch (err) {
+    // `formatToParts` throws `RangeError` for a `Date` value outside
+    // the formatter's supported range. Caller treats null as "can't
+    // gate, skip the catch-up". Other throws (e.g. internal V8/JS
+    // engine errors signalling a programming bug) propagate per
+    // `coding-policy: error-handling`.
+    if (!(err instanceof RangeError)) throw err;
+    return null;
+  }
+  const byType: Record<string, string> = {};
+  for (const p of parts) {
+    if (p.type !== 'literal') byType[p.type] = p.value;
+  }
+  return byType;
+}
+
+/**
+ * #584 — Recompute `next_run` for every active `schedule_timezone =
+ * 'local'` row. Called from the `tz_state.current_tz` write path
+ * (`applyTripitSegmentsToTzState`, `runTzHeartbeatAdvisory`) via an
+ * `onTzFlipped` callback, so a tz flip mid-slot invalidates cached
+ * `next_run` values immediately rather than waiting for each row to
+ * elapse against the prior zone.
+ *
+ * Per-row error handling: `computeNextRunDetailed` is documented as
+ * resilient — bad-cron and bad-tz rows return a `remediation` hint
+ * (`pause-broken-cron` / `clear-bad-timezone`) without throwing. The
+ * recompute invokes `applyComputeNextRunRemediation` for those rows
+ * so they're paused (or their bad tz cleared) consistently with every
+ * other compute caller; skipping the remediation here would strand
+ * the row with `status='active'` + `next_run=null`, invisible to the
+ * scheduler's `WHERE next_run <= ?` due-task filter. An unexpected
+ * throw from compute signals a programming bug and propagates per
+ * `coding-policy: error-handling`. `setTaskNextRun` failures are
+ * narrowed to transient SQLite contention (`SQLITE_BUSY` /
+ * `SQLITE_LOCKED`); those warn-and-continue because the next
+ * scheduler tick (max ~60 s later) retries naturally. Persistent DB
+ * faults, FK violations, and other programming bugs propagate so they
+ * surface at the outer `tz_state` writer's narrowed catch (and at the
+ * scheduler-tick boundary) rather than being hidden behind stale
+ * schedule state across the fleet of `'local'`-scheduled rows.
+ *
+ * Production catch-up: `cron-parser.next()` always returns a future
+ * occurrence, so the future `next_run` alone never describes "the row
+ * should already have fired today in the new zone". The bug from #584
+ * (owner lands in Berlin where 7am already passed → brief should fire
+ * NOW, not tomorrow morning) requires asking cron-parser for the
+ * PREVIOUS occurrence in the new zone via `.prev()`, comparing it
+ * against `last_run` + `now`, and overriding `next_run` to `now` when
+ * the prev is missed-and-fireable. The next scheduler tick (max ~60 s
+ * later) then picks the row up through the standard due-task gate.
+ *
+ * The override target is `now` (not the prev's literal past time) so
+ * the row evaluates as "due right now" on the next tick, not
+ * "overdue by hours" — semantically cleaner for any downstream code
+ * that reasons about `now - next_run` as freshness.
+ */
+export interface RecomputeLocalSchedulesResult {
+  recomputed: number;
+  caughtUp: number;
+}
+
+export interface DecideCatchUpInput {
+  scheduleValue: string;
+  scheduleTimezone: string;
+  lastRun: string | null;
+  prevCronTz: string;
+  now: Date;
+}
+
+export interface DecideCatchUpResult {
+  shouldCatchUp: boolean;
+  prevOccurrence: Date | null;
+}
+
+/**
+ * Pure helper for the catch-up decision so `recomputeLocalSchedules`
+ * stays DB-free and the prev-occurrence logic is unit-testable in
+ * isolation. Returns `shouldCatchUp: true` when the previous cron
+ * occurrence in `prevCronTz` falls between `last_run` (exclusive) and
+ * `now` (inclusive), within the last 24h.
+ *
+ *   - `prev <= last_run` → already fired (or fired later) → not catching up
+ *   - `prev > now`       → cron-parser disagrees with our slot framing,
+ *                          treat defensively as "no prev today" → not catching up
+ *   - `now - prev > 24h` → too stale (e.g. row was paused, or no
+ *                          cron occurrence fell within the last day);
+ *                          let regular cadence pick it up
+ *
+ * The 24h window is wider than the daily-brief use case strictly
+ * needs but bounds the catch-up surface so a weekly cron whose last
+ * fire was 5 days ago doesn't get force-fired on a tz flip.
+ */
+const CATCH_UP_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+export function decideCatchUp(input: DecideCatchUpInput): DecideCatchUpResult {
+  // #584 — No catch-all here. By the time `recomputeLocalSchedules`
+  // calls this, `computeNextRunDetailed` has already returned a
+  // non-null `nextRun` for the same `scheduleValue` (the catch-up
+  // gate is only consulted on successful compute paths). Cron-parse
+  // failures on a syntactically valid cron string are not expected
+  // to vary by `tz` — `CronExpressionParser.parse` only varies its
+  // throw shape on the cron string itself, which we've already
+  // validated upstream. `.prev()` on a valid daily/weekly cron with
+  // a real `currentDate` always has a previous occurrence. Any
+  // remaining throw therefore signals a programming bug (corrupted
+  // input shape, cron-parser internal invariant violation) and must
+  // propagate per `coding-policy: error-handling`. Catching it here
+  // would silently anchor rows to the "no catch-up" branch and hide
+  // the bug behind stale schedule state.
+  const interval = CronExpressionParser.parse(input.scheduleValue, {
+    tz: input.prevCronTz,
+    currentDate: input.now,
+  });
+  const prev = interval.prev().toDate();
+  const prevMs = prev.getTime();
+  const nowMs = input.now.getTime();
+  if (prevMs > nowMs) {
+    return { shouldCatchUp: false, prevOccurrence: prev };
+  }
+  if (nowMs - prevMs > CATCH_UP_WINDOW_MS) {
+    return { shouldCatchUp: false, prevOccurrence: prev };
+  }
+  const lastRunMs = input.lastRun ? Date.parse(input.lastRun) : 0;
+  // last_run unparseable → treat as never-fired (lastRunMs stays 0)
+  const lastForCompare =
+    Number.isFinite(lastRunMs) && lastRunMs > 0 ? lastRunMs : 0;
+  if (lastForCompare >= prevMs) {
+    return { shouldCatchUp: false, prevOccurrence: prev };
+  }
+  return { shouldCatchUp: true, prevOccurrence: prev };
+}
+
+/**
+ * #584 — SQLite error codes the `setTaskNextRun` writer treats as
+ * recoverable contention. Same set as the `tz_state` writer callbacks
+ * in `src/db.ts`; see that constant for the full rationale. Every
+ * other error (programming bug, persistent DB failure, malformed
+ * schema) propagates per `coding-policy: error-handling`.
+ */
+const RECOMPUTE_TRANSIENT_SQLITE_CODES: ReadonlySet<string> = new Set([
+  'SQLITE_BUSY',
+  'SQLITE_LOCKED',
+]);
+
+export function recomputeLocalSchedules(
+  resolveCurrentTz: () => string | null = getCurrentTz,
+  now: Date = new Date(),
+  deps: {
+    getActiveLocalScheduledTasks?: () => ScheduledTask[];
+    setTaskNextRun?: (id: string, nextRun: string | null) => void;
+    applyRemediation?: (
+      taskId: string,
+      remediation: NextRunRemediation,
+      observedScheduleValue: string,
+      observedScheduleTimezone: string | null | undefined,
+    ) => void;
+  } = {},
+): RecomputeLocalSchedulesResult {
+  const readRows =
+    deps.getActiveLocalScheduledTasks ?? getActiveLocalScheduledTasks;
+  const writeRow = deps.setTaskNextRun ?? setTaskNextRun;
+  const applyRemediation =
+    deps.applyRemediation ?? applyComputeNextRunRemediation;
+  const rows = readRows();
+  const tzForGate = resolveCurrentTz();
+  // Pre-flight the gate inputs once per recompute pass. NaN from
+  // startOfTodayInTz (or null tz) → skip the catch-up branch entirely
+  // per the function contract: without a usable "today midnight" we
+  // can't reason about the catch-up window correctly, so default to
+  // the future-cron path and let the next scheduler tick handle any
+  // residual staleness.
+  const midnightInNewZoneUtc = tzForGate
+    ? startOfTodayInTz(tzForGate, now)
+    : NaN;
+  const catchUpGateUsable =
+    typeof tzForGate === 'string' && Number.isFinite(midnightInNewZoneUtc);
+  let recomputed = 0;
+  let caughtUp = 0;
+  for (const row of rows) {
+    // #584 — `computeNextRunDetailed` is documented as resilient:
+    // bad-cron rows enter the `paused` status via the sibling
+    // `applyComputeRemediation` path (it does NOT throw on documented
+    // cases), bad tz falls back to TIMEZONE env var, throwing tz
+    // resolvers fall back to TIMEZONE. An unexpected throw here
+    // therefore signals a programming bug (corrupted row shape,
+    // schema migration mid-flight, undefined behaviour). Per
+    // `coding-policy: error-handling`, programming bugs must
+    // propagate — they will surface at the outer `tz_state` writer's
+    // narrowed catch (which lets non-`SqliteError` propagate) and at
+    // the scheduler-tick boundary. Catching them here would hide the
+    // bug behind stale schedule state across the entire fleet of
+    // `'local'` rows.
+    const detailed = computeNextRunDetailed(row, resolveCurrentTz);
+    let nextRun = detailed.nextRun;
+    // Production catch-up: when the gate is usable, ask cron-parser
+    // for the previous occurrence in the new zone and override
+    // nextRun to `now` if the prev is missed-and-fireable. Skipped
+    // entirely when the gate is unusable (NaN midnight / null tz).
+    let catchUpDecided = false;
+    // `computeNextRunDetailed` returning a remediation hint means the
+    // row's cron / per-task tz was unparseable — invoke
+    // `applyComputeNextRunRemediation` so the row is paused (or its
+    // bad tz cleared) like every other compute caller does. Skipping
+    // this writer would leave the row with `status='active'` +
+    // `next_run=null`, invisible to the scheduler's
+    // `WHERE next_run <= ?` filter — the standard due-task query
+    // strands it permanently rather than surfacing it as paused for
+    // the operator. The remediation re-fetches fresh row state so a
+    // concurrent `update_task` fix wins. Skip the catch-up branch on
+    // this path: `decideCatchUp` would re-throw the same cron-parse
+    // error, and the row is being paused anyway so there's no future
+    // fire to catch up.
+    const remediation = detailed.remediation ?? null;
+    if (remediation !== null) {
+      applyRemediation(
+        row.id,
+        remediation,
+        row.schedule_value,
+        row.schedule_timezone,
+      );
+      continue;
+    }
+    if (catchUpGateUsable && row.schedule_type === 'cron') {
+      const decision = decideCatchUp({
+        scheduleValue: row.schedule_value,
+        scheduleTimezone: row.schedule_timezone ?? 'local',
+        lastRun: row.last_run,
+        prevCronTz: tzForGate as string,
+        now,
+      });
+      if (decision.shouldCatchUp) {
+        nextRun = now.toISOString();
+        catchUpDecided = true;
+      }
+    }
+    try {
+      writeRow(row.id, nextRun);
+      recomputed += 1;
+    } catch (err) {
+      // Narrowed to transient SQLite contention only — SQLITE_BUSY /
+      // SQLITE_LOCKED can fire under WAL contention with the
+      // orchestrator's other writers and the next scheduler tick
+      // will retry the recompute. Every other error (programming bug,
+      // FK violation, malformed schema, persistent DB failure)
+      // propagates per `coding-policy: error-handling`; hiding those
+      // behind a per-row warn would silently anchor rows to stale
+      // pre-flip values.
+      if (
+        !(err instanceof SqliteError) ||
+        !RECOMPUTE_TRANSIENT_SQLITE_CODES.has(err.code)
+      ) {
+        throw err;
+      }
+      logger.warn(
+        {
+          taskId: row.id,
+          nextRun,
+          err: err.message,
+          code: err.code,
+        },
+        'recomputeLocalSchedules: setTaskNextRun transient SQLite contention — next scheduler tick will retry against the stored value',
+      );
+      continue;
+    }
+    if (catchUpDecided) {
+      caughtUp += 1;
+      logger.warn(
+        {
+          taskId: row.id,
+          scheduleValue: row.schedule_value,
+          nextRun,
+          lastRun: row.last_run,
+          currentTz: tzForGate,
+        },
+        'recomputeLocalSchedules: catch-up — row had a missed occurrence today in new zone; next_run overridden to now (#584). Next scheduler tick will fire it.',
+      );
+    }
+  }
+  return { recomputed, caughtUp };
 }
 
 /**
