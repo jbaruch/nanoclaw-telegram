@@ -3079,10 +3079,18 @@ describe('recomputeLocalSchedules (#584)', () => {
     })
       .next()
       .toISOString()!;
-    seedLocalRow('local-row', initial);
+    // Seed last_run AFTER today's 7am-Tokyo prev occurrence so the
+    // catch-up path doesn't fire (this test exercises the
+    // "no catch-up, take future next_run" branch). FROZEN_NOW is
+    // 09:00 Tokyo on 2026-03-10; today's 7am Tokyo = 22:00 UTC prev
+    // day. last_run = 23:00 UTC prev day satisfies the gate.
+    seedLocalRow('local-row', initial, {
+      last_run: new Date('2026-03-09T23:00:00.000Z').toISOString(),
+    });
 
     const result = recomputeLocalSchedules(() => 'Asia/Tokyo', FROZEN_NOW);
     expect(result.recomputed).toBe(1);
+    expect(result.caughtUp).toBe(0);
 
     const fresh = getTaskById('local-row');
     expect(fresh).toBeDefined();
@@ -3127,16 +3135,17 @@ describe('recomputeLocalSchedules (#584)', () => {
     expect(getActiveLocalScheduledTasks()).toHaveLength(0);
   });
 
-  it('emits catch-up warning when new next_run is in past AND row has not fired today in new zone', () => {
-    // The catch-up branch is structurally hard to reach from
-    // production compute (`cron-parser.next()` and the interval
-    // skip-past-missed loop both produce strictly-future values), so
-    // we drive it through the `computeNextRun` dep override — that
-    // seam exists for exactly this catch-up scenario, which only
-    // fires defensively if a future cron-parser bug or DST
-    // discontinuity surfaces a past wall-clock.
-    const fakeNow = new Date('2026-03-10T05:00:00.000Z');
-    const pastNextRun = new Date(fakeNow.getTime() - 5 * 60_000).toISOString();
+  it('overrides next_run to now and emits catch-up when row missed today in new zone (real cron prev path)', () => {
+    // Production catch-up scenario from #584: owner lands in Tokyo at
+    // 14:00 local (05:00 UTC) where the 7am-local-daily brief should
+    // have fired 7h ago. cron-parser.next() returns 7am tomorrow in
+    // Tokyo (strictly future), so the missed occurrence is invisible
+    // to .next() alone. The recompute path asks cron-parser for the
+    // PREVIOUS occurrence in the new zone via decideCatchUp's
+    // .prev() call and, when it's missed-and-fireable, overrides
+    // next_run to `now` so the next scheduler tick fires the brief
+    // immediately rather than waiting 17h for tomorrow's slot.
+    const fakeNow = new Date('2026-03-10T05:00:00.000Z'); // 14:00 Tokyo
     const fakeRow: ScheduledTask = {
       id: 'catchup-overdue',
       group_folder: 'main',
@@ -3147,7 +3156,9 @@ describe('recomputeLocalSchedules (#584)', () => {
       schedule_value: '0 7 * * *',
       schedule_timezone: 'local',
       context_mode: 'isolated',
-      next_run: pastNextRun,
+      // Pre-flip next_run was for the prior zone; the recompute will
+      // produce a new value via the real production path.
+      next_run: new Date('2026-03-10T12:00:00.000Z').toISOString(),
       last_run: null, // never fired → row is overdue-and-fireable
       last_result: null,
       status: 'active',
@@ -3163,12 +3174,15 @@ describe('recomputeLocalSchedules (#584)', () => {
       setTaskNextRun: (id, nr) => {
         writes.set(id, nr);
       },
-      computeNextRun: () => ({ nextRun: pastNextRun }),
     });
 
     expect(result.recomputed).toBe(1);
     expect(result.caughtUp).toBe(1);
-    expect(writes.get('catchup-overdue')).toBe(pastNextRun);
+    // Critical assertion: next_run was overridden to `now`, so the
+    // next scheduler tick fires the row immediately. If the override
+    // hadn't taken, next_run would be the future 7am-tomorrow-Tokyo
+    // value from cron-parser.next() and the brief would skip ~17h.
+    expect(writes.get('catchup-overdue')).toBe(fakeNow.toISOString());
     const catchupCalls = warnSpy.mock.calls.filter(
       (call) =>
         typeof call[1] === 'string' &&
@@ -3177,19 +3191,18 @@ describe('recomputeLocalSchedules (#584)', () => {
     expect(catchupCalls).toHaveLength(1);
     expect(catchupCalls[0][0]).toMatchObject({
       taskId: 'catchup-overdue',
-      nextRun: pastNextRun,
       currentTz: 'Asia/Tokyo',
     });
 
     warnSpy.mockRestore();
   });
 
-  it('does NOT emit catch-up when row already fired today in new zone', () => {
-    // `last_run` AFTER today's midnight in the new zone → row already
-    // ran today → gate suppresses catch-up warn even if the freshly-
-    // computed next_run lands in the past.
+  it('does NOT emit catch-up when last_run is on/after the prev cron occurrence (real cron prev path)', () => {
+    // last_run AFTER today's 7am-Tokyo (= 22:00 UTC prev day) means
+    // the row already fired its missed slot. decideCatchUp returns
+    // shouldCatchUp=false and next_run takes cron-parser.next()'s
+    // future value (tomorrow's 7am Tokyo).
     const fakeNow = new Date('2026-03-10T05:00:00.000Z'); // 14:00 Tokyo
-    const pastNextRun = new Date(fakeNow.getTime() - 5 * 60_000).toISOString();
     const fakeRow: ScheduledTask = {
       id: 'fired-today',
       group_folder: 'main',
@@ -3200,10 +3213,10 @@ describe('recomputeLocalSchedules (#584)', () => {
       schedule_value: '0 7 * * *',
       schedule_timezone: 'local',
       context_mode: 'isolated',
-      next_run: pastNextRun,
-      // 23:00 UTC on 2026-03-09 = 08:00 Tokyo on 2026-03-10
-      // → AFTER Tokyo midnight on 2026-03-10, BEFORE `fakeNow` —
-      // row already fired today in Tokyo.
+      next_run: new Date('2026-03-10T12:00:00.000Z').toISOString(),
+      // 23:00 UTC on 2026-03-09 = 08:00 Tokyo on 2026-03-10. Today's
+      // 7am Tokyo prev occurrence = 22:00 UTC prev day; last_run is
+      // an hour AFTER that → row already fired today's slot.
       last_run: new Date('2026-03-09T23:00:00.000Z').toISOString(),
       last_result: 'prior-fire',
       status: 'active',
@@ -3212,11 +3225,108 @@ describe('recomputeLocalSchedules (#584)', () => {
     };
 
     const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const writes = new Map<string, string | null>();
 
     const result = recomputeLocalSchedules(() => 'Asia/Tokyo', fakeNow, {
       getActiveLocalScheduledTasks: () => [fakeRow],
-      setTaskNextRun: () => {},
-      computeNextRun: () => ({ nextRun: pastNextRun }),
+      setTaskNextRun: (id, nr) => {
+        writes.set(id, nr);
+      },
+    });
+    expect(result.recomputed).toBe(1);
+    expect(result.caughtUp).toBe(0);
+    // next_run is the future cron-parser.next() value, not `now`.
+    expect(writes.get('fired-today')).not.toBe(fakeNow.toISOString());
+    const written = writes.get('fired-today');
+    expect(written).toBeTruthy();
+    expect(Date.parse(written!)).toBeGreaterThan(fakeNow.getTime());
+    const catchupCalls = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[1] === 'string' &&
+        call[1].startsWith('recomputeLocalSchedules: catch-up'),
+    );
+    expect(catchupCalls).toHaveLength(0);
+
+    warnSpy.mockRestore();
+  });
+
+  it('does NOT emit catch-up when prev cron occurrence is older than 24h (stale window)', () => {
+    // Weekly Monday-7am cron, now is Wednesday — prev occurrence is
+    // ~48h old, outside the 24h catch-up window. decideCatchUp
+    // returns false; we don't force-fire a long-stale row even on a
+    // tz flip.
+    const fakeNow = new Date('2026-03-11T05:00:00.000Z'); // Wed 14:00 Tokyo
+    const fakeRow: ScheduledTask = {
+      id: 'weekly-stale',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: '0 7 * * 1', // Monday 07:00
+      schedule_timezone: 'local',
+      context_mode: 'isolated',
+      next_run: new Date('2026-03-15T22:00:00.000Z').toISOString(),
+      last_run: null,
+      last_result: null,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    };
+
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const writes = new Map<string, string | null>();
+
+    const result = recomputeLocalSchedules(() => 'Asia/Tokyo', fakeNow, {
+      getActiveLocalScheduledTasks: () => [fakeRow],
+      setTaskNextRun: (id, nr) => {
+        writes.set(id, nr);
+      },
+    });
+    expect(result.recomputed).toBe(1);
+    expect(result.caughtUp).toBe(0);
+    const catchupCalls = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[1] === 'string' &&
+        call[1].startsWith('recomputeLocalSchedules: catch-up'),
+    );
+    expect(catchupCalls).toHaveLength(0);
+
+    warnSpy.mockRestore();
+  });
+
+  it('skips catch-up entirely when startOfTodayInTz returns NaN', () => {
+    // Sentinel tz that throws inside Intl.DateTimeFormat → NaN
+    // midnight → gate unusable → catch-up branch skipped even when
+    // the row IS overdue. Matches the function contract for
+    // unparseable timezones.
+    const fakeNow = new Date('2026-03-10T05:00:00.000Z');
+    const fakeRow: ScheduledTask = {
+      id: 'gate-unusable',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: '0 7 * * *',
+      schedule_timezone: 'local',
+      context_mode: 'isolated',
+      next_run: new Date('2026-03-10T12:00:00.000Z').toISOString(),
+      last_run: null,
+      last_result: null,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    };
+
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const writes = new Map<string, string | null>();
+
+    const result = recomputeLocalSchedules(() => 'Not/A_Real_Zone', fakeNow, {
+      getActiveLocalScheduledTasks: () => [fakeRow],
+      setTaskNextRun: (id, nr) => {
+        writes.set(id, nr);
+      },
     });
     expect(result.recomputed).toBe(1);
     expect(result.caughtUp).toBe(0);
@@ -3250,30 +3360,70 @@ describe('recomputeLocalSchedules (#584)', () => {
     ).toBeNaN();
   });
 
-  it('does NOT emit catch-up when row already fired today in new zone', () => {
-    // Seed a cron-`local` row with last_run AFTER today's midnight in
-    // the new zone. Even if a future iteration recomputes against the
-    // new zone, the gate suppresses the catch-up warn.
+  it('startOfTodayInTz resolves offset at intended midnight, not at now (DST spring-forward)', () => {
+    // 2026-03-08 in America/New_York: at 02:00 EST clocks jumped to
+    // 03:00 EDT. Offset at NY midnight (start of day) = UTC-5 (EST);
+    // offset at NY 10:00 (after the jump) = UTC-4 (EDT). The naive
+    // single-pass implementation that read the offset at `now` would
+    // compute midnight using UTC-4 and miss by 1h.
+    //
+    // NY 2026-03-08 midnight (00:00 EST) = 2026-03-08T05:00:00Z.
+    // We pass `now` = 10:00 EDT = 14:00 UTC.
+    const nowAfterSpringForward = new Date('2026-03-08T14:00:00.000Z');
+    expect(startOfTodayInTz('America/New_York', nowAfterSpringForward)).toBe(
+      Date.UTC(2026, 2, 8, 5, 0, 0),
+    );
+  });
+
+  it('startOfTodayInTz resolves offset at intended midnight, not at now (DST fall-back)', () => {
+    // 2026-11-01 in America/New_York: at 02:00 EDT clocks fell back
+    // to 01:00 EST. Offset at NY midnight (start of day) = UTC-4
+    // (EDT, pre-transition); offset at NY 10:00 (post-transition) =
+    // UTC-5 (EST). Naive single-pass would mis-compute by 1h.
+    //
+    // NY 2026-11-01 midnight (00:00 EDT) = 2026-11-01T04:00:00Z.
+    // We pass `now` = 10:00 EST = 15:00 UTC.
+    const nowAfterFallBack = new Date('2026-11-01T15:00:00.000Z');
+    expect(startOfTodayInTz('America/New_York', nowAfterFallBack)).toBe(
+      Date.UTC(2026, 10, 1, 4, 0, 0),
+    );
+  });
+
+  it('startOfTodayInTz handles tz-day-boundary crossing (UTC date != local date)', () => {
+    // 2026-03-10T05:00:00Z = 2026-03-10 14:00 Tokyo (UTC+9). The
+    // candidate Date.UTC(2026, 2, 10) = 2026-03-10T00:00Z, which in
+    // Tokyo is 09:00 on 2026-03-10. The formatter at that candidate
+    // shows hour=9 on the same calendar day → residual = 9h → true
+    // Tokyo midnight = candidate - 9h = 2026-03-09T15:00Z.
+    expect(
+      startOfTodayInTz('Asia/Tokyo', new Date('2026-03-10T05:00:00.000Z')),
+    ).toBe(Date.UTC(2026, 2, 9, 15, 0, 0));
+  });
+
+  it('end-to-end DB path: row that already fired today in new zone takes future next_run with no catch-up', () => {
+    // End-to-end integration: real createTask + real selector + real
+    // setTaskNextRun. Distinct from the dep-injection test above
+    // (which exercises decideCatchUp logic in isolation) — this one
+    // verifies the full DB round-trip doesn't trip the catch-up
+    // branch when last_run is on/after the prev cron occurrence.
     const tz = 'Asia/Tokyo';
     const now = new Date('2026-03-10T05:00:00.000Z'); // 14:00 in Tokyo
     const initial = new Date('2026-03-15T00:00:00.000Z').toISOString();
-    // 08:00 Tokyo = 23:00 UTC previous day — AFTER Tokyo midnight,
-    // BEFORE `now`.
+    // 23:00 UTC prev day = 08:00 Tokyo today (AFTER today's 7am-Tokyo
+    // prev occurrence at 22:00 UTC prev day) → row already fired.
     seedLocalRow('fired-today-row', initial, {
       last_run: new Date('2026-03-09T23:00:00.000Z').toISOString(),
     });
 
     const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
 
-    // Drive with a fake selector returning the row but with a
-    // doctored cron compute path: cron will always pick a future
-    // next_run, so we just verify no catch-up warns landed.
     const result = recomputeLocalSchedules(() => tz, now);
     expect(result.recomputed).toBe(1);
     expect(result.caughtUp).toBe(0);
-    // The only allowed warns from this call would be the catch-up
-    // line; any other warn (per-row compute error etc.) would be a
-    // bug surface for this test to flag.
+    // Verify next_run was set to a future value (not `now`).
+    const fresh = getTaskById('fired-today-row');
+    expect(fresh!.next_run).toBeTruthy();
+    expect(Date.parse(fresh!.next_run!)).toBeGreaterThan(now.getTime());
     const catchupCalls = warnSpy.mock.calls.filter(
       (call) =>
         typeof call[1] === 'string' &&
