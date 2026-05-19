@@ -107,12 +107,27 @@ export function parseSkillNameFromPrompt(prompt: string): string | undefined {
 }
 
 /**
+ * Upper bound on `drain_timeout_ms` overrides. Node's `setTimeout`
+ * clamps delays > `2_147_483_647` (Int32 max) to 1ms, which would
+ * make the watchdog re-arm in a tight loop instead of waiting the
+ * declared budget — silently disabling the override. Capping well
+ * below the Int32 cliff also rejects implausibly-large values that
+ * are almost certainly a tile-author typo (10× the intended budget,
+ * a unit confusion `min` vs `ms`, etc.). 10 minutes is generous —
+ * the heaviest known maintenance compose is morning-brief at ~150s
+ * — and any genuine need for a longer budget should land here as a
+ * deliberate constant bump, not as a tile-author one-off.
+ */
+export const DRAIN_TIMEOUT_MS_MAX = 600_000;
+
+/**
  * Parse the `drain_timeout_ms` scalar from a SKILL.md's leading YAML
  * frontmatter. Returns `undefined` if the file has no frontmatter, no
  * `drain_timeout_ms` key, or a value that doesn't parse as a positive
- * integer. Deliberately narrow — pulling js-yaml just for one scalar
- * would be unjustified weight; the host-side cadence-registry's
- * `parseSkillFrontmatter` is the same shape and the same justification.
+ * integer within `(0, DRAIN_TIMEOUT_MS_MAX]`. Deliberately narrow —
+ * pulling js-yaml just for one scalar would be unjustified weight;
+ * the host-side cadence-registry's `parseSkillFrontmatter` is the
+ * same shape and the same justification.
  */
 export function parseDrainTimeoutMsFromFrontmatter(
   content: string,
@@ -136,6 +151,19 @@ export function parseDrainTimeoutMsFromFrontmatter(
     const key = line.slice(0, colonIdx).trim();
     if (key !== 'drain_timeout_ms') continue;
     let value = line.slice(colonIdx + 1).trim();
+    // Strip an inline `# ...` comment from an unquoted value before
+    // validating, matching the host-side `parseSkillFrontmatter`
+    // semantics in `src/cadence-registry.ts`. Without this,
+    // `drain_timeout_ms: 180000 # 3 minutes` would fail the digit
+    // regex and silently fall back to the default — exactly the
+    // shape tile authors will naturally write when annotating a
+    // non-obvious value.
+    if (!value.startsWith('"') && !value.startsWith("'")) {
+      const inlineCommentIdx = value.search(/\s+#/);
+      if (inlineCommentIdx >= 0) {
+        value = value.slice(0, inlineCommentIdx).trimEnd();
+      }
+    }
     if (
       value.length >= 2 &&
       ((value.startsWith('"') && value.endsWith('"')) ||
@@ -145,10 +173,26 @@ export function parseDrainTimeoutMsFromFrontmatter(
     }
     if (!/^\d+$/.test(value)) return undefined;
     const n = Number.parseInt(value, 10);
-    return n > 0 ? n : undefined;
+    if (n <= 0) return undefined;
+    if (n > DRAIN_TIMEOUT_MS_MAX) return undefined;
+    return n;
   }
   return undefined;
 }
+
+/**
+ * Skill names are directory names under the container's skills
+ * mount. Allow ASCII letters, digits, `_`, `-`, and the `__`
+ * namespace separator the tile installer uses (`tessl__<name>`).
+ * Rejecting anything else — slashes, dots, leading hyphens, NUL,
+ * empty — defends against a prompt that smuggles `..` or an
+ * absolute path into a `Skill(skill: "...")` invocation and tries
+ * to walk the budget resolver into reading a SKILL.md outside the
+ * mount. The character class is deliberately tighter than
+ * "anything `path.join` would accept" so an attacker can't slip a
+ * dotted segment past the regex.
+ */
+const SAFE_SKILL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 /**
  * Resolve the effective idle budget for the current runQuery. Reads
@@ -156,11 +200,16 @@ export function parseDrainTimeoutMsFromFrontmatter(
  * skill's SKILL.md under `skillsDir`, and returns the
  * `drain_timeout_ms` frontmatter override if valid. Falls back to
  * `defaultMs` on any miss — no skill invocation in the prompt, skill
- * not installed, missing or malformed frontmatter, or I/O error.
+ * name fails the safe-name regex, skill not installed, missing or
+ * malformed frontmatter.
  *
- * Read errors are swallowed deliberately: the watchdog is a last-
- * resort net and must never throw during budget resolution. A
- * missing SKILL.md means "use the default", not "abort the run".
+ * Filesystem misses (`ENOENT` / `ENOTDIR`) fall back to the default
+ * silently — a missing SKILL.md means "use the default", not "abort
+ * the run". Other I/O errors (permission, malformed path that
+ * survives the regex, etc.) are unexpected and propagate so the
+ * operator can diagnose; the existing `runQuery` error-handling
+ * surface in `index.ts` writes them to the SDK result diagnostic
+ * channel rather than silently disabling the override.
  */
 export function resolveDrainTimeoutMs(
   prompt: string,
@@ -169,12 +218,22 @@ export function resolveDrainTimeoutMs(
 ): number {
   const skillName = parseSkillNameFromPrompt(prompt);
   if (!skillName) return defaultMs;
+  if (!SAFE_SKILL_NAME_RE.test(skillName)) return defaultMs;
   const skillPath = path.join(skillsDir, skillName, 'SKILL.md');
+  // Defence-in-depth: even with the safe-name regex above, verify
+  // the resolved path is still under `skillsDir`. A future relaxation
+  // of the regex (or a `skillsDir` that itself contains a symlink)
+  // could otherwise widen the read surface.
+  const resolvedSkill = path.resolve(skillPath);
+  const resolvedRoot = path.resolve(skillsDir) + path.sep;
+  if (!resolvedSkill.startsWith(resolvedRoot)) return defaultMs;
   let content: string;
   try {
     content = fs.readFileSync(skillPath, 'utf-8');
-  } catch {
-    return defaultMs;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return defaultMs;
+    throw err;
   }
   const override = parseDrainTimeoutMsFromFrontmatter(content);
   return override ?? defaultMs;
