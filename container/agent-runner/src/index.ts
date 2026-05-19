@@ -73,6 +73,7 @@ import {
 import {
   decideHardExitWatchdog,
   HARD_EXIT_IDLE_BUDGET_MS,
+  resolveDrainTimeoutMs,
 } from './hard-exit-watchdog.js';
 import { shouldSynthesizeSilentStop } from './silent-stop-synthesis.js';
 import { isStaleSessionError } from './stale-session.js';
@@ -2936,6 +2937,35 @@ async function runQuery(
   // nothing has flowed yet (e.g. close detected immediately after
   // prompt enqueue, before the first assistant turn).
   let lastSdkActivityAt = Date.now();
+  // #589 — set of tool_use ids still awaiting their matching
+  // tool_result. `pendingToolCallCount` is `pendingToolUseIds.size`,
+  // resolved at watchdog-decision time. A Set rather than an int
+  // counter so duplicate SDK events (rare but observed) and missing
+  // tool_results (an abandoned tool call after stream.end()) don't
+  // produce a negative or double-counted balance. While the set is
+  // non-empty the watchdog re-arms unconditionally — the agent is
+  // provably alive (the SDK is blocking on a tool that hasn't
+  // returned yet), so the idle gap between tool_use and tool_result
+  // is not real silence. Tools that genuinely never return are caught
+  // by the SIGKILL deploy-kill cascade (#249/#250) at the host hard
+  // timeout, so the watchdog doesn't need to second-guess.
+  const pendingToolUseIds = new Set<string>();
+  // #589 — per-skill drain-timeout override. Heavy-maintenance skills
+  // (morning-brief, soul-searching) declare `drain_timeout_ms` in
+  // their SKILL.md frontmatter; everything else uses the 90s default.
+  // Resolved once at runQuery start from the prompt's `Skill(skill:
+  // "...")` invocation; missing / malformed values fall back. Walks
+  // `/home/node/.claude/skills/<name>/SKILL.md` via fs.readFileSync.
+  const drainBudgetMs = resolveDrainTimeoutMs(
+    prompt,
+    '/home/node/.claude/skills',
+    HARD_EXIT_IDLE_BUDGET_MS,
+  );
+  if (drainBudgetMs !== HARD_EXIT_IDLE_BUDGET_MS) {
+    log(
+      `Hard-exit watchdog: per-skill drain_timeout_ms override = ${drainBudgetMs}ms (default ${HARD_EXIT_IDLE_BUDGET_MS}ms)`,
+    );
+  }
   const pollIpcDuringQuery = () => {
     if (!ipcPolling) return;
     if (shouldClose()) {
@@ -2943,32 +2973,37 @@ async function runQuery(
       closedDuringQuery = true;
       stream.end();
       ipcPolling = false;
-      // #461 + #545 — activity-aware hard-exit watchdog. The
-      // decision (`exit` vs `rearm`) lives in
-      // `hard-exit-watchdog.ts` so the boundary semantics
-      // (idleMs >= budget exits, otherwise re-arm with remaining
-      // budget) are unit-testable as a pure function. The natural
-      // exit path still runs first when healthy — `process.exit`
-      // synchronously terminates, so this timer's callback only
-      // fires when nothing has come out of the SDK for the full
-      // idle budget.
+      // #461 + #545 + #589 — activity-aware hard-exit watchdog with
+      // per-skill budget override and in-flight tool_use re-arm. The
+      // decision (`exit` vs `rearm`) lives in `hard-exit-watchdog.ts`
+      // so the boundary semantics are unit-testable as a pure
+      // function. The natural exit path still runs first when
+      // healthy — `process.exit` synchronously terminates, so this
+      // timer's callback only fires when nothing has come out of the
+      // SDK for the full idle budget AND no tool call is in flight.
       const checkIdleAndExitOrRearm = () => {
-        const decision = decideHardExitWatchdog(Date.now(), lastSdkActivityAt);
+        const decision = decideHardExitWatchdog(
+          Date.now(),
+          lastSdkActivityAt,
+          drainBudgetMs,
+          pendingToolUseIds.size,
+        );
         if (decision.action === 'exit') {
           log(
             `Hard-exit watchdog: ${Math.round(decision.idleMs / 1000)}s idle since last SDK event after _close — process.exit(0)`,
           );
           process.exit(0);
         }
-        // Activity has reset the clock; re-arm to fire when the
-        // remaining idle window would next elapse. The helper
-        // returns `rearmInMs = budget - idleMs`, so a chatty agent
-        // that emits one event per 25s still trips the watchdog
-        // after ~30s of "true silence within the budget window",
-        // not never.
+        // Activity has reset the clock OR a tool call is in flight;
+        // re-arm to fire when the remaining idle window would next
+        // elapse. Helper returns `rearmInMs = budget - idleMs` for
+        // the normal path and `rearmInMs = budget` for the in-flight
+        // tool path. Chatty agents that emit one event per budget-1s
+        // keep re-arming and never trip; truly-stuck iterators with
+        // no in-flight tools eventually idle past the threshold.
         setTimeout(checkIdleAndExitOrRearm, decision.rearmInMs).unref();
       };
-      setTimeout(checkIdleAndExitOrRearm, HARD_EXIT_IDLE_BUDGET_MS).unref();
+      setTimeout(checkIdleAndExitOrRearm, drainBudgetMs).unref();
       return;
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
@@ -3882,6 +3917,14 @@ async function runQuery(
             ) {
               pendingUserFacingToolUseIds.add(block.id);
             }
+            // #589 — record the tool_use id so the post-close hard-
+            // exit watchdog re-arms while the SDK is blocking on this
+            // tool's result. Every tool_use with an id participates,
+            // not just user-facing sends — Bash/Read/Edit/etc. all
+            // have the same alive-during-tool guarantee.
+            if (block.id) {
+              pendingToolUseIds.add(block.id);
+            }
           }
         }
       }
@@ -3929,6 +3972,14 @@ async function runQuery(
               block.is_error !== true
             ) {
               userFacingSendSucceeded = true;
+            }
+            // #589 — clear the tool_use from the in-flight set so the
+            // watchdog stops re-arming on its account. The set keeps
+            // unmatched entries (rare; abandoned tool calls after
+            // stream.end) but those clear naturally when the process
+            // exits.
+            if (block.tool_use_id) {
+              pendingToolUseIds.delete(block.tool_use_id);
             }
           }
         }
