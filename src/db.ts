@@ -1541,6 +1541,42 @@ export function getAllTasks(): ScheduledTask[] {
     .all() as ScheduledTask[];
 }
 
+/**
+ * #584 — Cron rows scheduled with `schedule_timezone = 'local'`
+ * resolve their effective tz at fire time via `tz_state.current_tz`.
+ * When `current_tz` flips mid-slot (operator moves zones), already-
+ * cached `next_run` values stay anchored to the prior zone until the
+ * row fires. The scheduler hooks `tz_state` writers via
+ * `recomputeLocalSchedules` (see `task-scheduler.ts`) and uses this
+ * selector to find the affected rows. Narrow filter (`'local'` +
+ * `'active'`) so a flip doesn't recompute the world.
+ */
+export function getActiveLocalScheduledTasks(): ScheduledTask[] {
+  return db
+    .prepare(
+      `SELECT * FROM scheduled_tasks
+        WHERE schedule_timezone = 'local'
+          AND status = 'active'`,
+    )
+    .all() as ScheduledTask[];
+}
+
+/**
+ * #584 — Focused next_run writer for `recomputeLocalSchedules`. The
+ * caller has just computed a fresh `next_run` for a `'local'`-scheduled
+ * row against the new `current_tz`; this writes ONLY `next_run` and
+ * leaves every other field alone (status, last_run, last_result,
+ * schedule_*). Distinct from `updateTaskAfterRun` (which also bumps
+ * `last_run` / `last_result` / status) and `updateTask` (which is the
+ * general-purpose multi-field updater used for user-facing IPC writes).
+ */
+export function setTaskNextRun(id: string, nextRun: string | null): void {
+  db.prepare('UPDATE scheduled_tasks SET next_run = ? WHERE id = ?').run(
+    nextRun,
+    id,
+  );
+}
+
 export function updateTask(
   id: string,
   updates: Partial<
@@ -2198,6 +2234,7 @@ export function walkTzSegments(
 export function applyTripitSegmentsToTzState(
   stdoutJson: { segments?: readonly TripitSegment[] | null } | null,
   now: Date = new Date(),
+  onTzFlipped?: (prev: string, next: string) => void,
 ): { prev: string | null; next: string | null; changed: boolean } {
   const segments =
     stdoutJson && Array.isArray(stdoutJson.segments) ? stdoutJson.segments : [];
@@ -2241,6 +2278,27 @@ export function applyTripitSegmentsToTzState(
       { prev: row.current_tz, next, segmentCount: segments.length },
       'tz_state.current_tz flipped via sync_tripit segment walk (#542)',
     );
+    // #584 — invoke the recompute hook AFTER the UPDATE landed, so a
+    // reader picking up the new current_tz sees the new value. Wrap
+    // in try/catch: a transient throw from the recompute (DB busy,
+    // programming bug downstream) must not poison the tz_state write
+    // itself — the canonical state has already been updated, and the
+    // recompute is a derived optimisation. The next scheduler tick
+    // and the next tz_state writer will both retry.
+    if (onTzFlipped) {
+      try {
+        onTzFlipped(row.current_tz, next);
+      } catch (err) {
+        logger.warn(
+          {
+            err: err instanceof Error ? err.message : String(err),
+            prev: row.current_tz,
+            next,
+          },
+          'applyTripitSegmentsToTzState: onTzFlipped callback threw — tz_state write already landed, continuing',
+        );
+      }
+    }
   }
   return { prev: row.current_tz, next, changed };
 }
@@ -2344,6 +2402,7 @@ export function readTzStateForContext(): TzStateForContext | null {
 export function runTzHeartbeatAdvisory(
   now: Date = new Date(),
   ownerSenderId?: string | null,
+  onTzFlipped?: (prev: string, next: string) => void,
 ): TzAdvisoryResult {
   const row = db
     .prepare(
@@ -2496,6 +2555,24 @@ export function runTzHeartbeatAdvisory(
       },
       'tz_state.current_tz flipped via heartbeat advisory (#574 Phase 2)',
     );
+    // #584 — see `applyTripitSegmentsToTzState` for the rationale; same
+    // contract on the heartbeat-advisory writer. Wrap in try/catch so a
+    // recompute fault doesn't poison the tz_state write that already
+    // landed in this transaction.
+    if (onTzFlipped) {
+      try {
+        onTzFlipped(flip.prev, flip.next);
+      } catch (err) {
+        logger.warn(
+          {
+            err: err instanceof Error ? err.message : String(err),
+            prev: flip.prev,
+            next: flip.next,
+          },
+          'runTzHeartbeatAdvisory: onTzFlipped callback threw — tz_state write already landed, continuing',
+        );
+      }
+    }
   }
 
   return { flip, warningToFire };

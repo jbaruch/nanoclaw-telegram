@@ -63,6 +63,7 @@ import {
   deleteSessionName,
   getAllTasks,
   getChatByJid,
+  getCurrentTz,
   getLastBotMessageTimestamp,
   getLastFromMeMessage,
   getMessageById,
@@ -125,7 +126,10 @@ import {
   startHubitatListener,
   stopHubitatListener,
 } from './hubitat-listener.js';
-import { startSchedulerLoop } from './task-scheduler.js';
+import {
+  recomputeLocalSchedules,
+  startSchedulerLoop,
+} from './task-scheduler.js';
 import { startTriggerLearner } from './gates/trigger-learner-runtime.js';
 import { installTelegramOutboundTap } from './telegram-outbound-tap.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -3344,7 +3348,20 @@ async function main(): Promise<void> {
   setInterval(() => {
     let advisory: TzAdvisoryResult;
     try {
-      advisory = runTzHeartbeatAdvisory(new Date(), ASSISTANT_OWNER_TG_USER_ID);
+      // #584 — `onTzFlipped` invalidates cached `next_run` values on
+      // active `schedule_timezone='local'` rows so a zone change at
+      // heartbeat time doesn't leave 7am-local tasks anchored to the
+      // prior zone. The recompute is wrapped inside the writer; a
+      // recompute fault is logged and continued, never bubbled out
+      // here (this catch deliberately stays narrow on transient
+      // SQLite codes).
+      advisory = runTzHeartbeatAdvisory(
+        new Date(),
+        ASSISTANT_OWNER_TG_USER_ID,
+        () => {
+          recomputeLocalSchedules(getCurrentTz, new Date());
+        },
+      );
     } catch (err) {
       // Narrowed to transient SQLite contention codes only —
       // SQLITE_BUSY / SQLITE_LOCKED can fire under WAL contention

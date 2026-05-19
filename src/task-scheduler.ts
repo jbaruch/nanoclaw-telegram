@@ -19,6 +19,7 @@ import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
 import { computeThresholds } from './threshold.js';
 import { emitSessionTokens } from './usage-telemetry.js';
 import {
+  getActiveLocalScheduledTasks,
   getAllTasks,
   getCurrentTz,
   getDormantRecurringTasks,
@@ -27,6 +28,7 @@ import {
   getTaskById,
   logTaskRun,
   pruneCompletedTasks,
+  setTaskNextRun,
   setTaskSessionId,
   storeChatMetadata,
   storeMessage,
@@ -276,6 +278,189 @@ export function applyComputeNextRunRemediation(
       'Dropped invalid schedule_timezone — falling back to TIMEZONE going forward',
     );
   }
+}
+
+/**
+ * #584 — Compute today's UTC midnight in the given IANA timezone. Used
+ * by `recomputeLocalSchedules` to gate the "already fired today"
+ * decision: a row whose `last_run` falls before today's midnight (in
+ * the NEW zone) is overdue and worth a catch-up warn; a row whose
+ * `last_run` falls on/after that midnight has already executed for
+ * today and is fine.
+ *
+ * Implementation note: `Intl.DateTimeFormat` with the target tz gives
+ * us each calendar field; we then back-construct a UTC instant for
+ * 00:00:00 of that calendar date in that zone via Date.UTC + the zone's
+ * UTC offset at `now`. The two-step lookup (formatToParts to read the
+ * wall-clock components, then a UTC reconstruction) is necessary
+ * because JS Date itself has no tz-aware "start of day" primitive.
+ *
+ * Returns NaN if the tz string is unparseable — caller treats that as
+ * "can't gate, skip the catch-up" rather than throwing.
+ */
+export function startOfTodayInTz(tz: string, now: Date): number {
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).formatToParts(now);
+  } catch {
+    return NaN;
+  }
+  const byType: Record<string, string> = {};
+  for (const p of parts) {
+    if (p.type !== 'literal') byType[p.type] = p.value;
+  }
+  const year = Number(byType.year);
+  const month = Number(byType.month);
+  const day = Number(byType.day);
+  // `hour` from a 24h `Intl.DateTimeFormat` formatter can come back as
+  // "24" at midnight in some locales/runtimes; normalise via mod so
+  // arithmetic below is sane.
+  const hour = Number(byType.hour) % 24;
+  const minute = Number(byType.minute);
+  const second = Number(byType.second);
+  if (
+    !Number.isFinite(year) ||
+    !Number.isFinite(month) ||
+    !Number.isFinite(day) ||
+    !Number.isFinite(hour) ||
+    !Number.isFinite(minute) ||
+    !Number.isFinite(second)
+  ) {
+    return NaN;
+  }
+  // The wall-clock instant the formatter reports IS `now`. Subtract its
+  // wall-clock offset from `now`'s UTC time to get UTC-midnight-in-zone
+  // for the calendar date the formatter showed.
+  const wallUtcMillis = Date.UTC(year, month - 1, day, hour, minute, second);
+  const offsetMs = wallUtcMillis - now.getTime();
+  const midnightUtcMillis = Date.UTC(year, month - 1, day) - offsetMs;
+  return midnightUtcMillis;
+}
+
+/**
+ * #584 — Recompute `next_run` for every active `schedule_timezone =
+ * 'local'` row. Called from the `tz_state.current_tz` write path
+ * (`applyTripitSegmentsToTzState`, `runTzHeartbeatAdvisory`) via an
+ * `onTzFlipped` callback, so a tz flip mid-slot invalidates cached
+ * `next_run` values immediately rather than waiting for each row to
+ * elapse against the prior zone.
+ *
+ * Per-row error isolation: a `computeNextRunDetailed` failure or a
+ * `setTaskNextRun` failure on one row must not stall the rest of the
+ * recompute. Wrap each row, log + continue. The next scheduler tick
+ * (max ~60 s later) will pick up any rows that remain stale.
+ *
+ * Catch-up warn: a freshly-computed `next_run` that's already past
+ * AND for which `last_run < midnight-in-new-zone` (or `last_run` is
+ * null) signals "you just landed in a zone where this row's wall-
+ * clock fire time has already happened today". Emit a structured
+ * warn so operator-facing diagnostics surface it; the next scheduler
+ * tick fires the overdue row through the standard due-task gate, no
+ * separate dispatch path from the tz-writer needed.
+ */
+export interface RecomputeLocalSchedulesResult {
+  recomputed: number;
+  caughtUp: number;
+}
+
+export function recomputeLocalSchedules(
+  resolveCurrentTz: () => string | null = getCurrentTz,
+  now: Date = new Date(),
+  deps: {
+    getActiveLocalScheduledTasks?: () => ScheduledTask[];
+    setTaskNextRun?: (id: string, nextRun: string | null) => void;
+    /**
+     * Compute override for tests. Production never sets this; the
+     * default delegates to `computeNextRunDetailed`. The seam is
+     * narrow on purpose: production catch-up scenarios depend on
+     * `computeNextRunDetailed` returning a PAST value (only
+     * structurally reachable for pathological cron / DST-discontinuity
+     * cases), and the deterministic test for that branch needs to
+     * drive the compute result directly.
+     */
+    computeNextRun?: (task: ScheduledTask) => NextRunResult;
+  } = {},
+): RecomputeLocalSchedulesResult {
+  const readRows =
+    deps.getActiveLocalScheduledTasks ?? getActiveLocalScheduledTasks;
+  const writeRow = deps.setTaskNextRun ?? setTaskNextRun;
+  const compute =
+    deps.computeNextRun ??
+    ((task) => computeNextRunDetailed(task, resolveCurrentTz));
+  const rows = readRows();
+  const tzForGate = resolveCurrentTz();
+  const midnightInNewZoneUtc = tzForGate
+    ? startOfTodayInTz(tzForGate, now)
+    : NaN;
+  let recomputed = 0;
+  let caughtUp = 0;
+  for (const row of rows) {
+    let nextRun: string | null;
+    try {
+      const detailed = compute(row);
+      nextRun = detailed.nextRun;
+    } catch (err) {
+      logger.warn(
+        {
+          taskId: row.id,
+          scheduleValue: row.schedule_value,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'recomputeLocalSchedules: computeNextRunDetailed threw — skipping row',
+      );
+      continue;
+    }
+    try {
+      writeRow(row.id, nextRun);
+      recomputed += 1;
+    } catch (err) {
+      logger.warn(
+        {
+          taskId: row.id,
+          nextRun,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'recomputeLocalSchedules: setTaskNextRun threw — next scheduler tick will retry against the stored value',
+      );
+      continue;
+    }
+    if (nextRun === null) continue;
+    const nextRunMs = Date.parse(nextRun);
+    if (!Number.isFinite(nextRunMs)) continue;
+    if (nextRunMs >= now.getTime()) continue;
+    // next_run is past — gate the catch-up warn on "hasn't fired today".
+    // last_run null = row has never fired = overdue-and-fireable.
+    let firedTodayInNewZone = false;
+    if (row.last_run && Number.isFinite(midnightInNewZoneUtc)) {
+      const lastRunMs = Date.parse(row.last_run);
+      if (Number.isFinite(lastRunMs) && lastRunMs >= midnightInNewZoneUtc) {
+        firedTodayInNewZone = true;
+      }
+    }
+    if (!firedTodayInNewZone) {
+      caughtUp += 1;
+      logger.warn(
+        {
+          taskId: row.id,
+          scheduleValue: row.schedule_value,
+          nextRun,
+          lastRun: row.last_run,
+          currentTz: tzForGate,
+        },
+        'recomputeLocalSchedules: catch-up — next_run is past and row has not fired today in new zone (#584). Next scheduler tick will fire it.',
+      );
+    }
+  }
+  return { recomputed, caughtUp };
 }
 
 /**
