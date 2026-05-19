@@ -44,6 +44,50 @@ describe('classifyDestructiveOp', () => {
     expect(
       classifyDestructiveOp('mcp__nanoclaw__push_staged_to_branch', {}),
     ).toEqual({ scope: 'push_staged_to_branch', label: expect.any(String) });
+    expect(
+      classifyDestructiveOp('mcp__nanoclaw__set_agent_model', {}),
+    ).toEqual({ scope: 'set_agent_model', label: expect.any(String) });
+    expect(
+      classifyDestructiveOp(
+        'mcp__nanoclaw__set_maintenance_agent_model',
+        {},
+      ),
+    ).toEqual({
+      scope: 'set_maintenance_agent_model',
+      label: expect.any(String),
+    });
+    expect(
+      classifyDestructiveOp('mcp__nanoclaw__set_task_agent_model', {}),
+    ).toEqual({ scope: 'set_task_agent_model', label: expect.any(String) });
+  });
+
+  it('gates the three AGENT_MODEL set_* tools through decideConfirmation when chain is untrusted (#595)', () => {
+    for (const toolName of [
+      'mcp__nanoclaw__set_agent_model',
+      'mcp__nanoclaw__set_maintenance_agent_model',
+      'mcp__nanoclaw__set_task_agent_model',
+    ]) {
+      const denied = decideConfirmation({
+        toolName,
+        toolInput: {},
+        hasUntrustedProvenance: true,
+        tokens: [],
+        nowIso: NOW,
+      });
+      expect(denied.kind).toBe('deny');
+      if (denied.kind === 'deny') {
+        expect(denied.scope).toBe(toolName.replace('mcp__nanoclaw__', ''));
+      }
+
+      const passedOnTrustedChain = decideConfirmation({
+        toolName,
+        toolInput: {},
+        hasUntrustedProvenance: false,
+        tokens: [],
+        nowIso: NOW,
+      });
+      expect(passedOnTrustedChain.kind).toBe('allow');
+    }
   });
 
   it('returns null for non-destructive tools', () => {

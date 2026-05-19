@@ -13,8 +13,9 @@
  *   aye-confirm --scope <scope> --reason '<text>' --ttl <duration>
  *
  *   --scope    one of: nuke_session, nuke_chat, github_backup,
- *              set_trusted, set_trigger, register_group,
- *              unregister_group, promote_staging,
+ *              set_trusted, set_trigger, set_agent_model,
+ *              set_maintenance_agent_model, set_task_agent_model,
+ *              register_group, unregister_group, promote_staging,
  *              push_staged_to_branch, tessl_update,
  *              schedule_task_harness, egress_allowlist_mutation,
  *              file_delete_outside_group
@@ -46,6 +47,9 @@ const VALID_SCOPES: ReadonlyArray<DestructiveScope> = [
   'github_backup',
   'set_trusted',
   'set_trigger',
+  'set_agent_model',
+  'set_maintenance_agent_model',
+  'set_task_agent_model',
   'register_group',
   'unregister_group',
   'promote_staging',

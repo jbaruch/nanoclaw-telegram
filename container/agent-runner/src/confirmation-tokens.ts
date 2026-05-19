@@ -42,6 +42,9 @@ export type DestructiveScope =
   | 'github_backup'
   | 'set_trusted'
   | 'set_trigger'
+  | 'set_agent_model'
+  | 'set_maintenance_agent_model'
+  | 'set_task_agent_model'
   | 'register_group'
   | 'unregister_group'
   | 'promote_staging'
@@ -304,6 +307,18 @@ export function classifyDestructiveOp(
     'mcp__nanoclaw__set_trigger': {
       scope: 'set_trigger',
       label: 'change how the agent activates in a chat',
+    },
+    'mcp__nanoclaw__set_agent_model': {
+      scope: 'set_agent_model',
+      label: "pin a group's Claude model (cost impact)",
+    },
+    'mcp__nanoclaw__set_maintenance_agent_model': {
+      scope: 'set_maintenance_agent_model',
+      label: "pin the maintenance-session Claude model (cost impact)",
+    },
+    'mcp__nanoclaw__set_task_agent_model': {
+      scope: 'set_task_agent_model',
+      label: "pin a scheduled task's Claude model (cost impact)",
     },
     'mcp__nanoclaw__register_group': {
       scope: 'register_group',

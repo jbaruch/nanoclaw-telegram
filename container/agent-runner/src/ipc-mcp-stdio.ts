@@ -21,6 +21,12 @@ import {
   performOperatorApprovedWrite,
   WRITE_TRUSTED_MEMORY_DESCRIPTION as writeTrustedMemoryDescription,
 } from './write-trusted-memory.js';
+import {
+  buildSetAgentModelPayload,
+  buildSetMaintenanceAgentModelPayload,
+  buildSetTaskAgentModelPayload,
+  describeAgentModelChange,
+} from './agent-model-payload.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -163,8 +169,13 @@ const server = new McpServer({
 //
 // The candidate set is verified against the host-side authz in
 // `src/ipc.ts`; tools with conditional gates that allow self-target
-// (`schedule_task`, `update_task`, `set_agent_model`) are intentionally
-// NOT gated here — non-main tiers legitimately call them on themselves.
+// (`schedule_task`, `update_task`, `set_agent_model`,
+// `set_maintenance_agent_model`, `set_task_agent_model`) are
+// intentionally NOT gated here — non-main tiers legitimately call them
+// on themselves (e.g. a trusted chat demoting its own maintenance slot
+// to Haiku). The host's owner-of-bill check blocks cross-folder writes,
+// and `confirmation-tokens.ts` gates these scopes when the call chain
+// carries untrusted-provenance markers.
 //
 // Existing runtime guards inside the handlers stay as defense-in-depth.
 
@@ -1115,6 +1126,131 @@ Use this to give a chat extra capabilities (e.g. a coding chat with \`nanoclaw-c
   },
 );
 }
+
+// `set_agent_model` / `set_maintenance_agent_model` /
+// `set_task_agent_model` are NOT wrapped in `if (isMain)` here per the
+// tier-gating policy at the top of this file: the host-side handlers
+// have an owner-of-bill self-target carve-out so non-main tiers can
+// legitimately call them on themselves (e.g. a trusted chat demoting
+// its own maintenance slot). The host's auth check blocks cross-folder
+// writes; `confirmation-tokens.ts` gates these scopes when the chain
+// carries untrusted-provenance markers.
+server.tool(
+  'set_agent_model',
+  `Change a registered group's per-group AGENT_MODEL override without re-stating other containerConfig fields.
+
+Use this to pin a group's container to a specific Claude model — e.g. force \`claude-sonnet-4-6\` on a high-throughput chat to control cost, or clear back to the global default. Affects every container spawn for the group (default session, maintenance session, scheduled-task fires). Per-task and per-session-slot overrides still win this rung of the \`resolveSessionAgentModel\` ladder. Other containerConfig fields (trusted, maintenanceAgentModel, additionalTiles, additionalMounts, enableHeartbeat, gates) are preserved verbatim. Non-main tiers may call this on their own group only; cross-folder writes are rejected by the host's owner-of-bill check.`,
+  {
+    groupFolder: z
+      .string()
+      .trim()
+      .min(1)
+      .describe(
+        'The folder name of an already-registered group (e.g., "telegram_family-chat"). Whitespace-only rejected.',
+      ),
+    agentModel: z
+      .string()
+      .nullable()
+      .describe(
+        'Model identifier (e.g., "claude-sonnet-4-6", "claude-haiku-4-5-20251001") to pin for this group, or `null` to clear the override and fall back to the global default. Whitespace-padded values are trimmed; an empty or whitespace-only string is treated as a clear (mirrors the host-side trim-then-clear semantics).',
+      ),
+  },
+  async (args) => {
+    const data = buildSetAgentModelPayload(args, new Date());
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          // "requested" rather than "set": host applies asynchronously and
+          // may no-op if the groupFolder isn't registered. Use the
+          // normalized value from the payload so the response text matches
+          // what the host will actually apply (whitespace-padded inputs
+          // are trimmed; whitespace-only inputs are treated as a clear).
+          text: `Per-group AGENT_MODEL update requested for ${args.groupFolder} → ${describeAgentModelChange(data.agentModel, 'cleared (use global default)')}. (No-op if the groupFolder isn't registered — call register_group first. Cross-folder writes from a non-main tier are rejected by the host.)`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  'set_maintenance_agent_model',
+  `Change a registered group's per-session-slot maintenanceAgentModel override without re-stating other containerConfig fields.
+
+Use this to demote the maintenance session (scheduled-task fires: heartbeat, composio-fetch, morning-brief, housekeeping) to a cheaper model while keeping the user-facing default session on the higher tier. Sits between per-task overrides (winner) and per-group overrides (loser) in the \`resolveSessionAgentModel\` ladder. Other containerConfig fields are preserved verbatim. Non-main tiers may call this on their own group only; cross-folder writes are rejected by the host's owner-of-bill check.`,
+  {
+    groupFolder: z
+      .string()
+      .trim()
+      .min(1)
+      .describe(
+        'The folder name of an already-registered group. Whitespace-only rejected.',
+      ),
+    maintenanceAgentModel: z
+      .string()
+      .nullable()
+      .describe(
+        'Model identifier for the maintenance session, or `null` to clear and fall through to per-group / global default. Whitespace-padded values are trimmed; an empty or whitespace-only string is treated as a clear (mirrors the host-side trim-then-clear semantics).',
+      ),
+  },
+  async (args) => {
+    const data = buildSetMaintenanceAgentModelPayload(args, new Date());
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Maintenance AGENT_MODEL update requested for ${args.groupFolder} → ${describeAgentModelChange(data.maintenanceAgentModel, 'cleared (use per-group or global default)')}. (No-op if the groupFolder isn't registered — call register_group first. Cross-folder writes from a non-main tier are rejected by the host.)`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  'set_task_agent_model',
+  `Change a specific scheduled task's per-row \`agent_model\` override without rescheduling it.
+
+Top rung of the \`resolveSessionAgentModel\` ladder (\`per-row → maintenance → group → env → default\`). Use this to demote an operator-scheduled reminder or ad-hoc monitor to a cheaper model. Only writable on rows where \`source = 'schedule-task'\` — the host rejects writes to cadence-registry-owned rows because their \`agent_model\` is declared by the skill's SKILL.md \`agentModel:\` frontmatter and gets reasserted on every per-spawn rebuild. Modify the frontmatter and republish the tile instead. Non-main tiers may call this on tasks belonging to their own group only; cross-folder writes are rejected by the host's owner-of-bill check.`,
+  {
+    // `task_id` (snake_case) matches the sibling task tools in this file
+    // (pause_task / resume_task / cancel_task / update_task). The
+    // host-side IPC handler still consumes `taskId` (camelCase) — the
+    // mapping happens inside buildSetTaskAgentModelPayload.
+    task_id: z
+      .string()
+      .trim()
+      .min(1)
+      .describe(
+        'The `scheduled_tasks.id` of an existing operator-scheduled task (not a cadence-registry row). Whitespace-only rejected.',
+      ),
+    agentModel: z
+      .string()
+      .nullable()
+      .describe(
+        'Model identifier (e.g., "claude-haiku-4-5-20251001") to pin for this task, or `null` to clear the override and fall through the ladder. Whitespace-padded values are trimmed; an empty or whitespace-only string is treated as a clear (mirrors the host-side trim-then-clear semantics).',
+      ),
+  },
+  async (args) => {
+    const data = buildSetTaskAgentModelPayload(args, new Date());
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Per-task AGENT_MODEL update requested for ${args.task_id} → ${describeAgentModelChange(data.agentModel, 'cleared (use ladder)')}. (No-op if the task doesn't exist; rejected if the task is cadence-registry-owned — edit the skill's SKILL.md \`agentModel:\` frontmatter instead. Cross-folder writes from a non-main tier are rejected by the host.)`,
+        },
+      ],
+    };
+  },
+);
 
 server.tool(
   'nuke_session',

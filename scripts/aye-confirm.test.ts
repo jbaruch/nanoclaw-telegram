@@ -90,6 +90,17 @@ describe('parseArgs', () => {
     expect(calls).toMatch(/invalid --scope/);
   });
 
+  it('accepts the three new AGENT_MODEL set_* scopes (#595)', () => {
+    for (const scope of [
+      'set_agent_model',
+      'set_maintenance_agent_model',
+      'set_task_agent_model',
+    ]) {
+      const args = parseArgs(['--scope', scope, '--reason', 'cost-tier flip']);
+      expect(args.scope).toBe(scope);
+    }
+  });
+
   it('errors when an unknown argument is given', () => {
     expect(() => parseArgs(['--bogus'])).toThrow(/process\.exit/);
     const calls = (stderrMock.mock.calls.flat() as string[]).join('');
