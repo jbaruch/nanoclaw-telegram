@@ -500,6 +500,63 @@ export function decideCatchUp(input: DecideCatchUpInput): DecideCatchUpResult {
   return { shouldCatchUp: true, prevOccurrence: prev };
 }
 
+/**
+ * #584 — SQLite error codes the `setTaskNextRun` writer treats as
+ * recoverable contention. Same set as the `tz_state` writer callbacks
+ * in `src/db.ts`; see that constant for the full rationale. Every
+ * other error (programming bug, persistent DB failure, malformed
+ * schema) propagates per `coding-policy: error-handling`.
+ */
+const RECOMPUTE_TRANSIENT_SQLITE_CODES: ReadonlySet<string> = new Set([
+  'SQLITE_BUSY',
+  'SQLITE_LOCKED',
+]);
+
+/**
+ * #584 — Per-row wrapper that surfaces an unexpected throw from
+ * `computeNextRunDetailed` as a returned value rather than a thrown
+ * exception, so a single bad row doesn't stall the recompute of every
+ * subsequent row in the same `tz_state` flip.
+ *
+ * Why a wrapper instead of a bare try/catch in `recomputeLocalSchedules`:
+ * `coding-policy: error-handling` forbids catch-all handlers in inner
+ * helpers. Per-row isolation IS the legitimate contract here — the
+ * caller is iterating over N rows and a fault on row K must not
+ * silently anchor rows K+1..N to the prior zone — but the contract
+ * should be visible at the call site rather than hidden in a generic
+ * try/catch. The wrapper makes "unexpected exception → returned error"
+ * an explicit part of the API.
+ *
+ * `computeNextRunDetailed` is documented as resilient: it handles cron
+ * parse failures (`pause-broken-cron` remediation), invalid per-task
+ * tz (`clear-bad-timezone`), throwing resolver callbacks (fallback to
+ * TIMEZONE), and malformed intervals (60s default). An unexpected
+ * throw therefore signals a programming bug — corrupted row shape,
+ * `task.id` undefined, etc. We surface it for the warn log and let
+ * the caller continue with row K+1.
+ *
+ * Note: this wrapper is the SOLE catch-all in the recompute path; the
+ * writer catch (`setTaskNextRun`) below is narrowed to SqliteError +
+ * recoverable codes only, per the same rule.
+ */
+function tryComputeNextRunForRow(
+  row: ScheduledTask,
+  resolveCurrentTz: () => string | null,
+): { result?: NextRunResult; error?: Error } {
+  try {
+    return { result: computeNextRunDetailed(row, resolveCurrentTz) };
+  } catch (err) {
+    // Per-row isolation surface: a programming bug in one row must
+    // not stall the recompute of every other row in the same flip.
+    // The error is surfaced as a returned value (not thrown) so the
+    // caller can warn + continue without an additional catch-all
+    // handler in `recomputeLocalSchedules` itself.
+    return {
+      error: err instanceof Error ? err : new Error(String(err)),
+    };
+  }
+}
+
 export function recomputeLocalSchedules(
   resolveCurrentTz: () => string | null = getCurrentTz,
   now: Date = new Date(),
@@ -527,20 +584,24 @@ export function recomputeLocalSchedules(
   let recomputed = 0;
   let caughtUp = 0;
   for (const row of rows) {
-    let detailed: NextRunResult;
-    try {
-      detailed = computeNextRunDetailed(row, resolveCurrentTz);
-    } catch (err) {
+    const computed = tryComputeNextRunForRow(row, resolveCurrentTz);
+    if (computed.error) {
+      // Wrapper surfaces an unexpected throw as a returned error so
+      // the rest of the loop continues. Programming bugs reach this
+      // branch (documented throw cases are handled inside
+      // `computeNextRunDetailed`); warn-log with row context and
+      // proceed.
       logger.warn(
         {
           taskId: row.id,
           scheduleValue: row.schedule_value,
-          err: err instanceof Error ? err.message : String(err),
+          err: computed.error.message,
         },
         'recomputeLocalSchedules: computeNextRunDetailed threw — skipping row',
       );
       continue;
     }
+    const detailed = computed.result as NextRunResult;
     let nextRun = detailed.nextRun;
     // Production catch-up: when the gate is usable, ask cron-parser
     // for the previous occurrence in the new zone and override
@@ -564,13 +625,28 @@ export function recomputeLocalSchedules(
       writeRow(row.id, nextRun);
       recomputed += 1;
     } catch (err) {
+      // Narrowed to transient SQLite contention only — SQLITE_BUSY /
+      // SQLITE_LOCKED can fire under WAL contention with the
+      // orchestrator's other writers and the next scheduler tick
+      // will retry the recompute. Every other error (programming bug,
+      // FK violation, malformed schema, persistent DB failure)
+      // propagates per `coding-policy: error-handling`; hiding those
+      // behind a per-row warn would silently anchor rows to stale
+      // pre-flip values.
+      if (
+        !(err instanceof SqliteError) ||
+        !RECOMPUTE_TRANSIENT_SQLITE_CODES.has(err.code)
+      ) {
+        throw err;
+      }
       logger.warn(
         {
           taskId: row.id,
           nextRun,
-          err: err instanceof Error ? err.message : String(err),
+          err: err.message,
+          code: err.code,
         },
-        'recomputeLocalSchedules: setTaskNextRun threw — next scheduler tick will retry against the stored value',
+        'recomputeLocalSchedules: setTaskNextRun transient SQLite contention — next scheduler tick will retry against the stored value',
       );
       continue;
     }

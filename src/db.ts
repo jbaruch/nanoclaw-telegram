@@ -34,6 +34,21 @@ import {
   TriggerPatternConfig,
 } from './types.js';
 
+/**
+ * #584 — SQLite error codes the `onTzFlipped` callback catches as
+ * recoverable contention. SQLITE_BUSY / SQLITE_LOCKED can fire under
+ * WAL contention with the orchestrator's other writers; the canonical
+ * `tz_state` UPDATE has already landed in the same transaction, and
+ * the next scheduler tick will retry the recompute against the
+ * stored `current_tz`. Every other error (programming bug, persistent
+ * DB failure, malformed schema) propagates. Mirrors the same set
+ * used in `src/index.ts` around `runTzHeartbeatAdvisory`.
+ */
+const TRANSIENT_SQLITE_CODES: ReadonlySet<string> = new Set([
+  'SQLITE_BUSY',
+  'SQLITE_LOCKED',
+]);
+
 let db: Database.Database;
 
 /**
@@ -2279,23 +2294,33 @@ export function applyTripitSegmentsToTzState(
       'tz_state.current_tz flipped via sync_tripit segment walk (#542)',
     );
     // #584 — invoke the recompute hook AFTER the UPDATE landed, so a
-    // reader picking up the new current_tz sees the new value. Wrap
-    // in try/catch: a transient throw from the recompute (DB busy,
-    // programming bug downstream) must not poison the tz_state write
-    // itself — the canonical state has already been updated, and the
-    // recompute is a derived optimisation. The next scheduler tick
-    // and the next tz_state writer will both retry.
+    // reader picking up the new current_tz sees the new value. Narrow
+    // the catch to transient SQLite contention codes only
+    // (SQLITE_BUSY / SQLITE_LOCKED) — those are genuinely recoverable
+    // against the orchestrator's other WAL writers and the next
+    // scheduler tick will re-anchor `next_run` against the now-canonical
+    // `current_tz`. Every other error (programming bug, persistent DB
+    // failure, malformed schema) propagates out per
+    // `coding-policy: error-handling`. Mirrors the narrowing pattern
+    // in `src/index.ts` around `runTzHeartbeatAdvisory`.
     if (onTzFlipped) {
       try {
         onTzFlipped(row.current_tz, next);
       } catch (err) {
+        if (
+          !(err instanceof SqliteError) ||
+          !TRANSIENT_SQLITE_CODES.has(err.code)
+        ) {
+          throw err;
+        }
         logger.warn(
           {
-            err: err instanceof Error ? err.message : String(err),
+            err: err.message,
+            code: err.code,
             prev: row.current_tz,
             next,
           },
-          'applyTripitSegmentsToTzState: onTzFlipped callback threw — tz_state write already landed, continuing',
+          'applyTripitSegmentsToTzState: onTzFlipped transient SQLite contention — tz_state write landed, next scheduler tick will recompute',
         );
       }
     }
@@ -2556,20 +2581,28 @@ export function runTzHeartbeatAdvisory(
       'tz_state.current_tz flipped via heartbeat advisory (#574 Phase 2)',
     );
     // #584 — see `applyTripitSegmentsToTzState` for the rationale; same
-    // contract on the heartbeat-advisory writer. Wrap in try/catch so a
-    // recompute fault doesn't poison the tz_state write that already
-    // landed in this transaction.
+    // narrowing contract on the heartbeat-advisory writer. Catch only
+    // transient SQLite contention (SQLITE_BUSY / SQLITE_LOCKED); every
+    // other error propagates so programming bugs / persistent DB
+    // failures surface instead of getting swallowed as a warn.
     if (onTzFlipped) {
       try {
         onTzFlipped(flip.prev, flip.next);
       } catch (err) {
+        if (
+          !(err instanceof SqliteError) ||
+          !TRANSIENT_SQLITE_CODES.has(err.code)
+        ) {
+          throw err;
+        }
         logger.warn(
           {
-            err: err instanceof Error ? err.message : String(err),
+            err: err.message,
+            code: err.code,
             prev: flip.prev,
             next: flip.next,
           },
-          'runTzHeartbeatAdvisory: onTzFlipped callback threw — tz_state write already landed, continuing',
+          'runTzHeartbeatAdvisory: onTzFlipped transient SQLite contention — tz_state write landed, next scheduler tick will recompute',
         );
       }
     }

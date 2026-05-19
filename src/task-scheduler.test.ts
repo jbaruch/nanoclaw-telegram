@@ -57,6 +57,7 @@ import {
 import type { ScheduledTask } from './types.js';
 import { TIMEZONE } from './config.js';
 import { CronExpressionParser } from 'cron-parser';
+import { SqliteError } from 'better-sqlite3';
 import { logger } from './logger.js';
 import type { ContainerOutput } from './container-runner.js';
 import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
@@ -3493,5 +3494,273 @@ describe('setTaskNextRun (#584)', () => {
     setTaskNextRun('null-next-run', null);
     const fresh = getTaskById('null-next-run');
     expect(fresh!.next_run).toBeNull();
+  });
+});
+
+describe('recomputeLocalSchedules error narrowing (#584 — error-handling)', () => {
+  // The recompute path has two failure surfaces — compute(row) and
+  // writeRow(row.id, nextRun) — that used to share a broad catch-all
+  // shape. Per `coding-policy: error-handling`, each is now narrowed:
+  //
+  // - compute(row): wrapped in `tryComputeNextRunForRow` which surfaces
+  //   an unexpected throw as a returned `{error}` value (the wrapper
+  //   IS the per-row isolation surface — the alternative is one bad
+  //   row stalling N-1 good rows in the same `tz_state` flip).
+  //
+  // - writeRow(...): narrowed to SqliteError with SQLITE_BUSY /
+  //   SQLITE_LOCKED only. Every other error propagates.
+  //
+  // These tests verify both narrowings hold: transient contention is
+  // swallowed with a warn, programming bugs propagate.
+
+  beforeEach(() => {
+    _initTestDatabase();
+    _resetSchedulerLoopForTests();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-10T00:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function makeFakeRow(id: string): ScheduledTask {
+    return {
+      id,
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: '0 7 * * *',
+      schedule_timezone: 'local',
+      context_mode: 'isolated',
+      next_run: new Date('2026-03-10T12:00:00.000Z').toISOString(),
+      last_run: new Date('2026-03-09T23:00:00.000Z').toISOString(),
+      last_result: 'prior-fire',
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    };
+  }
+
+  it('writeRow SQLITE_BUSY: logged and continues to next row', () => {
+    const rows = [makeFakeRow('busy-row'), makeFakeRow('healthy-row')];
+    const writes = new Map<string, string | null>();
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const result = recomputeLocalSchedules(
+      () => 'Asia/Tokyo',
+      new Date('2026-03-10T05:00:00.000Z'),
+      {
+        getActiveLocalScheduledTasks: () => rows,
+        setTaskNextRun: (id, nr) => {
+          if (id === 'busy-row') {
+            throw new SqliteError('database is locked', 'SQLITE_BUSY');
+          }
+          writes.set(id, nr);
+        },
+      },
+    );
+
+    // Only the healthy row counted; the BUSY-throwing row was skipped.
+    expect(result.recomputed).toBe(1);
+    expect(writes.get('healthy-row')).toBeTruthy();
+    expect(writes.has('busy-row')).toBe(false);
+
+    const transientWarns = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[1] === 'string' &&
+        call[1].startsWith(
+          'recomputeLocalSchedules: setTaskNextRun transient SQLite contention',
+        ),
+    );
+    expect(transientWarns).toHaveLength(1);
+    expect(transientWarns[0][0]).toMatchObject({
+      taskId: 'busy-row',
+      code: 'SQLITE_BUSY',
+    });
+
+    warnSpy.mockRestore();
+  });
+
+  it('writeRow SQLITE_LOCKED: logged and continues', () => {
+    const rows = [makeFakeRow('locked-row')];
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const result = recomputeLocalSchedules(
+      () => 'Asia/Tokyo',
+      new Date('2026-03-10T05:00:00.000Z'),
+      {
+        getActiveLocalScheduledTasks: () => rows,
+        setTaskNextRun: () => {
+          throw new SqliteError('table is locked', 'SQLITE_LOCKED');
+        },
+      },
+    );
+
+    expect(result.recomputed).toBe(0);
+    const transientWarns = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[1] === 'string' &&
+        call[1].startsWith(
+          'recomputeLocalSchedules: setTaskNextRun transient SQLite contention',
+        ),
+    );
+    expect(transientWarns).toHaveLength(1);
+    expect(transientWarns[0][0]).toMatchObject({ code: 'SQLITE_LOCKED' });
+
+    warnSpy.mockRestore();
+  });
+
+  it('writeRow generic TypeError PROPAGATES (programming bug)', () => {
+    const rows = [makeFakeRow('typo-row')];
+    expect(() =>
+      recomputeLocalSchedules(
+        () => 'Asia/Tokyo',
+        new Date('2026-03-10T05:00:00.000Z'),
+        {
+          getActiveLocalScheduledTasks: () => rows,
+          setTaskNextRun: () => {
+            // Simulates an undefined-property access inside a buggy
+            // writer wrapper — the kind of bug the broad catch used
+            // to hide.
+            throw new TypeError(
+              "Cannot read properties of undefined (reading 'id')",
+            );
+          },
+        },
+      ),
+    ).toThrow(TypeError);
+  });
+
+  it('writeRow SqliteError with non-transient code (SQLITE_CONSTRAINT) PROPAGATES', () => {
+    const rows = [makeFakeRow('fk-violation-row')];
+    expect(() =>
+      recomputeLocalSchedules(
+        () => 'Asia/Tokyo',
+        new Date('2026-03-10T05:00:00.000Z'),
+        {
+          getActiveLocalScheduledTasks: () => rows,
+          setTaskNextRun: () => {
+            throw new SqliteError(
+              'FOREIGN KEY constraint failed',
+              'SQLITE_CONSTRAINT_FOREIGNKEY',
+            );
+          },
+        },
+      ),
+    ).toThrow(SqliteError);
+  });
+
+  it('compute wrapper: unexpected throw is surfaced as {error}, warn-logged, row skipped', () => {
+    // `computeNextRunDetailed` is documented as resilient — it handles
+    // every documented throw case internally. An unexpected throw (e.g.
+    // corrupted row triggering a TypeError inside cron-parser) reaches
+    // the wrapper. The wrapper returns {error}; the loop warn-logs and
+    // continues with the next row.
+    //
+    // We trigger an unexpected throw by passing a resolver that
+    // throws AFTER computeNextRunDetailed's internal resolver catch
+    // would normally absorb it — i.e., by making the row's
+    // `schedule_timezone` something OTHER than 'local', so the
+    // resolver isn't invoked and the throw comes from elsewhere. The
+    // most reliable trigger is a malformed `next_run` interval row
+    // — but easier: construct a row that violates the type contract.
+    //
+    // Use a row whose `schedule_value` is an empty cron string. The
+    // internal try/catch in computeNextRunDetailed catches the
+    // CronExpressionParser throw and returns `pause-broken-cron` —
+    // NOT an unexpected throw. So we directly exercise the wrapper
+    // via the dep-injected `getActiveLocalScheduledTasks` returning
+    // a Proxy that throws when an internal field is read.
+    // The proxy throws on `schedule_type` — a property
+    // `computeNextRunDetailed` reads first thing, but which the
+    // wrapper's downstream warn-log path does NOT access (the warn
+    // reads `id` and `schedule_value` only). This isolates the
+    // wrapper-surface fault from the warn-log surface so the test
+    // exercises only the catch-all narrowing it cares about.
+    const buggyRow = new Proxy(makeFakeRow('proxy-row'), {
+      get(target, prop, receiver) {
+        if (prop === 'schedule_type') {
+          throw new TypeError("Cannot read 'schedule_type' from poisoned row");
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const healthyRow = makeFakeRow('healthy-row');
+    const writes = new Map<string, string | null>();
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const result = recomputeLocalSchedules(
+      () => 'Asia/Tokyo',
+      new Date('2026-03-10T05:00:00.000Z'),
+      {
+        getActiveLocalScheduledTasks: () => [buggyRow, healthyRow],
+        setTaskNextRun: (id, nr) => {
+          writes.set(id, nr);
+        },
+      },
+    );
+
+    // Healthy row still recomputed despite the buggy row's throw —
+    // the wrapper's per-row isolation is the whole point.
+    expect(result.recomputed).toBe(1);
+    expect(writes.get('healthy-row')).toBeTruthy();
+    expect(writes.has('proxy-row')).toBe(false);
+
+    const wrapperWarns = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[1] === 'string' &&
+        call[1].startsWith(
+          'recomputeLocalSchedules: computeNextRunDetailed threw',
+        ),
+    );
+    expect(wrapperWarns).toHaveLength(1);
+    expect(wrapperWarns[0][0]).toMatchObject({ taskId: 'proxy-row' });
+
+    warnSpy.mockRestore();
+  });
+
+  it('compute wrapper: non-Error throw value is wrapped into an Error', () => {
+    // Defensive: a `throw "string"` (not an Error instance) should
+    // still surface a usable `.message` to the warn log rather than
+    // crashing the warn-formatter on `undefined.message`.
+    const stringThrowRow = new Proxy(makeFakeRow('string-throw'), {
+      get(target, prop, receiver) {
+        if (prop === 'schedule_type') {
+          // Intentionally throw a non-Error value — the wrapper must
+          // normalise this into a proper Error via String(err).
+          throw 'not-an-error-instance';
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const result = recomputeLocalSchedules(
+      () => 'Asia/Tokyo',
+      new Date('2026-03-10T05:00:00.000Z'),
+      {
+        getActiveLocalScheduledTasks: () => [stringThrowRow],
+        setTaskNextRun: () => {},
+      },
+    );
+
+    expect(result.recomputed).toBe(0);
+    const wrapperWarns = warnSpy.mock.calls.filter(
+      (call) =>
+        typeof call[1] === 'string' &&
+        call[1].startsWith(
+          'recomputeLocalSchedules: computeNextRunDetailed threw',
+        ),
+    );
+    expect(wrapperWarns).toHaveLength(1);
+    expect(wrapperWarns[0][0]).toMatchObject({
+      taskId: 'string-throw',
+      err: 'not-an-error-instance',
+    });
+
+    warnSpy.mockRestore();
   });
 });
