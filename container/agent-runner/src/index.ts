@@ -111,6 +111,7 @@ import {
   runExternalFileSummary,
 } from './external-file-summary.js';
 import { formatErrorResult } from './format-error-result.js';
+import { buildSuccessOutput } from './result-suppression.js';
 import {
   decideCapabilityAclIterable,
   walkBackIterableForProvenance,
@@ -191,6 +192,24 @@ interface ContainerOutput {
   newSessionId?: string;
   error?: string;
   streamText?: string;
+  /**
+   * #581 — Set to `true` by `buildSuccessOutput` when (a) the agent
+   * successfully used `send_message` / `send_file` during this turn
+   * (`userFacingSendSucceeded`) AND (b) the SDK's final result message
+   * carried non-empty text (`!!textResult`). The two-condition gate
+   * matches the case the suppression actually targets: the SDK's
+   * closing-thought text that would otherwise be echoed as a second
+   * user reply on top of the agent's `send_message`. When `true`,
+   * the orchestrator + task-scheduler skip their chat-echo +
+   * `storeMessage` paths but STILL populate `task_run_logs.result`
+   * from `result` so observability isn't lost. The empty-`textResult`
+   * branch deliberately omits this flag — the orchestrator's outer
+   * `if (result.result)` gate already skips chat-echo in that case,
+   * so emitting `chat_displayed: true` there would be informational
+   * only. See `result-suppression.ts` for the rationale (split
+   * chat-echo suppression from result-null suppression).
+   */
+  chat_displayed?: boolean;
   /**
    * Per-turn token usage from the most recent assistant message of
    * this query. Captured from the SDK message stream's
@@ -4073,26 +4092,29 @@ async function runQuery(
         });
         sawErrorResult = true;
       } else {
-        // #47: if the agent already used send_message / send_file
-        // successfully (tracked above), suppress the SDK's final
-        // closing-thought text so it doesn't get echoed as a second
-        // user reply. The orchestrator's `if (result.result)` gate in
-        // src/index.ts skips when result is null.
-        const suppressFinalText = userFacingSendSucceeded && !!textResult;
-        if (suppressFinalText) {
+        // #47 + #581: if the agent already used send_message / send_file
+        // successfully (tracked above), mark `chat_displayed: true`
+        // (send tool already succeeded) so the orchestrator + task-
+        // scheduler skip their chat-echo path. Result text is still
+        // emitted so `task_run_logs.result` stays populated for
+        // observability — see `result-suppression.ts` for the rationale.
+        const willMarkChatDisplayed = userFacingSendSucceeded && !!textResult;
+        if (willMarkChatDisplayed) {
           log(
-            `Suppressing result.text echo (send tool already succeeded): ${textResult!.slice(0, 80)}`,
+            `Marking chat_displayed (send tool already succeeded): ${textResult!.slice(0, 80)}`,
           );
         }
         log(
           `Result #${resultCount}: subtype=${subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
         );
-        writeOutput({
-          status: 'success',
-          result: suppressFinalText ? null : textResult || null,
-          newSessionId,
-          usage: latestUsage,
-        });
+        writeOutput(
+          buildSuccessOutput(
+            textResult ?? null,
+            userFacingSendSucceeded,
+            newSessionId,
+            latestUsage,
+          ),
+        );
       }
       // Break out of the for-await loop after receiving the result.
       // Without this, the iterator hangs waiting for more SDK messages

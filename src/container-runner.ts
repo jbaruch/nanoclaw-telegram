@@ -1184,6 +1184,16 @@ export interface ContainerOutput {
   error?: string;
   streamText?: string;
   /**
+   * #581 — agent-runner sets this to true when the agent successfully
+   * used `send_message` / `send_file`. Orchestrator + task-scheduler
+   * skip their chat-echo path when set, but STILL populate
+   * `task_run_logs.result` from `result` so observability isn't lost.
+   * Pre-#581 the agent-runner collapsed `result` to null in this case,
+   * which broke `task_run_logs.result` for wrapper scheduled-task
+   * skills that always finish by calling `send_message`.
+   */
+  chat_displayed?: boolean;
+  /**
    * Per-turn token usage from the agent-runner's most recent SDK
    * assistant message. Used by the kill-auto-compaction telemetry +
    * threshold detector (issue #104, design at

@@ -1615,7 +1615,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
         const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
         logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-        if (text) {
+        // #581 — when the agent already used send_message / send_file
+        // successfully, the agent-runner sets `chat_displayed: true`.
+        // The result text is still present (so the orchestrator can
+        // log it / surface it), but we MUST NOT echo it back via
+        // `channel.sendMessage` (would duplicate the user-visible
+        // reply) and we MUST NOT call `storeMessage` (the IPC
+        // `send_message` handler already wrote the bot row).
+        if (text && !result.chat_displayed) {
           const replyId = pendingReplyTo[chatJid];
           const sendResult = await channel.sendMessage(chatJid, text, replyId);
           // Normalize `string | void` to `string | undefined`; only
@@ -1660,6 +1667,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           }
           // Consume after first reply — prevents replying to the wrong message
           // when user sends follow-ups while background agent is working.
+          pendingReplyTo[chatJid] = undefined;
+          outputSentToUser = true;
+        } else if (text && result.chat_displayed) {
+          // #581 — agent already delivered the reply via send_message;
+          // result text is preserved for logs but not re-sent.
+          logger.info(
+            {
+              group: group.name,
+              chatJid,
+              contentLen: text.length,
+            },
+            '[output] chat_displayed set — skipping chat-echo (agent already sent via send_message)',
+          );
           pendingReplyTo[chatJid] = undefined;
           outputSentToUser = true;
         }

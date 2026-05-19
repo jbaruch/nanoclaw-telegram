@@ -702,12 +702,24 @@ async function runTask(
           },
         });
         if (streamedOutput.result) {
+          // #581 — populate task_run_logs.result UNCONDITIONALLY when
+          // the agent emitted text. The chat-echo gate below is the
+          // only thing chat_displayed should suppress; observability
+          // (forensic greps, silent-success accounting) must stay
+          // intact for wrapper skills that always finish via
+          // send_message.
           result = streamedOutput.result;
           // Strip <internal> tags — suppress entirely if nothing remains
           const cleanResult = streamedOutput.result
             .replace(/<internal>[\s\S]*?<\/internal>/g, '')
             .trim();
-          if (cleanResult) {
+          // #581 — when the agent already used send_message /
+          // send_file successfully, the agent-runner sets
+          // `chat_displayed: true`. The IPC `send_message` handler
+          // already wrote to messages.db, so re-sending here would
+          // duplicate the user-visible reply AND double-row the DB.
+          // Result text is still captured above for task_run_logs.
+          if (cleanResult && !streamedOutput.chat_displayed) {
             await deps.sendMessage(task.chat_jid, cleanResult);
             // Store the bot send so `messages.db` reflects every send
             // out of this session. Without this, scheduled-task sends
