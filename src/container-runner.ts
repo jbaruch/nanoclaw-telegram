@@ -1184,6 +1184,23 @@ export interface ContainerOutput {
   error?: string;
   streamText?: string;
   /**
+   * #581 — Set to `true` by the agent-runner when (a) the agent
+   * successfully used `send_message` / `send_file` during this turn
+   * AND (b) the SDK's final result message carried non-empty text.
+   * The two-condition gate matches the case the suppression actually
+   * targets: the SDK's closing-thought text that would otherwise be
+   * echoed as a second user reply on top of the agent's `send_message`.
+   * When `chat_displayed` is `true`, the orchestrator (`src/index.ts`)
+   * and the task-scheduler (`src/task-scheduler.ts`) skip their
+   * chat-echo + `storeMessage` paths but STILL populate
+   * `task_run_logs.result` from `result` so observability isn't lost.
+   * When `chat_displayed` is absent/false, behavior is unchanged from
+   * the pre-#581 contract — including the case where `send_message`
+   * succeeded but `textResult` was empty (the orchestrator's outer
+   * `if (result.result)` gate already skips chat-echo there).
+   */
+  chat_displayed?: boolean;
+  /**
    * Per-turn token usage from the agent-runner's most recent SDK
    * assistant message. Used by the kill-auto-compaction telemetry +
    * threshold detector (issue #104, design at

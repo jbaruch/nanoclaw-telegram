@@ -139,6 +139,7 @@ import {
   releaseIdleTimerControl,
 } from './idle-timer.js';
 import type { IdleTimerControl } from './idle-timer.js';
+import { decideAgentOutputAction } from './agent-output-action.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -1606,63 +1607,86 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     prompt,
     chatJid,
     async (result) => {
-      // Streaming output callback — called for each agent result
-      if (result.result) {
-        const raw =
-          typeof result.result === 'string'
-            ? result.result
-            : JSON.stringify(result.result);
-        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-        logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-        if (text) {
-          const replyId = pendingReplyTo[chatJid];
-          const sendResult = await channel.sendMessage(chatJid, text, replyId);
-          // Normalize `string | void` to `string | undefined`; only
-          // persist a telegram_message_id when we actually got one.
-          const sentMsgId =
-            typeof sendResult === 'string' ? sendResult : undefined;
-          // Gate `storeMessage` on actual delivery (#428). Pre-#428,
-          // we wrote a `bot-*` row even when `sendMessage` returned
-          // undefined (transport-layer failure surfaced via the
-          // outer Channel catch and #414's narrowed gate). Heartbeat
-          // counts a `bot-*` row as evidence that the user message
-          // was answered — recording one for a send that never
-          // reached Telegram makes the user go silent-and-unanswered
-          // with no operator-visible signal. The channel's outer
-          // catch already logs `[send] Failed to send Telegram
-          // message`, so the operator-visible signal is preserved
-          // either way. Reuses the same `shouldStoreBotMessage`
-          // predicate as the IPC `send_message` and
-          // `send_message_to_chat` paths (`src/ipc.ts:686, 2254`)
-          // so all four bot-row write sites apply the same gate.
-          if (shouldStoreBotMessage(chatJid, sentMsgId)) {
-            storeMessage({
-              id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-              chat_jid: chatJid,
-              sender: ASSISTANT_NAME,
-              sender_name: ASSISTANT_NAME,
-              content: text,
-              timestamp: new Date().toISOString(),
-              is_from_me: true,
-              is_bot_message: true,
-              reply_to_message_id: replyId,
-              telegram_message_id: sentMsgId,
-            });
-          } else {
-            logger.warn(
-              {
-                chatJid,
-                contentLen: text.length,
-              },
-              '[send] Skipping bot-message storeMessage — channel returned no message id (delivery failed)',
-            );
-          }
-          // Consume after first reply — prevents replying to the wrong message
-          // when user sends follow-ups while background agent is working.
-          pendingReplyTo[chatJid] = undefined;
-          outputSentToUser = true;
+      // Streaming output callback — called for each agent result.
+      // Decision logic lives in `decideAgentOutputAction` so the four
+      // branches (send / mark-displayed / reset-only / noop) stay
+      // unit-testable without the channel + DB + queue machinery
+      // around this callback. See `src/agent-output-action.ts`.
+      const action = decideAgentOutputAction(result);
+      if (action.kind !== 'noop') {
+        // Telemetry: raw-length log fires on every non-noop event so
+        // we keep visibility into work that produced only `<internal>`
+        // content (reset-only) and full chat replies (send /
+        // mark-displayed) alike.
+        const rawLength =
+          action.kind === 'reset-only'
+            ? action.rawLength
+            : action.textForLog.length;
+        logger.info({ group: group.name }, `Agent output: ${rawLength} chars`);
+      }
+      if (action.kind === 'send') {
+        const text = action.textForLog;
+        const replyId = pendingReplyTo[chatJid];
+        const sendResult = await channel.sendMessage(chatJid, text, replyId);
+        // Normalize `string | void` to `string | undefined`; only
+        // persist a telegram_message_id when we actually got one.
+        const sentMsgId =
+          typeof sendResult === 'string' ? sendResult : undefined;
+        // Gate `storeMessage` on actual delivery (#428). Pre-#428,
+        // we wrote a `bot-*` row even when `sendMessage` returned
+        // undefined (transport-layer failure surfaced via the
+        // outer Channel catch and #414's narrowed gate). Heartbeat
+        // counts a `bot-*` row as evidence that the user message
+        // was answered — recording one for a send that never
+        // reached Telegram makes the user go silent-and-unanswered
+        // with no operator-visible signal. The channel's outer
+        // catch already logs `[send] Failed to send Telegram
+        // message`, so the operator-visible signal is preserved
+        // either way. Reuses the same `shouldStoreBotMessage`
+        // predicate as the IPC `send_message` and
+        // `send_message_to_chat` paths (`src/ipc.ts:686, 2254`)
+        // so all four bot-row write sites apply the same gate.
+        if (shouldStoreBotMessage(chatJid, sentMsgId)) {
+          storeMessage({
+            id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            chat_jid: chatJid,
+            sender: ASSISTANT_NAME,
+            sender_name: ASSISTANT_NAME,
+            content: text,
+            timestamp: new Date().toISOString(),
+            is_from_me: true,
+            is_bot_message: true,
+            reply_to_message_id: replyId,
+            telegram_message_id: sentMsgId,
+          });
+        } else {
+          logger.warn(
+            {
+              chatJid,
+              contentLen: text.length,
+            },
+            '[send] Skipping bot-message storeMessage — channel returned no message id (delivery failed)',
+          );
         }
+        // Consume after first reply — prevents replying to the wrong message
+        // when user sends follow-ups while background agent is working.
+        pendingReplyTo[chatJid] = undefined;
+        outputSentToUser = true;
+      } else if (action.kind === 'mark-displayed') {
+        // #581 — agent already delivered the reply via send_message;
+        // result text is preserved for logs but not re-sent.
+        logger.info(
+          {
+            group: group.name,
+            chatJid,
+            contentLen: action.textForLog.length,
+          },
+          '[output] chat_displayed set — skipping chat-echo (agent already sent via send_message)',
+        );
+        pendingReplyTo[chatJid] = undefined;
+        outputSentToUser = true;
+      }
+      if (action.kind !== 'noop') {
         // Re-anchor idle close on any non-null agent result (tool calls,
         // thinking, user-visible output) — not session-update markers
         // where `result.result` is null. The reset fires even when

@@ -1272,6 +1272,109 @@ describe('task scheduler', () => {
     expect(getLastBotMessageTimestamp(chatJid, 'bot')).toBeFalsy();
   });
 
+  it('streamed scheduled-task with chat_displayed=true skips chat-echo + storeMessage but still records task_run_logs.result (#581)', async () => {
+    // Wrapper scheduled-task skills (nightly-external-sync,
+    // entertainment-sync, soul-searching-wrapper) always finish by
+    // calling send_message themselves — so the agent-runner sets
+    // `chat_displayed: true` on the final IPC envelope. Pre-#581 the
+    // agent-runner ALSO collapsed `result` to null, which broke
+    // `task_run_logs.result` (silent-success: status=success +
+    // result=null, no forensic trail).
+    //
+    // The fix: agent-runner carries the result text + chat_displayed
+    // separately. Task-scheduler must (a) NOT re-send via
+    // deps.sendMessage (avoids duplicate user reply), (b) NOT write a
+    // bot row via storeMessage (the IPC send_message handler already
+    // wrote it), and (c) STILL populate `task_run_logs.result` so
+    // observability is preserved.
+    const MAIN_GROUP = {
+      name: 'Main',
+      folder: 'main',
+      trigger: 'always',
+      added_at: '2026-01-01T00:00:00.000Z',
+      isMain: true,
+    };
+    const chatJid = 'wrapper-skill@g.us';
+    storeChatMetadata(chatJid, '2026-01-01T00:00:00.000Z', 'Wrapper');
+
+    createTask({
+      id: 'wrapper-result-task',
+      group_folder: 'main',
+      chat_jid: chatJid,
+      prompt: 'run',
+      schedule_type: 'once',
+      schedule_value: '2026-01-01T00:00:00.000Z',
+      context_mode: 'group',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    const streamedText = 'closing thought from wrapper skill';
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result: streamedText,
+          chat_displayed: true,
+        } as ContainerOutput);
+        return { status: 'success', result: streamedText };
+      },
+    );
+
+    const sentTexts: string[] = [];
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+
+    startSchedulerLoop({
+      registeredGroups: () => ({ [chatJid]: MAIN_GROUP }),
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
+      onProcess: () => {},
+      sendMessage: async (_jid: string, text: string) => {
+        sentTexts.push(text);
+      },
+      wipeSessionJsonl: () => 0,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    // (a) deps.sendMessage was NOT called — the agent already sent.
+    expect(sentTexts).toEqual([]);
+
+    // (b) storeMessage for the bot row was NOT called — the IPC
+    // send_message handler already wrote it (would double-row in
+    // production messages.db otherwise).
+    expect(getLastBotMessageTimestamp(chatJid, 'bot')).toBeFalsy();
+
+    // (c) task_run_logs.result IS populated with the streamed text —
+    // observability preserved. This is the regression: pre-#581 this
+    // would have been null because the agent-runner suppressed the
+    // result field along with the chat-echo signal.
+    const { _rawQueryForTests } = await import('./db.js');
+    const rows = _rawQueryForTests<{
+      status: string;
+      result: string | null;
+    }>(`SELECT status, result FROM task_run_logs WHERE task_id = ?`, [
+      'wrapper-result-task',
+    ]);
+    expect(rows.length).toBe(1);
+    expect(rows[0].status).toBe('success');
+    expect(rows[0].result).toContain(streamedText);
+  });
+
   it('computeNextRun skips missed intervals without infinite loop', () => {
     // Task was due 10 intervals ago (missed)
     const ms = 60000;
