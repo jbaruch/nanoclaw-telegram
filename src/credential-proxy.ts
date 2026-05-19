@@ -468,28 +468,6 @@ export function startCredentialProxy(
                   // Fire-and-forget. appendUsageRecord swallows IO
                   // errors internally so this can never reject.
                   void appendUsageRecord(usageLogPath, record);
-                } else {
-                  // Temporary content-free diagnostic surfaced at INFO
-                  // (not DEBUG) so it's visible in production while
-                  // we verify the decompression fix. Drop once first
-                  // JSONL line lands.
-                  logger.info(
-                    {
-                      url: upstreamPath,
-                      contentEncoding: encoding || '(none)',
-                      rawBytes: rawBuffer.length,
-                      decodedBytes: bodyBuffer.length,
-                      hasMessageStart: bodyText.includes(
-                        '"type":"message_start"',
-                      ),
-                      hasMessageDelta: bodyText.includes(
-                        '"type":"message_delta"',
-                      ),
-                      hasDataLine: /(?:^|\r?\n)data: /.test(bodyText),
-                      startsWithBrace: bodyText.charCodeAt(0) === 0x7b,
-                    },
-                    'usage-log: parser returned null (structural diagnostic)',
-                  );
                 }
               } catch (err) {
                 // Defense in depth: parseUsageFromBody is designed not
