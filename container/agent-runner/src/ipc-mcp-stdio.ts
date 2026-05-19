@@ -17,6 +17,10 @@ import {
   buildRegisterGroupContainerConfig,
   describeOverlayUpdate,
 } from './overlay-tiles.js';
+import {
+  performOperatorApprovedWrite,
+  WRITE_TRUSTED_MEMORY_DESCRIPTION as writeTrustedMemoryDescription,
+} from './write-trusted-memory.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -2084,6 +2088,77 @@ server.tool(
   },
 );
 }
+
+// #585 — Operator-approved trusted-memory write. Bypasses the #325
+// quarantine hook because it's registered under a fresh tool name
+// (the hook only intercepts `Write` / `Edit`). The validation and
+// write logic lives in `write-trusted-memory.ts` so it can be tested
+// without spinning up the MCP server here.
+//
+// Tier gating: this tool is registered unconditionally — same posture
+// as `send_file` — because the filesystem mount is the real enforcer.
+// `/workspace/trusted/` is mounted RW only for main + trusted
+// containers (see `src/container-runner.ts`); on untrusted containers
+// the mount isn't writable (in most setups, it isn't mounted at all),
+// so a call from untrusted would fail at the OS level with a
+// structured error. The Composio / web / cross-group / email
+// provenance ACL (`capability-acl.ts`) does NOT list this tool as an
+// allowed sink under any external-content prefix, so chains carrying
+// untrusted-provenance markers are denied at the ACL layer before
+// they reach the filesystem.
+server.tool(
+  'write_trusted_memory',
+  writeTrustedMemoryDescription,
+  {
+    file_path: z
+      .string()
+      .describe(
+        'Absolute path under /workspace/trusted/ (e.g., /workspace/trusted/MEMORY.md). Must NOT be under /workspace/trusted/quarantine/. Relative paths are rejected.',
+      ),
+    content: z
+      .string()
+      .describe(
+        'Full file content. Empty strings are accepted (legitimate clear-the-file requests); a missing parameter is rejected.',
+      ),
+    operator_justification: z
+      .string()
+      .describe(
+        'Required. At least 8 characters describing the chat turn where the operator dictated this content (e.g., "operator dictated Amir\'s birthday in turn 14"). Logged for forensic review under event=memory_quarantine.operator_approved_write.',
+      ),
+  },
+  async (args) => {
+    const result = performOperatorApprovedWrite(
+      {
+        file_path: args.file_path,
+        content: args.content,
+        operator_justification: args.operator_justification,
+      },
+      (payload) => {
+        // Structured single-line JSON to stderr. Stderr is the
+        // MCP stdio server's diagnostic channel (stdout carries
+        // the JSON-RPC tool frames; mixing log lines there would
+        // corrupt the protocol). The host-side reviewer greps
+        // for `memory_quarantine.operator_approved_write` to
+        // surface every bypassed write across the fleet.
+        console.error(JSON.stringify(payload));
+      },
+    );
+    if (result.ok) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `Wrote trusted memory: ${result.path}`,
+          },
+        ],
+      };
+    }
+    return {
+      content: [{ type: 'text' as const, text: result.error }],
+      isError: true,
+    };
+  },
+);
 
 // Start the stdio transport
 const transport = new StdioServerTransport();
