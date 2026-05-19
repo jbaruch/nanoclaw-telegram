@@ -412,10 +412,20 @@ function formatToPartsAsRecord(
  * `next_run` values immediately rather than waiting for each row to
  * elapse against the prior zone.
  *
- * Per-row error isolation: a `computeNextRunDetailed` failure or a
- * `setTaskNextRun` failure on one row must not stall the rest of the
- * recompute. Wrap each row, log + continue. The next scheduler tick
- * (max ~60 s later) will pick up any rows that remain stale.
+ * Per-row error handling: `computeNextRunDetailed` is documented as
+ * resilient — bad-cron and bad-tz rows route through
+ * `pause-broken-cron` / `clear-bad-timezone` via the sibling
+ * `applyComputeRemediation` writer without throwing — so an
+ * unexpected throw from compute signals a programming bug and
+ * propagates per `coding-policy: error-handling`. `setTaskNextRun`
+ * failures are narrowed to transient SQLite contention
+ * (`SQLITE_BUSY` / `SQLITE_LOCKED`); those warn-and-continue because
+ * the next scheduler tick (max ~60 s later) retries naturally.
+ * Persistent DB faults, FK violations, and other programming bugs
+ * propagate so they surface at the outer `tz_state` writer's
+ * narrowed catch (and at the scheduler-tick boundary) rather than
+ * being hidden behind stale schedule state across the fleet of
+ * `'local'`-scheduled rows.
  *
  * Production catch-up: `cron-parser.next()` always returns a future
  * occurrence, so the future `next_run` alone never describes "the row
