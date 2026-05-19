@@ -3502,10 +3502,9 @@ describe('recomputeLocalSchedules error narrowing (#584 — error-handling)', ()
   // writeRow(row.id, nextRun) — that used to share a broad catch-all
   // shape. Per `coding-policy: error-handling`, each is now narrowed:
   //
-  // - compute(row): wrapped in `tryComputeNextRunForRow` which surfaces
-  //   an unexpected throw as a returned `{error}` value (the wrapper
-  //   IS the per-row isolation surface — the alternative is one bad
-  //   row stalling N-1 good rows in the same `tz_state` flip).
+  // - compute(row): no catch-all. `computeNextRunDetailed` is
+  //   documented as resilient, so any throw signals a programming
+  //   bug and must propagate to the scheduler-tick boundary.
   //
   // - writeRow(...): narrowed to SqliteError with SQLITE_BUSY /
   //   SQLITE_LOCKED only. Every other error propagates.
@@ -3653,33 +3652,21 @@ describe('recomputeLocalSchedules error narrowing (#584 — error-handling)', ()
     ).toThrow(SqliteError);
   });
 
-  it('compute wrapper: unexpected throw is surfaced as {error}, warn-logged, row skipped', () => {
+  it('compute path: unexpected throw from computeNextRunDetailed PROPAGATES (programming bug)', () => {
     // `computeNextRunDetailed` is documented as resilient — it handles
-    // every documented throw case internally. An unexpected throw (e.g.
-    // corrupted row triggering a TypeError inside cron-parser) reaches
-    // the wrapper. The wrapper returns {error}; the loop warn-logs and
-    // continues with the next row.
+    // every documented throw case internally (cron parse failures →
+    // `pause-broken-cron` remediation, invalid per-task tz →
+    // `clear-bad-timezone`, throwing resolver callbacks → TIMEZONE
+    // fallback, malformed intervals → 60s default). An unexpected
+    // throw therefore signals a programming bug (corrupted row shape,
+    // schema drift, undefined behaviour). Per
+    // `coding-policy: error-handling`, programming bugs must
+    // propagate — catching them here would hide the bug behind stale
+    // schedule state across the entire fleet of `'local'` rows.
     //
-    // We trigger an unexpected throw by passing a resolver that
-    // throws AFTER computeNextRunDetailed's internal resolver catch
-    // would normally absorb it — i.e., by making the row's
-    // `schedule_timezone` something OTHER than 'local', so the
-    // resolver isn't invoked and the throw comes from elsewhere. The
-    // most reliable trigger is a malformed `next_run` interval row
-    // — but easier: construct a row that violates the type contract.
-    //
-    // Use a row whose `schedule_value` is an empty cron string. The
-    // internal try/catch in computeNextRunDetailed catches the
-    // CronExpressionParser throw and returns `pause-broken-cron` —
-    // NOT an unexpected throw. So we directly exercise the wrapper
-    // via the dep-injected `getActiveLocalScheduledTasks` returning
-    // a Proxy that throws when an internal field is read.
-    // The proxy throws on `schedule_type` — a property
-    // `computeNextRunDetailed` reads first thing, but which the
-    // wrapper's downstream warn-log path does NOT access (the warn
-    // reads `id` and `schedule_value` only). This isolates the
-    // wrapper-surface fault from the warn-log surface so the test
-    // exercises only the catch-all narrowing it cares about.
+    // Trigger an unexpected throw via a Proxy that throws on a
+    // property `computeNextRunDetailed` reads. The throw must escape
+    // the loop, not be absorbed.
     const buggyRow = new Proxy(makeFakeRow('proxy-row'), {
       get(target, prop, receiver) {
         if (prop === 'schedule_type') {
@@ -3688,79 +3675,16 @@ describe('recomputeLocalSchedules error narrowing (#584 — error-handling)', ()
         return Reflect.get(target, prop, receiver);
       },
     });
-    const healthyRow = makeFakeRow('healthy-row');
-    const writes = new Map<string, string | null>();
-    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
 
-    const result = recomputeLocalSchedules(
-      () => 'Asia/Tokyo',
-      new Date('2026-03-10T05:00:00.000Z'),
-      {
-        getActiveLocalScheduledTasks: () => [buggyRow, healthyRow],
-        setTaskNextRun: (id, nr) => {
-          writes.set(id, nr);
+    expect(() =>
+      recomputeLocalSchedules(
+        () => 'Asia/Tokyo',
+        new Date('2026-03-10T05:00:00.000Z'),
+        {
+          getActiveLocalScheduledTasks: () => [buggyRow],
+          setTaskNextRun: () => {},
         },
-      },
-    );
-
-    // Healthy row still recomputed despite the buggy row's throw —
-    // the wrapper's per-row isolation is the whole point.
-    expect(result.recomputed).toBe(1);
-    expect(writes.get('healthy-row')).toBeTruthy();
-    expect(writes.has('proxy-row')).toBe(false);
-
-    const wrapperWarns = warnSpy.mock.calls.filter(
-      (call) =>
-        typeof call[1] === 'string' &&
-        call[1].startsWith(
-          'recomputeLocalSchedules: computeNextRunDetailed threw',
-        ),
-    );
-    expect(wrapperWarns).toHaveLength(1);
-    expect(wrapperWarns[0][0]).toMatchObject({ taskId: 'proxy-row' });
-
-    warnSpy.mockRestore();
-  });
-
-  it('compute wrapper: non-Error throw value is wrapped into an Error', () => {
-    // Defensive: a `throw "string"` (not an Error instance) should
-    // still surface a usable `.message` to the warn log rather than
-    // crashing the warn-formatter on `undefined.message`.
-    const stringThrowRow = new Proxy(makeFakeRow('string-throw'), {
-      get(target, prop, receiver) {
-        if (prop === 'schedule_type') {
-          // Intentionally throw a non-Error value — the wrapper must
-          // normalise this into a proper Error via String(err).
-          throw 'not-an-error-instance';
-        }
-        return Reflect.get(target, prop, receiver);
-      },
-    });
-    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
-
-    const result = recomputeLocalSchedules(
-      () => 'Asia/Tokyo',
-      new Date('2026-03-10T05:00:00.000Z'),
-      {
-        getActiveLocalScheduledTasks: () => [stringThrowRow],
-        setTaskNextRun: () => {},
-      },
-    );
-
-    expect(result.recomputed).toBe(0);
-    const wrapperWarns = warnSpy.mock.calls.filter(
-      (call) =>
-        typeof call[1] === 'string' &&
-        call[1].startsWith(
-          'recomputeLocalSchedules: computeNextRunDetailed threw',
-        ),
-    );
-    expect(wrapperWarns).toHaveLength(1);
-    expect(wrapperWarns[0][0]).toMatchObject({
-      taskId: 'string-throw',
-      err: 'not-an-error-instance',
-    });
-
-    warnSpy.mockRestore();
+      ),
+    ).toThrow(TypeError);
   });
 });

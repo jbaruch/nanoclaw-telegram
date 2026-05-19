@@ -471,17 +471,25 @@ export interface DecideCatchUpResult {
 const CATCH_UP_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export function decideCatchUp(input: DecideCatchUpInput): DecideCatchUpResult {
-  let prev: Date;
-  try {
-    const interval = CronExpressionParser.parse(input.scheduleValue, {
-      tz: input.prevCronTz,
-      currentDate: input.now,
-    });
-    prev = interval.prev().toDate();
-  } catch {
-    // Cron parse / prev failed — be defensive, don't force a fire.
-    return { shouldCatchUp: false, prevOccurrence: null };
-  }
+  // #584 — No catch-all here. By the time `recomputeLocalSchedules`
+  // calls this, `computeNextRunDetailed` has already returned a
+  // non-null `nextRun` for the same `scheduleValue` (the catch-up
+  // gate is only consulted on successful compute paths). Cron-parse
+  // failures on a syntactically valid cron string are not expected
+  // to vary by `tz` — `CronExpressionParser.parse` only varies its
+  // throw shape on the cron string itself, which we've already
+  // validated upstream. `.prev()` on a valid daily/weekly cron with
+  // a real `currentDate` always has a previous occurrence. Any
+  // remaining throw therefore signals a programming bug (corrupted
+  // input shape, cron-parser internal invariant violation) and must
+  // propagate per `coding-policy: error-handling`. Catching it here
+  // would silently anchor rows to the "no catch-up" branch and hide
+  // the bug behind stale schedule state.
+  const interval = CronExpressionParser.parse(input.scheduleValue, {
+    tz: input.prevCronTz,
+    currentDate: input.now,
+  });
+  const prev = interval.prev().toDate();
   const prevMs = prev.getTime();
   const nowMs = input.now.getTime();
   if (prevMs > nowMs) {
@@ -512,51 +520,6 @@ const RECOMPUTE_TRANSIENT_SQLITE_CODES: ReadonlySet<string> = new Set([
   'SQLITE_LOCKED',
 ]);
 
-/**
- * #584 — Per-row wrapper that surfaces an unexpected throw from
- * `computeNextRunDetailed` as a returned value rather than a thrown
- * exception, so a single bad row doesn't stall the recompute of every
- * subsequent row in the same `tz_state` flip.
- *
- * Why a wrapper instead of a bare try/catch in `recomputeLocalSchedules`:
- * `coding-policy: error-handling` forbids catch-all handlers in inner
- * helpers. Per-row isolation IS the legitimate contract here — the
- * caller is iterating over N rows and a fault on row K must not
- * silently anchor rows K+1..N to the prior zone — but the contract
- * should be visible at the call site rather than hidden in a generic
- * try/catch. The wrapper makes "unexpected exception → returned error"
- * an explicit part of the API.
- *
- * `computeNextRunDetailed` is documented as resilient: it handles cron
- * parse failures (`pause-broken-cron` remediation), invalid per-task
- * tz (`clear-bad-timezone`), throwing resolver callbacks (fallback to
- * TIMEZONE), and malformed intervals (60s default). An unexpected
- * throw therefore signals a programming bug — corrupted row shape,
- * `task.id` undefined, etc. We surface it for the warn log and let
- * the caller continue with row K+1.
- *
- * Note: this wrapper is the SOLE catch-all in the recompute path; the
- * writer catch (`setTaskNextRun`) below is narrowed to SqliteError +
- * recoverable codes only, per the same rule.
- */
-function tryComputeNextRunForRow(
-  row: ScheduledTask,
-  resolveCurrentTz: () => string | null,
-): { result?: NextRunResult; error?: Error } {
-  try {
-    return { result: computeNextRunDetailed(row, resolveCurrentTz) };
-  } catch (err) {
-    // Per-row isolation surface: a programming bug in one row must
-    // not stall the recompute of every other row in the same flip.
-    // The error is surfaced as a returned value (not thrown) so the
-    // caller can warn + continue without an additional catch-all
-    // handler in `recomputeLocalSchedules` itself.
-    return {
-      error: err instanceof Error ? err : new Error(String(err)),
-    };
-  }
-}
-
 export function recomputeLocalSchedules(
   resolveCurrentTz: () => string | null = getCurrentTz,
   now: Date = new Date(),
@@ -584,31 +547,35 @@ export function recomputeLocalSchedules(
   let recomputed = 0;
   let caughtUp = 0;
   for (const row of rows) {
-    const computed = tryComputeNextRunForRow(row, resolveCurrentTz);
-    if (computed.error) {
-      // Wrapper surfaces an unexpected throw as a returned error so
-      // the rest of the loop continues. Programming bugs reach this
-      // branch (documented throw cases are handled inside
-      // `computeNextRunDetailed`); warn-log with row context and
-      // proceed.
-      logger.warn(
-        {
-          taskId: row.id,
-          scheduleValue: row.schedule_value,
-          err: computed.error.message,
-        },
-        'recomputeLocalSchedules: computeNextRunDetailed threw — skipping row',
-      );
-      continue;
-    }
-    const detailed = computed.result as NextRunResult;
+    // #584 — `computeNextRunDetailed` is documented as resilient:
+    // bad-cron rows enter the `paused` status via the sibling
+    // `applyComputeRemediation` path (it does NOT throw on documented
+    // cases), bad tz falls back to TIMEZONE env var, throwing tz
+    // resolvers fall back to TIMEZONE. An unexpected throw here
+    // therefore signals a programming bug (corrupted row shape,
+    // schema migration mid-flight, undefined behaviour). Per
+    // `coding-policy: error-handling`, programming bugs must
+    // propagate — they will surface at the outer `tz_state` writer's
+    // narrowed catch (which lets non-`SqliteError` propagate) and at
+    // the scheduler-tick boundary. Catching them here would hide the
+    // bug behind stale schedule state across the entire fleet of
+    // `'local'` rows.
+    const detailed = computeNextRunDetailed(row, resolveCurrentTz);
     let nextRun = detailed.nextRun;
     // Production catch-up: when the gate is usable, ask cron-parser
     // for the previous occurrence in the new zone and override
     // nextRun to `now` if the prev is missed-and-fireable. Skipped
     // entirely when the gate is unusable (NaN midnight / null tz).
     let catchUpDecided = false;
-    if (catchUpGateUsable && row.schedule_type === 'cron') {
+    // Skip the catch-up branch when `computeNextRunDetailed` returned
+    // `nextRun: null` — that path is the documented `pause-broken-cron`
+    // remediation (BOTH parse attempts failed). Calling `decideCatchUp`
+    // would re-throw the same cron-parse error. With the inner
+    // catch-all removed (programming-bug propagation), we gate at the
+    // call site instead: a null nextRun is a documented bad-cron
+    // outcome, not a programming bug, and the broken-cron row will
+    // be paused by the sibling `applyComputeRemediation` writer.
+    if (catchUpGateUsable && row.schedule_type === 'cron' && nextRun !== null) {
       const decision = decideCatchUp({
         scheduleValue: row.schedule_value,
         scheduleTimezone: row.schedule_timezone ?? 'local',
