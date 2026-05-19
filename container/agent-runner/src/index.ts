@@ -66,10 +66,7 @@ import { decideGroundTruthReminder } from './ground-truth-reminder.js';
 import { detectLazyVerification } from './lazy-verification.js';
 import { createReadonlyWarner } from './ipc-readonly-warn.js';
 import { rewriteMarkdownToHtml } from './markdown-to-html.js';
-import {
-  parseScriptOutput,
-  type ScriptResult,
-} from './script-output-parse.js';
+import { parseScriptOutput, type ScriptResult } from './script-output-parse.js';
 import {
   decideHardExitWatchdog,
   HARD_EXIT_IDLE_BUDGET_MS,
@@ -102,10 +99,7 @@ import {
   wrapMcpToolResult,
   type SummariseBodyOptions,
 } from './untrusted-input-wrap.js';
-import {
-  formatSentinel,
-  inferSentinelSource,
-} from './provenance-sentinel.js';
+import { formatSentinel, inferSentinelSource } from './provenance-sentinel.js';
 import {
   decideExternalFileSummary,
   runExternalFileSummary,
@@ -443,7 +437,9 @@ function createPreCompactHook(assistantName?: string): HookCallback {
         log('No messages to archive');
       } else {
         const summary = getSessionSummary(sessionId, transcriptPath);
-        const name = summary ? sanitizeFilename(summary) : generateFallbackName();
+        const name = summary
+          ? sanitizeFilename(summary)
+          : generateFallbackName();
 
         const conversationsDir = '/workspace/group/conversations';
         fs.mkdirSync(conversationsDir, { recursive: true });
@@ -679,16 +675,12 @@ function createUntrustedInputWrapHook(
   return async (input, _toolUseId, _context) => {
     const post = input as PostToolUseHookInput;
     if (!post.tool_name?.startsWith('mcp__')) return {};
-    const {
-      wrapped,
-      mutated,
-      summaryLatenciesMs,
-      summaryOutcomes,
-    } = await wrapMcpToolResult(
-      post.tool_name,
-      post.tool_response,
-      summariseOpts,
-    );
+    const { wrapped, mutated, summaryLatenciesMs, summaryOutcomes } =
+      await wrapMcpToolResult(
+        post.tool_name,
+        post.tool_response,
+        summariseOpts,
+      );
     if (!mutated) return {};
     if (summaryLatenciesMs.length > 0) {
       // Telemetry per acceptance: per-tool latency + outcome metadata
@@ -1497,7 +1489,11 @@ function createConfirmationTokenHook(fs: typeof import('fs')): HookCallback {
       // sentinel the gate checks (see createConfirmationTokenWriteGate).
       try {
         process.env.NANOCLAW_INTERNAL_TOKEN_WRITE = '1';
-        saveConfirmationTokens(fs, CONFIRMATION_TOKENS_PATH, decision.updatedTokens);
+        saveConfirmationTokens(
+          fs,
+          CONFIRMATION_TOKENS_PATH,
+          decision.updatedTokens,
+        );
       } finally {
         delete process.env.NANOCLAW_INTERNAL_TOKEN_WRITE;
       }
@@ -1590,8 +1586,7 @@ function createConfirmationTokenWriteGate(): HookCallback {
         const cmd = (pre.tool_input as { command?: unknown })?.command;
         if (typeof cmd !== 'string') return false;
         return (
-          cmd.includes(CONFIRMATION_TOKENS_PATH) ||
-          cmd.includes(tokenBasename)
+          cmd.includes(CONFIRMATION_TOKENS_PATH) || cmd.includes(tokenBasename)
         );
       }
       return false;
@@ -3705,7 +3700,7 @@ async function runQuery(
           {
             matcher: '^(Agent|Task|mcp__nanoclaw__schedule_task)$',
             hooks: [createRateLimitsHook(fs, !!containerInput.isTrusted)],
-          }
+          },
         ],
         // #117 — strip invisible-Unicode + cap byte size on every MCP
         // tool result. Matcher restricts to MCP because that's the
