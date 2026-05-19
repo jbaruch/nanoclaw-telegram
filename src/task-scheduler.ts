@@ -413,19 +413,22 @@ function formatToPartsAsRecord(
  * elapse against the prior zone.
  *
  * Per-row error handling: `computeNextRunDetailed` is documented as
- * resilient — bad-cron and bad-tz rows route through
- * `pause-broken-cron` / `clear-bad-timezone` via the sibling
- * `applyComputeRemediation` writer without throwing — so an
- * unexpected throw from compute signals a programming bug and
- * propagates per `coding-policy: error-handling`. `setTaskNextRun`
- * failures are narrowed to transient SQLite contention
- * (`SQLITE_BUSY` / `SQLITE_LOCKED`); those warn-and-continue because
- * the next scheduler tick (max ~60 s later) retries naturally.
- * Persistent DB faults, FK violations, and other programming bugs
- * propagate so they surface at the outer `tz_state` writer's
- * narrowed catch (and at the scheduler-tick boundary) rather than
- * being hidden behind stale schedule state across the fleet of
- * `'local'`-scheduled rows.
+ * resilient — bad-cron and bad-tz rows return a `remediation` hint
+ * (`pause-broken-cron` / `clear-bad-timezone`) without throwing. The
+ * recompute invokes `applyComputeNextRunRemediation` for those rows
+ * so they're paused (or their bad tz cleared) consistently with every
+ * other compute caller; skipping the remediation here would strand
+ * the row with `status='active'` + `next_run=null`, invisible to the
+ * scheduler's `WHERE next_run <= ?` due-task filter. An unexpected
+ * throw from compute signals a programming bug and propagates per
+ * `coding-policy: error-handling`. `setTaskNextRun` failures are
+ * narrowed to transient SQLite contention (`SQLITE_BUSY` /
+ * `SQLITE_LOCKED`); those warn-and-continue because the next
+ * scheduler tick (max ~60 s later) retries naturally. Persistent DB
+ * faults, FK violations, and other programming bugs propagate so they
+ * surface at the outer `tz_state` writer's narrowed catch (and at the
+ * scheduler-tick boundary) rather than being hidden behind stale
+ * schedule state across the fleet of `'local'`-scheduled rows.
  *
  * Production catch-up: `cron-parser.next()` always returns a future
  * occurrence, so the future `next_run` alone never describes "the row
@@ -536,11 +539,19 @@ export function recomputeLocalSchedules(
   deps: {
     getActiveLocalScheduledTasks?: () => ScheduledTask[];
     setTaskNextRun?: (id: string, nextRun: string | null) => void;
+    applyRemediation?: (
+      taskId: string,
+      remediation: NextRunRemediation,
+      observedScheduleValue: string,
+      observedScheduleTimezone: string | null | undefined,
+    ) => void;
   } = {},
 ): RecomputeLocalSchedulesResult {
   const readRows =
     deps.getActiveLocalScheduledTasks ?? getActiveLocalScheduledTasks;
   const writeRow = deps.setTaskNextRun ?? setTaskNextRun;
+  const applyRemediation =
+    deps.applyRemediation ?? applyComputeNextRunRemediation;
   const rows = readRows();
   const tzForGate = resolveCurrentTz();
   // Pre-flight the gate inputs once per recompute pass. NaN from
@@ -577,15 +588,30 @@ export function recomputeLocalSchedules(
     // nextRun to `now` if the prev is missed-and-fireable. Skipped
     // entirely when the gate is unusable (NaN midnight / null tz).
     let catchUpDecided = false;
-    // Skip the catch-up branch when `computeNextRunDetailed` returned
-    // `nextRun: null` — that path is the documented `pause-broken-cron`
-    // remediation (BOTH parse attempts failed). Calling `decideCatchUp`
-    // would re-throw the same cron-parse error. With the inner
-    // catch-all removed (programming-bug propagation), we gate at the
-    // call site instead: a null nextRun is a documented bad-cron
-    // outcome, not a programming bug, and the broken-cron row will
-    // be paused by the sibling `applyComputeRemediation` writer.
-    if (catchUpGateUsable && row.schedule_type === 'cron' && nextRun !== null) {
+    // `computeNextRunDetailed` returning a remediation hint means the
+    // row's cron / per-task tz was unparseable — invoke
+    // `applyComputeNextRunRemediation` so the row is paused (or its
+    // bad tz cleared) like every other compute caller does. Skipping
+    // this writer would leave the row with `status='active'` +
+    // `next_run=null`, invisible to the scheduler's
+    // `WHERE next_run <= ?` filter — the standard due-task query
+    // strands it permanently rather than surfacing it as paused for
+    // the operator. The remediation re-fetches fresh row state so a
+    // concurrent `update_task` fix wins. Skip the catch-up branch on
+    // this path: `decideCatchUp` would re-throw the same cron-parse
+    // error, and the row is being paused anyway so there's no future
+    // fire to catch up.
+    const remediation = detailed.remediation ?? null;
+    if (remediation !== null) {
+      applyRemediation(
+        row.id,
+        remediation,
+        row.schedule_value,
+        row.schedule_timezone,
+      );
+      continue;
+    }
+    if (catchUpGateUsable && row.schedule_type === 'cron') {
       const decision = decideCatchUp({
         scheduleValue: row.schedule_value,
         scheduleTimezone: row.schedule_timezone ?? 'local',

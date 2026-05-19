@@ -3687,4 +3687,63 @@ describe('recomputeLocalSchedules error narrowing (#584 — error-handling)', ()
       ),
     ).toThrow(TypeError);
   });
+
+  it('routes pause-broken-cron remediation through applyComputeNextRunRemediation (not setTaskNextRun(null))', () => {
+    // A row whose schedule_value is unparseable as cron AND whose
+    // schedule_timezone is 'local' returns
+    // `{nextRun: null, remediation: 'pause-broken-cron'}` from
+    // computeNextRunDetailed. The recompute MUST route through
+    // applyRemediation so the row's status flips to 'paused' — writing
+    // null to next_run while leaving status='active' would strand the
+    // row outside the scheduler's WHERE next_run <= ? due-task filter
+    // permanently (the policy reviewer's #592 concern).
+    const fakeNow = new Date('2026-03-10T05:00:00.000Z');
+    const fakeRow: ScheduledTask = {
+      id: 'broken-cron-row',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'noop',
+      script: null,
+      schedule_type: 'cron',
+      schedule_value: 'NOT A CRON',
+      schedule_timezone: 'local',
+      context_mode: 'isolated',
+      next_run: new Date('2026-03-10T12:00:00.000Z').toISOString(),
+      last_run: null,
+      last_result: null,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    };
+
+    const writes = new Map<string, string | null>();
+    const remediations: Array<{
+      taskId: string;
+      remediation: string;
+      sv: string;
+      stz: string | null | undefined;
+    }> = [];
+
+    const result = recomputeLocalSchedules(() => 'Asia/Tokyo', fakeNow, {
+      getActiveLocalScheduledTasks: () => [fakeRow],
+      setTaskNextRun: (id, nr) => {
+        writes.set(id, nr);
+      },
+      applyRemediation: (taskId, remediation, sv, stz) => {
+        remediations.push({ taskId, remediation, sv, stz });
+      },
+    });
+
+    expect(result.recomputed).toBe(0);
+    expect(result.caughtUp).toBe(0);
+    expect(writes.has('broken-cron-row')).toBe(false);
+    expect(remediations).toEqual([
+      {
+        taskId: 'broken-cron-row',
+        remediation: 'pause-broken-cron',
+        sv: 'NOT A CRON',
+        stz: 'local',
+      },
+    ]);
+  });
 });
