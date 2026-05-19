@@ -321,7 +321,15 @@ export function startOfTodayInTz(tz: string, now: Date): number {
       second: '2-digit',
       hour12: false,
     });
-  } catch {
+  } catch (err) {
+    // `Intl.DateTimeFormat` throws `RangeError` on an unparseable
+    // `timeZone` option (the contract for an unknown / malformed IANA
+    // zone string). That's the only expected failure mode here, and
+    // the caller treats NaN as "can't gate, skip the catch-up". Any
+    // other throw signals a programming bug (e.g. options shape error
+    // from a future refactor) and propagates per
+    // `coding-policy: error-handling`.
+    if (!(err instanceof RangeError)) throw err;
     return NaN;
   }
   const nowParts = formatToPartsAsRecord(formatter, now);
@@ -394,7 +402,13 @@ function formatToPartsAsRecord(
   let parts: Intl.DateTimeFormatPart[];
   try {
     parts = formatter.formatToParts(date);
-  } catch {
+  } catch (err) {
+    // `formatToParts` throws `RangeError` for a `Date` value outside
+    // the formatter's supported range. Caller treats null as "can't
+    // gate, skip the catch-up". Other throws (e.g. internal V8/JS
+    // engine errors signalling a programming bug) propagate per
+    // `coding-policy: error-handling`.
+    if (!(err instanceof RangeError)) throw err;
     return null;
   }
   const byType: Record<string, string> = {};

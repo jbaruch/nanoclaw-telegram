@@ -3351,10 +3351,16 @@ async function main(): Promise<void> {
       // #584 — `onTzFlipped` invalidates cached `next_run` values on
       // active `schedule_timezone='local'` rows so a zone change at
       // heartbeat time doesn't leave 7am-local tasks anchored to the
-      // prior zone. The recompute is wrapped inside the writer; a
-      // recompute fault is logged and continued, never bubbled out
-      // here (this catch deliberately stays narrow on transient
-      // SQLite codes).
+      // prior zone. The recompute callback is wrapped inside the
+      // writer with a narrowed catch — only transient SQLite
+      // contention (`SQLITE_BUSY` / `SQLITE_LOCKED`) is logged and
+      // continued so the canonical `tz_state` UPDATE that already
+      // landed stays consistent. Programming bugs, persistent DB
+      // failures, and unexpected throws propagate through the writer
+      // back to this outer catch (which is itself narrowed on the same
+      // transient SQLite codes) and finally to the orchestrator's
+      // log-and-keep-ticking scheduler loop per
+      // `coding-policy: error-handling`.
       advisory = runTzHeartbeatAdvisory(
         new Date(),
         ASSISTANT_OWNER_TG_USER_ID,

@@ -3394,9 +3394,13 @@ export async function processTaskIpc(
                 // resolved from the TripIt segment walk also
                 // invalidates cached `next_run` values on active
                 // `schedule_timezone='local'` rows. The recompute is
-                // wrapped in its own try/catch inside the writer; a
-                // recompute fault is logged and continued, never
-                // bubbled back to this IPC handler.
+                // wrapped inside the writer with a narrowed catch —
+                // only transient SQLite contention (`SQLITE_BUSY` /
+                // `SQLITE_LOCKED`) is swallowed-with-warn so the
+                // canonical `tz_state` UPDATE that already landed
+                // stays consistent; programming bugs, persistent DB
+                // failures, and unexpected throws propagate back to
+                // this IPC handler per `coding-policy: error-handling`.
                 applyTripitSegmentsToTzState({ segments }, new Date(), () => {
                   recomputeLocalSchedules(getCurrentTz, new Date());
                 });
