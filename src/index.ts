@@ -98,6 +98,7 @@ import {
   MAINTENANCE_SESSION_NAME,
 } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
+import { writeFlightAssistLocation } from './flight-assist-location.js';
 import { initBotPool } from './channels/telegram.js';
 import { shouldStoreBotMessage, startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
@@ -132,7 +133,12 @@ import {
 } from './task-scheduler.js';
 import { startTriggerLearner } from './gates/trigger-learner-runtime.js';
 import { installTelegramOutboundTap } from './telegram-outbound-tap.js';
-import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import {
+  Channel,
+  LocationRecord,
+  NewMessage,
+  RegisteredGroup,
+} from './types.js';
 import { logger } from './logger.js';
 import { initObserver } from './observer.js';
 import { runGateChain, GateContext } from './gates/index.js';
@@ -2724,7 +2730,19 @@ async function main(): Promise<void> {
       channel?: string,
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
-    onLocation: storeLocation,
+    onLocation: (record: LocationRecord) => {
+      storeLocation(record);
+      // Sidecar write for `jbaruch/nanoclaw-flight-assist`'s
+      // `precheck.py` origin-resolution ladder (issue
+      // `nanoclaw-flight-assist#18`). The DB row drives the host-side
+      // TZ resolver; this file drives the per-group container's
+      // time-to-leave origin. Filters to owner-only inside.
+      writeFlightAssistLocation(record, {
+        groups: registeredGroups,
+        ownerSenderId: ASSISTANT_OWNER_TG_USER_ID,
+        dataDir: DATA_DIR,
+      });
+    },
     registeredGroups: () => registeredGroups,
   };
 
