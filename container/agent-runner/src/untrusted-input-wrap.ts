@@ -215,6 +215,14 @@ const READ_TOOL_PATTERNS: ReadonlyArray<{
     pattern: /^mcp__tessl__(search|outdated|query_library_docs)\w*$/i,
     prefix: 'tessl',
   },
+  {
+    // snitchmd fetch — host-side docker render of an arbitrary URL
+    // returning extracted markdown. Body content is attacker-controlled
+    // (any page on the web) so it wraps as `web:<url>` and #322's
+    // walk-back applies cross-source-cell rate limits.
+    pattern: /^mcp__nanoclaw__fetch_markdown$/i,
+    prefix: 'web',
+  },
 ];
 
 interface InternalReadRow {

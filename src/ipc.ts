@@ -8,6 +8,7 @@ import {
   ASSISTANT_NAME,
   DATA_DIR,
   GROUPS_DIR,
+  HOST_PROJECT_ROOT,
   IPC_POLL_INTERVAL,
   STORE_DIR,
   TIMEZONE,
@@ -971,6 +972,20 @@ export async function processTaskIpc(
     // uses to supersede prior versions.
     kind?: string;
     pattern?: string;
+    // For fetch_markdown (#169). All optional except `url`. Mirrors the
+    // snitchmd CLI flag set; see docs/fetch-tools.md for the decision
+    // matrix and snitchmd's own README for flag semantics.
+    url?: string;
+    wait?: number;
+    waitUntil?: string;
+    waitForSelector?: string;
+    favorPrecision?: boolean;
+    favorRecall?: boolean;
+    includeLinks?: boolean;
+    includeImages?: boolean;
+    maxChars?: number;
+    noCache?: boolean;
+    timeout?: number;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -3573,6 +3588,216 @@ export async function processTaskIpc(
             } catch {
               /* best effort */
             }
+          },
+        );
+      }
+      break;
+
+    case 'fetch_markdown':
+      if (data.requestId) {
+        const resultPath = scriptResultPath(sourceGroup, data);
+
+        const rawUrl = typeof data.url === 'string' ? data.url : '';
+        let parsedUrl: URL;
+        try {
+          parsedUrl = new URL(rawUrl);
+        } catch {
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({
+              error:
+                'fetch_markdown: invalid URL. Pass an absolute http(s) URL, e.g. https://example.com/path.',
+            }),
+          );
+          break;
+        }
+        if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({
+              error: `fetch_markdown: only http(s) URLs are supported (got ${parsedUrl.protocol}).`,
+            }),
+          );
+          break;
+        }
+
+        const flags: string[] = ['--json'];
+        if (
+          typeof data.wait === 'number' &&
+          Number.isInteger(data.wait) &&
+          data.wait > 0
+        ) {
+          flags.push('--wait', String(data.wait));
+        }
+        if (
+          typeof data.waitUntil === 'string' &&
+          ['commit', 'domcontentloaded', 'load', 'networkidle'].includes(
+            data.waitUntil,
+          )
+        ) {
+          flags.push('--wait-until', data.waitUntil);
+        }
+        if (typeof data.waitForSelector === 'string' && data.waitForSelector) {
+          flags.push('--wait-for-selector', data.waitForSelector);
+        }
+        if (data.favorPrecision === true) flags.push('--favor-precision');
+        if (data.favorRecall === true) flags.push('--favor-recall');
+        if (data.includeLinks === true) flags.push('--include-links');
+        if (data.includeImages === true) flags.push('--include-images');
+        if (
+          typeof data.maxChars === 'number' &&
+          Number.isInteger(data.maxChars) &&
+          data.maxChars > 0
+        ) {
+          flags.push('--max-chars', String(data.maxChars));
+        }
+        if (data.noCache === true) flags.push('--no-cache');
+        if (
+          typeof data.timeout === 'number' &&
+          Number.isInteger(data.timeout) &&
+          data.timeout > 0
+        ) {
+          flags.push('--timeout', String(data.timeout));
+        }
+
+        // Cache directory on the HOST filesystem — the snitchmd sibling
+        // container is launched via the orchestrator's docker.sock, so
+        // -v mount paths must reference the host's view (HOST_PROJECT_ROOT),
+        // not the orchestrator's /app/store. Same convention as the agent
+        // container mounts in container-runner.ts.
+        const hostCacheDir = path.join(
+          HOST_PROJECT_ROOT,
+          'store',
+          'snitchmd-cache',
+        );
+        // Also mkdir locally so the path is visible to the orchestrator
+        // process (e.g. for size-rollup or cleanup tooling). The actual
+        // write into the cache is performed by the sibling container as
+        // its own user; we just want the directory to exist.
+        fs.mkdirSync(path.join(STORE_DIR, 'snitchmd-cache'), {
+          recursive: true,
+        });
+
+        const snitchmdImage =
+          process.env.SNITCHMD_IMAGE || 'syabro/snitchmd:latest';
+
+        logger.info(
+          {
+            sourceGroup,
+            host: parsedUrl.host,
+            flags: flags.filter((f) => !f.startsWith('http')),
+          },
+          'Running fetch_markdown',
+        );
+
+        execFile(
+          'docker',
+          [
+            'run',
+            '--rm',
+            '-v',
+            `${hostCacheDir}:/cache`,
+            snitchmdImage,
+            parsedUrl.toString(),
+            ...flags,
+          ],
+          {
+            // First call cold-pulls the image — give it room. Subsequent
+            // calls are cached and complete in well under 30s.
+            timeout: 240_000,
+            // snitchmd's markdown output can run into the megabytes for
+            // wiki/long articles; cap at 16 MiB so a runaway page doesn't
+            // exhaust orchestrator memory before the agent's --max-chars
+            // truncation kicks in.
+            maxBuffer: 16 * 1024 * 1024,
+          },
+          (error, stdout, stderr) => {
+            if (error) {
+              // execFile attaches `code` (numeric exit code or string like
+              // ETIMEDOUT) and `killed` (timeout signal). Surface both so
+              // runHostOperation's diagnostic relay can show the agent
+              // which failure mode hit (cf. #146 retry context).
+              const execErr = error as NodeJS.ErrnoException & {
+                code?: number | string;
+                killed?: boolean;
+              };
+              logger.warn(
+                {
+                  sourceGroup,
+                  host: parsedUrl.host,
+                  exitCode: execErr.code,
+                  killed: execErr.killed,
+                  stderr: stderr.slice(-500),
+                },
+                'fetch_markdown failed',
+              );
+              fs.writeFileSync(
+                resultPath,
+                JSON.stringify({
+                  error: error.message,
+                  exit_code: execErr.code,
+                  killed: execErr.killed,
+                  stderr: stderr.slice(-2000),
+                }),
+              );
+              return;
+            }
+            // snitchmd --json writes a single JSON object on stdout. Pass
+            // the markdown body up to the agent as plain text (the
+            // <untrusted-input> envelope is applied client-side via the
+            // READ_TOOL_PATTERNS row in untrusted-input-wrap.ts — #321).
+            let payload: {
+              markdown?: string;
+              title?: string;
+              final_url?: string;
+              quality?: number | null;
+              chars?: number;
+            } = {};
+            try {
+              payload = JSON.parse(stdout);
+            } catch (parseErr) {
+              if (!(parseErr instanceof SyntaxError)) throw parseErr;
+              logger.warn(
+                {
+                  sourceGroup,
+                  host: parsedUrl.host,
+                  stdoutLen: stdout.length,
+                },
+                'fetch_markdown: stdout did not parse as JSON',
+              );
+              fs.writeFileSync(
+                resultPath,
+                JSON.stringify({
+                  error: 'fetch_markdown: snitchmd produced non-JSON output',
+                  stderr: stderr.slice(-2000),
+                  stdout: stdout.slice(-2000),
+                }),
+              );
+              return;
+            }
+            const markdown = payload.markdown ?? '';
+            const header =
+              `# ${payload.title || '(untitled)'}\n` +
+              `# source: ${payload.final_url || parsedUrl.toString()}\n` +
+              `# chars: ${payload.chars ?? markdown.length}` +
+              (payload.quality != null ? ` quality: ${payload.quality}` : '') +
+              '\n\n';
+            logger.info(
+              {
+                sourceGroup,
+                host: parsedUrl.host,
+                chars: payload.chars ?? markdown.length,
+                quality: payload.quality,
+              },
+              'fetch_markdown completed',
+            );
+            fs.writeFileSync(
+              resultPath,
+              JSON.stringify({
+                stdout: header + markdown,
+                stderr: stderr.slice(-500) || undefined,
+              }),
+            );
           },
         );
       }

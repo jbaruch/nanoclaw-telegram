@@ -17,11 +17,11 @@ You maintain a personal wiki at `/workspace/trusted/wiki/` with raw sources at `
 
 When the user provides a source (URL, file, text, image, voice note):
 
-1. **Save the raw source** to `/workspace/trusted/sources/`. For URLs, download the full content:
+1. **Save the raw source** to `/workspace/trusted/sources/`. For binary downloads (PDFs, images, audio):
    ```bash
    curl -sLo /workspace/trusted/sources/filename.pdf "<url>"
    ```
-   For web pages, use WebFetch or browser to get full text. Never rely on summaries — get the complete document.
+   For web pages, default to `mcp__nanoclaw__fetch_markdown(url)` — it bypasses Cloudflare/anti-bot, handles JS-rendered SPAs, and returns clean markdown ready to save. Fall back to plain `WebFetch` only for trivial static HTML where snitchmd's docker overhead isn't worth it; fall back to the `agent-browser` skill only when the page needs clicks, form fills, or screenshots. Never rely on summaries — get the complete document.
 
 2. **Read and discuss** — summarize key takeaways with the user. Don't rush to filing.
 
