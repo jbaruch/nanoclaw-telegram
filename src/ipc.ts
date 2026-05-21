@@ -20,6 +20,7 @@ import {
   buildSnitchmdFlags,
   formatSnitchmdHeader,
   parseFetchMarkdownUrl,
+  parseSnitchmdStdout,
 } from './fetch-markdown-args.js';
 import {
   AvailableGroup,
@@ -3720,21 +3721,17 @@ export async function processTaskIpc(
               );
               return;
             }
-            // snitchmd --json writes a single JSON object on stdout. Pass
-            // the markdown body up to the agent as plain text (the
-            // <untrusted-input> envelope is applied client-side via the
-            // READ_TOOL_PATTERNS row in untrusted-input-wrap.ts — #321).
-            let payload: {
-              markdown?: string;
-              title?: string;
-              final_url?: string;
-              quality?: number | null;
-              chars?: number;
-            } = {};
-            try {
-              payload = JSON.parse(stdout);
-            } catch (parseErr) {
-              if (!(parseErr instanceof SyntaxError)) throw parseErr;
+            // snitchmd --json writes a single JSON object on stdout.
+            // Production smoke-test caught CloakBrowser leaking
+            // "Downloading newer chromium" log lines onto stdout BEFORE
+            // the JSON on the cold-pull path, so we use a tolerant
+            // parser that retries with a `{`-to-`}` slice when the
+            // strict parse fails. The successful payload's markdown
+            // body is passed up as plain text (the <untrusted-input>
+            // envelope is applied client-side via the READ_TOOL_PATTERNS
+            // row in untrusted-input-wrap.ts — #321).
+            const parseResult = parseSnitchmdStdout(stdout);
+            if (!parseResult.ok) {
               // Per `jbaruch/coding-policy: no-secrets`: snitchmd's
               // JSON payload always carries `url` and `final_url`
               // fields, and the raw bytes we couldn't parse may still
@@ -3769,6 +3766,7 @@ export async function processTaskIpc(
               );
               return;
             }
+            const payload = parseResult.payload;
             const markdown = payload.markdown ?? '';
             const header = formatSnitchmdHeader(payload, parsedUrl.toString());
             logger.info(

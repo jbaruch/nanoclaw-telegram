@@ -4,6 +4,7 @@ import {
   buildSnitchmdFlags,
   formatSnitchmdHeader,
   parseFetchMarkdownUrl,
+  parseSnitchmdStdout,
 } from './fetch-markdown-args.js';
 
 describe('parseFetchMarkdownUrl', () => {
@@ -289,5 +290,90 @@ describe('formatSnitchmdHeader', () => {
       'https://example.com/',
     );
     expect(header).toContain('# chars: 0');
+  });
+});
+
+describe('parseSnitchmdStdout', () => {
+  const cleanPayload = JSON.stringify(
+    {
+      url: 'https://example.com',
+      final_url: 'https://example.com/',
+      title: 'Example Domain',
+      page_type: 'service',
+      quality: 0.8,
+      chars: 113,
+      markdown: 'This domain is for use in documentation examples.',
+    },
+    null,
+    2,
+  );
+
+  it('fast-path parses a clean JSON stdout', () => {
+    const r = parseSnitchmdStdout(cleanPayload);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.payload.title).toBe('Example Domain');
+      expect(r.payload.chars).toBe(113);
+    }
+  });
+
+  it('recovers JSON when CloakBrowser logs pollute stdout BEFORE the payload', () => {
+    // This is the exact shape caught in production on 2026-05-21:
+    // CloakBrowser writes "Downloading newer chromium" progress lines
+    // to stdout while snitchmd writes its JSON afterward.
+    const polluted =
+      '[cloakbrowser] Newer Chromium available: 146.0.7680.177.5 (current: 146.0.7680.177.3). Downloading in background...\n' +
+      '[cloakbrowser] Downloading from https://cloakbrowser.dev/chromium-v146.0.7680.177.5/cloakbrowser-linux-x64.tar.gz\n' +
+      '[cloakbrowser] Download progress: 9% (19/206 MB)\n' +
+      '[cloakbrowser] Download progress: 19% (39/206 MB)\n' +
+      cleanPayload;
+    const r = parseSnitchmdStdout(polluted);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.payload.title).toBe('Example Domain');
+  });
+
+  it('recovers JSON when noise appears AFTER the payload too', () => {
+    // Defensive: a future CloakBrowser tick could land after snitchmd
+    // emits its JSON but before the process exits.
+    const polluted =
+      cleanPayload + '\n[cloakbrowser] Download progress: 100% (206/206 MB)\n';
+    const r = parseSnitchmdStdout(polluted);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.payload.chars).toBe(113);
+  });
+
+  it('returns ok=false when stdout has no JSON object', () => {
+    const r = parseSnitchmdStdout('garbage with no braces at all');
+    expect(r.ok).toBe(false);
+  });
+
+  it('returns ok=false when stdout is empty', () => {
+    const r = parseSnitchmdStdout('');
+    expect(r.ok).toBe(false);
+  });
+
+  it('returns ok=false when the slice between braces is still malformed', () => {
+    // Two `{` and `}` chars but the inner content isn't JSON. The
+    // slice-from-first-{ -to-last-} catches `{ this } { is malformed }`
+    // and re-parses it; that parse fails too, so we return ok=false
+    // rather than smuggling garbage through.
+    const r = parseSnitchmdStdout('preamble { not really json } trailing');
+    expect(r.ok).toBe(false);
+  });
+
+  it('propagates non-SyntaxError exceptions on the fast path', () => {
+    // Defensive: if a future custom JSON.parse override throws something
+    // other than SyntaxError (programming bug), we should NOT swallow it
+    // and silently fall through to the slice retry.
+    const original = JSON.parse;
+    const probe = new RangeError('not a parse failure');
+    (globalThis as { JSON: typeof JSON }).JSON.parse = () => {
+      throw probe;
+    };
+    try {
+      expect(() => parseSnitchmdStdout(cleanPayload)).toThrow(probe);
+    } finally {
+      (globalThis as { JSON: typeof JSON }).JSON.parse = original;
+    }
   });
 });
