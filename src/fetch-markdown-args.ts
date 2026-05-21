@@ -136,6 +136,50 @@ export interface SnitchmdPayload {
   chars?: number;
 }
 
+export type ParsePayloadResult =
+  | { ok: true; payload: SnitchmdPayload }
+  | { ok: false };
+
+/**
+ * Parse snitchmd's `--json` stdout, tolerating pre-JSON noise.
+ *
+ * Production smoke-test on 2026-05-21 caught CloakBrowser's internal
+ * `[cloakbrowser] Newer Chromium available: ... Downloading in
+ * background... Download progress: 9% ...` chatter leaking onto stdout
+ * BEFORE the JSON payload on the cold-pull path. The strict
+ * `JSON.parse(stdout)` choked even though the actual fetch succeeded
+ * (the JSON payload was present, just preceded by garbage). Cached
+ * calls don't have the chatter, so the cached path was clean.
+ *
+ * Strategy: try the strict parse first (fast path, always succeeds on
+ * cached calls). If that fails, slice from the FIRST `{` to the LAST
+ * `}` and retry. The payload uses double-quoted JSON strings, so a `{`
+ * inside an extracted page title can't confuse the slice — JSON strings
+ * never carry a bare `}` followed by EOF and the LAST `}` always pairs
+ * with snitchmd's outermost object. Return `{ ok: false }` if both
+ * attempts fail so the caller can route to the "non-JSON output"
+ * diagnostic branch.
+ */
+export function parseSnitchmdStdout(stdout: string): ParsePayloadResult {
+  try {
+    return { ok: true, payload: JSON.parse(stdout) as SnitchmdPayload };
+  } catch (parseErr) {
+    if (!(parseErr instanceof SyntaxError)) throw parseErr;
+  }
+  const firstBrace = stdout.indexOf('{');
+  const lastBrace = stdout.lastIndexOf('}');
+  if (firstBrace < 0 || lastBrace <= firstBrace) {
+    return { ok: false };
+  }
+  const sliced = stdout.slice(firstBrace, lastBrace + 1);
+  try {
+    return { ok: true, payload: JSON.parse(sliced) as SnitchmdPayload };
+  } catch (parseErr) {
+    if (!(parseErr instanceof SyntaxError)) throw parseErr;
+    return { ok: false };
+  }
+}
+
 /**
  * Compose the 3-line header the handler prepends to the markdown body
  * before writing the IPC result file. Pulled out so the format is
