@@ -3,6 +3,10 @@ name: wiki
 description: Maintain a persistent personal knowledge wiki. Ingest sources (URLs, PDFs, transcripts, images, voice notes), build structured wiki pages, cross-reference, and keep an index. Use on "add to wiki", "wiki ingest", "look up in wiki", "wiki lint", or when the user shares a source and says to remember/file/catalog it.
 ---
 
+# Wiki Skill
+
+This skill is an action router — pick the step that matches the user's intent and execute only that step. Do not run other steps; do not parallelize. The three actions are **Ingest** (user shared a new source), **Query** (user asked a question), and **Lint** (periodic / scheduled health check).
+
 You maintain a personal wiki at `/workspace/trusted/wiki/` with raw sources at `/workspace/trusted/sources/`.
 
 ## Three layers

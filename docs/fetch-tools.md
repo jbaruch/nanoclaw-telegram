@@ -41,5 +41,5 @@ Skill({ skill: "agent-browser" })
 ## Operational notes
 
 - snitchmd cache lives at `${HOST_PROJECT_ROOT}/store/snitchmd-cache/` on the host. Wipe with `rm -rf` if a stale page is poisoning runs.
-- Image is pinned via the `SNITCHMD_IMAGE` env var (defaults to `syabro/snitchmd:latest`). Pin a digest in `.env` for reproducible behavior across deploys.
+- Default image is `syabro/snitchmd:latest` — snitchmd is an app-level renderer (not an API contract), and floating gets us upstream CloakBrowser fingerprint updates as anti-bot detection evolves. Operators who need reproducible builds can pin a specific tag or `sha256:…` digest via `SNITCHMD_IMAGE` in `.env`.
 - Cold-pull on first call can take ~30-60s. The MCP tool's IPC envelope allows 260s total; the docker invocation itself caps at 240s.

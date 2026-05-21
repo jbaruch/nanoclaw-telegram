@@ -17,6 +17,11 @@ import { syncBackupRepo, type SyncResult } from './backup-sync.js';
 import { sendPoolMessage } from './channels/telegram.js';
 import { coerceTaskTextField } from './coerce-task-prompt.js';
 import {
+  buildSnitchmdFlags,
+  formatSnitchmdHeader,
+  parseFetchMarkdownUrl,
+} from './fetch-markdown-args.js';
+import {
   AvailableGroup,
   DEFAULT_SESSION_NAME,
   getInstalledTiles,
@@ -3597,68 +3602,14 @@ export async function processTaskIpc(
       if (data.requestId) {
         const resultPath = scriptResultPath(sourceGroup, data);
 
-        const rawUrl = typeof data.url === 'string' ? data.url : '';
-        let parsedUrl: URL;
-        try {
-          parsedUrl = new URL(rawUrl);
-        } catch {
-          fs.writeFileSync(
-            resultPath,
-            JSON.stringify({
-              error:
-                'fetch_markdown: invalid URL. Pass an absolute http(s) URL, e.g. https://example.com/path.',
-            }),
-          );
+        const parsed = parseFetchMarkdownUrl(data.url);
+        if (!parsed.ok) {
+          fs.writeFileSync(resultPath, JSON.stringify({ error: parsed.error }));
           break;
         }
-        if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
-          fs.writeFileSync(
-            resultPath,
-            JSON.stringify({
-              error: `fetch_markdown: only http(s) URLs are supported (got ${parsedUrl.protocol}).`,
-            }),
-          );
-          break;
-        }
+        const parsedUrl = parsed.url;
 
-        const flags: string[] = ['--json'];
-        if (
-          typeof data.wait === 'number' &&
-          Number.isInteger(data.wait) &&
-          data.wait > 0
-        ) {
-          flags.push('--wait', String(data.wait));
-        }
-        if (
-          typeof data.waitUntil === 'string' &&
-          ['commit', 'domcontentloaded', 'load', 'networkidle'].includes(
-            data.waitUntil,
-          )
-        ) {
-          flags.push('--wait-until', data.waitUntil);
-        }
-        if (typeof data.waitForSelector === 'string' && data.waitForSelector) {
-          flags.push('--wait-for-selector', data.waitForSelector);
-        }
-        if (data.favorPrecision === true) flags.push('--favor-precision');
-        if (data.favorRecall === true) flags.push('--favor-recall');
-        if (data.includeLinks === true) flags.push('--include-links');
-        if (data.includeImages === true) flags.push('--include-images');
-        if (
-          typeof data.maxChars === 'number' &&
-          Number.isInteger(data.maxChars) &&
-          data.maxChars > 0
-        ) {
-          flags.push('--max-chars', String(data.maxChars));
-        }
-        if (data.noCache === true) flags.push('--no-cache');
-        if (
-          typeof data.timeout === 'number' &&
-          Number.isInteger(data.timeout) &&
-          data.timeout > 0
-        ) {
-          flags.push('--timeout', String(data.timeout));
-        }
+        const flags = buildSnitchmdFlags(data);
 
         // Cache directory on the HOST filesystem — the snitchmd sibling
         // container is launched via the orchestrator's docker.sock, so
@@ -3678,6 +3629,13 @@ export async function processTaskIpc(
           recursive: true,
         });
 
+        // snitchmd is an app-level dependency (a renderer + content
+        // extractor), not an API contract — we WANT to ride the latest
+        // CloakBrowser fingerprint updates as anti-bot detection
+        // evolves, and snitchmd's output shape is stable across point
+        // releases. Operators who need a reproducible build can pin to
+        // a specific tag or `sha256:…` digest via `SNITCHMD_IMAGE`
+        // without a code change.
         const snitchmdImage =
           process.env.SNITCHMD_IMAGE || 'syabro/snitchmd:latest';
 
@@ -3776,12 +3734,7 @@ export async function processTaskIpc(
               return;
             }
             const markdown = payload.markdown ?? '';
-            const header =
-              `# ${payload.title || '(untitled)'}\n` +
-              `# source: ${payload.final_url || parsedUrl.toString()}\n` +
-              `# chars: ${payload.chars ?? markdown.length}` +
-              (payload.quality != null ? ` quality: ${payload.quality}` : '') +
-              '\n\n';
+            const header = formatSnitchmdHeader(payload, parsedUrl.toString());
             logger.info(
               {
                 sourceGroup,
