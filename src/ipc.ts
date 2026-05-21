@@ -3679,23 +3679,43 @@ export async function processTaskIpc(
                 code?: number | string;
                 killed?: boolean;
               };
+              // Per `jbaruch/coding-policy: no-secrets`: Node's `execFile`
+              // packs the full command line — including the target URL —
+              // into `error.message` as `Command failed: docker run ...
+              // <url> --json ...`. A URL with query-string auth (session
+              // token, signed-URL signature) would leak into both the
+              // structured log AND the result-file the agent reads. Emit
+              // a fixed-shape message that names only the host + exit
+              // mode; the host attribute itself isn't a secret and the
+              // operator can correlate with the structured log.
+              const safeError = `fetch_markdown failed for ${parsedUrl.host} (exit_code: ${execErr.code ?? 'unknown'}${execErr.killed ? ', killed' : ''})`;
+              // Defense-in-depth: snitchmd's stderr is normally just
+              // `snitchmd: title=... quality=... chars=...`, but a
+              // Playwright / Chromium fault could echo the input URL.
+              // Scrub the exact URL we passed in before writing so a
+              // query-string auth secret can't leak via stderr.
+              const urlString = parsedUrl.toString();
+              const safeStderr = stderr
+                .slice(-2000)
+                .split(urlString)
+                .join('<URL>');
               logger.warn(
                 {
                   sourceGroup,
                   host: parsedUrl.host,
                   exitCode: execErr.code,
                   killed: execErr.killed,
-                  stderr: stderr.slice(-500),
+                  stderr: safeStderr.slice(-500),
                 },
                 'fetch_markdown failed',
               );
               fs.writeFileSync(
                 resultPath,
                 JSON.stringify({
-                  error: error.message,
+                  error: safeError,
                   exit_code: execErr.code,
                   killed: execErr.killed,
-                  stderr: stderr.slice(-2000),
+                  stderr: safeStderr,
                 }),
               );
               return;
