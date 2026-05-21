@@ -23,7 +23,7 @@ When the user provides a source (URL, file, text, image, voice note):
    ```bash
    curl -sLo /workspace/trusted/sources/filename.pdf "<url>"
    ```
-   For web pages, default to `mcp__nanoclaw__fetch_markdown(url: "<page-url>")` — it bypasses Cloudflare/anti-bot, handles JS-rendered SPAs, and returns clean markdown ready to save. Fall back to plain `WebFetch` only for trivial static HTML where snitchmd's docker overhead isn't worth it; fall back to the `agent-browser` skill only when the page needs clicks, form fills, or screenshots. Never rely on summaries — get the complete document.
+   For web pages, default to `mcp__nanoclaw__fetch_markdown(url: "<page-url>")` — it bypasses Cloudflare/anti-bot, handles JS-rendered SPAs, and returns clean markdown ready to save. Fall back to plain `WebFetch` only for trivial static HTML where snitchmd's docker overhead isn't worth it; fall back to `Skill(skill: "agent-browser")` only when the page needs clicks, form fills, or screenshots. Never rely on summaries — get the complete document.
 
 2. **Read and discuss** — summarize key takeaways with the user. Don't rush to filing.
 
