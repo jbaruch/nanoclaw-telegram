@@ -1,6 +1,11 @@
 ---
 name: wiki
-description: Maintain a persistent personal knowledge wiki. Ingest sources (URLs, PDFs, transcripts, images, voice notes), build structured wiki pages, cross-reference, and keep an index. Use on "add to wiki", "wiki ingest", "look up in wiki", "wiki lint", or when the user shares a source and says to remember/file/catalog it.
+description: |
+  Maintain a persistent personal knowledge wiki. Action router with three actions:
+  Ingest (file a new source), Query (look something up in the wiki), Lint (periodic
+  health check — cross-refs, orphans, contradictions, stale claims). Use on "add to
+  wiki", "wiki ingest", "look up in wiki", "wiki lint", or when the user shares a
+  source and says to remember/file/catalog it.
 ---
 
 # Wiki Skill
