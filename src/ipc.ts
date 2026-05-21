@@ -8,6 +8,7 @@ import {
   ASSISTANT_NAME,
   DATA_DIR,
   GROUPS_DIR,
+  HOST_PROJECT_ROOT,
   IPC_POLL_INTERVAL,
   STORE_DIR,
   TIMEZONE,
@@ -15,6 +16,11 @@ import {
 import { syncBackupRepo, type SyncResult } from './backup-sync.js';
 import { sendPoolMessage } from './channels/telegram.js';
 import { coerceTaskTextField } from './coerce-task-prompt.js';
+import {
+  buildSnitchmdFlags,
+  formatSnitchmdHeader,
+  parseFetchMarkdownUrl,
+} from './fetch-markdown-args.js';
 import {
   AvailableGroup,
   DEFAULT_SESSION_NAME,
@@ -971,6 +977,20 @@ export async function processTaskIpc(
     // uses to supersede prior versions.
     kind?: string;
     pattern?: string;
+    // For fetch_markdown (#169). All optional except `url`. Mirrors the
+    // snitchmd CLI flag set; see docs/fetch-tools.md for the decision
+    // matrix and snitchmd's own README for flag semantics.
+    url?: string;
+    wait?: number;
+    waitUntil?: string;
+    waitForSelector?: string;
+    favorPrecision?: boolean;
+    favorRecall?: boolean;
+    includeLinks?: boolean;
+    includeImages?: boolean;
+    maxChars?: number;
+    noCache?: boolean;
+    timeout?: number;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -3573,6 +3593,200 @@ export async function processTaskIpc(
             } catch {
               /* best effort */
             }
+          },
+        );
+      }
+      break;
+
+    case 'fetch_markdown':
+      if (data.requestId) {
+        const resultPath = scriptResultPath(sourceGroup, data);
+
+        const parsed = parseFetchMarkdownUrl(data.url);
+        if (!parsed.ok) {
+          fs.writeFileSync(resultPath, JSON.stringify({ error: parsed.error }));
+          break;
+        }
+        const parsedUrl = parsed.url;
+
+        const flags = buildSnitchmdFlags(data);
+
+        // Cache directory on the HOST filesystem — the snitchmd sibling
+        // container is launched via the orchestrator's docker.sock, so
+        // -v mount paths must reference the host's view (HOST_PROJECT_ROOT),
+        // not the orchestrator's /app/store. Same convention as the agent
+        // container mounts in container-runner.ts.
+        const hostCacheDir = path.join(
+          HOST_PROJECT_ROOT,
+          'store',
+          'snitchmd-cache',
+        );
+        // Also mkdir locally so the path is visible to the orchestrator
+        // process (e.g. for size-rollup or cleanup tooling). The actual
+        // write into the cache is performed by the sibling container as
+        // its own user; we just want the directory to exist.
+        fs.mkdirSync(path.join(STORE_DIR, 'snitchmd-cache'), {
+          recursive: true,
+        });
+
+        // snitchmd is an app-level dependency (a renderer + content
+        // extractor), not an API contract — we WANT to ride the latest
+        // CloakBrowser fingerprint updates as anti-bot detection
+        // evolves, and snitchmd's output shape is stable across point
+        // releases. Operators who need a reproducible build can pin to
+        // a specific tag or `sha256:…` digest via `SNITCHMD_IMAGE`
+        // without a code change.
+        const snitchmdImage =
+          process.env.SNITCHMD_IMAGE || 'syabro/snitchmd:latest';
+
+        logger.info(
+          {
+            sourceGroup,
+            host: parsedUrl.host,
+            flags: flags.filter((f) => !f.startsWith('http')),
+          },
+          'Running fetch_markdown',
+        );
+
+        execFile(
+          'docker',
+          [
+            'run',
+            '--rm',
+            '-v',
+            `${hostCacheDir}:/cache`,
+            snitchmdImage,
+            parsedUrl.toString(),
+            ...flags,
+          ],
+          {
+            // First call cold-pulls the image — give it room. Subsequent
+            // calls are cached and complete in well under 30s.
+            timeout: 240_000,
+            // snitchmd's markdown output can run into the megabytes for
+            // wiki/long articles; cap at 16 MiB so a runaway page doesn't
+            // exhaust orchestrator memory before the agent's --max-chars
+            // truncation kicks in.
+            maxBuffer: 16 * 1024 * 1024,
+          },
+          (error, stdout, stderr) => {
+            if (error) {
+              // execFile attaches `code` (numeric exit code or string like
+              // ETIMEDOUT) and `killed` (timeout signal). Surface both so
+              // runHostOperation's diagnostic relay can show the agent
+              // which failure mode hit (cf. #146 retry context).
+              const execErr = error as NodeJS.ErrnoException & {
+                code?: number | string;
+                killed?: boolean;
+              };
+              // Per `jbaruch/coding-policy: no-secrets`: Node's `execFile`
+              // packs the full command line — including the target URL —
+              // into `error.message` as `Command failed: docker run ...
+              // <url> --json ...`. A URL with query-string auth (session
+              // token, signed-URL signature) would leak into both the
+              // structured log AND the result-file the agent reads. Emit
+              // a fixed-shape message that names only the host + exit
+              // mode; the host attribute itself isn't a secret and the
+              // operator can correlate with the structured log.
+              const safeError = `fetch_markdown failed for ${parsedUrl.host} (exit_code: ${execErr.code ?? 'unknown'}${execErr.killed ? ', killed' : ''})`;
+              // Defense-in-depth: snitchmd's stderr is normally just
+              // `snitchmd: title=... quality=... chars=...`, but a
+              // Playwright / Chromium fault could echo the input URL.
+              // Scrub the exact URL we passed in before writing so a
+              // query-string auth secret can't leak via stderr.
+              const urlString = parsedUrl.toString();
+              const safeStderr = stderr
+                .slice(-2000)
+                .split(urlString)
+                .join('<URL>');
+              logger.warn(
+                {
+                  sourceGroup,
+                  host: parsedUrl.host,
+                  exitCode: execErr.code,
+                  killed: execErr.killed,
+                  stderr: safeStderr.slice(-500),
+                },
+                'fetch_markdown failed',
+              );
+              fs.writeFileSync(
+                resultPath,
+                JSON.stringify({
+                  error: safeError,
+                  exit_code: execErr.code,
+                  killed: execErr.killed,
+                  stderr: safeStderr,
+                }),
+              );
+              return;
+            }
+            // snitchmd --json writes a single JSON object on stdout. Pass
+            // the markdown body up to the agent as plain text (the
+            // <untrusted-input> envelope is applied client-side via the
+            // READ_TOOL_PATTERNS row in untrusted-input-wrap.ts — #321).
+            let payload: {
+              markdown?: string;
+              title?: string;
+              final_url?: string;
+              quality?: number | null;
+              chars?: number;
+            } = {};
+            try {
+              payload = JSON.parse(stdout);
+            } catch (parseErr) {
+              if (!(parseErr instanceof SyntaxError)) throw parseErr;
+              // Per `jbaruch/coding-policy: no-secrets`: snitchmd's
+              // JSON payload always carries `url` and `final_url`
+              // fields, and the raw bytes we couldn't parse may still
+              // contain those substrings. Scrub the input URL and the
+              // host stderr's same vector before persisting the
+              // diagnostic so a query-string auth secret doesn't ride
+              // the parse-failure path back to the agent.
+              const urlString = parsedUrl.toString();
+              const safeStderr = stderr
+                .slice(-2000)
+                .split(urlString)
+                .join('<URL>');
+              const safeStdout = stdout
+                .slice(-2000)
+                .split(urlString)
+                .join('<URL>');
+              logger.warn(
+                {
+                  sourceGroup,
+                  host: parsedUrl.host,
+                  stdoutLen: stdout.length,
+                },
+                'fetch_markdown: stdout did not parse as JSON',
+              );
+              fs.writeFileSync(
+                resultPath,
+                JSON.stringify({
+                  error: 'fetch_markdown: snitchmd produced non-JSON output',
+                  stderr: safeStderr,
+                  stdout: safeStdout,
+                }),
+              );
+              return;
+            }
+            const markdown = payload.markdown ?? '';
+            const header = formatSnitchmdHeader(payload, parsedUrl.toString());
+            logger.info(
+              {
+                sourceGroup,
+                host: parsedUrl.host,
+                chars: payload.chars ?? markdown.length,
+                quality: payload.quality,
+              },
+              'fetch_markdown completed',
+            );
+            fs.writeFileSync(
+              resultPath,
+              JSON.stringify({
+                stdout: header + markdown,
+                stderr: stderr.slice(-500) || undefined,
+              }),
+            );
           },
         );
       }

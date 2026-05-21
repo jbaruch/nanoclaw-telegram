@@ -1,7 +1,16 @@
 ---
 name: wiki
-description: Maintain a persistent personal knowledge wiki. Ingest sources (URLs, PDFs, transcripts, images, voice notes), build structured wiki pages, cross-reference, and keep an index. Use on "add to wiki", "wiki ingest", "look up in wiki", "wiki lint", or when the user shares a source and says to remember/file/catalog it.
+description: |
+  Maintain a persistent personal knowledge wiki. Action router with three actions:
+  Ingest (file a new source), Query (look something up in the wiki), Lint (periodic
+  health check — cross-refs, orphans, contradictions, stale claims). Use on "add to
+  wiki", "wiki ingest", "look up in wiki", "wiki lint", or when the user shares a
+  source and says to remember/file/catalog it.
 ---
+
+# Wiki Skill
+
+This skill is an action router — pick the step that matches the user's intent and execute only that step. Do not run other steps; do not parallelize. The three actions are **Ingest** (user shared a new source), **Query** (user asked a question), and **Lint** (periodic / scheduled health check).
 
 You maintain a personal wiki at `/workspace/trusted/wiki/` with raw sources at `/workspace/trusted/sources/`.
 
@@ -11,17 +20,15 @@ You maintain a personal wiki at `/workspace/trusted/wiki/` with raw sources at `
 2. **Wiki** (`/workspace/trusted/wiki/`) — your output. Summaries, entity pages, concept pages, comparisons, syntheses. You own this entirely.
 3. **Schema** (this file) — how you maintain the wiki.
 
-## Three operations
-
-### Ingest
+## Step 1 — Ingest
 
 When the user provides a source (URL, file, text, image, voice note):
 
-1. **Save the raw source** to `/workspace/trusted/sources/`. For URLs, download the full content:
+1. **Save the raw source** to `/workspace/trusted/sources/`. For binary downloads (PDFs, images, audio):
    ```bash
    curl -sLo /workspace/trusted/sources/filename.pdf "<url>"
    ```
-   For web pages, use WebFetch or browser to get full text. Never rely on summaries — get the complete document.
+   For web pages, default to `mcp__nanoclaw__fetch_markdown(url: "<page-url>")` — it bypasses Cloudflare/anti-bot, handles JS-rendered SPAs, and returns clean markdown ready to save. Fall back to plain `WebFetch` only for trivial static HTML where snitchmd's docker overhead isn't worth it; fall back to `Skill(skill: "agent-browser")` only when the page needs clicks, form fills, or screenshots. Never rely on summaries — get the complete document.
 
 2. **Read and discuss** — summarize key takeaways with the user. Don't rush to filing.
 
@@ -38,7 +45,7 @@ When the user provides a source (URL, file, text, image, voice note):
 
 **Ingest discipline:** When given multiple sources, process them ONE AT A TIME. Read, discuss, create all wiki pages, finish completely, then move to the next. Batch processing produces shallow, generic pages.
 
-### Query
+## Step 2 — Query
 
 When the user asks a question:
 
@@ -47,7 +54,7 @@ When the user asks a question:
 3. Synthesize an answer with citations to wiki pages.
 4. If the answer is substantial and reusable, offer to file it as a new wiki page (explorations compound rather than disappearing into chat).
 
-### Lint
+## Step 3 — Lint
 
 Periodic health check. **Self-service by default — do not ask "should I fix?"** The lint is often invoked from scheduled contexts (weekly-housekeeping, heartbeat), where there is no interactive reader on the other end. Hanging on a yes/no prompt silently blocks the whole scheduled cycle — observed on 2026-04-19 when the Sun 4am weekly sent "rebuild?" to Telegram and idled waiting for a reply that never came.
 
