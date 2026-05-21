@@ -15,9 +15,7 @@ You maintain a personal wiki at `/workspace/trusted/wiki/` with raw sources at `
 2. **Wiki** (`/workspace/trusted/wiki/`) — your output. Summaries, entity pages, concept pages, comparisons, syntheses. You own this entirely.
 3. **Schema** (this file) — how you maintain the wiki.
 
-## Three operations
-
-### Ingest
+## Step 1 — Ingest
 
 When the user provides a source (URL, file, text, image, voice note):
 
@@ -42,7 +40,7 @@ When the user provides a source (URL, file, text, image, voice note):
 
 **Ingest discipline:** When given multiple sources, process them ONE AT A TIME. Read, discuss, create all wiki pages, finish completely, then move to the next. Batch processing produces shallow, generic pages.
 
-### Query
+## Step 2 — Query
 
 When the user asks a question:
 
@@ -51,7 +49,7 @@ When the user asks a question:
 3. Synthesize an answer with citations to wiki pages.
 4. If the answer is substantial and reusable, offer to file it as a new wiki page (explorations compound rather than disappearing into chat).
 
-### Lint
+## Step 3 — Lint
 
 Periodic health check. **Self-service by default — do not ask "should I fix?"** The lint is often invoked from scheduled contexts (weekly-housekeeping, heartbeat), where there is no interactive reader on the other end. Hanging on a yes/no prompt silently blocks the whole scheduled cycle — observed on 2026-04-19 when the Sun 4am weekly sent "rebuild?" to Telegram and idled waiting for a reply that never came.
 

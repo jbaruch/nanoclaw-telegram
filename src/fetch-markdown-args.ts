@@ -33,7 +33,13 @@ export function parseFetchMarkdownUrl(raw: unknown): ParseUrlResult {
   let url: URL;
   try {
     url = new URL(raw);
-  } catch {
+  } catch (parseErr) {
+    // `new URL(input)` throws `TypeError` for any unparseable string —
+    // see WHATWG URL spec. Catch that specifically per
+    // `jbaruch/coding-policy: error-handling`; let any other error
+    // propagate so a programming bug here (e.g. unexpected throw from
+    // a Node platform change) doesn't get masked as "invalid URL".
+    if (!(parseErr instanceof TypeError)) throw parseErr;
     return {
       ok: false,
       error:
