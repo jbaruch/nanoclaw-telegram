@@ -111,9 +111,10 @@ export function writeFlightAssistLocation(
     // Programming bugs (no `.code`) propagate so they surface in dev
     // instead of being hidden behind a warn.
     if (err instanceof Error && 'code' in err) {
+      const code = (err as NodeJS.ErrnoException).code;
       logger.warn(
-        { err, chatJid: record.chat_jid, folder: group.folder },
-        'Failed to write flight-assist current-location.json',
+        { err, code, chatJid: record.chat_jid, folder: group.folder, target },
+        `flight-assist current-location.json write failed (${code}) — flight-assist precheck will fall back to home_address until the next successful write. Remediation: EACCES/EPERM → \`chown -R $HOST_UID:$HOST_GID ${dir}\` (the orchestrator chowns the state dir at container-runner.ts but a stale-ownership group folder can still trip the per-skill subdir). ENOSPC → free disk on the data volume. EROFS → state volume is mounted read-only; check the mount in docker-compose.yml. ENOTDIR → a path component is a file, not a directory; inspect ${target}.`,
       );
       return;
     }
