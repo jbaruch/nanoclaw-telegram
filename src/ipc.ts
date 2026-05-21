@@ -3735,6 +3735,22 @@ export async function processTaskIpc(
               payload = JSON.parse(stdout);
             } catch (parseErr) {
               if (!(parseErr instanceof SyntaxError)) throw parseErr;
+              // Per `jbaruch/coding-policy: no-secrets`: snitchmd's
+              // JSON payload always carries `url` and `final_url`
+              // fields, and the raw bytes we couldn't parse may still
+              // contain those substrings. Scrub the input URL and the
+              // host stderr's same vector before persisting the
+              // diagnostic so a query-string auth secret doesn't ride
+              // the parse-failure path back to the agent.
+              const urlString = parsedUrl.toString();
+              const safeStderr = stderr
+                .slice(-2000)
+                .split(urlString)
+                .join('<URL>');
+              const safeStdout = stdout
+                .slice(-2000)
+                .split(urlString)
+                .join('<URL>');
               logger.warn(
                 {
                   sourceGroup,
@@ -3747,8 +3763,8 @@ export async function processTaskIpc(
                 resultPath,
                 JSON.stringify({
                   error: 'fetch_markdown: snitchmd produced non-JSON output',
-                  stderr: stderr.slice(-2000),
-                  stdout: stdout.slice(-2000),
+                  stderr: safeStderr,
+                  stdout: safeStdout,
                 }),
               );
               return;
