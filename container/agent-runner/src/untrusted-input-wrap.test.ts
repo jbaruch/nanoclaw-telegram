@@ -67,6 +67,20 @@ describe('inferReadSource', () => {
     });
   });
 
+  it('identifies the nanoclaw fetch_markdown tool as web-sourced', () => {
+    // snitchmd renders arbitrary URLs from the open web. The value
+    // segment strips the `mcp__nanoclaw__` prefix and emits the bare
+    // tool name — checked here against a future refactor that might
+    // silently change either the regex or the prefix-stripping
+    // convention and drop the `<untrusted-input>` envelope for
+    // fetched web content (which would let prompt-injection in the
+    // fetched markdown reach the agent unframed).
+    expect(inferReadSource('mcp__nanoclaw__fetch_markdown')).toEqual({
+      prefix: 'web',
+      value: 'fetch_markdown',
+    });
+  });
+
   it('returns null for write/mutating tools', () => {
     expect(inferReadSource('mcp__composio__gmail_send_email')).toBeNull();
     expect(inferReadSource('mcp__composio__slack_post_message')).toBeNull();

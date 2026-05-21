@@ -218,8 +218,10 @@ const READ_TOOL_PATTERNS: ReadonlyArray<{
   {
     // snitchmd fetch — host-side docker render of an arbitrary URL
     // returning extracted markdown. Body content is attacker-controlled
-    // (any page on the web) so it wraps as `web:<url>` and #322's
-    // walk-back applies cross-source-cell rate limits.
+    // (any page on the web) so it wraps as `web:fetch_markdown` (the
+    // `inferReadRow` value strips the `mcp__nanoplugin__` prefix and
+    // emits the bare tool name as the source-value); #322's walk-back
+    // applies cross-source-cell rate limits.
     pattern: /^mcp__nanoclaw__fetch_markdown$/i,
     prefix: 'web',
   },
