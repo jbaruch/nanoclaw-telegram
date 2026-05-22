@@ -132,7 +132,7 @@ registry_tile_hash() {
     cat > tessl.json <<EOF
 {"name":"reconcile-verify","mode":"managed","dependencies":{}}
 EOF
-    if ! tessl install "$TILE_OWNER_VAL/$tile@$version" --yes --dangerously-ignore-security >/dev/null 2>&1; then
+    if ! tessl install "$TILE_OWNER_VAL/$tile@$version" --yes --accept-warnings >/dev/null 2>&1; then
       echo "ERR"
       exit 0
     fi
