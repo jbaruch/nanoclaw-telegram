@@ -66,6 +66,10 @@ import { decideGroundTruthReminder } from './ground-truth-reminder.js';
 import { detectLazyVerification } from './lazy-verification.js';
 import { createReadonlyWarner } from './ipc-readonly-warn.js';
 import { rewriteMarkdownToHtml } from './markdown-to-html.js';
+import {
+  buildPrecheckErrorOutput,
+  buildPrecheckSkippedOutput,
+} from './precheck-emission.js';
 import { parseScriptOutput, type ScriptResult } from './script-output-parse.js';
 import {
   decideHardExitWatchdog,
@@ -181,7 +185,7 @@ interface ContainerInput {
 }
 
 interface ContainerOutput {
-  status: 'success' | 'error';
+  status: 'success' | 'error' | 'precheck_skipped';
   result: string | null;
   newSessionId?: string;
   error?: string;
@@ -4422,15 +4426,17 @@ async function main(): Promise<void> {
     log('Running task script...');
     const scriptResult = await runScript(containerInput.script);
 
-    if (!scriptResult || !scriptResult.wake_agent) {
-      const reason = scriptResult
-        ? 'wake_agent=false'
-        : 'script error/no output';
-      log(`Script decided not to wake agent: ${reason}`);
-      writeOutput({
-        status: 'success',
-        result: null,
-      });
+    if (!scriptResult) {
+      log(
+        'Script error: precheck crashed, produced no output, or omitted wake_agent',
+      );
+      writeOutput(buildPrecheckErrorOutput());
+      return;
+    }
+
+    if (!scriptResult.wake_agent) {
+      log('Script decided not to wake agent: wake_agent=false');
+      writeOutput(buildPrecheckSkippedOutput(scriptResult.data));
       return;
     }
 

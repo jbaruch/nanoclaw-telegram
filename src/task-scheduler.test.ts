@@ -2940,6 +2940,108 @@ describe('interval cadence end-to-end (#438)', () => {
     await vi.advanceTimersByTimeAsync(10);
   });
 
+  // --- #581 follow-up — precheck_skipped propagation ---
+  //
+  // When the agent-runner's `runScript` precheck returns
+  // `wake_agent: false` (the cadence cap is not yet elapsed and the
+  // agent should NOT wake), `container/agent-runner/src/index.ts`
+  // emits `writeOutput({status: 'precheck_skipped', result:
+  // <internal>...})`. The scheduler must propagate that status
+  // verbatim into `task_run_logs.status` and capture the diagnostic
+  // result column. Pre-fix this branch wrote `status: 'success',
+  // result: null` which was indistinguishable from a wake-up that
+  // ran to completion and produced no output — the silent-success
+  // shape AyeAye flagged across the 2026-05-20 → 2026-05-22 window
+  // for `nightly-external-sync`.
+
+  it('records status=precheck_skipped with the diagnostic result when the agent-runner emits a precheck-skipped output', async () => {
+    const RECURRING_GROUP = {
+      name: 'Main',
+      folder: 'main',
+      trigger: 'always',
+      added_at: '2026-01-01T00:00:00.000Z',
+      isMain: true,
+    };
+
+    createTask({
+      id: 'precheck-skipped-task',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'run',
+      schedule_type: 'cron',
+      schedule_value: '0 6 * * *',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    // Simulate the agent-runner's wake_agent=false branch: precheck
+    // ran, decided no work, emitted the diagnostic envelope.
+    const skipResult =
+      '<internal>precheck-skipped: ' +
+      JSON.stringify({
+        reason: 'within_cadence',
+        last_run: '2026-05-20T04:06:58Z',
+        age_hours: 47.89,
+        cadence_hours: 72.0,
+      }) +
+      '</internal>';
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput?.({
+          status: 'precheck_skipped',
+          result: skipResult,
+        });
+        return { status: 'precheck_skipped', result: skipResult };
+      },
+    );
+
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+    const sendMessage = vi.fn(async () => {});
+
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
+      onProcess: () => {},
+      sendMessage,
+      wipeSessionJsonl: () => 0,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    const { _rawQueryForTests } = await import('./db.js');
+    const rows = _rawQueryForTests<{ status: string; result: string | null }>(
+      `SELECT status, result FROM task_run_logs WHERE task_id = ?`,
+      ['precheck-skipped-task'],
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].status).toBe('precheck_skipped');
+    expect(rows[0].result).toBe(skipResult);
+
+    // Chat-echo must be suppressed — the diagnostic <internal>
+    // envelope strips to empty after the orchestrator's tag-strip,
+    // and there's nothing user-visible to send. A noisy precheck
+    // skip every fire would spam the operator's chat.
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
   it('does NOT reclassify when forcedCloseAt is from BEFORE the run started (stale stamp)', async () => {
     const RECURRING_GROUP = {
       name: 'Main',

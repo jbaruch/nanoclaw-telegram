@@ -28,7 +28,13 @@ export function isSessionCommandAllowed(
 
 /** Minimal agent result interface — matches the subset of ContainerOutput used here. */
 export interface AgentResult {
-  status: 'success' | 'error';
+  // `'precheck_skipped'` (#581) is part of the ContainerOutput union
+  // for type-assignability with `runAgent`'s output callback, but the
+  // slash-command path never emits it — the agent-runner only writes
+  // that status from the scheduled-task `runScript` branch in
+  // `container/agent-runner/src/index.ts`. Slash commands take a
+  // different code path that exits via `'success'` / `'error'`.
+  status: 'success' | 'error' | 'precheck_skipped';
   result?: string | object | null;
 }
 

@@ -442,7 +442,16 @@ export interface TaskRunLog {
   // and 'success' (the run finished cleanly) so operator-facing audits
   // can tell apart bookkeeping-success from semantic-success — exit
   // code 0 alone is no longer a guarantee the work landed.
-  status: 'success' | 'error' | 'killed';
+  //
+  // 'precheck_skipped' (#581) marks a fire whose precheck script
+  // returned `wake_agent: false` — the agent never woke, the wrapper
+  // never ran. Distinct from 'success' (the agent ran cleanly with no
+  // output) so silent-success watchdogs querying `task_run_logs` can
+  // tell a precheck-gated no-op (healthy quiet) apart from a wake-up
+  // that left an empty result column (the original #581 silent-success
+  // bug shape). A precheck script that crashes / emits non-JSON / omits
+  // `wake_agent` is `'error'`, not `'precheck_skipped'`.
+  status: 'success' | 'error' | 'killed' | 'precheck_skipped';
   result: string | null;
   error: string | null;
 }
