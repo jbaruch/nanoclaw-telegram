@@ -55,6 +55,27 @@ const TOKEN_PREFIX_RE = /^\/c\/([A-Za-z0-9_-]+)(\/.*)?$/;
  */
 const USAGE_CAPTURE_BUFFER_CAP = 10 * 1024 * 1024;
 
+/**
+ * Orchestrator-side bypass for the LiteLLM router (#610). When
+ * `ANTHROPIC_BASE_URL` points at `nanoclaw-litellm` and the primary
+ * attempt fails on a recoverable shape — the LiteLLM container is
+ * unreachable (ECONNREFUSED / ENOTFOUND), the primary stalls without
+ * a response for `BYPASS_IDLE_TIMEOUT_MS`, or LiteLLM itself returns
+ * a 5xx — the proxy retries against `ANTHROPIC_BYPASS_URL` (default
+ * `https://api.anthropic.com`) using the same `ANTHROPIC_API_KEY`.
+ * Complementary to LiteLLM's router-level fallback in
+ * `container/litellm/litellm.config.yaml`: that one fires when the
+ * litellm.ai gateway responds with 5xx but nanoclaw-litellm itself
+ * is up; this one fires when nanoclaw-litellm itself is down. Both
+ * layers exist because either can fail independently.
+ *
+ * Bypass is automatically disabled when the primary and bypass URLs
+ * resolve to the same origin — there's nothing to fall back TO if the
+ * primary is already Anthropic-direct.
+ */
+const BYPASS_TRIGGER_STATUS_CODES = new Set([500, 502, 503, 504]);
+const BYPASS_IDLE_TIMEOUT_MS = 3000;
+
 export function startCredentialProxy(
   port: number,
   host = '127.0.0.1',
@@ -64,6 +85,7 @@ export function startCredentialProxy(
     'CLAUDE_CODE_OAUTH_TOKEN',
     'ANTHROPIC_AUTH_TOKEN',
     'ANTHROPIC_BASE_URL',
+    'ANTHROPIC_BYPASS_URL',
   ]);
 
   const authMode: AuthMode = secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
@@ -73,8 +95,13 @@ export function startCredentialProxy(
   const upstreamUrl = new URL(
     secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
   );
-  const isHttps = upstreamUrl.protocol === 'https:';
-  const makeRequest = isHttps ? httpsRequest : httpRequest;
+  const bypassUrl = new URL(
+    secrets.ANTHROPIC_BYPASS_URL || 'https://api.anthropic.com',
+  );
+  // Same-origin bypass is a no-op — skip the second attempt entirely
+  // so we don't double-bill the same target on every error.
+  const bypassEnabled =
+    upstreamUrl.origin !== bypassUrl.origin && authMode === 'api-key';
 
   const usageLogPath = resolveUsageLogPath();
 
@@ -273,236 +300,314 @@ export function startCredentialProxy(
           }
         }
 
-        const headers: Record<string, string | number | string[] | undefined> =
-          {
+        // Single-attempt sender. Called once with the primary upstream;
+        // re-called against `bypassUrl` if the primary trips one of
+        // the bypass triggers (ECONNREFUSED / ENOTFOUND / idle timeout
+        // / 5xx). `fromBypass=true` prevents infinite recursion — the
+        // bypass attempt's own failure surfaces as a normal 502.
+        const sendUpstreamRequest = (
+          targetUrl: URL,
+          fromBypass: boolean,
+        ): void => {
+          const isHttps = targetUrl.protocol === 'https:';
+          const makeRequest = isHttps ? httpsRequest : httpRequest;
+
+          const headers: Record<
+            string,
+            string | number | string[] | undefined
+          > = {
             ...(req.headers as Record<string, string>),
-            host: upstreamUrl.host,
+            host: targetUrl.host,
             'content-length': body.length,
           };
 
-        // Strip hop-by-hop headers that must not be forwarded by proxies
-        delete headers['connection'];
-        delete headers['keep-alive'];
-        delete headers['transfer-encoding'];
+          // Strip hop-by-hop headers that must not be forwarded by proxies
+          delete headers['connection'];
+          delete headers['keep-alive'];
+          delete headers['transfer-encoding'];
 
-        if (authMode === 'api-key') {
-          // API key mode: inject x-api-key on every request
-          delete headers['x-api-key'];
-          headers['x-api-key'] = secrets.ANTHROPIC_API_KEY;
-        } else {
-          // OAuth mode: replace placeholder Bearer token with the real one
-          // only when the container actually sends an Authorization header
-          // (exchange request + auth probes). Post-exchange requests use
-          // x-api-key only, so they pass through without token injection.
-          if (headers['authorization']) {
-            delete headers['authorization'];
-            if (oauthToken) {
-              headers['authorization'] = `Bearer ${oauthToken}`;
+          if (authMode === 'api-key') {
+            // API key mode: inject x-api-key on every request
+            delete headers['x-api-key'];
+            headers['x-api-key'] = secrets.ANTHROPIC_API_KEY;
+          } else {
+            // OAuth mode: replace placeholder Bearer token with the real
+            // one only when the container actually sends an Authorization
+            // header (exchange request + auth probes). Post-exchange
+            // requests use x-api-key only, so they pass through without
+            // token injection.
+            if (headers['authorization']) {
+              delete headers['authorization'];
+              if (oauthToken) {
+                headers['authorization'] = `Bearer ${oauthToken}`;
+              }
             }
           }
-        }
 
-        const upstream = makeRequest(
-          {
-            hostname: upstreamUrl.hostname,
-            port: upstreamUrl.port || (isHttps ? 443 : 80),
-            path: upstreamPath,
-            method: req.method,
-            headers,
-          } as RequestOptions,
-          (upRes) => {
-            res.writeHead(upRes.statusCode!, upRes.headers);
-
-            if (!captureUsage || upRes.statusCode !== 200) {
-              upRes.pipe(res);
-              return;
-            }
-
-            // Tee: forward chunks to the client AND collect them for
-            // usage parsing. We attach the data/end listeners directly
-            // on `upRes` (instead of `upRes.pipe(res)` + a separate
-            // capture-only data listener) because the pipe-then-attach
-            // shape silently dropped capture in production: 37 of 37
-            // /v1/messages requests through the post-#487 deploy
-            // tripped sub-#3's silent-zero guard. The exact failure
-            // mode (listener-attach race vs. pipe consuming chunks
-            // before the late listener subscribed) wasn't pinpointed,
-            // but reverting to the explicit-tee shape from
-            // ligolnik#125 — augmented with explicit pause/resume
-            // for backpressure — restores capture and addresses the
-            // OpenAI reviewer's original concern about pipe's
-            // implicit backpressure being lost. `res.write()` returns
-            // false when its buffer is full; we pause `upRes` and
-            // resume on the client's `drain` event. This is the
-            // mechanism `pipe` uses internally; doing it explicitly
-            // keeps the data listener on the same flow.
-            const captured: Buffer[] = [];
-            let captureSize = 0;
-            let capped = false;
-            // Backpressure: track whether upRes was paused so resume
-            // only fires once per drain. Using a closure flag rather
-            // than upRes.isPaused() because the latter is also true
-            // briefly after construction.
-            let upPaused = false;
-            const resumeUpstream = () => {
-              if (upPaused) {
-                upPaused = false;
-                upRes.resume();
-              }
-            };
-            // Client-disconnect handler: if the client aborts mid-stream,
-            // tear down the upstream so we don't keep consuming data,
-            // and drop our listeners so subsequent res.write/end calls
-            // can't crash on a destroyed socket.
-            const onClientClose = () => {
-              if (!upRes.destroyed) upRes.destroy();
-              res.removeListener('drain', resumeUpstream);
-            };
-            res.on('drain', resumeUpstream);
-            res.on('close', onClientClose);
-            // Helper: guard res.write so an already-ended/destroyed
-            // client can't crash the proxy. Returns true on successful
-            // write, false otherwise (so the caller can stop capturing).
-            // Catches only the specific Node stream errors that
-            // res.write() can throw on a torn-down socket — write
-            // races between our writableEnded/destroyed check and
-            // the write call itself. Any other exception is a
-            // programming bug and propagates per
-            // error-handling.Specific Exceptions.
-            const STREAM_TEARDOWN_CODES = new Set([
-              'ERR_STREAM_WRITE_AFTER_END',
-              'ERR_STREAM_DESTROYED',
-              'ERR_STREAM_ALREADY_FINISHED',
-            ]);
-            const safeWrite = (chunk: Buffer): boolean => {
-              if (res.writableEnded || res.destroyed) return false;
-              try {
-                return res.write(chunk);
-              } catch (err) {
-                const code =
-                  err instanceof Error && 'code' in err
-                    ? (err as NodeJS.ErrnoException).code
-                    : undefined;
-                if (code && STREAM_TEARDOWN_CODES.has(code)) return false;
-                throw err;
-              }
-            };
-            upRes.on('data', (chunk: Buffer) => {
-              const writeOk = safeWrite(chunk);
-              if (!writeOk && !upPaused) {
-                upPaused = true;
-                upRes.pause();
-              }
-              if (capped) return;
-              captureSize += chunk.length;
-              if (captureSize > USAGE_CAPTURE_BUFFER_CAP) {
-                capped = true;
-                captured.length = 0;
-                logger.warn(
-                  { url: upstreamPath, size: captureSize },
-                  'usage-log: response too large, skipping capture',
-                );
-              } else {
-                captured.push(chunk);
-              }
-            });
-            upRes.on('end', () => {
-              if (!res.writableEnded && !res.destroyed) res.end();
-              res.removeListener('drain', resumeUpstream);
-              res.removeListener('close', onClientClose);
-              if (capped) return;
-              const rawBuffer = Buffer.concat(captured);
-              // The Claude SDK (undici) sends `accept-encoding: gzip,
-              // deflate, br` by default, so Anthropic's edge serves
-              // compressed responses. The proxy forwards the raw
-              // (encoded) bytes to the client so the SDK can
-              // decompress them transparently — but for capture we
-              // need the decompressed text to parse SSE / JSON. Read
-              // the response Content-Encoding and decode accordingly;
-              // identity (or unset) keeps the raw bytes. Decompression
-              // failures fall through to the raw buffer with a warn
-              // log so downstream parsing still gets a chance.
-              const encoding = (
-                upRes.headers['content-encoding'] || ''
-              ).toLowerCase();
-              let bodyBuffer = rawBuffer;
+          const upstream = makeRequest(
+            {
+              hostname: targetUrl.hostname,
+              port: targetUrl.port || (isHttps ? 443 : 80),
+              path: upstreamPath,
+              method: req.method,
+              headers,
+            } as RequestOptions,
+            (upRes) => {
+              // Bypass on a 5xx from the primary. The LiteLLM container
+              // may be up but its own router-level fallback chain has
+              // been exhausted; a fresh attempt against api.anthropic.com
+              // is more likely to succeed than passing the 5xx through.
+              // The bypass attempt's own 5xx is a real upstream failure
+              // and gets surfaced normally to the client.
               if (
-                encoding === 'gzip' ||
-                encoding === 'br' ||
-                encoding === 'deflate'
+                !fromBypass &&
+                bypassEnabled &&
+                BYPASS_TRIGGER_STATUS_CODES.has(upRes.statusCode || 0)
               ) {
+                logger.warn(
+                  {
+                    statusCode: upRes.statusCode,
+                    url: upstreamPath,
+                    primary: targetUrl.origin,
+                    bypass: bypassUrl.origin,
+                  },
+                  'credential-proxy: primary returned 5xx, bypassing to anthropic-direct',
+                );
+                // Drain the failed primary response so the socket can
+                // return to the pool / close cleanly before retry.
+                upRes.resume();
+                sendUpstreamRequest(bypassUrl, true);
+                return;
+              }
+
+              res.writeHead(upRes.statusCode!, upRes.headers);
+
+              if (!captureUsage || upRes.statusCode !== 200) {
+                upRes.pipe(res);
+                return;
+              }
+
+              // Tee: forward chunks to the client AND collect them for
+              // usage parsing. We attach the data/end listeners directly
+              // on `upRes` (instead of `upRes.pipe(res)` + a separate
+              // capture-only data listener) because the pipe-then-attach
+              // shape silently dropped capture in production: 37 of 37
+              // /v1/messages requests through the post-#487 deploy
+              // tripped sub-#3's silent-zero guard. The exact failure
+              // mode (listener-attach race vs. pipe consuming chunks
+              // before the late listener subscribed) wasn't pinpointed,
+              // but reverting to the explicit-tee shape from
+              // ligolnik#125 — augmented with explicit pause/resume
+              // for backpressure — restores capture and addresses the
+              // OpenAI reviewer's original concern about pipe's
+              // implicit backpressure being lost. `res.write()` returns
+              // false when its buffer is full; we pause `upRes` and
+              // resume on the client's `drain` event. This is the
+              // mechanism `pipe` uses internally; doing it explicitly
+              // keeps the data listener on the same flow.
+              const captured: Buffer[] = [];
+              let captureSize = 0;
+              let capped = false;
+              // Backpressure: track whether upRes was paused so resume
+              // only fires once per drain. Using a closure flag rather
+              // than upRes.isPaused() because the latter is also true
+              // briefly after construction.
+              let upPaused = false;
+              const resumeUpstream = () => {
+                if (upPaused) {
+                  upPaused = false;
+                  upRes.resume();
+                }
+              };
+              // Client-disconnect handler: if the client aborts mid-stream,
+              // tear down the upstream so we don't keep consuming data,
+              // and drop our listeners so subsequent res.write/end calls
+              // can't crash on a destroyed socket.
+              const onClientClose = () => {
+                if (!upRes.destroyed) upRes.destroy();
+                res.removeListener('drain', resumeUpstream);
+              };
+              res.on('drain', resumeUpstream);
+              res.on('close', onClientClose);
+              // Helper: guard res.write so an already-ended/destroyed
+              // client can't crash the proxy. Returns true on successful
+              // write, false otherwise (so the caller can stop capturing).
+              // Catches only the specific Node stream errors that
+              // res.write() can throw on a torn-down socket — write
+              // races between our writableEnded/destroyed check and
+              // the write call itself. Any other exception is a
+              // programming bug and propagates per
+              // error-handling.Specific Exceptions.
+              const STREAM_TEARDOWN_CODES = new Set([
+                'ERR_STREAM_WRITE_AFTER_END',
+                'ERR_STREAM_DESTROYED',
+                'ERR_STREAM_ALREADY_FINISHED',
+              ]);
+              const safeWrite = (chunk: Buffer): boolean => {
+                if (res.writableEnded || res.destroyed) return false;
                 try {
-                  if (encoding === 'gzip') bodyBuffer = gunzipSync(rawBuffer);
-                  else if (encoding === 'br')
-                    bodyBuffer = brotliDecompressSync(rawBuffer);
-                  else bodyBuffer = inflateSync(rawBuffer);
+                  return res.write(chunk);
                 } catch (err) {
+                  const code =
+                    err instanceof Error && 'code' in err
+                      ? (err as NodeJS.ErrnoException).code
+                      : undefined;
+                  if (code && STREAM_TEARDOWN_CODES.has(code)) return false;
+                  throw err;
+                }
+              };
+              upRes.on('data', (chunk: Buffer) => {
+                const writeOk = safeWrite(chunk);
+                if (!writeOk && !upPaused) {
+                  upPaused = true;
+                  upRes.pause();
+                }
+                if (capped) return;
+                captureSize += chunk.length;
+                if (captureSize > USAGE_CAPTURE_BUFFER_CAP) {
+                  capped = true;
+                  captured.length = 0;
                   logger.warn(
-                    {
-                      err,
-                      url: upstreamPath,
-                      encoding,
-                      rawBytes: rawBuffer.length,
-                    },
-                    'usage-log: response decompression failed, falling back to raw buffer for parse',
+                    { url: upstreamPath, size: captureSize },
+                    'usage-log: response too large, skipping capture',
+                  );
+                } else {
+                  captured.push(chunk);
+                }
+              });
+              upRes.on('end', () => {
+                if (!res.writableEnded && !res.destroyed) res.end();
+                res.removeListener('drain', resumeUpstream);
+                res.removeListener('close', onClientClose);
+                if (capped) return;
+                const rawBuffer = Buffer.concat(captured);
+                // The Claude SDK (undici) sends `accept-encoding: gzip,
+                // deflate, br` by default, so Anthropic's edge serves
+                // compressed responses. The proxy forwards the raw
+                // (encoded) bytes to the client so the SDK can
+                // decompress them transparently — but for capture we
+                // need the decompressed text to parse SSE / JSON. Read
+                // the response Content-Encoding and decode accordingly;
+                // identity (or unset) keeps the raw bytes. Decompression
+                // failures fall through to the raw buffer with a warn
+                // log so downstream parsing still gets a chance.
+                const encoding = (
+                  upRes.headers['content-encoding'] || ''
+                ).toLowerCase();
+                let bodyBuffer = rawBuffer;
+                if (
+                  encoding === 'gzip' ||
+                  encoding === 'br' ||
+                  encoding === 'deflate'
+                ) {
+                  try {
+                    if (encoding === 'gzip') bodyBuffer = gunzipSync(rawBuffer);
+                    else if (encoding === 'br')
+                      bodyBuffer = brotliDecompressSync(rawBuffer);
+                    else bodyBuffer = inflateSync(rawBuffer);
+                  } catch (err) {
+                    logger.warn(
+                      {
+                        err,
+                        url: upstreamPath,
+                        encoding,
+                        rawBytes: rawBuffer.length,
+                      },
+                      'usage-log: response decompression failed, falling back to raw buffer for parse',
+                    );
+                  }
+                }
+                const bodyText = bodyBuffer.toString('utf8');
+                const ctx: ContainerContext = containerCtx ?? {
+                  group: 'unknown',
+                  tier: 'untrusted',
+                  session: 'unknown',
+                  task_id: null,
+                  message_id: null,
+                };
+                try {
+                  const record = parseUsageFromBody(
+                    bodyText,
+                    ctx,
+                    Date.now() - requestStartMs,
+                    requestModel,
+                  );
+                  if (record) {
+                    noteCaptureWrite();
+                    // Fire-and-forget. appendUsageRecord swallows IO
+                    // errors internally so this can never reject.
+                    void appendUsageRecord(usageLogPath, record);
+                  }
+                } catch (err) {
+                  // Defense in depth: parseUsageFromBody is designed not
+                  // to throw, but if it ever does, we MUST NOT propagate.
+                  logger.warn(
+                    { err, url: upstreamPath },
+                    'usage-log: parse failed',
                   );
                 }
-              }
-              const bodyText = bodyBuffer.toString('utf8');
-              const ctx: ContainerContext = containerCtx ?? {
-                group: 'unknown',
-                tier: 'untrusted',
-                session: 'unknown',
-                task_id: null,
-                message_id: null,
-              };
-              try {
-                const record = parseUsageFromBody(
-                  bodyText,
-                  ctx,
-                  Date.now() - requestStartMs,
-                  requestModel,
-                );
-                if (record) {
-                  noteCaptureWrite();
-                  // Fire-and-forget. appendUsageRecord swallows IO
-                  // errors internally so this can never reject.
-                  void appendUsageRecord(usageLogPath, record);
-                }
-              } catch (err) {
-                // Defense in depth: parseUsageFromBody is designed not
-                // to throw, but if it ever does, we MUST NOT propagate.
+              });
+              upRes.on('error', (err) => {
                 logger.warn(
                   { err, url: upstreamPath },
-                  'usage-log: parse failed',
+                  'usage-log: upstream stream error during capture',
                 );
-              }
-            });
-            upRes.on('error', (err) => {
-              logger.warn(
-                { err, url: upstreamPath },
-                'usage-log: upstream stream error during capture',
-              );
-              res.removeListener('drain', resumeUpstream);
-              res.removeListener('close', onClientClose);
-              if (!res.writableEnded && !res.destroyed) res.end();
-            });
-          },
-        );
-
-        upstream.on('error', (err) => {
-          logger.error(
-            { err, url: upstreamPath },
-            'Credential proxy upstream error',
+                res.removeListener('drain', resumeUpstream);
+                res.removeListener('close', onClientClose);
+                if (!res.writableEnded && !res.destroyed) res.end();
+              });
+            },
           );
-          if (!res.headersSent) {
-            res.writeHead(502);
-            res.end('Bad Gateway');
-          }
-        });
 
-        upstream.write(body);
-        upstream.end();
+          // Idle-timeout-driven bypass. `setTimeout` fires when no
+          // socket activity has happened for `BYPASS_IDLE_TIMEOUT_MS`
+          // — covers the LiteLLM-reachable-but-not-responding case
+          // (TCP accepted, no HTTP response in 3s). Cleared the moment
+          // response headers arrive so a slow-streaming SDK response
+          // isn't torn down mid-flight; the `'timeout'` event without
+          // a handler is silent, so a `destroy()` is explicit.
+          upstream.setTimeout(BYPASS_IDLE_TIMEOUT_MS, () => {
+            upstream.destroy(new Error('credential-proxy idle timeout'));
+          });
+          upstream.once('response', () => upstream.setTimeout(0));
+
+          upstream.on('error', (err) => {
+            const code = (err as NodeJS.ErrnoException).code;
+            const isReachabilityError =
+              code === 'ECONNREFUSED' ||
+              code === 'ENOTFOUND' ||
+              code === 'EHOSTUNREACH' ||
+              code === 'ECONNRESET' ||
+              err.message === 'credential-proxy idle timeout';
+            if (!fromBypass && bypassEnabled && isReachabilityError) {
+              logger.warn(
+                {
+                  err: err.message,
+                  code,
+                  url: upstreamPath,
+                  primary: targetUrl.origin,
+                  bypass: bypassUrl.origin,
+                },
+                'credential-proxy: primary unreachable, bypassing to anthropic-direct',
+              );
+              sendUpstreamRequest(bypassUrl, true);
+              return;
+            }
+            logger.error(
+              { err, url: upstreamPath, fromBypass },
+              'Credential proxy upstream error',
+            );
+            if (!res.headersSent) {
+              res.writeHead(502);
+              res.end('Bad Gateway');
+            }
+          });
+
+          upstream.write(body);
+          upstream.end();
+        };
+
+        sendUpstreamRequest(upstreamUrl, false);
       });
     });
 

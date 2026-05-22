@@ -61,3 +61,60 @@ services:
     ports:
       # Credential proxy — agent containers reach it via host.docker.internal:3001
       - "3001:3001"
+
+  # LiteLLM router (#610) — sits between the credential-proxy and the
+  # litellm.ai cloud gateway. The orchestrator's credential-proxy
+  # forwards SDK calls here via `ANTHROPIC_BASE_URL=http://nanoclaw-litellm:4000`
+  # (set in ~/nanoclaw/.env on the NAS). Stage 0 carries Anthropic-shape
+  # passthrough with router-level fallback to api.anthropic.com; #613
+  # populates per-workload model_list aliases.
+  #
+  # When this container is unreachable, the credential-proxy's
+  # orchestrator-side bypass falls direct to api.anthropic.com — see
+  # src/credential-proxy.ts. Router-level fallback (above) covers
+  # litellm.ai gateway outages; orchestrator-side bypass covers
+  # nanoclaw-litellm itself being down.
+  nanoclaw-litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: nanoclaw-litellm
+    restart: always
+    command:
+      - "--config"
+      - "/etc/litellm/litellm.config.yaml"
+      - "--port"
+      - "4000"
+      - "--num_workers"
+      - "1"
+    volumes:
+      - ./container/litellm/litellm.config.yaml:/etc/litellm/litellm.config.yaml:ro
+    environment:
+      # Inbound master_key — the orchestrator's credential-proxy sends
+      # `x-api-key: $ANTHROPIC_API_KEY` on outbound requests, so we
+      # set the LiteLLM master_key value to ANTHROPIC_API_KEY too;
+      # the existing auth header passes through unchanged. The two
+      # outbound keys (gateway + Anthropic-direct) come from .env
+      # via env_file below.
+      - LITELLM_MASTER_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - LITELLM_GATEWAY_API_KEY=${LITELLM_GATEWAY_API_KEY}
+      - TZ=America/Chicago
+    env_file:
+      - .env
+    ports:
+      # Internal — exposed on the host so an operator can hit the
+      # /health endpoint from the NAS shell during rollout debugging.
+      # The orchestrator reaches it by service-name on the default
+      # compose network (nanoclaw-litellm:4000); the published port
+      # is for ops, not for the orchestrator.
+      - "4000:4000"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:4000/health/liveliness"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
