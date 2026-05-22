@@ -119,7 +119,6 @@ def main() -> int:
     refresh_token = token_resp["refresh_token"]
 
     print("\n  Authenticated successfully!")
-    print(f"  Access token: {access_token[:20]}...")
 
     env_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
