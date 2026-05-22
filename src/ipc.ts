@@ -3463,12 +3463,21 @@ export async function processTaskIpc(
         const { readEnvFile: readTraktEnv } = await import('./env.js');
         const traktVars = readTraktEnv([
           'TRAKT_CLIENT_ID',
+          'TRAKT_CLIENT_SECRET',
           'TRAKT_ACCESS_TOKEN',
+          'TRAKT_REFRESH_TOKEN',
         ]);
+        // TRAKT_ENV_PATH tells the script where to persist refreshed
+        // tokens after a 401-driven refresh-grant. Without it the
+        // script will still refresh in-memory and retry the request
+        // once, but the new tokens won't survive across IPC calls —
+        // every fetch would burn a refresh-grant.
+        const traktEnvPath = path.join(process.cwd(), '.env');
         const traktEnv: Record<string, string> = {
           PATH: process.env.PATH || '/usr/bin:/bin',
           HOME: process.env.HOME || '/root',
           TZ: process.env.TZ || 'UTC',
+          TRAKT_ENV_PATH: traktEnvPath,
           ...Object.fromEntries(Object.entries(traktVars).filter(([, v]) => v)),
         };
 
