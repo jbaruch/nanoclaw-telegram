@@ -8,6 +8,16 @@ Usage: Run on the NAS via docker exec:
 """
 import json, os, sys, time, urllib.request
 
+# Browser-shaped User-Agent. Cloudflare in front of api.trakt.tv
+# flags short custom UAs; `NanoClaw/1.0` was being intermittently
+# blocked. Match the UA used by the runtime fetcher so reauth and
+# fetch share one Cloudflare fingerprint.
+BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
 CLIENT_ID = os.environ.get("TRAKT_CLIENT_ID")
 CLIENT_SECRET = os.environ.get("TRAKT_CLIENT_SECRET")
 
@@ -35,7 +45,7 @@ req = urllib.request.Request(
         "Content-Type": "application/json",
         "trakt-api-version": "2",
         "trakt-api-key": CLIENT_ID,
-        "User-Agent": "NanoClaw/1.0",
+        "User-Agent": BROWSER_UA,
     },
 )
 resp = json.loads(urllib.request.urlopen(req).read())
@@ -62,7 +72,7 @@ while True:
         "Content-Type": "application/json",
         "trakt-api-version": "2",
         "trakt-api-key": CLIENT_ID,
-        "User-Agent": "NanoClaw/1.0",
+        "User-Agent": BROWSER_UA,
     },
         )
         token_resp = json.loads(urllib.request.urlopen(req).read())
