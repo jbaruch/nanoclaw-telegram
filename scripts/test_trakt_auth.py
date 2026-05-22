@@ -220,6 +220,27 @@ class PersistTokensTest(unittest.TestCase):
         self.assertEqual(access, ["TRAKT_ACCESS_TOKEN=a-2"])
         self.assertEqual(refresh, ["TRAKT_REFRESH_TOKEN=r-2"])
 
+    def test_normalizes_missing_final_newline_before_appending(self):
+        """If the pre-existing .env's last line lacks a trailing
+        newline, naive append would produce
+        `EXISTING=valueTRAKT_ACCESS_TOKEN=...` — corrupted env file,
+        broken on next read. The helper must inject `\\n` before
+        appending."""
+        # Deliberately no trailing newline on the final line.
+        with open(self.env_path, "w") as f:
+            f.write("OTHER=preserved\nLAST=no-newline-here")
+        self.module._persist_tokens(self.env_path, "fresh", "fresh-r")
+
+        text = open(self.env_path).read()
+        lines = text.splitlines()
+        # Pre-existing values preserved verbatim, new tokens on their
+        # own lines (no concatenation).
+        self.assertIn("OTHER=preserved", lines)
+        self.assertIn("LAST=no-newline-here", lines)
+        self.assertIn("TRAKT_ACCESS_TOKEN=fresh", lines)
+        self.assertIn("TRAKT_REFRESH_TOKEN=fresh-r", lines)
+        self.assertNotIn("no-newline-hereTRAKT_ACCESS_TOKEN=fresh", text)
+
 
 if __name__ == "__main__":
     sys.exit(unittest.main())

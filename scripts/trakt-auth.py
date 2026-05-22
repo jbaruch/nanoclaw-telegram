@@ -110,6 +110,16 @@ def _persist_tokens(env_path: str, access_token: str, refresh_token: str) -> Non
         else:
             out_lines.append(line)
 
+    # Normalize the last preserved line to end with a newline before
+    # appending new keys. Without this, an .env that lacks a final
+    # newline (`EXISTING_VAR=val` with no `\n`) would concatenate as
+    # `EXISTING_VAR=valTRAKT_ACCESS_TOKEN=...`, corrupting the env
+    # file and breaking the next read. Cheap to fix here; the
+    # alternative (splitlines + join with `\n`) would lose the
+    # original line-ending shape if it ever mattered.
+    if out_lines and not out_lines[-1].endswith("\n"):
+        out_lines[-1] += "\n"
+
     if not seen_access:
         out_lines.append(f"TRAKT_ACCESS_TOKEN={access_token}\n")
     if not seen_refresh:
