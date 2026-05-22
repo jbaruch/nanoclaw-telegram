@@ -462,7 +462,7 @@ describe('credential-proxy', () => {
     it('does NOT cut off a slow-but-valid upstream when bypass is disabled', async () => {
       // Per `coding-policy: error-handling` Graceful Fallback — the
       // idle timeout exists to drive bypass, and when bypass is
-      // disabled (same-origin / OAuth / no LITELLM_MASTER_KEY) there
+      // disabled (same-origin primary+bypass, or OAuth mode) there
       // is no fallback to drive to. A slow upstream that takes
       // longer than `idleTimeoutMs` to send response headers must
       // still complete normally; this is exactly the slow-Anthropic

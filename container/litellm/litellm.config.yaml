@@ -80,13 +80,17 @@ litellm_settings:
   request_timeout: 600
 
 general_settings:
-  # Inbound client auth — clients (the orchestrator's credential-proxy)
-  # send their existing `x-api-key: $ANTHROPIC_API_KEY` value and
-  # LITELLM_MASTER_KEY in the container env is set to the same value
-  # so the SDK's existing header passes auth without the
-  # credential-proxy needing to learn about LiteLLM's auth shape.
-  # Outbound auth to backends uses `os.environ/LITELLM_GATEWAY_API_KEY`
-  # and `os.environ/ANTHROPIC_API_KEY` per `litellm_params` above.
+  # Inbound client auth — the orchestrator's credential-proxy injects
+  # `x-api-key: ${LITELLM_MASTER_KEY}` when forwarding to this
+  # container (separate value from `ANTHROPIC_API_KEY` so a rotation
+  # on the LiteLLM side doesn't couple to the Anthropic provider
+  # credential; see `.env.example` for the rationale). The proxy
+  # falls back to `ANTHROPIC_API_KEY` when LITELLM_MASTER_KEY is
+  # unset, so a partial-config deploy still flows traffic — that
+  # graceful path is for incident recovery, not steady state.
+  # Outbound auth to backends uses `LITELLM_GATEWAY_API_KEY` (cloud
+  # gateway rows) and `ANTHROPIC_API_KEY` (Anthropic-direct fallback
+  # rows) per `litellm_params` above.
   master_key: os.environ/LITELLM_MASTER_KEY
   # /health is what docker-compose's healthcheck hits.
   health_check_interval: 60
