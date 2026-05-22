@@ -241,7 +241,7 @@ fi
 
 # 3. Update tiles
 echo "3. Updating tiles from registry..."
-docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl update --yes --dangerously-ignore-security 2>&1' | tail -10
+docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl update --yes --accept-warnings 2>&1' | tail -10
 echo ""
 
 # 3b. Verify every tessl.json in the repo declares mode: managed and
