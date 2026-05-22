@@ -459,6 +459,61 @@ describe('credential-proxy', () => {
       }
     });
 
+    it('does NOT cut off a slow-but-valid upstream when bypass is disabled', async () => {
+      // Per `coding-policy: error-handling` Graceful Fallback — the
+      // idle timeout exists to drive bypass, and when bypass is
+      // disabled (same-origin / OAuth / no LITELLM_MASTER_KEY) there
+      // is no fallback to drive to. A slow upstream that takes
+      // longer than `idleTimeoutMs` to send response headers must
+      // still complete normally; this is exactly the slow-Anthropic
+      // edge path that worked pre-#610 and must not regress.
+      let resolveSlowResponse: () => void = () => {};
+      const slowPrimary: http.Server = http.createServer((_req, res) => {
+        // Hold the response for 150ms (3× the test idle timeout) then
+        // complete normally.
+        setTimeout(() => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: 'slow' }));
+          resolveSlowResponse();
+        }, 150);
+      });
+      await new Promise<void>((r) => slowPrimary.listen(0, '127.0.0.1', r));
+      const slowPort = (slowPrimary.address() as AddressInfo).port;
+
+      try {
+        Object.assign(mockEnv, {
+          ANTHROPIC_API_KEY: 'sk-ant-real-key',
+          // Same-origin primary + bypass disables the bypass entirely.
+          ANTHROPIC_BASE_URL: `http://127.0.0.1:${slowPort}`,
+          ANTHROPIC_BYPASS_URL: `http://127.0.0.1:${slowPort}`,
+        });
+        proxyServer = await startCredentialProxy(0, '127.0.0.1', {
+          idleTimeoutMs: 50,
+        });
+        proxyPort = (proxyServer.address() as AddressInfo).port;
+
+        const res = await makeRequest(
+          proxyPort,
+          {
+            method: 'POST',
+            path: '/v1/messages',
+            headers: { 'content-type': 'application/json' },
+          },
+          '{}',
+        );
+
+        expect(res.statusCode).toBe(200);
+        expect(res.body).toBe(JSON.stringify({ ok: 'slow' }));
+        // Sanity: the bypass server (same as primary here) never
+        // produced a second response — there was only one upstream
+        // call, not two.
+        expect(bypassHits).toBe(0);
+      } finally {
+        resolveSlowResponse();
+        await new Promise<void>((r) => slowPrimary.close(() => r()));
+      }
+    });
+
     it('injects LITELLM_MASTER_KEY for the primary and ANTHROPIC_API_KEY for the bypass', async () => {
       // The credential-proxy picks the right `x-api-key` per target:
       // the LiteLLM master_key when forwarding to the primary (so

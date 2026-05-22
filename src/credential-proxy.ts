@@ -591,16 +591,27 @@ export function startCredentialProxy(
           );
 
           // Idle-timeout-driven bypass. `setTimeout` fires when no
-          // socket activity has happened for `BYPASS_IDLE_TIMEOUT_MS`
-          // — covers the LiteLLM-reachable-but-not-responding case
-          // (TCP accepted, no HTTP response in 3s). Cleared the moment
+          // socket activity has happened for `idleTimeoutMs` — covers
+          // the LiteLLM-reachable-but-not-responding case (TCP
+          // accepted, no HTTP response in 3s). Cleared the moment
           // response headers arrive so a slow-streaming SDK response
-          // isn't torn down mid-flight; the `'timeout'` event without
-          // a handler is silent, so a `destroy()` is explicit.
-          upstream.setTimeout(idleTimeoutMs, () => {
-            upstream.destroy(new Error('credential-proxy idle timeout'));
-          });
-          upstream.once('response', () => upstream.setTimeout(0));
+          // isn't torn down mid-flight.
+          //
+          // Gated to the PRIMARY attempt of a bypass-enabled
+          // deployment per `coding-policy: error-handling`'s Graceful
+          // Fallback clause. When bypass is disabled (same-origin
+          // primary+bypass, OAuth mode, no LITELLM_MASTER_KEY) there
+          // is nothing to fall back to and a 3s cap would regress
+          // slow-response handling that worked before #610. On the
+          // bypass attempt itself the timer is also skipped — if even
+          // the bypass is hung, surfacing the existing 502 path is
+          // more honest than tearing the socket down for no follow-up.
+          if (bypassEnabled && !fromBypass) {
+            upstream.setTimeout(idleTimeoutMs, () => {
+              upstream.destroy(new Error('credential-proxy idle timeout'));
+            });
+            upstream.once('response', () => upstream.setTimeout(0));
+          }
 
           upstream.on('error', (err) => {
             const code = (err as NodeJS.ErrnoException).code;
