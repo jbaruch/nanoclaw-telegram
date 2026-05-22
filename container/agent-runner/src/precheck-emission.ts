@@ -64,34 +64,50 @@ export interface PrecheckErrorOutput {
  * the `cleanResult` step in `src/task-scheduler.ts:1119`), so the
  * envelope lands in `task_run_logs.result` without producing chat
  * noise.
+ *
+ * Per `coding-policy: script-delegation`, prechecks emit
+ * `{"wake_agent": false, "data": {}}` (object-shaped `data`); the
+ * parser at `script-output-parse.ts` accepts an omitted `data` as
+ * valid (defaults to `{}` semantically). `data === undefined` would
+ * make `JSON.stringify(data)` emit the literal `undefined` (not
+ * valid JSON), so the helper coerces to `{}` before serialising.
  */
 export function buildPrecheckSkippedOutput(
   data: unknown,
 ): PrecheckSkippedOutput {
+  const payload = data === undefined ? {} : data;
   return {
     status: 'precheck_skipped',
-    result: `<internal>precheck-skipped: ${JSON.stringify(data)}</internal>`,
+    result: `<internal>precheck-skipped: ${JSON.stringify(payload)}</internal>`,
   };
 }
 
 /**
- * Build the writeOutput payload when the precheck script crashed,
- * emitted non-JSON, or omitted `wake_agent`. The gating decision is
- * unknown — emitting `'success'` here would mask a real failure
- * because the silent-success watchdog cannot tell the row apart from
- * a precheck-gated no-op. `'error'` flows through the existing error
- * pipeline (`task_run_logs.error` populated, error-side metrics fire)
- * so the failure is visible. The diagnostic `result` line lets the
- * watchdog explain WHY the row is `'error'` without re-parsing
- * `error`.
+ * Build the writeOutput payload when the precheck script failed.
+ * `runScript` returns `null` for multiple failure modes — `execFile`
+ * error (crash / timeout / nonzero exit), empty stdout, non-JSON
+ * stdout, invalid `data` shape, or missing `wake_agent`. The caller
+ * passes the specific reason through so the persisted diagnostic
+ * tells the operator what actually went wrong rather than a generic
+ * "something failed" string. The gating decision is unknown — the
+ * row lands as `'error'` (flows through the existing error pipeline)
+ * rather than `'success'` which would mask the failure as a healthy
+ * row to the silent-success watchdog.
  */
-export function buildPrecheckErrorOutput(): PrecheckErrorOutput {
-  const errorMsg =
-    'precheck script crashed, produced no output, or omitted wake_agent';
+export type PrecheckErrorReason =
+  | 'execfile-error'
+  | 'empty-output'
+  | 'invalid-json'
+  | 'invalid-data-shape'
+  | 'missing-wake-agent';
+
+export function buildPrecheckErrorOutput(
+  reason: PrecheckErrorReason,
+): PrecheckErrorOutput {
+  const errorMsg = `precheck script failed: ${reason}`;
   return {
     status: 'error',
-    result:
-      '<internal>precheck-error: script crashed / no output / missing wake_agent</internal>',
+    result: `<internal>precheck-error: ${reason}</internal>`,
     error: errorMsg,
   };
 }

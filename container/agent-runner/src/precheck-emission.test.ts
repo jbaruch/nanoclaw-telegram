@@ -45,35 +45,59 @@ describe('buildPrecheckSkippedOutput', () => {
 
     expect(out.status).not.toBe('success');
   });
+
+  it('coerces undefined data to {} so the diagnostic never contains the literal "undefined" — `parseScriptOutput` accepts omitted `data` as valid, so `scriptResult.data` may be undefined; JSON.stringify(undefined) would emit the literal string undefined (not valid JSON) and break watchdog parsers', () => {
+    const out = buildPrecheckSkippedOutput(undefined);
+
+    expect(out.status).toBe('precheck_skipped');
+    expect(out.result).toBe('<internal>precheck-skipped: {}</internal>');
+    expect(out.result).not.toContain('undefined');
+  });
 });
 
 describe('buildPrecheckErrorOutput', () => {
-  it('emits error status with diagnostic result and an actionable error message', () => {
-    const out = buildPrecheckErrorOutput();
+  it('emits error status with diagnostic result naming the specific failure mode', () => {
+    const out = buildPrecheckErrorOutput('execfile-error');
 
     expect(out.status).toBe('error');
     expect(out.result).toBe(
-      '<internal>precheck-error: script crashed / no output / missing wake_agent</internal>',
+      '<internal>precheck-error: execfile-error</internal>',
     );
-    expect(out.error).toMatch(/precheck script crashed/);
-    expect(out.error).toMatch(/omitted wake_agent/);
+    expect(out.error).toBe('precheck script failed: execfile-error');
+  });
+
+  it('covers each PrecheckErrorReason variant so watchdog queries can match on the specific cause', () => {
+    const reasons = [
+      'execfile-error',
+      'empty-output',
+      'invalid-json',
+      'invalid-data-shape',
+      'missing-wake-agent',
+    ] as const;
+
+    for (const reason of reasons) {
+      const out = buildPrecheckErrorOutput(reason);
+      expect(out.status).toBe('error');
+      expect(out.result).toBe(`<internal>precheck-error: ${reason}</internal>`);
+      expect(out.error).toBe(`precheck script failed: ${reason}`);
+    }
   });
 
   it('result envelope is wrapped in <internal> tags so the orchestrator strips it before chat-echo and only task_run_logs.result sees it', () => {
-    const out = buildPrecheckErrorOutput();
+    const out = buildPrecheckErrorOutput('empty-output');
 
     expect(out.result.startsWith('<internal>')).toBe(true);
     expect(out.result.endsWith('</internal>')).toBe(true);
   });
 
   it('never emits status: success — masking a script crash as success was the pre-fix behaviour the watchdog could not act on', () => {
-    const out = buildPrecheckErrorOutput();
+    const out = buildPrecheckErrorOutput('invalid-json');
 
     expect(out.status).not.toBe('success');
   });
 
-  it('error message is a string, not undefined — pre-fix the precheck-error path emitted writeOutput without an error field, so task_run_logs.error was null and the operator had nothing to diagnose with', () => {
-    const out = buildPrecheckErrorOutput();
+  it('error message is a non-empty string — pre-fix the precheck-error path emitted writeOutput without an error field, so task_run_logs.error was null and the operator had nothing to diagnose with', () => {
+    const out = buildPrecheckErrorOutput('invalid-data-shape');
 
     expect(typeof out.error).toBe('string');
     expect(out.error.length).toBeGreaterThan(0);

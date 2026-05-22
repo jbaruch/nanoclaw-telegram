@@ -277,6 +277,54 @@ describe('runAuditSnapshot', () => {
     expect(t.gated_likely).toBe(1); // only the genuine gate-out
   });
 
+  it("counts `status='precheck_skipped'` rows as gated_likely regardless of duration (#581 follow-up)", () => {
+    // Post-#581-followup the agent-runner emits a dedicated
+    // 'precheck_skipped' status when the precheck script returns
+    // `wake_agent: false`, with a non-null `<internal>` diagnostic
+    // result. The audit's gated_likely heuristic now ORs the legacy
+    // signature (success + null result + short duration) with the
+    // canonical signature (status='precheck_skipped'); the canonical
+    // branch does NOT require a duration cutoff because the status
+    // alone is ground truth.
+    makeFixtureDb();
+    insertTask('t1', 'g1', 'cron', '0 7 * * *', 'active', 'precheck.py');
+
+    const now = new Date('2026-05-01T00:00:00Z');
+    // Legacy gate-out (pre-fix shape): still counts.
+    insertRun('t1', '2026-04-15T07:00:00Z', 3_000, {
+      status: 'success',
+      result: null,
+    });
+    // Canonical gate-out, short duration: counts.
+    insertRun('t1', '2026-04-16T07:00:00Z', 4_000, {
+      status: 'precheck_skipped',
+      result:
+        '<internal>precheck-skipped: {"reason":"within_cadence"}</internal>',
+    });
+    // Canonical gate-out, long duration (precheck script took
+    // longer than usual but still gated out): counts. The legacy
+    // branch's duration cutoff doesn't apply because the status
+    // alone is the ground-truth signal.
+    insertRun('t1', '2026-04-17T07:00:00Z', 25_000, {
+      status: 'precheck_skipped',
+      result:
+        '<internal>precheck-skipped: {"reason":"within_cadence"}</internal>',
+    });
+    // Full agent run with diagnostic <internal> marker: status is
+    // 'success', so the legacy branch would consider it; but result
+    // is non-null, so it does NOT count.
+    insertRun('t1', '2026-04-18T07:00:00Z', 60_000, {
+      status: 'success',
+      result: '<internal>...surfaced</internal>',
+    });
+
+    const snap = runAuditSnapshot({ dbPath, now });
+
+    const t = snap.tasks.find((tt) => tt.task_id === 't1')!;
+    expect(t.fires).toBe(4);
+    expect(t.gated_likely).toBe(3); // legacy + 2 canonical
+  });
+
   it('orders tasks deterministically by group_folder then schedule_type then id', () => {
     makeFixtureDb();
     insertTask('t-z-int', 'group_z', 'interval', '30m', 'active', null);
