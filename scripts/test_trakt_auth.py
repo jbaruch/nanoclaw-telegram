@@ -140,5 +140,86 @@ class DeviceCodeRequestUsesBrowserUA(unittest.TestCase):
         self.assertEqual(req.headers["Trakt-api-key"], "cid")
 
 
+class PersistTokensTest(unittest.TestCase):
+    """`_persist_tokens` rewrites .env in place. Contract:
+    - Inode stable across the rewrite (docker bind-mount safety).
+    - Stacked pre-existing TRAKT_*_TOKEN= lines collapse to exactly
+      one of each key (first match wins, subsequent dropped).
+    - Other .env vars preserved verbatim.
+    - Append-only when no prior key exists."""
+
+    def setUp(self):
+        self.module = _load_script()
+        # tempdir + tempfile manually since this is stdlib-only.
+        import tempfile
+
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.env_path = os.path.join(self._dir.name, ".env")
+
+    def _read_lines(self):
+        with open(self.env_path) as f:
+            return f.read().splitlines()
+
+    def test_rewrites_in_place_preserving_inode(self):
+        with open(self.env_path, "w") as f:
+            f.write("TRAKT_ACCESS_TOKEN=old\nTRAKT_REFRESH_TOKEN=old-r\n")
+        inode_before = os.stat(self.env_path).st_ino
+        self.module._persist_tokens(self.env_path, "new", "new-r")
+        inode_after = os.stat(self.env_path).st_ino
+        self.assertEqual(
+            inode_before,
+            inode_after,
+            "inode swap would break docker bind-mounts",
+        )
+        lines = self._read_lines()
+        self.assertIn("TRAKT_ACCESS_TOKEN=new", lines)
+        self.assertIn("TRAKT_REFRESH_TOKEN=new-r", lines)
+
+    def test_collapses_stacked_pre_existing_duplicates(self):
+        with open(self.env_path, "w") as f:
+            f.write(
+                "OTHER=keep\n"
+                "TRAKT_ACCESS_TOKEN=stale-1\n"
+                "TRAKT_REFRESH_TOKEN=stale-1\n"
+                "MIDDLE=between\n"
+                "TRAKT_ACCESS_TOKEN=stale-2\n"
+                "TRAKT_REFRESH_TOKEN=stale-2\n"
+                "TRAKT_ACCESS_TOKEN=stale-3\n"
+                "TAIL=tail\n"
+            )
+        self.module._persist_tokens(self.env_path, "fresh", "fresh-r")
+        lines = self._read_lines()
+        access = [line for line in lines if line.startswith("TRAKT_ACCESS_TOKEN=")]
+        refresh = [line for line in lines if line.startswith("TRAKT_REFRESH_TOKEN=")]
+        self.assertEqual(access, ["TRAKT_ACCESS_TOKEN=fresh"], lines)
+        self.assertEqual(refresh, ["TRAKT_REFRESH_TOKEN=fresh-r"], lines)
+        # Non-Trakt vars preserved verbatim.
+        self.assertIn("OTHER=keep", lines)
+        self.assertIn("MIDDLE=between", lines)
+        self.assertIn("TAIL=tail", lines)
+
+    def test_appends_when_no_prior_keys(self):
+        with open(self.env_path, "w") as f:
+            f.write("OTHER=keep\n")
+        self.module._persist_tokens(self.env_path, "new", "new-r")
+        lines = self._read_lines()
+        self.assertIn("OTHER=keep", lines)
+        self.assertIn("TRAKT_ACCESS_TOKEN=new", lines)
+        self.assertIn("TRAKT_REFRESH_TOKEN=new-r", lines)
+
+    def test_idempotent_across_multiple_runs(self):
+        """`jbaruch/coding-policy: file-hygiene` — Scripts should be
+        safe to run multiple times. Three sequential _persist_tokens
+        calls must leave exactly one of each key."""
+        for i in range(3):
+            self.module._persist_tokens(self.env_path, f"a-{i}", f"r-{i}")
+        lines = self._read_lines()
+        access = [line for line in lines if line.startswith("TRAKT_ACCESS_TOKEN=")]
+        refresh = [line for line in lines if line.startswith("TRAKT_REFRESH_TOKEN=")]
+        self.assertEqual(access, ["TRAKT_ACCESS_TOKEN=a-2"])
+        self.assertEqual(refresh, ["TRAKT_REFRESH_TOKEN=r-2"])
+
+
 if __name__ == "__main__":
     sys.exit(unittest.main())

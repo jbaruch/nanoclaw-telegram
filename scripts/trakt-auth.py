@@ -37,15 +37,19 @@ def _build_headers(client_id: str) -> dict:
     }
 
 
+def _env_path() -> str:
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
+    )
+
+
 def _load_credentials() -> tuple[str, str]:
     client_id = os.environ.get("TRAKT_CLIENT_ID")
     client_secret = os.environ.get("TRAKT_CLIENT_SECRET")
     if client_id and client_secret:
         return client_id, client_secret
 
-    env_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
-    )
+    env_path = _env_path()
     if os.path.exists(env_path):
         with open(env_path) as f:
             for line in f:
@@ -56,11 +60,63 @@ def _load_credentials() -> tuple[str, str]:
                     client_secret = line.split("=", 1)[1]
 
     if not client_id or not client_secret:
+        # stderr per `jbaruch/coding-policy: file-hygiene`. stdout is
+        # reserved for the interactive auth flow's verification URL +
+        # user code, which the operator copies into a browser.
         print(
-            "ERROR: TRAKT_CLIENT_ID and TRAKT_CLIENT_SECRET must be in .env or environment"
+            "ERROR: TRAKT_CLIENT_ID and TRAKT_CLIENT_SECRET must be in .env or environment",
+            file=sys.stderr,
         )
         sys.exit(1)
     return client_id, client_secret
+
+
+def _persist_tokens(env_path: str, access_token: str, refresh_token: str) -> None:
+    """Rewrite .env in place, preserving the inode so a docker
+    bind-mount of this file continues to see the new content.
+    Replaces existing TRAKT_ACCESS_TOKEN / TRAKT_REFRESH_TOKEN lines
+    if present (first match wins, subsequent stacked duplicates are
+    dropped — older runs of this script appended on every invocation
+    rather than replacing, leaving stacked tokens in .env); appends
+    both if absent. All other lines preserved verbatim.
+
+    Same rewrite shape as the runtime watch-history script's
+    `_persist_tokens_to_env` (jbaruch/nanoclaw-admin) so the two
+    writers don't drift on .env layout.
+
+    NB: temp-file + rename would swap the inode and break the bind
+    mount — bind mounts attach to the inode, not the path, and the
+    renamed file ends up unmounted from the container. `open("w")`
+    truncates the existing file in place, keeping the inode."""
+    try:
+        with open(env_path, "r") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        lines = []
+
+    seen_access = False
+    seen_refresh = False
+    out_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("TRAKT_ACCESS_TOKEN="):
+            if not seen_access:
+                out_lines.append(f"TRAKT_ACCESS_TOKEN={access_token}\n")
+                seen_access = True
+        elif stripped.startswith("TRAKT_REFRESH_TOKEN="):
+            if not seen_refresh:
+                out_lines.append(f"TRAKT_REFRESH_TOKEN={refresh_token}\n")
+                seen_refresh = True
+        else:
+            out_lines.append(line)
+
+    if not seen_access:
+        out_lines.append(f"TRAKT_ACCESS_TOKEN={access_token}\n")
+    if not seen_refresh:
+        out_lines.append(f"TRAKT_REFRESH_TOKEN={refresh_token}\n")
+
+    with open(env_path, "w") as f:
+        f.writelines(out_lines)
 
 
 def main() -> int:
@@ -100,17 +156,22 @@ def main() -> int:
             token_resp = json.loads(urllib.request.urlopen(req).read())
             break
         except urllib.error.HTTPError as e:
+            # `400 (still waiting)` and `429 (polling too fast)` are
+            # expected on stdout — they're part of the interactive
+            # flow. Terminal errors (`410 expired`, `418 denied`) and
+            # the diagnostic above the rate-limit retry go to stderr
+            # per file-hygiene.
             if e.code == 400:
                 print("  Still waiting...")
                 continue
             elif e.code == 410:
-                print("  ERROR: Code expired. Run again.")
+                print("  ERROR: Code expired. Run again.", file=sys.stderr)
                 sys.exit(1)
             elif e.code == 418:
-                print("  ERROR: User denied access")
+                print("  ERROR: User denied access", file=sys.stderr)
                 sys.exit(1)
             elif e.code == 429:
-                print("  Polling too fast, slowing down...")
+                print("  Polling too fast, slowing down...", file=sys.stderr)
                 interval += 1
                 continue
             raise
@@ -120,12 +181,8 @@ def main() -> int:
 
     print("\n  Authenticated successfully!")
 
-    env_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
-    )
-    with open(env_path, "a") as f:
-        f.write(f"\nTRAKT_ACCESS_TOKEN={access_token}\n")
-        f.write(f"TRAKT_REFRESH_TOKEN={refresh_token}\n")
+    env_path = _env_path()
+    _persist_tokens(env_path, access_token, refresh_token)
 
     print(f"  Tokens saved to {env_path}")
     return 0
