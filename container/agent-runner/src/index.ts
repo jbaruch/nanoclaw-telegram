@@ -66,6 +66,11 @@ import { decideGroundTruthReminder } from './ground-truth-reminder.js';
 import { detectLazyVerification } from './lazy-verification.js';
 import { createReadonlyWarner } from './ipc-readonly-warn.js';
 import { rewriteMarkdownToHtml } from './markdown-to-html.js';
+import {
+  buildPrecheckErrorOutput,
+  buildPrecheckSkippedOutput,
+  type PrecheckErrorReason,
+} from './precheck-emission.js';
 import { parseScriptOutput, type ScriptResult } from './script-output-parse.js';
 import {
   decideHardExitWatchdog,
@@ -181,7 +186,7 @@ interface ContainerInput {
 }
 
 interface ContainerOutput {
-  status: 'success' | 'error';
+  status: 'success' | 'error' | 'precheck_skipped';
   result: string | null;
   newSessionId?: string;
   error?: string;
@@ -4173,7 +4178,21 @@ async function runQuery(
 
 const SCRIPT_TIMEOUT_MS = 30_000;
 
-async function runScript(script: string): Promise<ScriptResult | null> {
+// Discriminated return shape for `runScript` (#581 follow-up): on
+// success carries the parsed `ScriptResult`; on failure carries a
+// `PrecheckErrorReason` so `buildPrecheckErrorOutput` can name what
+// actually went wrong. Pre-fix the function returned `null` on every
+// failure mode and the call site emitted a generic diagnostic that
+// hard-coded the cause list — Copilot flagged this on PR #608
+// because `parseScriptOutput` returns more failure modes than the
+// pre-fix list named (`invalid_json` and `invalid_data_shape`
+// weren't in the diagnostic), making the persisted
+// `task_run_logs.error` misleading.
+type RunScriptResult =
+  | { ok: true; result: ScriptResult }
+  | { ok: false; reason: PrecheckErrorReason };
+
+async function runScript(script: string): Promise<RunScriptResult> {
   const scriptPath = '/tmp/task-script.sh';
   fs.writeFileSync(scriptPath, script, { mode: 0o755 });
 
@@ -4193,7 +4212,7 @@ async function runScript(script: string): Promise<ScriptResult | null> {
 
         if (error) {
           log(`Script error: ${error.message}`);
-          return resolve(null);
+          return resolve({ ok: false, reason: 'execfile-error' });
         }
 
         const outcome = parseScriptOutput(stdout);
@@ -4201,18 +4220,21 @@ async function runScript(script: string): Promise<ScriptResult | null> {
           const lastLine = (outcome.lastLine ?? '').slice(0, 200);
           if (outcome.reason === 'empty') {
             log('Script produced no output');
+            return resolve({ ok: false, reason: 'empty-output' });
           } else if (outcome.reason === 'invalid_json') {
             log(`Script output is not valid JSON: ${lastLine}`);
+            return resolve({ ok: false, reason: 'invalid-json' });
           } else if (outcome.reason === 'invalid_data_shape') {
             log(
               `Script output 'data' must be a JSON object per coding-policy: script-delegation: ${lastLine}`,
             );
+            return resolve({ ok: false, reason: 'invalid-data-shape' });
           } else {
             log(`Script output missing wake_agent boolean: ${lastLine}`);
+            return resolve({ ok: false, reason: 'missing-wake-agent' });
           }
-          return resolve(null);
         }
-        resolve(outcome.result);
+        resolve({ ok: true, result: outcome.result });
       },
     );
   });
@@ -4422,21 +4444,21 @@ async function main(): Promise<void> {
     log('Running task script...');
     const scriptResult = await runScript(containerInput.script);
 
-    if (!scriptResult || !scriptResult.wake_agent) {
-      const reason = scriptResult
-        ? 'wake_agent=false'
-        : 'script error/no output';
-      log(`Script decided not to wake agent: ${reason}`);
-      writeOutput({
-        status: 'success',
-        result: null,
-      });
+    if (!scriptResult.ok) {
+      log(`Script failed: ${scriptResult.reason}`);
+      writeOutput(buildPrecheckErrorOutput(scriptResult.reason));
+      return;
+    }
+
+    if (!scriptResult.result.wake_agent) {
+      log('Script decided not to wake agent: wake_agent=false');
+      writeOutput(buildPrecheckSkippedOutput(scriptResult.result.data));
       return;
     }
 
     // Script says wake agent — enrich prompt with script data
     log(`Script wake_agent=true, enriching prompt with data`);
-    prompt = `[SCHEDULED TASK]\n\nScript output:\n${JSON.stringify(scriptResult.data, null, 2)}\n\nInstructions:\n${containerInput.prompt}`;
+    prompt = `[SCHEDULED TASK]\n\nScript output:\n${JSON.stringify(scriptResult.result.data, null, 2)}\n\nInstructions:\n${containerInput.prompt}`;
   }
 
   // Tag untrusted group prompts with origin markers so the model (and compaction)

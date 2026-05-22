@@ -15,12 +15,21 @@
  * small to detect duration-profile drift on the cron-weekly tasks
  * (only 4 fires per 30 days).
  *
- * `gated_likely` is a heuristic populated from a duration cutoff —
- * NOT ground truth. Real gated runs share the short-`duration_ms`
- * signature with quick-failing runs, and the canonical signal is
- * `result=null`+short-duration combined per the audit doc's "How the
- * gate actually works" section. The replay agent is expected to
- * verify before reporting.
+ * `gated_likely` is a heuristic that ORs two signatures:
+ *   1. Canonical (post-#581-followup): rows with
+ *      `status='precheck_skipped'` — emitted by the agent-runner's
+ *      `runScript` branch when the precheck script returned
+ *      `wake_agent: false`. This is ground truth, not a heuristic;
+ *      the row was a gate-out by construction.
+ *   2. Legacy (pre-#581-followup): rows with `status='success' AND
+ *      result IS NULL` paired with a short `duration_ms`. The
+ *      agent-runner used to collapse every `wake_agent: false`
+ *      decision to that shape, indistinguishable from a wake-and-
+ *      empty bug; the duration cutoff was the only post-hoc
+ *      discriminator. Historical rows are this shape.
+ *
+ * The replay agent is expected to verify the legacy branch before
+ * reporting (the canonical branch is ground truth).
  */
 import Database from 'better-sqlite3';
 import fs from 'fs';
@@ -97,18 +106,37 @@ export function runAuditSnapshot(args: {
       )
       .all() as TaskRow[];
 
-    // `gated_likely` is conditioned on `status='success' AND result
-    // IS NULL` — the canonical precheck-gate signature per the audit
-    // doc's "How the gate actually works" section. Counting every
-    // short run would conflate fast failures (status='error') with
-    // genuine gate-outs and inflate the heuristic.
+    // `gated_likely` counts both the legacy and the post-#581 gate
+    // signatures so historical and current rows both surface in the
+    // quarterly audit.
+    //
+    //   - Legacy (pre-#581-followup): `status='success' AND result IS
+    //     NULL` paired with a short duration. The agent-runner used
+    //     to emit `writeOutput({status: 'success', result: null})` on
+    //     EVERY `wake_agent: false` decision, so the historical rows
+    //     are all this shape.
+    //
+    //   - Canonical (post-#581-followup): `status='precheck_skipped'`
+    //     regardless of duration. The agent-runner now emits a
+    //     dedicated status + non-null `<internal>precheck-skipped:
+    //     ...</internal>` result diagnostic, so the canonical shape
+    //     does NOT require the duration cutoff or a NULL result. The
+    //     status alone is the gate-out signal.
+    //
+    // Counting every short run would conflate fast failures
+    // (status='error') with genuine gate-outs and inflate the
+    // heuristic, so the legacy branch keeps the duration + NULL gate
+    // and the canonical branch keys off the explicit status.
     const statsStmt = db.prepare(
       `SELECT COUNT(*) AS fires,
               SUM(CASE
+                    WHEN status = 'precheck_skipped'
+                    THEN 1
                     WHEN duration_ms < ?
                      AND status = 'success'
                      AND result IS NULL
-                    THEN 1 ELSE 0
+                    THEN 1
+                    ELSE 0
                   END) AS gated_likely,
               AVG(duration_ms) AS avg_ms,
               MIN(duration_ms) AS min_ms,

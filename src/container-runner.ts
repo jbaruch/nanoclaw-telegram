@@ -1178,7 +1178,15 @@ export interface ContainerInput {
 }
 
 export interface ContainerOutput {
-  status: 'success' | 'error';
+  // `'precheck_skipped'` (#581) — emitted by the agent-runner when the
+  // scheduled-task precheck script returned `wake_agent: false`. The
+  // agent never woke; the wrapper never ran. Distinct from `'success'`
+  // so the silent-success watchdog can tell a precheck-gated no-op
+  // (healthy quiet) apart from an agent that woke and produced an
+  // empty result (the original #581 bug). A precheck script that
+  // crashes / emits non-JSON / omits `wake_agent` is `'error'`, not
+  // `'precheck_skipped'`.
+  status: 'success' | 'error' | 'precheck_skipped';
   result: string | null;
   newSessionId?: string;
   error?: string;

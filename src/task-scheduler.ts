@@ -885,6 +885,12 @@ async function runTask(
 
   let result: string | null = null;
   let error: string | null = null;
+  // #581 follow-up — captured from the streaming or terminal output
+  // so the runStatus mapping after the try / catch / finally can
+  // propagate `'precheck_skipped'` into `task_run_logs.status`. The
+  // terminal `output` const is scoped inside the try block, so we
+  // mirror its `status === 'precheck_skipped'` signal here.
+  let precheckSkipped = false;
 
   // Per-fire telemetry context (#349). Computed once so every
   // streamed `usage` payload classifies against the same window
@@ -1219,13 +1225,21 @@ async function runTask(
           // Don't close here — agent may still be polling for host script results.
           // Close only on final 'success' status below.
         }
-        if (streamedOutput.status === 'success') {
+        if (
+          streamedOutput.status === 'success' ||
+          streamedOutput.status === 'precheck_skipped'
+        ) {
           // No `notifyIdle` here — `notifyIdle` targets the `default` slot
           // only, so calling it from a maintenance-routed task would flip
           // the wrong container's state and could preempt active user work.
           // `scheduleClose` already winds this container down; when runTask
           // finishes, `drainGroup` chains any pending maintenance task.
+          // Same wind-down for `'precheck_skipped'` — the agent never woke,
+          // there's nothing to poll for, container can close.
           scheduleClose();
+        }
+        if (streamedOutput.status === 'precheck_skipped') {
+          precheckSkipped = true;
         }
         if (streamedOutput.status === 'error') {
           error = streamedOutput.error || 'Unknown error';
@@ -1273,9 +1287,18 @@ async function runTask(
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
-    } else if (output.result) {
-      // Result was already forwarded to the user via the streaming callback above
-      result = output.result;
+    } else {
+      if (output.status === 'precheck_skipped') {
+        // #581 follow-up — terminal status mirrored to the outer
+        // scope so the runStatus mapping after try / catch / finally
+        // can propagate it. The streaming callback above sets this
+        // too for the streaming path; either signal is sufficient.
+        precheckSkipped = true;
+      }
+      if (output.result) {
+        // Result was already forwarded to the user via the streaming callback above
+        result = output.result;
+      }
     }
 
     logger.info(
@@ -1315,7 +1338,19 @@ async function runTask(
     MAINTENANCE_SESSION_NAME,
   );
   const wasForcedClosed = forcedCloseAt !== null && forcedCloseAt >= startTime;
-  let runStatus: 'success' | 'error' | 'killed' = error ? 'error' : 'success';
+  // Map terminal output / streamed status to the persisted
+  // `task_run_logs.status`. `'precheck_skipped'` propagates verbatim
+  // (#581) so the silent-success watchdog can tell a precheck-gated
+  // no-op from a wake-up with empty result. `error` text (set above
+  // by the streaming callback when `streamedOutput.status === 'error'`
+  // or by the terminal `output.status === 'error'` branch) wins over
+  // a precheck-skip signal: any throw or error-stream means the row
+  // is `'error'` regardless of what the terminal output said.
+  let runStatus: 'success' | 'error' | 'killed' | 'precheck_skipped' = error
+    ? 'error'
+    : precheckSkipped
+      ? 'precheck_skipped'
+      : 'success';
   if (wasForcedClosed && runStatus === 'success') {
     runStatus = 'killed';
     // Surface the kill in the structured log AND in `task_run_logs.error`
