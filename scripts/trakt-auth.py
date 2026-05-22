@@ -165,10 +165,19 @@ def main() -> int:
                 print("  Still waiting...")
                 continue
             elif e.code == 410:
-                print("  ERROR: Code expired. Run again.", file=sys.stderr)
+                print(
+                    "  ERROR: Device code expired (10-minute window elapsed). "
+                    "Re-run this script to start a fresh device-code flow.",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
             elif e.code == 418:
-                print("  ERROR: User denied access", file=sys.stderr)
+                print(
+                    "  ERROR: Authorization denied. Re-run this script and "
+                    "approve the Trakt authorization prompt at the URL "
+                    "displayed above.",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
             elif e.code == 429:
                 print("  Polling too fast, slowing down...", file=sys.stderr)
