@@ -109,6 +109,7 @@ import {
   decideExternalFileSummary,
   runExternalFileSummary,
 } from './external-file-summary.js';
+import { classifyResultIsError } from './classify-result-error.js';
 import { formatErrorResult } from './format-error-result.js';
 import { buildSuccessOutput } from './result-suppression.js';
 import {
@@ -4056,9 +4057,7 @@ async function runQuery(
         total_cost_usd?: number;
       };
       const subtype = errMsg.subtype || 'unknown';
-      const isError =
-        errMsg.is_error === true ||
-        (subtype !== 'success' && subtype !== 'unknown');
+      const isError = classifyResultIsError(errMsg);
       if (isError) {
         // SDKResultError carries the actual diagnostic context that the
         // generic 'error_during_execution' subtype name buries. Pull every
