@@ -411,6 +411,101 @@ describe('credential-proxy', () => {
       expect(res.statusCode).toBe(502);
       expect(bypassHits).toBe(0);
     });
+
+    it('falls through to bypass when primary accepts but never sends a response (idle timeout)', async () => {
+      // Primary accepts the TCP connection and parses the HTTP
+      // request but never writes the response. The idle-timeout
+      // setTimeout on the credential-proxy's upstream socket should
+      // fire and destroy the socket with `credential-proxy idle
+      // timeout`, which the error handler recognises as a
+      // bypass-trigger shape.
+      const hangPrimary: http.Server = http.createServer(() => {
+        // Intentionally no response — let the test's idle-timeout
+        // override (50ms via startCredentialProxy opts) fire.
+      });
+      await new Promise<void>((r) => hangPrimary.listen(0, '127.0.0.1', r));
+      const hangPort = (hangPrimary.address() as AddressInfo).port;
+
+      try {
+        Object.assign(mockEnv, {
+          ANTHROPIC_API_KEY: 'sk-ant-real-key',
+          ANTHROPIC_BASE_URL: `http://127.0.0.1:${hangPort}`,
+          ANTHROPIC_BYPASS_URL: `http://127.0.0.1:${bypassPort}`,
+        });
+        proxyServer = await startCredentialProxy(0, '127.0.0.1', {
+          idleTimeoutMs: 50,
+        });
+        proxyPort = (proxyServer.address() as AddressInfo).port;
+
+        const res = await makeRequest(
+          proxyPort,
+          {
+            method: 'POST',
+            path: '/v1/messages',
+            headers: { 'content-type': 'application/json' },
+          },
+          '{}',
+        );
+
+        expect(res.statusCode).toBe(200);
+        expect(res.body).toBe(JSON.stringify({ ok: 'bypass' }));
+        expect(bypassHits).toBe(1);
+      } finally {
+        // Force-close any sockets the hung server is still holding so
+        // the test process exits cleanly even though the in-flight
+        // upstream socket was torn down by the proxy's idle timeout.
+        hangPrimary.closeAllConnections?.();
+        await new Promise<void>((r) => hangPrimary.close(() => r()));
+      }
+    });
+
+    it('injects LITELLM_MASTER_KEY for the primary and ANTHROPIC_API_KEY for the bypass', async () => {
+      // The credential-proxy picks the right `x-api-key` per target:
+      // the LiteLLM master_key when forwarding to the primary (so
+      // a key rotation on the LiteLLM side doesn't couple to
+      // ANTHROPIC_API_KEY), and ANTHROPIC_API_KEY when bypassing
+      // direct to api.anthropic.com. This test exercises both
+      // halves with a single round-trip: primary returns 503, the
+      // proxy retries against the bypass URL.
+      let primaryKey: string | undefined;
+      const primary503: http.Server = http.createServer((req, res) => {
+        primaryKey = req.headers['x-api-key'] as string;
+        res.writeHead(503);
+        res.end();
+      });
+      await new Promise<void>((r) => primary503.listen(0, '127.0.0.1', r));
+      const primary503Port = (primary503.address() as AddressInfo).port;
+
+      try {
+        Object.assign(mockEnv, {
+          ANTHROPIC_API_KEY: 'sk-ant-real-key',
+          LITELLM_MASTER_KEY: 'sk-litellm-master',
+          ANTHROPIC_BASE_URL: `http://127.0.0.1:${primary503Port}`,
+          ANTHROPIC_BYPASS_URL: `http://127.0.0.1:${bypassPort}`,
+        });
+        proxyServer = await startCredentialProxy(0);
+        proxyPort = (proxyServer.address() as AddressInfo).port;
+
+        const res = await makeRequest(
+          proxyPort,
+          {
+            method: 'POST',
+            path: '/v1/messages',
+            headers: {
+              'content-type': 'application/json',
+              'x-api-key': 'placeholder',
+            },
+          },
+          '{}',
+        );
+
+        expect(res.statusCode).toBe(200);
+        expect(primaryKey).toBe('sk-litellm-master');
+        expect(lastBypassHeaders['x-api-key']).toBe('sk-ant-real-key');
+      } finally {
+        await new Promise<void>((r) => primary503.close(() => r()));
+      }
+    });
   });
 });
 

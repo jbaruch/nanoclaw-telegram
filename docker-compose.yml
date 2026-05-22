@@ -75,7 +75,12 @@ services:
   # litellm.ai gateway outages; orchestrator-side bypass covers
   # nanoclaw-litellm itself being down.
   nanoclaw-litellm:
-    image: ghcr.io/berriai/litellm:main-stable
+    # Pinned to a specific upstream tag per `coding-policy:
+    # dependency-management`. The runtime-managed-manifest carve-out
+    # applies only to tessl.json — Docker images stay pinned. Bump
+    # alongside any `litellm.config.yaml` schema change that requires
+    # a newer runtime; CHANGELOG entry should note the bump.
+    image: ghcr.io/berriai/litellm:v1.85.1
     container_name: nanoclaw-litellm
     restart: always
     command:
@@ -88,13 +93,16 @@ services:
     volumes:
       - ./container/litellm/litellm.config.yaml:/etc/litellm/litellm.config.yaml:ro
     environment:
-      # Inbound master_key — the orchestrator's credential-proxy sends
-      # `x-api-key: $ANTHROPIC_API_KEY` on outbound requests, so we
-      # set the LiteLLM master_key value to ANTHROPIC_API_KEY too;
-      # the existing auth header passes through unchanged. The two
-      # outbound keys (gateway + Anthropic-direct) come from .env
-      # via env_file below.
-      - LITELLM_MASTER_KEY=${ANTHROPIC_API_KEY}
+      # Inbound master_key — operators MUST set LITELLM_MASTER_KEY in
+      # ~/nanoclaw/.env to a value distinct from ANTHROPIC_API_KEY so
+      # an Anthropic-key rotation doesn't accidentally invalidate
+      # internal-router auth, and so a future LiteLLM debug-log of
+      # the master_key value doesn't leak the provider credential.
+      # The credential-proxy injects this key when forwarding to
+      # nanoclaw-litellm; bypass traffic to api.anthropic.com keeps
+      # using ANTHROPIC_API_KEY. Outbound backend keys (cloud gateway
+      # + Anthropic-direct fallback row) come from .env via env_file.
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - LITELLM_GATEWAY_API_KEY=${LITELLM_GATEWAY_API_KEY}
       - TZ=America/Chicago

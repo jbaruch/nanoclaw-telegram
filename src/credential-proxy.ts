@@ -76,9 +76,22 @@ const USAGE_CAPTURE_BUFFER_CAP = 10 * 1024 * 1024;
 const BYPASS_TRIGGER_STATUS_CODES = new Set([500, 502, 503, 504]);
 const BYPASS_IDLE_TIMEOUT_MS = 3000;
 
+export interface CredentialProxyOptions {
+  /**
+   * Override for the credential-proxy idle-timeout-driven bypass
+   * trigger (`BYPASS_IDLE_TIMEOUT_MS`, default 3000ms). Production
+   * callers should not set this — the 3s default tolerates Anthropic
+   * edge slow-paths and gives time for SDK retries before we tear
+   * the socket down. Tests use a tight value (50–100ms) so the
+   * "primary accepts and hangs" path runs sub-second.
+   */
+  idleTimeoutMs?: number;
+}
+
 export function startCredentialProxy(
   port: number,
   host = '127.0.0.1',
+  opts: CredentialProxyOptions = {},
 ): Promise<Server> {
   const secrets = readEnvFile([
     'ANTHROPIC_API_KEY',
@@ -86,6 +99,7 @@ export function startCredentialProxy(
     'ANTHROPIC_AUTH_TOKEN',
     'ANTHROPIC_BASE_URL',
     'ANTHROPIC_BYPASS_URL',
+    'LITELLM_MASTER_KEY',
   ]);
 
   const authMode: AuthMode = secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
@@ -102,6 +116,7 @@ export function startCredentialProxy(
   // so we don't double-bill the same target on every error.
   const bypassEnabled =
     upstreamUrl.origin !== bypassUrl.origin && authMode === 'api-key';
+  const idleTimeoutMs = opts.idleTimeoutMs ?? BYPASS_IDLE_TIMEOUT_MS;
 
   const usageLogPath = resolveUsageLogPath();
 
@@ -327,9 +342,25 @@ export function startCredentialProxy(
           delete headers['transfer-encoding'];
 
           if (authMode === 'api-key') {
-            // API key mode: inject x-api-key on every request
+            // API key mode: inject x-api-key on every request. Pick
+            // the right key per target — `nanoclaw-litellm` gets its
+            // own master_key so a key rotation on the LiteLLM side
+            // doesn't couple to the Anthropic provider credential
+            // (and so a LiteLLM debug-log of the master_key can't
+            // leak the Anthropic key). Bypass traffic to
+            // `api.anthropic.com` always uses ANTHROPIC_API_KEY.
+            // When LITELLM_MASTER_KEY is unset (partial-config
+            // deploy / pre-Stage-0 default), fall back to
+            // ANTHROPIC_API_KEY so the proxy still flows traffic;
+            // this graceful path is for incident recovery, not
+            // steady state.
             delete headers['x-api-key'];
-            headers['x-api-key'] = secrets.ANTHROPIC_API_KEY;
+            const isBypassTarget = targetUrl.origin === bypassUrl.origin;
+            const upstreamKey =
+              !isBypassTarget && secrets.LITELLM_MASTER_KEY
+                ? secrets.LITELLM_MASTER_KEY
+                : secrets.ANTHROPIC_API_KEY;
+            headers['x-api-key'] = upstreamKey;
           } else {
             // OAuth mode: replace placeholder Bearer token with the real
             // one only when the container actually sends an Authorization
@@ -566,7 +597,7 @@ export function startCredentialProxy(
           // response headers arrive so a slow-streaming SDK response
           // isn't torn down mid-flight; the `'timeout'` event without
           // a handler is silent, so a `destroy()` is explicit.
-          upstream.setTimeout(BYPASS_IDLE_TIMEOUT_MS, () => {
+          upstream.setTimeout(idleTimeoutMs, () => {
             upstream.destroy(new Error('credential-proxy idle timeout'));
           });
           upstream.once('response', () => upstream.setTimeout(0));
@@ -582,7 +613,7 @@ export function startCredentialProxy(
             if (!fromBypass && bypassEnabled && isReachabilityError) {
               logger.warn(
                 {
-                  err: err.message,
+                  err,
                   code,
                   url: upstreamPath,
                   primary: targetUrl.origin,
