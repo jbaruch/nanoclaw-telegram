@@ -4445,7 +4445,7 @@ export async function processTaskIpc(
           'bash',
           [
             '-c',
-            'cd /app/tessl-workspace && tessl update --yes --dangerously-ignore-security --agent claude-code 2>&1',
+            'cd /app/tessl-workspace && tessl update --yes --accept-warnings --agent claude-code 2>&1',
           ],
           { timeout: 150_000, maxBuffer: 2 * 1024 * 1024 },
           (error, stdout) => {

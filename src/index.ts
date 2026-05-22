@@ -3300,7 +3300,7 @@ async function main(): Promise<void> {
       'bash',
       [
         '-c',
-        'cd /app/tessl-workspace && tessl update --yes --dangerously-ignore-security --agent claude-code 2>&1',
+        'cd /app/tessl-workspace && tessl update --yes --accept-warnings --agent claude-code 2>&1',
       ],
       { timeout: 120_000 },
       (err, stdout) => {
