@@ -4140,34 +4140,57 @@ export async function processTaskIpc(
             maxBuffer: 10 * 1024 * 1024,
           },
           (error, stdout, stderr) => {
+            // backup.py exits non-zero when any book failed (#625
+            // silent-loop fix). The per-book breakdown still lives in
+            // its stdout JSON, so always try to parse stdout first and
+            // only fall back to a bare error payload if no JSON is
+            // available — otherwise a partial-success run with mixed
+            // ok/failed books would lose its books[] array.
             if (error) {
               logger.error(
                 { sourceGroup, error: error.message, stderr },
                 'audible_backup failed',
-              );
-              fs.writeFileSync(
-                audibleResultPath,
-                JSON.stringify({
-                  error: error.message,
-                  stderr: stderr.slice(-500),
-                }),
               );
             } else {
               logger.info(
                 { sourceGroup, stdoutLen: stdout.length },
                 'audible_backup completed',
               );
-              // stdout is JSON from backup.py --json; merge stderr (progress logs) into it
-              try {
-                const parsed = JSON.parse(stdout);
-                if (stderr) parsed.logs = stderr.slice(-2000);
-                fs.writeFileSync(audibleResultPath, JSON.stringify(parsed));
-              } catch {
-                fs.writeFileSync(
-                  audibleResultPath,
-                  JSON.stringify({ raw: stdout, logs: stderr?.slice(-2000) }),
-                );
-              }
+            }
+            // Narrow exception scope per `coding-policy: error-handling`
+            // (catch specific types, let unexpected exceptions
+            // propagate). The fallback exists for the case where the
+            // script's stdout isn't valid JSON — JSON.parse only
+            // throws SyntaxError in that scenario, and any other
+            // failure here (filesystem write error, unexpected runtime
+            // issue) MUST propagate so the operator sees the real
+            // problem instead of silently writing a degraded payload.
+            let parsed: { logs?: string; exec_error?: string } | null = null;
+            try {
+              parsed = JSON.parse(stdout);
+            } catch (e) {
+              if (!(e instanceof SyntaxError)) throw e;
+              parsed = null;
+            }
+            if (parsed !== null) {
+              if (stderr) parsed.logs = stderr.slice(-2000);
+              // Don't overwrite a script-emitted top-level `error` —
+              // backup.py itself sets that field when a precondition
+              // fails (e.g. inventory missing) and its message is
+              // more useful than `execFile`'s generic non-zero-exit
+              // message. Surface the exec error in a sibling field so
+              // both signals are preserved.
+              if (error) parsed.exec_error = error.message;
+              fs.writeFileSync(audibleResultPath, JSON.stringify(parsed));
+            } else {
+              fs.writeFileSync(
+                audibleResultPath,
+                JSON.stringify({
+                  error: error?.message,
+                  raw: stdout,
+                  logs: stderr?.slice(-2000),
+                }),
+              );
             }
           },
         );
