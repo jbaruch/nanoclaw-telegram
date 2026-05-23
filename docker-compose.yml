@@ -114,7 +114,39 @@ services:
       # is for ops, not for the orchestrator.
       - "4000:4000"
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:4000/health/liveliness"]
+      # Use python3 because the LiteLLM upstream image ships
+      # neither wget nor curl. Verified empirically 2026-05-22:
+      # /usr/bin/ has python3 + python3.13 only; the original
+      # `wget --spider` healthcheck failed with "executable file
+      # not found in $PATH" on every probe, leaving the container
+      # in the unhealthy state indefinitely (it kept serving
+      # because `restart: always` does not act on healthcheck-only
+      # failures, but the unhealthy flag polluted dashboards and
+      # would have broken any future `depends_on: service_healthy`
+      # wiring).
+      # Catch the specific failure modes a healthcheck legitimately
+      # treats as "unhealthy" per `coding-policy: error-handling`:
+      # `URLError` (connection refused, DNS, TLS, plus `HTTPError`
+      # subclass on non-2xx), and `TimeoutError` (the modern alias
+      # for `socket.timeout` after Python 3.10). All three collapse
+      # to a single-line `unhealthy` token via `sys.exit(1)` so
+      # Docker's `.State.Health.Log[].Output` stays one-line per
+      # probe instead of a multi-line urllib traceback. Anything
+      # else (e.g. an `ImportError` from a broken stdlib) propagates
+      # so the operator sees the real problem rather than a probe
+      # falsely reporting `unhealthy`.
+      test:
+        - "CMD"
+        - "python3"
+        - "-c"
+        - |
+          import urllib.request, urllib.error, sys
+          try:
+              urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=4).close()
+              sys.exit(0)
+          except (urllib.error.URLError, TimeoutError):
+              print('unhealthy')
+              sys.exit(1)
       interval: 30s
       timeout: 5s
       retries: 3
