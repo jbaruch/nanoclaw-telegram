@@ -64,14 +64,30 @@ services:
 
   # The `nanoclaw-litellm` service was removed from this compose
   # 2026-05-22. The LiteLLM router now runs as a separate UGOS Pro
-  # project on the NAS (managed via the NASync UI, not deploy.sh) —
-  # that decouples the router's lifecycle from this project's
-  # recreate cycle and avoids the multi-agent kill races observed
-  # when deploy.sh's step-5 grep (which selects agents by the
-  # `^nanoclaw-` prefix) picked up the sidecar before the
-  # `^nanoclaw(-litellm)?$` exclude landed in #624. The canonical
-  # paste-ready compose + the `litellm.config.yaml` content live in
-  # `container/litellm/` for operator reference; the credential-proxy
-  # still reads `ANTHROPIC_BASE_URL` from `.env` and routes through
-  # whatever URL the operator sets (NAS LAN IP + port 4000 when the
-  # UGOS project is up).
+  # project on the NAS — that decouples the router's lifecycle from
+  # this project's recreate cycle and avoids the multi-agent kill
+  # races observed when deploy.sh's step-5 grep (which selects
+  # agents by the `^nanoclaw-` prefix) picked up the sidecar before
+  # the `^nanoclaw(-litellm)?$` exclude landed in #624.
+  #
+  # Repo / NAS topology for compose projects that need UGOS Pro UI
+  # visibility (orchestrator + sidecars):
+  # - Compose files live in this repo under `~/nanoclaw/`. Edits
+  #   flow through PR review and `deploy.sh` keeps working unchanged.
+  # - A symlink at `/volume1/docker/<project-name>/` points at the
+  #   in-repo dir so UGOS Pro's project UI discovers the compose
+  #   file. Both deploy.sh (working from `~/nanoclaw/`) and UGOS Pro
+  #   (working from the symlinked path) manage the same container
+  #   set because Docker derives the compose project name from the
+  #   directory basename.
+  # - The orchestrator: symlink `/volume1/docker/nanoclaw` →
+  #   `/home/jbaruch/nanoclaw`.
+  # - The LiteLLM router: symlink `/volume1/docker/nanoclaw-litellm`
+  #   → `/home/jbaruch/nanoclaw/container/litellm`.
+  #
+  # Secrets stay out of the repo. UGOS Pro's project env UI carries
+  # the LITELLM_* keys for the litellm project; `~/nanoclaw/.env`
+  # (gitignored) carries the orchestrator's secrets. The credential-
+  # proxy reads `ANTHROPIC_BASE_URL` from `~/nanoclaw/.env` and routes
+  # through whatever URL the operator sets (NAS LAN IP + port 4000
+  # when the UGOS project is up).
