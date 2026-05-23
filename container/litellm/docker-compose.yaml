@@ -64,10 +64,14 @@
 #
 # Orchestrator cutover (when ready): set in `~/nanoclaw/.env` on the
 # NAS:
-#      ANTHROPIC_BASE_URL=http://192.168.10.32:4000
-# (Cross-project Docker DNS doesn't resolve `nanoclaw-litellm` from
-# the orchestrator's project network — reach it via the NAS LAN IP
-# on the published port instead.) Then `./scripts/deploy.sh` once.
+#      ANTHROPIC_BASE_URL=http://host.docker.internal:4000
+# The orchestrator's `docker-compose.yml` maps that hostname to the
+# host-gateway via an `extra_hosts` entry so the orchestrator's
+# bridge network can reach the LiteLLM project's published port
+# (the NAS LAN IP `192.168.10.32:4000` does NOT work from inside
+# the orchestrator container — docker iptables don't forward
+# inter-bridge traffic to published ports). Then
+# `./scripts/deploy.sh` once.
 #
 # Why this lives in a separate project (and not the main
 # `docker-compose.yml`): see the deletion notice in the orchestrator
@@ -79,9 +83,11 @@
 # index) by default. A fixed `container_name: nanoclaw-litellm` would
 # collide globally on the Docker host if a stale container from the
 # pre-removal main compose still exists during cutover/rollback, and
-# the orchestrator no longer reaches the router by container name
-# (it uses the NAS LAN IP via `ANTHROPIC_BASE_URL`), so the
-# attribution gain doesn't justify the collision risk.
+# the orchestrator reaches the router by hostname mapped via
+# `ANTHROPIC_BASE_URL=http://host.docker.internal:4000` (the
+# orchestrator's `extra_hosts` block in the main compose maps
+# `host.docker.internal` to the host gateway), not by container
+# name, so the attribution gain doesn't justify the collision risk.
 
 services:
   nanoclaw-litellm:

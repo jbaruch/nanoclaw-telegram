@@ -61,6 +61,24 @@ services:
     ports:
       # Credential proxy — agent containers reach it via host.docker.internal:3001
       - "3001:3001"
+    extra_hosts:
+      # Docker-on-Linux doesn't auto-provide `host.docker.internal` —
+      # we add it explicitly so the orchestrator (and the credential-
+      # proxy inside it) can reach ports published on the NAS host
+      # by OTHER compose projects, e.g. `nanoclaw-litellm` publishing
+      # 4000:4000 from its own UGOS Pro project. Without this entry,
+      # the orchestrator's bridge network (`nanoclaw_default`,
+      # 172.18.0.0/16) is isolated from the LiteLLM project's bridge
+      # network (`nanoclaw-litellm_default`) and cannot reach the
+      # `0.0.0.0:4000` published port — neither via the NAS LAN IP
+      # nor via the docker bridge gateway, because docker iptables
+      # rules don't forward inter-bridge traffic to published ports.
+      # `host-gateway` resolves at container start to the host's
+      # docker0 / bridge interface IP, which IS the bind target of
+      # the published port. Operators flip the LiteLLM router on by
+      # setting `ANTHROPIC_BASE_URL=http://host.docker.internal:4000`
+      # in `~/nanoclaw/.env`.
+      - "host.docker.internal:host-gateway"
 
   # The `nanoclaw-litellm` service was removed from this compose
   # 2026-05-22. The LiteLLM router now runs as a separate UGOS Pro
@@ -101,8 +119,11 @@ services:
   # `${VAR}` placeholders only; docker compose interpolates from
   # `.env` at spawn time. The credential-proxy reads
   # `ANTHROPIC_BASE_URL` from `~/nanoclaw/.env` and routes through
-  # whatever URL the operator sets (NAS LAN IP + port 4000 when the
-  # UGOS project is up).
+  # whatever URL the operator sets (typically
+  # `http://host.docker.internal:4000` for the LiteLLM router — the
+  # `extra_hosts` block on this service maps that name to the
+  # host-gateway so inter-bridge traffic can reach the LiteLLM
+  # project's published port).
   #
   # UGOS Pro UI also stores compose `content` inline in its SQLite
   # DB at `/volume1/@appstore/com.ugreen.docker/db/docker_info_log.db`
