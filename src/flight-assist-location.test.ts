@@ -3,12 +3,9 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import {
-  CURRENT_LOCATION_SCHEMA_VERSION,
-  writeFlightAssistLocation,
-} from './flight-assist-location.js';
-import type { LocationRecord, RegisteredGroup } from './types.js';
-
+// Module mocks must come before the imports that consume them. Vitest
+// hoists `vi.mock` automatically, but keeping them physically above the
+// imports makes the read order match the execution order.
 vi.mock('./logger.js', () => ({
   logger: {
     debug: vi.fn(),
@@ -20,12 +17,18 @@ vi.mock('./logger.js', () => ({
 
 // Pin HOST_UID/HOST_GID so the chown-after-mkdir path is exercised in
 // unit tests. The values are picked to be different from any real test
-// runner uid/gid so chownSync will EPERM — the writer must swallow
+// runner uid/gid so `lchownSync` will EPERM — the writer must swallow
 // EPERM/EACCES (orchestrator runs as root in prod, but tests don't).
 vi.mock('./config.js', () => ({
   HOST_UID: 999,
   HOST_GID: 10,
 }));
+
+import {
+  CURRENT_LOCATION_SCHEMA_VERSION,
+  writeFlightAssistLocation,
+} from './flight-assist-location.js';
+import type { LocationRecord, RegisteredGroup } from './types.js';
 
 const OWNER_ID = '12345';
 const CHAT_JID = 'tg:-1001';
@@ -192,8 +195,8 @@ describe('writeFlightAssistLocation', () => {
     ).not.toThrow();
   });
 
-  it('chowns the flight-assist dir to HOST_UID:HOST_GID after creating it', () => {
-    const chownSpy = vi.spyOn(fs, 'chownSync');
+  it('lchowns the flight-assist dir to HOST_UID:HOST_GID after creating it', () => {
+    const lchownSpy = vi.spyOn(fs, 'lchownSync');
 
     writeFlightAssistLocation(ownerRecord(), {
       groups: { [CHAT_JID]: group() },
@@ -202,12 +205,12 @@ describe('writeFlightAssistLocation', () => {
     });
 
     const expectedDir = path.join(dataDir, 'state', FOLDER, 'flight-assist');
-    expect(chownSpy).toHaveBeenCalledWith(expectedDir, 999, 10);
-    chownSpy.mockRestore();
+    expect(lchownSpy).toHaveBeenCalledWith(expectedDir, 999, 10);
+    lchownSpy.mockRestore();
   });
 
-  it('swallows EPERM/EACCES from chown so non-root callers still write', () => {
-    const chownSpy = vi.spyOn(fs, 'chownSync').mockImplementation(() => {
+  it('swallows EPERM/EACCES from lchown so non-root callers still write', () => {
+    const lchownSpy = vi.spyOn(fs, 'lchownSync').mockImplementation(() => {
       const err = new Error(
         'EPERM: operation not permitted',
       ) as NodeJS.ErrnoException;
@@ -222,11 +225,11 @@ describe('writeFlightAssistLocation', () => {
     });
 
     expect(fs.existsSync(targetPath())).toBe(true);
-    chownSpy.mockRestore();
+    lchownSpy.mockRestore();
   });
 
-  it('lets non-EPERM/EACCES chown errors fall into the outer fs-error catch', () => {
-    const chownSpy = vi.spyOn(fs, 'chownSync').mockImplementation(() => {
+  it('lets non-EPERM/EACCES lchown errors fall into the outer fs-error catch', () => {
+    const lchownSpy = vi.spyOn(fs, 'lchownSync').mockImplementation(() => {
       const err = new Error(
         'EROFS: read-only file system',
       ) as NodeJS.ErrnoException;
@@ -242,6 +245,33 @@ describe('writeFlightAssistLocation', () => {
       }),
     ).not.toThrow();
     expect(fs.existsSync(targetPath())).toBe(false);
-    chownSpy.mockRestore();
+    lchownSpy.mockRestore();
+  });
+
+  it('refuses to chown when flight-assist is a symlink (privilege-escalation guard)', () => {
+    // Simulate the attack: the agent (uid HOST_UID, write access on the
+    // per-group state dir) rmdirs the empty flight-assist/ and replaces
+    // it with a symlink pointing somewhere the orchestrator (root)
+    // shouldn't touch. `lchownSync` would chown the symlink itself
+    // safely, but the contract is to refuse entirely — surfacing the
+    // tampering rather than silently chowning the planted symlink to
+    // HOST_UID:HOST_GID and going about our business.
+    const groupStateDir = path.join(dataDir, 'state', FOLDER);
+    fs.mkdirSync(groupStateDir, { recursive: true });
+    fs.symlinkSync(
+      '/tmp/attacker-target',
+      path.join(groupStateDir, 'flight-assist'),
+    );
+
+    const lchownSpy = vi.spyOn(fs, 'lchownSync');
+
+    writeFlightAssistLocation(ownerRecord(), {
+      groups: { [CHAT_JID]: group() },
+      ownerSenderId: OWNER_ID,
+      dataDir,
+    });
+
+    expect(lchownSpy).not.toHaveBeenCalled();
+    lchownSpy.mockRestore();
   });
 });
