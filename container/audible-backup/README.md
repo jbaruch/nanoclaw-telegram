@@ -70,6 +70,7 @@ With `--json`, the output is machine-readable:
   "downloaded": 5,
   "skipped": 0,
   "failed": 0,
+  "missing_on_disk": 1,
   "books": [
     {
       "asin": "B079LRSMNN",
@@ -78,12 +79,18 @@ With `--json`, the output is machine-readable:
       "narrated_by": "Mark Boyett",
       "status": "ok",
       "m4b_path": "/library/books/Galaxys Edge.m4b"
+    },
+    {
+      "asin": "ASIN999",
+      "title": "Uncle Dynamite",
+      "filename": "Uncle Dynamite.m4b",
+      "status": "missing_on_disk"
     }
   ]
 }
 ```
 
-Field names match `backup.py`'s `map_to_inventory_schema()` output — `author` / `narrated_by` (singular), not `authors` / `narrators`. The full per-book record carries every field in `REQUIRED_OUTPUT_FIELDS`; only a subset is shown here.
+Field names match `backup.py`'s `map_to_inventory_schema()` output — `author` / `narrated_by` (singular), not `authors` / `narrators`. The full per-book record carries every field in `REQUIRED_OUTPUT_FIELDS`; only a subset is shown here. `status: "missing_on_disk"` records (counted under `missing_on_disk`) are inventory rows whose m4b file is no longer present under `/library/books/` — soft-alert only, no automatic redownload, lets the operator decide whether to re-fetch or accept the gap.
 
 ## Scheduling
 
