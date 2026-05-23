@@ -178,11 +178,51 @@ def get_known_asins(books: list[dict]) -> set[str]:
     return {b["asin"] for b in books if b.get("asin")}
 
 
-def find_new_books(library: list[dict], known_asins: set[str]) -> list[dict]:
-    """Find books in Audible library not yet in inventory."""
+SKIPLIST_FILENAME = "audible-backup-skiplist.txt"
+
+
+def load_skiplist(skiplist_path: Path) -> set[str]:
+    """Load ASINs the operator has marked as 'never re-attempt'.
+
+    File format: one ASIN per line; `#` introduces a comment to the
+    end of the line (operator-friendly so a title hint can sit next to
+    the bare ASIN); blank lines ignored. Missing file returns an empty
+    set — bootstrap state, not an error.
+
+    Resolves the "AyeAye re-alarms on the same Plus-only / no-longer-
+    owned books every weekly run" UX problem by giving the operator an
+    explicit-ack surface; once the ASIN is on the list, find_new_books
+    filters it out upstream so the download branch never fires and no
+    `status: "skipped"` record is emitted for it.
+    """
+    if not skiplist_path.is_file():
+        return set()
+    asins: set[str] = set()
+    for raw in skiplist_path.read_text(encoding="utf-8").splitlines():
+        stripped = raw.split("#", 1)[0].strip()
+        if stripped:
+            asins.add(stripped)
+    return asins
+
+
+def find_new_books(
+    library: list[dict],
+    known_asins: set[str],
+    skiplist_asins: Optional[set[str]] = None,
+) -> list[dict]:
+    """Find books in Audible library not yet in inventory.
+
+    `skiplist_asins` filters out ASINs the operator has marked as
+    'never re-attempt' (e.g. Plus-only / not owned) so the download
+    branch never fires for them and the same noisy `status: "skipped"`
+    record isn't emitted every weekly run.
+    """
+    skip = skiplist_asins or set()
     return [
         book for book in library
-        if book.get("asin") and book["asin"] not in known_asins
+        if book.get("asin")
+        and book["asin"] not in known_asins
+        and book["asin"] not in skip
     ]
 
 
@@ -602,6 +642,10 @@ def download_and_decrypt(
 
     if "not downloadable" in result.stdout + result.stderr:
         log(f"SKIPPED: {title} — not downloadable (not owned or Plus-only)")
+        log(
+            f"  To stop seeing this on future runs: add {asin} to "
+            f"<library>/{SKIPLIST_FILENAME}"
+        )
         return {**book, "status": "skipped", "error": "not downloadable"}
 
     # Collect everything audible-cli created during this download.
@@ -761,14 +805,28 @@ def main():
     inventory = load_inventory(inventory_path)
     known = get_known_asins(inventory)
 
+    # Operator skip-list: ASINs the operator has explicitly ack'd as
+    # "never re-attempt" (Plus-only / unowned). Filtered out before the
+    # download branch so the same noisy `status: "skipped"` record
+    # doesn't fire every weekly run and train the operator to ignore
+    # the skip bucket entirely.
+    skiplist_path = library_dir / SKIPLIST_FILENAME
+    skiplist_asins = load_skiplist(skiplist_path)
+
     if not args.json:
         print("=== Audible Backup ===")
         print(f"Inventory: {inventory_path.name} ({len(known)} books)")
+        if skiplist_asins:
+            print(f"Skip-list: {len(skiplist_asins)} ASINs ({skiplist_path.name})")
         print("Fetching Audible library (enriched metadata)...")
 
     # Fetch enriched library
     library = fetch_enriched_library(tmp_dir)
-    new_books_raw = find_new_books(library, known)
+    new_books_raw = find_new_books(library, known, skiplist_asins)
+    skipped_by_filter = sorted(
+        book["asin"] for book in library
+        if book.get("asin") and book["asin"] in skiplist_asins
+    )
 
     # Soft-alert disk-presence check: inventory records whose m4b is
     # missing on disk get surfaced as `status: "missing_on_disk"` so the
@@ -798,14 +856,18 @@ def main():
             print(f"Missing on disk: {len(missing_records)}")
             for r in missing_records:
                 print(f"  {r.get('asin')}  {r.get('title', '?')} — {r.get('filename', '?')}")
+        if skipped_by_filter:
+            print(f"Filtered out by skip-list: {len(skipped_by_filter)}")
 
     if not new_books_raw:
         if args.json:
             print(json.dumps({
                 "new_books": 0,
                 "downloaded": 0,
+                "skipped": 0,
                 "failed": 0,
                 "missing_on_disk": len(missing_results),
+                "skipped_by_filter": skipped_by_filter,
                 "books": missing_results,
             }))
         elif missing_results:
@@ -826,6 +888,7 @@ def main():
                 "new_books": len(new_records),
                 "dry_run": True,
                 "missing_on_disk": len(missing_results),
+                "skipped_by_filter": skipped_by_filter,
                 "books": new_records + missing_results,
             }))
         else:
@@ -879,6 +942,7 @@ def main():
             "skipped": skipped,
             "failed": failed,
             "missing_on_disk": len(missing_results),
+            "skipped_by_filter": skipped_by_filter,
             "books": results + missing_results,
         }))
     else:
@@ -887,6 +951,8 @@ def main():
         print(f"Skipped: {skipped}")
         print(f"Failed: {failed}")
         print(f"Missing on disk: {len(missing_results)}")
+        if skipped_by_filter:
+            print(f"Filtered by skip-list: {len(skipped_by_filter)}")
         print(f"Inventory now has: {len(inventory)} books")
 
     # Non-zero exit on any download/decrypt failure so the cadence

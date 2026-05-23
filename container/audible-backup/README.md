@@ -40,11 +40,23 @@ The container expects an OpenAudible-compatible directory at `/library`:
 
 ```
 /library/
-  books.json          # OpenAudible inventory (read-only, used for ASIN diffing)
-  books/              # Decoded audiobooks (M4B/MP3)
-  aax/                # Raw encrypted AAX files (archived after decrypt)
-  art/                # Cover art
+  books.json                       # OpenAudible inventory (read-only, used for ASIN diffing)
+  books/                           # Decoded audiobooks (M4B/MP3)
+  aax/                             # Raw encrypted AAX files (archived after decrypt)
+  art/                             # Cover art
+  audible-backup-skiplist.txt      # Optional: ASINs to filter out before download
 ```
+
+### Skip-list
+
+Add an ASIN to `audible-backup-skiplist.txt` (one per line) to permanently filter it out of the download attempt. Use the `# comment` syntax to remember why:
+
+```
+1663704015  # Healing the Wounds — Plus-only, no longer in catalog
+B079LRSMNN  # Galaxy's Edge — Plus-borrowed, never owned
+```
+
+The skip-list is the operator's explicit ack that an ASIN is intentionally absent. Without it, every weekly run re-attempts the same not-downloadable books and surfaces a fresh `status: "skipped"` record — noisy, and trains the operator to ignore the skip bucket entirely. ASINs filtered by the list appear in the JSON output's `skipped_by_filter` field so the audit trail is preserved.
 
 If you don't have an existing OpenAudible library, create a minimal one:
 
@@ -71,14 +83,15 @@ With `--json`, the output is machine-readable:
   "skipped": 0,
   "failed": 0,
   "missing_on_disk": 1,
+  "skipped_by_filter": ["1663704015", "B079LRSMNN"],
   "books": [
     {
-      "asin": "B079LRSMNN",
-      "title": "Galaxy's Edge",
+      "asin": "B0AAAAAAAA",
+      "title": "Some New Book",
       "author": "Jason Anspach",
       "narrated_by": "Mark Boyett",
       "status": "ok",
-      "m4b_path": "/library/books/Galaxys Edge.m4b"
+      "m4b_path": "/library/books/Some New Book.m4b"
     },
     {
       "asin": "ASIN999",
@@ -90,7 +103,7 @@ With `--json`, the output is machine-readable:
 }
 ```
 
-Field names match `backup.py`'s `map_to_inventory_schema()` output — `author` / `narrated_by` (singular), not `authors` / `narrators`. The full per-book record carries every field in `REQUIRED_OUTPUT_FIELDS`; only a subset is shown here. `status: "missing_on_disk"` records (counted under `missing_on_disk`) are inventory rows whose m4b file is no longer present under `/library/books/` — soft-alert only, no automatic redownload, lets the operator decide whether to re-fetch or accept the gap.
+Field names match `backup.py`'s `map_to_inventory_schema()` output — `author` / `narrated_by` (singular), not `authors` / `narrators`. The full per-book record carries every field in `REQUIRED_OUTPUT_FIELDS`; only a subset is shown here. `status: "missing_on_disk"` records (counted under `missing_on_disk`) are inventory rows whose m4b file is no longer present under `/library/books/` — soft-alert only, no automatic redownload, lets the operator decide whether to re-fetch or accept the gap. `skipped_by_filter` lists ASINs from the operator-maintained skip-list (see "Library structure" above) that were filtered out before the download attempt — preserved at the top level so the audit trail survives runs where the filter prevents `books[]` from mentioning them.
 
 ## Scheduling
 
