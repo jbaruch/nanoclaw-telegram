@@ -22,14 +22,22 @@
 # on the published port instead.) Then `./scripts/deploy.sh` once.
 #
 # Why this lives in a separate project (and not the main
-# `docker-compose.yml`): see the deletion notice at the bottom of
-# `/docker-compose.yml` in the repo and the CHANGELOG entry dated
-# 2026-05-22.
+# `docker-compose.yml`): see the deletion notice in the orchestrator
+# service block of `/docker-compose.yml` in the repo and the
+# corresponding `[Unreleased]` entry in `CHANGELOG.md`.
+#
+# `container_name` is intentionally omitted — Docker assigns
+# `nanoclaw-litellm-nanoclaw-litellm-1` (project name + service +
+# index) by default. A fixed `container_name: nanoclaw-litellm` would
+# collide globally on the Docker host if a stale container from the
+# pre-removal main compose still exists during cutover/rollback, and
+# the orchestrator no longer reaches the router by container name
+# (it uses the NAS LAN IP via `ANTHROPIC_BASE_URL`), so the
+# attribution gain doesn't justify the collision risk.
 
 services:
   nanoclaw-litellm:
     image: ghcr.io/berriai/litellm:v1.85.1
-    container_name: nanoclaw-litellm
     restart: always
     command:
       - "--config"
