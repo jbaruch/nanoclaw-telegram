@@ -4,30 +4,63 @@
 # review. UGOS Pro discovers it via a symlink at
 # `/volume1/docker/nanoclaw-litellm` → `container/litellm/`.
 #
-# Setup (one-time, on the NAS):
+# Setup (one-time, on the NAS) — PROVEN model verified 2026-05-23.
+# Source-of-truth: this repo. UGOS Pro UI: visibility surface +
+# Start/Stop button only. Secrets: in `~/nanoclaw/.env`, reached via
+# a symlinked `.env` in this directory. NEVER paste literal env
+# values into UGOS Pro's project env UI — those get written into
+# the compose file's `environment:` block and (because the project
+# dir is a symlink to this repo dir) leak into the tracked source
+# tree.
+#
 # 1. FIRST clear out the pre-removal `nanoclaw-litellm` container if
 #    one is still alive — it publishes the same host port 4000 and
-#    would block the new project from starting. Two paths:
-#      a) Run `./scripts/deploy.sh` once after this PR merges. Deploy
-#         calls `docker compose up -d --build --remove-orphans` which
-#         picks the orphan up and removes it automatically.
-#      b) Or do it manually from `~/nanoclaw` before deploy.sh:
-#           docker compose stop nanoclaw-litellm
-#           docker compose rm -f nanoclaw-litellm
-# 2. Create the symlink so UGOS Pro can find this compose:
+#    would block the new project from starting:
+#      cd ~/nanoclaw && docker compose stop nanoclaw-litellm \
+#        && docker compose rm -f nanoclaw-litellm
+#    (`./scripts/deploy.sh` also handles this via `--remove-orphans`
+#    on its `docker compose up -d --build` line.)
+#
+# 2. Create the directory symlink so UGOS Pro discovers the compose
+#    file under the conventional path:
 #      ln -s /home/jbaruch/nanoclaw/container/litellm \
 #            /volume1/docker/nanoclaw-litellm
-# 3. UGOS Pro → Projects → Import (or Create) the project rooted at
-#    `/volume1/docker/nanoclaw-litellm`. UGOS reads
-#    `docker-compose.yaml` from there (resolved through the symlink
-#    to this file) and `litellm.config.yaml` next to it.
-# 4. Set three env vars via UGOS Pro's project env UI (kept in UGOS,
-#    NOT in the repo — secrets stay out of git):
-#      LITELLM_MASTER_KEY=<any sufficiently random value>
-#      ANTHROPIC_API_KEY=<existing Anthropic key>
-#      LITELLM_GATEWAY_API_KEY=<litellm.ai virtual key, optional
-#                              for now — leave unset until provisioned>
-# 5. Start the project.
+#
+# 3. Create the `.env` symlink inside this directory so docker
+#    compose interpolates `${VAR}` placeholders from `~/nanoclaw/.env`
+#    at spawn time. The `.env` file IS gitignored at the repo root,
+#    so a symlink at this path is safe. Required vars on the host
+#    side: `LITELLM_MASTER_KEY`, `ANTHROPIC_API_KEY`,
+#    `LITELLM_GATEWAY_API_KEY` (optional — leave unset until
+#    minted; LiteLLM will route via the Anthropic-direct fallback
+#    rows in `litellm.config.yaml`):
+#      ln -s ../../.env /home/jbaruch/nanoclaw/container/litellm/.env
+#    Linux resolves the relative target against the symlink's own
+#    parent dir, so the chain
+#      /volume1/docker/nanoclaw-litellm/.env
+#        → ~/nanoclaw/container/litellm/.env
+#        → ~/nanoclaw/.env
+#    resolves correctly at docker compose read time.
+#
+# 4. Insert the UGOS Pro DB row so the project appears in the
+#    Projects UI. UGOS renders the UI from
+#    `/volume1/@appstore/com.ugreen.docker/db/docker_info_log.db`
+#    (table `compose`), and the row's `path` column tells UGOS which
+#    compose file to operate against — point it at the symlinked
+#    path so UI Start/Stop drives the in-repo compose. Requires
+#    sudo because the DB is `root:root 644`. Example one-shot:
+#      ssh -t nas 'sudo python3 -c "
+#      import sqlite3
+#      content = open(\"/home/jbaruch/nanoclaw/container/litellm/docker-compose.yaml\").read()
+#      conn = sqlite3.connect(\"/volume1/@appstore/com.ugreen.docker/db/docker_info_log.db\")
+#      conn.execute(\"INSERT INTO compose (created_at, updated_at, name, state, path, content, app_id, container_num) VALUES (datetime(\\\"now\\\"), datetime(\\\"now\\\"), \\\"nanoclaw-litellm\\\", 1, \\\"/volume1/docker/nanoclaw-litellm/docker-compose.yaml\\\", ?, \\\"\\\", 0)\", (content,))
+#      conn.commit()
+#      "'
+#
+# 5. Open UGOS Pro → Projects. The `nanoclaw-litellm` project
+#    appears. Click Start (NOT "Edit" — leave env, leave compose
+#    untouched in the UI; the env values flow from the symlinked
+#    `.env`). Container comes up healthy on port 4000.
 #
 # Orchestrator cutover (when ready): set in `~/nanoclaw/.env` on the
 # NAS:

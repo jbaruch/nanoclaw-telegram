@@ -85,9 +85,28 @@ services:
   # - The LiteLLM router: symlink `/volume1/docker/nanoclaw-litellm`
   #   → `/home/jbaruch/nanoclaw/container/litellm`.
   #
-  # Secrets stay out of the repo. UGOS Pro's project env UI carries
-  # the LITELLM_* keys for the litellm project; `~/nanoclaw/.env`
-  # (gitignored) carries the orchestrator's secrets. The credential-
-  # proxy reads `ANTHROPIC_BASE_URL` from `~/nanoclaw/.env` and routes
-  # through whatever URL the operator sets (NAS LAN IP + port 4000
-  # when the UGOS project is up).
+  # Secrets stay out of the repo. NEVER paste env values into UGOS
+  # Pro's project env UI — UGOS dumps those values into the compose
+  # file's `environment:` block, and through the symlink they would
+  # land in the tracked repo file (verified 2026-05-23: caught
+  # before any git contamination, see CHANGELOG entry). Instead,
+  # secrets live in `~/nanoclaw/.env` (gitignored at the repo root)
+  # and the UGOS project picks them up via a symlinked `.env` inside
+  # the project's compose dir:
+  #   ln -s ../../.env ~/nanoclaw/container/<project>/.env
+  # Linux resolves the relative target against the symlink's own
+  # parent, so the chain
+  #   /volume1/docker/<project>/.env -> <repo>/container/<project>/.env -> ~/nanoclaw/.env
+  # is followed at docker compose read time. The compose YAML stays
+  # `${VAR}` placeholders only; docker compose interpolates from
+  # `.env` at spawn time. The credential-proxy reads
+  # `ANTHROPIC_BASE_URL` from `~/nanoclaw/.env` and routes through
+  # whatever URL the operator sets (NAS LAN IP + port 4000 when the
+  # UGOS project is up).
+  #
+  # UGOS Pro UI also stores compose `content` inline in its SQLite
+  # DB at `/volume1/@appstore/com.ugreen.docker/db/docker_info_log.db`
+  # (table `compose`); the UI renders from there. Adding a new UGOS
+  # Pro project rooted at a symlinked path requires a sudo INSERT
+  # into that table — see `container/litellm/docker-compose.yaml`
+  # for the canonical setup steps.
