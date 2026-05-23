@@ -1,0 +1,78 @@
+# nanoclaw-litellm — paste this into a UGOS Pro project named
+# "nanoclaw-litellm" on the NASync NAS. The companion
+# `litellm.config.yaml` (sibling file in this directory) goes into
+# the same project folder so the relative volume mount resolves.
+#
+# Setup (one-time):
+# 1. UGOS Pro → Projects → Create. Name: "nanoclaw-litellm".
+# 2. Drop both this file (as `docker-compose.yml`) and the
+#    `litellm.config.yaml` from this directory into the project root.
+# 3. Set three env vars via UGOS Pro's project env UI (or in a
+#    `.env` file the project root reads):
+#      LITELLM_MASTER_KEY=<any sufficiently random value>
+#      ANTHROPIC_API_KEY=<existing Anthropic key>
+#      LITELLM_GATEWAY_API_KEY=<litellm.ai virtual key>
+# 4. Start the project.
+#
+# Orchestrator cutover (when ready): set in `~/nanoclaw/.env` on the
+# NAS:
+#      ANTHROPIC_BASE_URL=http://192.168.10.32:4000
+# (Cross-project Docker DNS doesn't resolve `nanoclaw-litellm` from
+# the orchestrator's project network — reach it via the NAS LAN IP
+# on the published port instead.) Then `./scripts/deploy.sh` once.
+#
+# Why this lives in a separate project (and not the main
+# `docker-compose.yml`): see the deletion notice at the bottom of
+# `/docker-compose.yml` in the repo and the CHANGELOG entry dated
+# 2026-05-22.
+
+services:
+  nanoclaw-litellm:
+    image: ghcr.io/berriai/litellm:v1.85.1
+    container_name: nanoclaw-litellm
+    restart: always
+    command:
+      - "--config"
+      - "/etc/litellm/litellm.config.yaml"
+      - "--port"
+      - "4000"
+      - "--num_workers"
+      - "1"
+    volumes:
+      - ./litellm.config.yaml:/etc/litellm/litellm.config.yaml:ro
+    environment:
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - LITELLM_GATEWAY_API_KEY=${LITELLM_GATEWAY_API_KEY}
+      - TZ=America/Chicago
+    ports:
+      - "4000:4000"
+    healthcheck:
+      # Use python3 because the LiteLLM upstream image ships neither
+      # wget nor curl. Catches `(urllib.error.URLError, TimeoutError)`
+      # per `coding-policy: error-handling` — URLError covers
+      # connection refused / DNS / TLS / HTTPError on non-2xx;
+      # TimeoutError is the Python 3.10+ alias for socket.timeout.
+      # Anything else propagates so the operator sees the real
+      # problem rather than a probe falsely reporting `unhealthy`.
+      test:
+        - "CMD"
+        - "python3"
+        - "-c"
+        - |
+          import urllib.request, urllib.error, sys
+          try:
+              urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=4).close()
+              sys.exit(0)
+          except (urllib.error.URLError, TimeoutError):
+              print('unhealthy')
+              sys.exit(1)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
