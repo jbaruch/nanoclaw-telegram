@@ -229,9 +229,18 @@ if [[ "$TILES_ONLY" == false ]]; then
         # form (`build --no-cache --pull` then `up -d --force-recreate
         # --no-build`) avoids the second build entirely.
         docker compose build --no-cache --pull nanoclaw
-        docker compose up -d --force-recreate --no-build nanoclaw
+        docker compose up -d --force-recreate --no-build --remove-orphans nanoclaw
     else
-        docker compose up -d --build
+        # `--remove-orphans` cleans up containers whose service blocks
+        # were deleted from this compose. Specifically: when a sidecar
+        # is moved out to its own UGOS Pro project (#610 moved
+        # `nanoclaw-litellm` this way), the OLD container is still
+        # alive after the compose-file change lands; without
+        # `--remove-orphans`, deploy.sh leaves it running and a
+        # subsequent attempt to start the UGOS project hits a port /
+        # name collision. The flag has no effect on the common case
+        # where no services have been removed.
+        docker compose up -d --build --remove-orphans
     fi
     echo ""
 else

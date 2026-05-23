@@ -1,0 +1,101 @@
+# nanoclaw-litellm — the LiteLLM router's compose file. Lives in the
+# repo so `deploy.sh`-adjacent edits (config bumps, image-tag
+# bumps, CHANGELOG-coordinated changes) flow through normal PR
+# review. UGOS Pro discovers it via a symlink at
+# `/volume1/docker/nanoclaw-litellm` → `container/litellm/`.
+#
+# Setup (one-time, on the NAS):
+# 1. FIRST clear out the pre-removal `nanoclaw-litellm` container if
+#    one is still alive — it publishes the same host port 4000 and
+#    would block the new project from starting. Two paths:
+#      a) Run `./scripts/deploy.sh` once after this PR merges. Deploy
+#         calls `docker compose up -d --build --remove-orphans` which
+#         picks the orphan up and removes it automatically.
+#      b) Or do it manually from `~/nanoclaw` before deploy.sh:
+#           docker compose stop nanoclaw-litellm
+#           docker compose rm -f nanoclaw-litellm
+# 2. Create the symlink so UGOS Pro can find this compose:
+#      ln -s /home/jbaruch/nanoclaw/container/litellm \
+#            /volume1/docker/nanoclaw-litellm
+# 3. UGOS Pro → Projects → Import (or Create) the project rooted at
+#    `/volume1/docker/nanoclaw-litellm`. UGOS reads
+#    `docker-compose.yaml` from there (resolved through the symlink
+#    to this file) and `litellm.config.yaml` next to it.
+# 4. Set three env vars via UGOS Pro's project env UI (kept in UGOS,
+#    NOT in the repo — secrets stay out of git):
+#      LITELLM_MASTER_KEY=<any sufficiently random value>
+#      ANTHROPIC_API_KEY=<existing Anthropic key>
+#      LITELLM_GATEWAY_API_KEY=<litellm.ai virtual key, optional
+#                              for now — leave unset until provisioned>
+# 5. Start the project.
+#
+# Orchestrator cutover (when ready): set in `~/nanoclaw/.env` on the
+# NAS:
+#      ANTHROPIC_BASE_URL=http://192.168.10.32:4000
+# (Cross-project Docker DNS doesn't resolve `nanoclaw-litellm` from
+# the orchestrator's project network — reach it via the NAS LAN IP
+# on the published port instead.) Then `./scripts/deploy.sh` once.
+#
+# Why this lives in a separate project (and not the main
+# `docker-compose.yml`): see the deletion notice in the orchestrator
+# service block of `/docker-compose.yml` in the repo and the
+# corresponding `[Unreleased]` entry in `CHANGELOG.md`.
+#
+# `container_name` is intentionally omitted — Docker assigns
+# `nanoclaw-litellm-nanoclaw-litellm-1` (project name + service +
+# index) by default. A fixed `container_name: nanoclaw-litellm` would
+# collide globally on the Docker host if a stale container from the
+# pre-removal main compose still exists during cutover/rollback, and
+# the orchestrator no longer reaches the router by container name
+# (it uses the NAS LAN IP via `ANTHROPIC_BASE_URL`), so the
+# attribution gain doesn't justify the collision risk.
+
+services:
+  nanoclaw-litellm:
+    image: ghcr.io/berriai/litellm:v1.85.1
+    restart: always
+    command:
+      - "--config"
+      - "/etc/litellm/litellm.config.yaml"
+      - "--port"
+      - "4000"
+      - "--num_workers"
+      - "1"
+    volumes:
+      - ./litellm.config.yaml:/etc/litellm/litellm.config.yaml:ro
+    environment:
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - LITELLM_GATEWAY_API_KEY=${LITELLM_GATEWAY_API_KEY}
+      - TZ=America/Chicago
+    ports:
+      - "4000:4000"
+    healthcheck:
+      # Use python3 because the LiteLLM upstream image ships neither
+      # wget nor curl. Catches `(urllib.error.URLError, TimeoutError)`
+      # per `coding-policy: error-handling` — URLError covers
+      # connection refused / DNS / TLS / HTTPError on non-2xx;
+      # TimeoutError is the Python 3.10+ alias for socket.timeout.
+      # Anything else propagates so the operator sees the real
+      # problem rather than a probe falsely reporting `unhealthy`.
+      test:
+        - "CMD"
+        - "python3"
+        - "-c"
+        - |
+          import urllib.request, urllib.error, sys
+          try:
+              urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=4).close()
+              sys.exit(0)
+          except (urllib.error.URLError, TimeoutError):
+              print('unhealthy')
+              sys.exit(1)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
