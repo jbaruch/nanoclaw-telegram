@@ -4,15 +4,24 @@
 # the same project folder so the relative volume mount resolves.
 #
 # Setup (one-time):
-# 1. UGOS Pro → Projects → Create. Name: "nanoclaw-litellm".
-# 2. Drop both this file (as `docker-compose.yml`) and the
+# 1. FIRST clear out the pre-removal `nanoclaw-litellm` container if
+#    one is still alive — it publishes the same host port 4000 and
+#    would block the UGOS project from starting. Two paths:
+#      a) Run `./scripts/deploy.sh` once after this PR merges. Deploy
+#         calls `docker compose up -d --build --remove-orphans` which
+#         picks the orphan up and removes it automatically.
+#      b) Or do it manually from `~/nanoclaw` before deploy.sh:
+#           docker compose stop nanoclaw-litellm
+#           docker compose rm -f nanoclaw-litellm
+# 2. UGOS Pro → Projects → Create. Name: "nanoclaw-litellm".
+# 3. Drop both this file (as `docker-compose.yml`) and the
 #    `litellm.config.yaml` from this directory into the project root.
-# 3. Set three env vars via UGOS Pro's project env UI (or in a
+# 4. Set three env vars via UGOS Pro's project env UI (or in a
 #    `.env` file the project root reads):
 #      LITELLM_MASTER_KEY=<any sufficiently random value>
 #      ANTHROPIC_API_KEY=<existing Anthropic key>
 #      LITELLM_GATEWAY_API_KEY=<litellm.ai virtual key>
-# 4. Start the project.
+# 5. Start the project.
 #
 # Orchestrator cutover (when ready): set in `~/nanoclaw/.env` on the
 # NAS:
