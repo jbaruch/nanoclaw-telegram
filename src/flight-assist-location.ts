@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
+import { HOST_GID, HOST_UID } from './config.js';
 import { logger } from './logger.js';
 import type { LocationRecord, RegisteredGroup } from './types.js';
 
@@ -32,6 +33,17 @@ import type { LocationRecord, RegisteredGroup } from './types.js';
  *   `ASSISTANT_OWNER_TG_USER_ID`. Group-member pins are ignored.
  * - Every write produces a complete record at the current schema
  *   version. No partial updates, no merge with prior on-disk state.
+ * - Self-heals `flight-assist/` ownership on every write: `lchownSync`
+ *   to `HOST_UID:HOST_GID` after the idempotent `mkdirSync`, gated by
+ *   an `lstatSync` symlink check (the dir lives under a mount the agent
+ *   can write, so a non-traversing chown is mandatory — same pattern
+ *   as `container-runner.ts: chownRecursive`). Without this, the
+ *   orchestrator (root inside its container) leaves the dir root-owned
+ *   mode 755 on first creation and the agent's sync_tripit precheck
+ *   fails with PermissionError when it tries to write its own state
+ *   files (`flight-*.json`, sync-tripit locks). EPERM/EACCES on the
+ *   chown means we're not root (unit tests, or an unprivileged
+ *   orchestrator) — both surfaced via `logger.warn`.
  *
  * **Reader contract** (flight-assist >= 0.1.9, non-owner):
  * - Returns `None` on missing file, malformed JSON, missing/wrong-type
@@ -98,6 +110,58 @@ export function writeFlightAssistLocation(
 
   try {
     fs.mkdirSync(dir, { recursive: true });
+    // Self-heal ownership on every write (mkdir is idempotent under
+    // `recursive: true`, so this runs whether the dir is freshly created
+    // or already existed from a prior root-owned build).
+    //
+    // The orchestrator runs as root inside its container; without this
+    // chown, `mkdirSync` leaves `flight-assist/` owned by root:root and
+    // the agent container (uid HOST_UID) can't write its own state
+    // files (flight-*.json, sync-tripit lock files) into the dir
+    // (parent mode 755 blocks non-owner writes). `container-runner.ts`
+    // chowns the per-group state dir at creation (see HOST_UID block)
+    // but never visits host-created per-skill subdirs — so this writer
+    // owns its own ownership.
+    //
+    // Symlink safety: the dir lives under `/workspace/state` which the
+    // agent (lower-privilege than root) can write. A non-traversing
+    // chown is mandatory — `chownSync` would follow a symlink and let
+    // an attacker who planted `flight-assist -> /etc/passwd` (after
+    // `rmdir`-ing the empty subdir) redirect the root chown to an
+    // arbitrary target. Mirrors `container-runner.ts: chownRecursive`'s
+    // `lchownSync` pattern. The `lstatSync` guard refuses the WHOLE
+    // write when the path isn't a real directory — chown AND the
+    // subsequent `writeFileSync` + `renameSync` would both follow the
+    // symlink, so logging without returning would still write
+    // `current-location.json` as root through the symlink target.
+    //
+    // EPERM/EACCES means we're not root (e.g. unit tests, or the
+    // orchestrator container running unprivileged). Warn and continue
+    // — the file write further down still succeeds when the dir is
+    // already owned by the calling user. Other codes propagate to the
+    // outer catch.
+    if (HOST_UID !== undefined && HOST_GID !== undefined) {
+      const stat = fs.lstatSync(dir);
+      if (!stat.isDirectory()) {
+        logger.warn(
+          { dir, chatJid: record.chat_jid, folder: group.folder },
+          `flight-assist state path is not a real directory (likely a symlink planted by the agent container) — refusing the entire write. Inspect ${dir} and remove the symlink before the next location event. The precheck will fall back to home_address until then.`,
+        );
+        return;
+      }
+      try {
+        fs.lchownSync(dir, HOST_UID, HOST_GID);
+      } catch (chownErr: unknown) {
+        const chownCode = (chownErr as NodeJS.ErrnoException)?.code;
+        if (chownCode !== 'EPERM' && chownCode !== 'EACCES') {
+          throw chownErr;
+        }
+        logger.warn(
+          { err: chownErr, code: chownCode, dir },
+          `flight-assist dir chown skipped (${chownCode}) — orchestrator is not running with CAP_CHOWN. Agent-side sync_tripit precheck will continue to fail with PermissionError until the dir is chowned manually (\`chown -R $HOST_UID:$HOST_GID ${dir}\`) or the orchestrator is restarted as root.`,
+        );
+      }
+    }
     const tmp = `${target}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(payload));
     fs.renameSync(tmp, target);

@@ -3,12 +3,9 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import {
-  CURRENT_LOCATION_SCHEMA_VERSION,
-  writeFlightAssistLocation,
-} from './flight-assist-location.js';
-import type { LocationRecord, RegisteredGroup } from './types.js';
-
+// Module mocks must come before the imports that consume them. Vitest
+// hoists `vi.mock` automatically, but keeping them physically above the
+// imports makes the read order match the execution order.
 vi.mock('./logger.js', () => ({
   logger: {
     debug: vi.fn(),
@@ -17,6 +14,27 @@ vi.mock('./logger.js', () => ({
     error: vi.fn(),
   },
 }));
+
+// Pin HOST_UID/HOST_GID to the test runner's own uid/gid so the
+// chown-after-mkdir actually mutates filesystem ownership in unit
+// tests (chown-to-self always succeeds, no CAP_CHOWN needed) and the
+// success-path assertion can observe `lstatSync(dir).uid/gid` per
+// `testing-standards: Assert outcomes, not implementation details`.
+// In prod HOST_UID/HOST_GID are the agent container's identity and
+// the orchestrator runs as root; the codepath is identical, only the
+// observable target uid/gid differs.
+const TEST_UID = process.getuid?.() ?? 0;
+const TEST_GID = process.getgid?.() ?? 0;
+vi.mock('./config.js', () => ({
+  HOST_UID: process.getuid?.() ?? 0,
+  HOST_GID: process.getgid?.() ?? 0,
+}));
+
+import {
+  CURRENT_LOCATION_SCHEMA_VERSION,
+  writeFlightAssistLocation,
+} from './flight-assist-location.js';
+import type { LocationRecord, RegisteredGroup } from './types.js';
 
 const OWNER_ID = '12345';
 const CHAT_JID = 'tg:-1001';
@@ -181,5 +199,98 @@ describe('writeFlightAssistLocation', () => {
         dataDir: file,
       }),
     ).not.toThrow();
+  });
+
+  it('leaves the flight-assist dir owned by HOST_UID:HOST_GID after creating it', () => {
+    // HOST_UID/HOST_GID are mocked to the test runner's own uid/gid so
+    // the chown-to-self actually mutates ownership (no CAP_CHOWN needed
+    // — chown-to-self succeeds for any user). The observable outcome we
+    // care about is "agent container can write into this dir" → the
+    // FS-level uid/gid match HOST_UID/HOST_GID. In prod the orchestrator
+    // runs as root and HOST_UID is the agent container's uid (999); the
+    // codepath is identical, only the observed target uid/gid differ.
+    writeFlightAssistLocation(ownerRecord(), {
+      groups: { [CHAT_JID]: group() },
+      ownerSenderId: OWNER_ID,
+      dataDir,
+    });
+
+    const expectedDir = path.join(dataDir, 'state', FOLDER, 'flight-assist');
+    const stat = fs.lstatSync(expectedDir);
+    expect(stat.uid).toBe(TEST_UID);
+    expect(stat.gid).toBe(TEST_GID);
+  });
+
+  it('swallows EPERM/EACCES from lchown so non-root callers still write', () => {
+    const lchownSpy = vi.spyOn(fs, 'lchownSync').mockImplementation(() => {
+      const err = new Error(
+        'EPERM: operation not permitted',
+      ) as NodeJS.ErrnoException;
+      err.code = 'EPERM';
+      throw err;
+    });
+
+    writeFlightAssistLocation(ownerRecord(), {
+      groups: { [CHAT_JID]: group() },
+      ownerSenderId: OWNER_ID,
+      dataDir,
+    });
+
+    expect(fs.existsSync(targetPath())).toBe(true);
+    lchownSpy.mockRestore();
+  });
+
+  it('lets non-EPERM/EACCES lchown errors fall into the outer fs-error catch', () => {
+    const lchownSpy = vi.spyOn(fs, 'lchownSync').mockImplementation(() => {
+      const err = new Error(
+        'EROFS: read-only file system',
+      ) as NodeJS.ErrnoException;
+      err.code = 'EROFS';
+      throw err;
+    });
+
+    expect(() =>
+      writeFlightAssistLocation(ownerRecord(), {
+        groups: { [CHAT_JID]: group() },
+        ownerSenderId: OWNER_ID,
+        dataDir,
+      }),
+    ).not.toThrow();
+    expect(fs.existsSync(targetPath())).toBe(false);
+    lchownSpy.mockRestore();
+  });
+
+  it('refuses the entire write when flight-assist is a symlink to a real dir (privilege-escalation guard)', () => {
+    // Simulate the attack: the agent (uid HOST_UID, write access on the
+    // per-group state dir) rmdirs the empty flight-assist/ and replaces
+    // it with a symlink pointing at a dir it controls. With a naive
+    // guard (skip chown but continue), `mkdirSync` succeeds (target
+    // exists), `writeFileSync` follows the symlink and writes
+    // `current-location.json.tmp` into the attacker's dir as root —
+    // leaking the owner's coordinates AND giving the attacker a
+    // root-owned file under their tree. The contract is to refuse the
+    // whole write so nothing flows through the symlink.
+    const groupStateDir = path.join(dataDir, 'state', FOLDER);
+    fs.mkdirSync(groupStateDir, { recursive: true });
+    const attackerTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'attacker-'));
+    try {
+      fs.symlinkSync(attackerTarget, path.join(groupStateDir, 'flight-assist'));
+
+      writeFlightAssistLocation(ownerRecord(), {
+        groups: { [CHAT_JID]: group() },
+        ownerSenderId: OWNER_ID,
+        dataDir,
+      });
+
+      // Security outcomes: nothing flowed through the symlink (no
+      // current-location.json, no current-location.json.tmp, no stray
+      // file at all in the attacker-controlled target).
+      expect(fs.readdirSync(attackerTarget)).toEqual([]);
+      expect(
+        fs.existsSync(path.join(attackerTarget, 'current-location.json')),
+      ).toBe(false);
+    } finally {
+      fs.rmSync(attackerTarget, { recursive: true, force: true });
+    }
   });
 });
