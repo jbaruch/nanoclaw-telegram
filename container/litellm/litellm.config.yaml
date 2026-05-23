@@ -1,0 +1,96 @@
+# LiteLLM router config for nanoclaw-litellm.
+#
+# Stage 0 — Anthropic-shape passthrough against the litellm.ai cloud
+# gateway with router-level fallback to api.anthropic.com on the
+# gateway's 5xx / rate-limit / connect-timeout. Workload-keyed
+# model_list aliases (per-tier, per-scheduled-task) land in #613;
+# this file only carries enough to (a) start the container cleanly
+# and (b) round-trip an Anthropic-shape /v1/messages from the
+# orchestrator end-to-end.
+#
+# The orchestrator's credential-proxy (src/credential-proxy.ts) has
+# its OWN bypass layer that fires on ECONNREFUSED / connect-timeout /
+# 5xx when nanoclaw-litellm ITSELF is unreachable. Router-level
+# fallback below can't fire when the router process is down — the
+# two layers are complementary.
+
+model_list:
+  # ---- claude-opus-4-7 (primary + fallback deployments) ----
+  - model_name: claude-opus-4-7
+    litellm_params:
+      model: anthropic/claude-opus-4-7
+      api_base: https://www.litellm.ai
+      api_key: os.environ/LITELLM_GATEWAY_API_KEY
+
+  - model_name: claude-opus-4-7-anthropic-direct
+    litellm_params:
+      model: anthropic/claude-opus-4-7
+      api_base: https://api.anthropic.com
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # ---- claude-sonnet-4-6 ----
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+      api_base: https://www.litellm.ai
+      api_key: os.environ/LITELLM_GATEWAY_API_KEY
+
+  - model_name: claude-sonnet-4-6-anthropic-direct
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+      api_base: https://api.anthropic.com
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # ---- claude-haiku-4-5 ----
+  - model_name: claude-haiku-4-5-20251001
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_base: https://www.litellm.ai
+      api_key: os.environ/LITELLM_GATEWAY_API_KEY
+
+  - model_name: claude-haiku-4-5-20251001-anthropic-direct
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_base: https://api.anthropic.com
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+router_settings:
+  # Static fallbacks — gateway primary, Anthropic direct on failure.
+  # Triggers on 5xx, connect-timeout, and rate-limit responses from
+  # the primary deployment. Same-name retries are not used here so
+  # the second hop is provably the second-row deployment.
+  fallbacks:
+    - claude-opus-4-7: ["claude-opus-4-7-anthropic-direct"]
+    - claude-sonnet-4-6: ["claude-sonnet-4-6-anthropic-direct"]
+    - claude-haiku-4-5-20251001: ["claude-haiku-4-5-20251001-anthropic-direct"]
+  num_retries: 1
+  # Cooldown a deployment for 30s after `allowed_fails` failures so a
+  # transient outage on the gateway doesn't keep retrying it before
+  # the fallback fires.
+  allowed_fails: 2
+  cooldown_time: 30
+
+litellm_settings:
+  # Don't drop unrecognised request params — the Anthropic SDK sends
+  # `cache_control` blocks on system messages that LiteLLM's input
+  # normaliser does not always recognise; dropping them silently
+  # kills the 10% cache_read discount that 318M tokens/week ride on.
+  drop_params: false
+  json_logs: true
+  request_timeout: 600
+
+general_settings:
+  # Inbound client auth — the orchestrator's credential-proxy injects
+  # `x-api-key: ${LITELLM_MASTER_KEY}` when forwarding to this
+  # container (separate value from `ANTHROPIC_API_KEY` so a rotation
+  # on the LiteLLM side doesn't couple to the Anthropic provider
+  # credential; see `.env.example` for the rationale). The proxy
+  # falls back to `ANTHROPIC_API_KEY` when LITELLM_MASTER_KEY is
+  # unset, so a partial-config deploy still flows traffic — that
+  # graceful path is for incident recovery, not steady state.
+  # Outbound auth to backends uses `LITELLM_GATEWAY_API_KEY` (cloud
+  # gateway rows) and `ANTHROPIC_API_KEY` (Anthropic-direct fallback
+  # rows) per `litellm_params` above.
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # /health is what docker-compose's healthcheck hits.
+  health_check_interval: 60

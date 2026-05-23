@@ -205,10 +205,14 @@ describe('credential-proxy', () => {
     expect(lastUpstreamHeaders['transfer-encoding']).toBeUndefined();
   });
 
-  it('returns 502 when upstream is unreachable', async () => {
+  it('returns 502 when upstream is unreachable and bypass is disabled (same-origin)', async () => {
+    // Same primary + bypass URL → `bypassEnabled` is false, so the
+    // ECONNREFUSED on the primary surfaces as 502 directly without a
+    // second-network attempt against the real api.anthropic.com.
     Object.assign(mockEnv, {
       ANTHROPIC_API_KEY: 'sk-ant-real-key',
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:59999',
+      ANTHROPIC_BYPASS_URL: 'http://127.0.0.1:59999',
     });
     proxyServer = await startCredentialProxy(0);
     proxyPort = (proxyServer.address() as AddressInfo).port;
@@ -225,6 +229,338 @@ describe('credential-proxy', () => {
 
     expect(res.statusCode).toBe(502);
     expect(res.body).toBe('Bad Gateway');
+  });
+
+  describe('orchestrator-side bypass (#610)', () => {
+    let bypassServer: http.Server;
+    let bypassPort: number;
+    let bypassHits: number;
+    let lastBypassHeaders: http.IncomingHttpHeaders;
+
+    beforeEach(async () => {
+      bypassHits = 0;
+      lastBypassHeaders = {};
+
+      bypassServer = http.createServer((req, res) => {
+        bypassHits += 1;
+        lastBypassHeaders = { ...req.headers };
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: 'bypass' }));
+      });
+      await new Promise<void>((resolve) =>
+        bypassServer.listen(0, '127.0.0.1', resolve),
+      );
+      bypassPort = (bypassServer.address() as AddressInfo).port;
+    });
+
+    afterEach(async () => {
+      await new Promise<void>((r) => bypassServer?.close(() => r()));
+    });
+
+    it('falls through to bypass when primary refuses connection', async () => {
+      Object.assign(mockEnv, {
+        ANTHROPIC_API_KEY: 'sk-ant-real-key',
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:59999',
+        ANTHROPIC_BYPASS_URL: `http://127.0.0.1:${bypassPort}`,
+      });
+      proxyServer = await startCredentialProxy(0);
+      proxyPort = (proxyServer.address() as AddressInfo).port;
+
+      const res = await makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/v1/messages',
+          headers: {
+            'content-type': 'application/json',
+            'x-api-key': 'placeholder',
+          },
+        },
+        '{}',
+      );
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toBe(JSON.stringify({ ok: 'bypass' }));
+      expect(bypassHits).toBe(1);
+      expect(lastBypassHeaders['x-api-key']).toBe('sk-ant-real-key');
+    });
+
+    it('falls through to bypass when primary returns 5xx', async () => {
+      // Primary upstream returns 500 — verify proxy retries against
+      // the bypass URL and forwards the bypass response.
+      const primary500: http.Server = http.createServer((_req, res) => {
+        res.writeHead(503, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({ type: 'error', error: { type: 'overloaded' } }),
+        );
+      });
+      await new Promise<void>((r) => primary500.listen(0, '127.0.0.1', r));
+      const primary500Port = (primary500.address() as AddressInfo).port;
+
+      try {
+        Object.assign(mockEnv, {
+          ANTHROPIC_API_KEY: 'sk-ant-real-key',
+          ANTHROPIC_BASE_URL: `http://127.0.0.1:${primary500Port}`,
+          ANTHROPIC_BYPASS_URL: `http://127.0.0.1:${bypassPort}`,
+        });
+        proxyServer = await startCredentialProxy(0);
+        proxyPort = (proxyServer.address() as AddressInfo).port;
+
+        const res = await makeRequest(
+          proxyPort,
+          {
+            method: 'POST',
+            path: '/v1/messages',
+            headers: { 'content-type': 'application/json' },
+          },
+          '{}',
+        );
+
+        expect(res.statusCode).toBe(200);
+        expect(res.body).toBe(JSON.stringify({ ok: 'bypass' }));
+        expect(bypassHits).toBe(1);
+      } finally {
+        await new Promise<void>((r) => primary500.close(() => r()));
+      }
+    });
+
+    it('does NOT bypass on 4xx — passes the client error straight through', async () => {
+      // 4xx is a real client error from the primary (bad request,
+      // unauthenticated key, rate-limit per-key); bypassing would mask
+      // the actionable status and double-charge across providers.
+      const primary401: http.Server = http.createServer((_req, res) => {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ type: 'error', error: { type: 'auth' } }));
+      });
+      await new Promise<void>((r) => primary401.listen(0, '127.0.0.1', r));
+      const primary401Port = (primary401.address() as AddressInfo).port;
+
+      try {
+        Object.assign(mockEnv, {
+          ANTHROPIC_API_KEY: 'sk-ant-real-key',
+          ANTHROPIC_BASE_URL: `http://127.0.0.1:${primary401Port}`,
+          ANTHROPIC_BYPASS_URL: `http://127.0.0.1:${bypassPort}`,
+        });
+        proxyServer = await startCredentialProxy(0);
+        proxyPort = (proxyServer.address() as AddressInfo).port;
+
+        const res = await makeRequest(
+          proxyPort,
+          {
+            method: 'POST',
+            path: '/v1/messages',
+            headers: { 'content-type': 'application/json' },
+          },
+          '{}',
+        );
+
+        expect(res.statusCode).toBe(401);
+        expect(bypassHits).toBe(0);
+      } finally {
+        await new Promise<void>((r) => primary401.close(() => r()));
+      }
+    });
+
+    it('returns 502 when BOTH primary and bypass are unreachable', async () => {
+      Object.assign(mockEnv, {
+        ANTHROPIC_API_KEY: 'sk-ant-real-key',
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:59999',
+        ANTHROPIC_BYPASS_URL: 'http://127.0.0.1:59998',
+      });
+      proxyServer = await startCredentialProxy(0);
+      proxyPort = (proxyServer.address() as AddressInfo).port;
+
+      const res = await makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/v1/messages',
+          headers: { 'content-type': 'application/json' },
+        },
+        '{}',
+      );
+
+      expect(res.statusCode).toBe(502);
+      expect(res.body).toBe('Bad Gateway');
+    });
+
+    it('does not bypass in OAuth mode (auth shape incompatible)', async () => {
+      // OAuth flow exchanges a placeholder token via
+      // /api/oauth/claude_cli/create_api_key — that endpoint does not
+      // exist on the LiteLLM proxy, so bypassing OAuth requests would
+      // route them to a target that can't service them. Primary failure
+      // surfaces as 502 unchanged.
+      Object.assign(mockEnv, {
+        CLAUDE_CODE_OAUTH_TOKEN: 'oauth-token',
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:59999',
+        ANTHROPIC_BYPASS_URL: `http://127.0.0.1:${bypassPort}`,
+      });
+      proxyServer = await startCredentialProxy(0);
+      proxyPort = (proxyServer.address() as AddressInfo).port;
+
+      const res = await makeRequest(
+        proxyPort,
+        {
+          method: 'POST',
+          path: '/v1/messages',
+          headers: { 'content-type': 'application/json' },
+        },
+        '{}',
+      );
+
+      expect(res.statusCode).toBe(502);
+      expect(bypassHits).toBe(0);
+    });
+
+    it('falls through to bypass when primary accepts but never sends a response (idle timeout)', async () => {
+      // Primary accepts the TCP connection and parses the HTTP
+      // request but never writes the response. The idle-timeout
+      // setTimeout on the credential-proxy's upstream socket should
+      // fire and destroy the socket with `credential-proxy idle
+      // timeout`, which the error handler recognises as a
+      // bypass-trigger shape.
+      const hangPrimary: http.Server = http.createServer(() => {
+        // Intentionally no response — let the test's idle-timeout
+        // override (50ms via startCredentialProxy opts) fire.
+      });
+      await new Promise<void>((r) => hangPrimary.listen(0, '127.0.0.1', r));
+      const hangPort = (hangPrimary.address() as AddressInfo).port;
+
+      try {
+        Object.assign(mockEnv, {
+          ANTHROPIC_API_KEY: 'sk-ant-real-key',
+          ANTHROPIC_BASE_URL: `http://127.0.0.1:${hangPort}`,
+          ANTHROPIC_BYPASS_URL: `http://127.0.0.1:${bypassPort}`,
+        });
+        proxyServer = await startCredentialProxy(0, '127.0.0.1', {
+          idleTimeoutMs: 50,
+        });
+        proxyPort = (proxyServer.address() as AddressInfo).port;
+
+        const res = await makeRequest(
+          proxyPort,
+          {
+            method: 'POST',
+            path: '/v1/messages',
+            headers: { 'content-type': 'application/json' },
+          },
+          '{}',
+        );
+
+        expect(res.statusCode).toBe(200);
+        expect(res.body).toBe(JSON.stringify({ ok: 'bypass' }));
+        expect(bypassHits).toBe(1);
+      } finally {
+        // Force-close any sockets the hung server is still holding so
+        // the test process exits cleanly even though the in-flight
+        // upstream socket was torn down by the proxy's idle timeout.
+        hangPrimary.closeAllConnections?.();
+        await new Promise<void>((r) => hangPrimary.close(() => r()));
+      }
+    });
+
+    it('does NOT cut off a slow-but-valid upstream when bypass is disabled', async () => {
+      // Per `coding-policy: error-handling` Graceful Fallback — the
+      // idle timeout exists to drive bypass, and when bypass is
+      // disabled (same-origin primary+bypass, or OAuth mode) there
+      // is no fallback to drive to. A slow upstream that takes
+      // longer than `idleTimeoutMs` to send response headers must
+      // still complete normally; this is exactly the slow-Anthropic
+      // edge path that worked pre-#610 and must not regress.
+      let resolveSlowResponse: () => void = () => {};
+      const slowPrimary: http.Server = http.createServer((_req, res) => {
+        // Hold the response for 150ms (3× the test idle timeout) then
+        // complete normally.
+        setTimeout(() => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: 'slow' }));
+          resolveSlowResponse();
+        }, 150);
+      });
+      await new Promise<void>((r) => slowPrimary.listen(0, '127.0.0.1', r));
+      const slowPort = (slowPrimary.address() as AddressInfo).port;
+
+      try {
+        Object.assign(mockEnv, {
+          ANTHROPIC_API_KEY: 'sk-ant-real-key',
+          // Same-origin primary + bypass disables the bypass entirely.
+          ANTHROPIC_BASE_URL: `http://127.0.0.1:${slowPort}`,
+          ANTHROPIC_BYPASS_URL: `http://127.0.0.1:${slowPort}`,
+        });
+        proxyServer = await startCredentialProxy(0, '127.0.0.1', {
+          idleTimeoutMs: 50,
+        });
+        proxyPort = (proxyServer.address() as AddressInfo).port;
+
+        const res = await makeRequest(
+          proxyPort,
+          {
+            method: 'POST',
+            path: '/v1/messages',
+            headers: { 'content-type': 'application/json' },
+          },
+          '{}',
+        );
+
+        expect(res.statusCode).toBe(200);
+        expect(res.body).toBe(JSON.stringify({ ok: 'slow' }));
+        // Sanity: the bypass server (same as primary here) never
+        // produced a second response — there was only one upstream
+        // call, not two.
+        expect(bypassHits).toBe(0);
+      } finally {
+        resolveSlowResponse();
+        await new Promise<void>((r) => slowPrimary.close(() => r()));
+      }
+    });
+
+    it('injects LITELLM_MASTER_KEY for the primary and ANTHROPIC_API_KEY for the bypass', async () => {
+      // The credential-proxy picks the right `x-api-key` per target:
+      // the LiteLLM master_key when forwarding to the primary (so
+      // a key rotation on the LiteLLM side doesn't couple to
+      // ANTHROPIC_API_KEY), and ANTHROPIC_API_KEY when bypassing
+      // direct to api.anthropic.com. This test exercises both
+      // halves with a single round-trip: primary returns 503, the
+      // proxy retries against the bypass URL.
+      let primaryKey: string | undefined;
+      const primary503: http.Server = http.createServer((req, res) => {
+        primaryKey = req.headers['x-api-key'] as string;
+        res.writeHead(503);
+        res.end();
+      });
+      await new Promise<void>((r) => primary503.listen(0, '127.0.0.1', r));
+      const primary503Port = (primary503.address() as AddressInfo).port;
+
+      try {
+        Object.assign(mockEnv, {
+          ANTHROPIC_API_KEY: 'sk-ant-real-key',
+          LITELLM_MASTER_KEY: 'sk-litellm-master',
+          ANTHROPIC_BASE_URL: `http://127.0.0.1:${primary503Port}`,
+          ANTHROPIC_BYPASS_URL: `http://127.0.0.1:${bypassPort}`,
+        });
+        proxyServer = await startCredentialProxy(0);
+        proxyPort = (proxyServer.address() as AddressInfo).port;
+
+        const res = await makeRequest(
+          proxyPort,
+          {
+            method: 'POST',
+            path: '/v1/messages',
+            headers: {
+              'content-type': 'application/json',
+              'x-api-key': 'placeholder',
+            },
+          },
+          '{}',
+        );
+
+        expect(res.statusCode).toBe(200);
+        expect(primaryKey).toBe('sk-litellm-master');
+        expect(lastBypassHeaders['x-api-key']).toBe('sk-ant-real-key');
+      } finally {
+        await new Promise<void>((r) => primary503.close(() => r()));
+      }
+    });
   });
 });
 
