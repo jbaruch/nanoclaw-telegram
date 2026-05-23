@@ -808,6 +808,11 @@ def main():
                 "missing_on_disk": len(missing_results),
                 "books": missing_results,
             }))
+        elif missing_results:
+            # "Library up to date" would be misleading when inventory rows
+            # are missing on disk — the operator's library has gaps even
+            # though no new books are pending download.
+            print(f"No new books. {len(missing_results)} missing on disk (see above).")
         else:
             print("Library up to date.")
         return
