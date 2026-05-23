@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
+import { HOST_GID, HOST_UID } from './config.js';
 import { logger } from './logger.js';
 import type { LocationRecord, RegisteredGroup } from './types.js';
 
@@ -32,6 +33,12 @@ import type { LocationRecord, RegisteredGroup } from './types.js';
  *   `ASSISTANT_OWNER_TG_USER_ID`. Group-member pins are ignored.
  * - Every write produces a complete record at the current schema
  *   version. No partial updates, no merge with prior on-disk state.
+ * - On directory creation, chowns `flight-assist/` to `HOST_UID:HOST_GID`
+ *   so the agent container (uid HOST_UID) can write its own state files
+ *   (`flight-*.json`, sync-tripit locks) into the same dir. Without this
+ *   the orchestrator (root inside its container) leaves the dir
+ *   root-owned mode 755 and the agent's sync_tripit precheck fails with
+ *   PermissionError on its first run.
  *
  * **Reader contract** (flight-assist >= 0.1.9, non-owner):
  * - Returns `None` on missing file, malformed JSON, missing/wrong-type
@@ -98,6 +105,27 @@ export function writeFlightAssistLocation(
 
   try {
     fs.mkdirSync(dir, { recursive: true });
+    // The orchestrator runs as root inside its container; without an
+    // explicit chown here `mkdirSync` leaves `flight-assist/` owned by
+    // root:root. The per-group state dir's mode (755) then blocks the
+    // agent container (uid HOST_UID) from writing flight-assist's own
+    // state files (flight-*.json, sync-tripit lock files). The
+    // container-runner chowns the per-group state dir at creation
+    // (see `container-runner.ts` HOST_UID block) but never visits
+    // host-created per-skill subdirs — so this writer owns matching
+    // ownership. EPERM/EACCES on the chown means we're not root (e.g.
+    // unit tests) and the dir's already owned by the test user, so
+    // log+continue. Other codes propagate to the outer catch.
+    if (HOST_UID !== undefined && HOST_GID !== undefined) {
+      try {
+        fs.chownSync(dir, HOST_UID, HOST_GID);
+      } catch (chownErr: unknown) {
+        const chownCode = (chownErr as NodeJS.ErrnoException)?.code;
+        if (chownCode !== 'EPERM' && chownCode !== 'EACCES') {
+          throw chownErr;
+        }
+      }
+    }
     const tmp = `${target}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(payload));
     fs.renameSync(tmp, target);

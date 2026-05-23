@@ -18,6 +18,15 @@ vi.mock('./logger.js', () => ({
   },
 }));
 
+// Pin HOST_UID/HOST_GID so the chown-after-mkdir path is exercised in
+// unit tests. The values are picked to be different from any real test
+// runner uid/gid so chownSync will EPERM — the writer must swallow
+// EPERM/EACCES (orchestrator runs as root in prod, but tests don't).
+vi.mock('./config.js', () => ({
+  HOST_UID: 999,
+  HOST_GID: 10,
+}));
+
 const OWNER_ID = '12345';
 const CHAT_JID = 'tg:-1001';
 const FOLDER = 'admin';
@@ -181,5 +190,58 @@ describe('writeFlightAssistLocation', () => {
         dataDir: file,
       }),
     ).not.toThrow();
+  });
+
+  it('chowns the flight-assist dir to HOST_UID:HOST_GID after creating it', () => {
+    const chownSpy = vi.spyOn(fs, 'chownSync');
+
+    writeFlightAssistLocation(ownerRecord(), {
+      groups: { [CHAT_JID]: group() },
+      ownerSenderId: OWNER_ID,
+      dataDir,
+    });
+
+    const expectedDir = path.join(dataDir, 'state', FOLDER, 'flight-assist');
+    expect(chownSpy).toHaveBeenCalledWith(expectedDir, 999, 10);
+    chownSpy.mockRestore();
+  });
+
+  it('swallows EPERM/EACCES from chown so non-root callers still write', () => {
+    const chownSpy = vi.spyOn(fs, 'chownSync').mockImplementation(() => {
+      const err = new Error(
+        'EPERM: operation not permitted',
+      ) as NodeJS.ErrnoException;
+      err.code = 'EPERM';
+      throw err;
+    });
+
+    writeFlightAssistLocation(ownerRecord(), {
+      groups: { [CHAT_JID]: group() },
+      ownerSenderId: OWNER_ID,
+      dataDir,
+    });
+
+    expect(fs.existsSync(targetPath())).toBe(true);
+    chownSpy.mockRestore();
+  });
+
+  it('lets non-EPERM/EACCES chown errors fall into the outer fs-error catch', () => {
+    const chownSpy = vi.spyOn(fs, 'chownSync').mockImplementation(() => {
+      const err = new Error(
+        'EROFS: read-only file system',
+      ) as NodeJS.ErrnoException;
+      err.code = 'EROFS';
+      throw err;
+    });
+
+    expect(() =>
+      writeFlightAssistLocation(ownerRecord(), {
+        groups: { [CHAT_JID]: group() },
+        ownerSenderId: OWNER_ID,
+        dataDir,
+      }),
+    ).not.toThrow();
+    expect(fs.existsSync(targetPath())).toBe(false);
+    chownSpy.mockRestore();
   });
 });
