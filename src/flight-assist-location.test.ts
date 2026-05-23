@@ -248,30 +248,36 @@ describe('writeFlightAssistLocation', () => {
     lchownSpy.mockRestore();
   });
 
-  it('refuses to chown when flight-assist is a symlink (privilege-escalation guard)', () => {
+  it('refuses the entire write when flight-assist is a symlink to a real dir (privilege-escalation guard)', () => {
     // Simulate the attack: the agent (uid HOST_UID, write access on the
     // per-group state dir) rmdirs the empty flight-assist/ and replaces
-    // it with a symlink pointing somewhere the orchestrator (root)
-    // shouldn't touch. `lchownSync` would chown the symlink itself
-    // safely, but the contract is to refuse entirely — surfacing the
-    // tampering rather than silently chowning the planted symlink to
-    // HOST_UID:HOST_GID and going about our business.
+    // it with a symlink pointing at a dir it controls. With a naive
+    // guard (skip chown but continue), `mkdirSync` succeeds (target
+    // exists), `writeFileSync` follows the symlink and writes
+    // `current-location.json.tmp` into the attacker's dir as root —
+    // leaking the owner's coordinates AND giving the attacker a
+    // root-owned file under their tree. The contract is to refuse the
+    // whole write so nothing flows through the symlink.
     const groupStateDir = path.join(dataDir, 'state', FOLDER);
     fs.mkdirSync(groupStateDir, { recursive: true });
-    fs.symlinkSync(
-      '/tmp/attacker-target',
-      path.join(groupStateDir, 'flight-assist'),
-    );
+    const attackerTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'attacker-'));
+    try {
+      fs.symlinkSync(attackerTarget, path.join(groupStateDir, 'flight-assist'));
 
-    const lchownSpy = vi.spyOn(fs, 'lchownSync');
+      const lchownSpy = vi.spyOn(fs, 'lchownSync');
 
-    writeFlightAssistLocation(ownerRecord(), {
-      groups: { [CHAT_JID]: group() },
-      ownerSenderId: OWNER_ID,
-      dataDir,
-    });
+      writeFlightAssistLocation(ownerRecord(), {
+        groups: { [CHAT_JID]: group() },
+        ownerSenderId: OWNER_ID,
+        dataDir,
+      });
 
-    expect(lchownSpy).not.toHaveBeenCalled();
-    lchownSpy.mockRestore();
+      // The security outcome: nothing was written through the symlink.
+      expect(fs.readdirSync(attackerTarget)).toEqual([]);
+      expect(lchownSpy).not.toHaveBeenCalled();
+      lchownSpy.mockRestore();
+    } finally {
+      fs.rmSync(attackerTarget, { recursive: true, force: true });
+    }
   });
 });

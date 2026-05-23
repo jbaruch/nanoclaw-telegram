@@ -126,12 +126,14 @@ export function writeFlightAssistLocation(
     // Symlink safety: the dir lives under `/workspace/state` which the
     // agent (lower-privilege than root) can write. A non-traversing
     // chown is mandatory — `chownSync` would follow a symlink and let
-    // an attacker who planted `flight-assist -> /etc/shadow` (after
+    // an attacker who planted `flight-assist -> /etc/passwd` (after
     // `rmdir`-ing the empty subdir) redirect the root chown to an
     // arbitrary target. Mirrors `container-runner.ts: chownRecursive`'s
-    // `lchownSync` pattern. The `lstatSync` guard rejects the path
-    // entirely if it isn't a real directory, so we never chown
-    // somebody else's symlink target.
+    // `lchownSync` pattern. The `lstatSync` guard refuses the WHOLE
+    // write when the path isn't a real directory — chown AND the
+    // subsequent `writeFileSync` + `renameSync` would both follow the
+    // symlink, so logging without returning would still write
+    // `current-location.json` as root through the symlink target.
     //
     // EPERM/EACCES means we're not root (e.g. unit tests, or the
     // orchestrator container running unprivileged). Warn and continue
@@ -143,21 +145,21 @@ export function writeFlightAssistLocation(
       if (!stat.isDirectory()) {
         logger.warn(
           { dir, chatJid: record.chat_jid, folder: group.folder },
-          `flight-assist state path is not a real directory (likely a symlink planted by the agent container) — refusing to chown. Inspect ${dir} and remove the symlink before the next location event.`,
+          `flight-assist state path is not a real directory (likely a symlink planted by the agent container) — refusing the entire write. Inspect ${dir} and remove the symlink before the next location event. The precheck will fall back to home_address until then.`,
         );
-      } else {
-        try {
-          fs.lchownSync(dir, HOST_UID, HOST_GID);
-        } catch (chownErr: unknown) {
-          const chownCode = (chownErr as NodeJS.ErrnoException)?.code;
-          if (chownCode !== 'EPERM' && chownCode !== 'EACCES') {
-            throw chownErr;
-          }
-          logger.warn(
-            { err: chownErr, code: chownCode, dir },
-            `flight-assist dir chown skipped (${chownCode}) — orchestrator is not running with CAP_CHOWN. Agent-side sync_tripit precheck will continue to fail with PermissionError until the dir is chowned manually (\`chown -R $HOST_UID:$HOST_GID ${dir}\`) or the orchestrator is restarted as root.`,
-          );
+        return;
+      }
+      try {
+        fs.lchownSync(dir, HOST_UID, HOST_GID);
+      } catch (chownErr: unknown) {
+        const chownCode = (chownErr as NodeJS.ErrnoException)?.code;
+        if (chownCode !== 'EPERM' && chownCode !== 'EACCES') {
+          throw chownErr;
         }
+        logger.warn(
+          { err: chownErr, code: chownCode, dir },
+          `flight-assist dir chown skipped (${chownCode}) — orchestrator is not running with CAP_CHOWN. Agent-side sync_tripit precheck will continue to fail with PermissionError until the dir is chowned manually (\`chown -R $HOST_UID:$HOST_GID ${dir}\`) or the orchestrator is restarted as root.`,
+        );
       }
     }
     const tmp = `${target}.tmp`;
