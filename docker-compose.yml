@@ -124,11 +124,24 @@ services:
       # failures, but the unhealthy flag polluted dashboards and
       # would have broken any future `depends_on: service_healthy`
       # wiring).
+      # Wrap urlopen in try/except so Docker's `.State.Health.Log[].Output`
+      # records a single-line `unhealthy` instead of a multi-line urllib
+      # traceback on every probe failure — failure modes the healthcheck
+      # should treat as "unhealthy" (HTTPError on non-2xx, URLError on
+      # connection refused, socket.timeout, etc.) all collapse to a
+      # `unhealthy` token via sys.exit(1).
       test:
         - "CMD"
         - "python3"
         - "-c"
-        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=4).status==200 else 1)"
+        - |
+          import urllib.request, sys
+          try:
+              urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=4).close()
+              sys.exit(0)
+          except Exception:
+              print('unhealthy')
+              sys.exit(1)
       interval: 30s
       timeout: 5s
       retries: 3
