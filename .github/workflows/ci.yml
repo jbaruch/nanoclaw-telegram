@@ -34,3 +34,11 @@ jobs:
 
       - name: Python tests (deploy agent-grep predicate)
         run: python3 -m unittest scripts.test_deploy_agent_grep
+
+      # audible-backup sidecar lives under a hyphenated directory, so
+      # we invoke unittest from inside it rather than via dotted
+      # module path (Python's import system rejects `-` in package
+      # names).
+      - name: Python tests (audible-backup sidecar)
+        working-directory: container/audible-backup
+        run: python3 -m unittest test_backup test_enrich
