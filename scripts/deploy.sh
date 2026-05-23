@@ -517,7 +517,19 @@ if ! DEPLOY_KILL_START=$(python3 -c "from datetime import datetime, timezone; pr
 fi
 # `grep` exits 1 when no agents match — the empty-string case is
 # handled by the `[[ -z ... ]]` check on the next line.
-AGENTS=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -v '^nanoclaw$' || true)
+#
+# Exclusions:
+# - `nanoclaw` itself (orchestrator) — restart is handled in step 7,
+#   not via the agent-close path.
+# - `nanoclaw-litellm` (#610 LiteLLM router) — infrastructure
+#   sidecar, not an agent. Has no `/workspace/ipc/input` mount, so
+#   the `_close` sentinel would be unresolvable and the grace-window
+#   timer would force-kill it every deploy (verified on the
+#   2026-05-22 deploy where the LiteLLM container exited 137 with
+#   empty logs after exactly 30s post-spawn). Any future
+#   infrastructure containers added to docker-compose.yml that match
+#   `^nanoclaw-` must be appended to this exclude pattern.
+AGENTS=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -Ev '^nanoclaw(-litellm)?$' || true)
 if [[ -z "$AGENTS" ]]; then
     echo "  no agent containers running"
 else
