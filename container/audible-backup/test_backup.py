@@ -299,5 +299,74 @@ class SanitizeFilenameTest(unittest.TestCase):
         self.assertLessEqual(len(result), 200)
 
 
+class FindMissingOnDiskTest(unittest.TestCase):
+    """`find_missing_on_disk` surfaces inventory records whose m4b is gone."""
+
+    def _inventory_record(self, asin: str, filename: str, title: str = "") -> dict:
+        return {
+            "asin": asin,
+            "title": title or f"Title {asin}",
+            "filename": filename,
+            "files": [f"/library/books/{filename}"] if filename else [],
+        }
+
+    def test_returns_records_with_missing_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            books_dir = Path(tmp)
+            (books_dir / "Present.m4b").write_bytes(b"")
+            inventory = [
+                self._inventory_record("ASIN1", "Present.m4b", "Present"),
+                self._inventory_record("ASIN2", "Gone.m4b", "Gone"),
+            ]
+            missing = backup.find_missing_on_disk(inventory, books_dir)
+            self.assertEqual([r["asin"] for r in missing], ["ASIN2"])
+
+    def test_skips_records_with_empty_filename(self):
+        # Records that have never been downloaded carry `filename=""`.
+        # They're a distinct state — outside the disk-presence check —
+        # otherwise every empty-inventory bootstrap would alert on every
+        # row at once.
+        with tempfile.TemporaryDirectory() as tmp:
+            inventory = [self._inventory_record("ASIN1", "")]
+            self.assertEqual(backup.find_missing_on_disk(inventory, Path(tmp)), [])
+
+    def test_skips_records_with_missing_filename_key(self):
+        # Defensive: legacy inventory rows imported from older OpenAudible
+        # builds may lack the `filename` key entirely. Treated the same
+        # as empty-string: skip, not error.
+        with tempfile.TemporaryDirectory() as tmp:
+            inventory = [{"asin": "ASIN1", "title": "Legacy"}]
+            self.assertEqual(backup.find_missing_on_disk(inventory, Path(tmp)), [])
+
+    def test_empty_inventory_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(backup.find_missing_on_disk([], Path(tmp)), [])
+
+    def test_returns_full_record_not_just_asin(self):
+        # Operator surface in the JSON output reads `title` and
+        # `filename` off the returned record; pin that the full
+        # inventory shape passes through so a future refactor toward
+        # returning bare ASINs doesn't silently strip the operator's
+        # context.
+        with tempfile.TemporaryDirectory() as tmp:
+            inventory = [self._inventory_record("ASIN1", "Gone.m4b", "Gone Book")]
+            missing = backup.find_missing_on_disk(inventory, Path(tmp))
+            self.assertEqual(len(missing), 1)
+            self.assertEqual(missing[0]["title"], "Gone Book")
+            self.assertEqual(missing[0]["filename"], "Gone.m4b")
+
+    def test_does_not_match_directory_at_filename_path(self):
+        # A directory at `<books_dir>/<filename>` should NOT be treated
+        # as a present m4b — `is_file()` rejects it. Defends against the
+        # operator state where they manually created a folder with the
+        # same name to organize chapter splits.
+        with tempfile.TemporaryDirectory() as tmp:
+            books_dir = Path(tmp)
+            (books_dir / "Confusing.m4b").mkdir()
+            inventory = [self._inventory_record("ASIN1", "Confusing.m4b")]
+            missing = backup.find_missing_on_disk(inventory, books_dir)
+            self.assertEqual([r["asin"] for r in missing], ["ASIN1"])
+
+
 if __name__ == "__main__":
     unittest.main()

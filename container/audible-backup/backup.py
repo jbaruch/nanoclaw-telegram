@@ -186,6 +186,30 @@ def find_new_books(library: list[dict], known_asins: set[str]) -> list[dict]:
     ]
 
 
+def find_missing_on_disk(inventory: list[dict], books_dir: Path) -> list[dict]:
+    """Find inventory records whose m4b file is no longer present under books_dir.
+
+    Soft-alert dedup gap: `find_new_books` keys off ASIN-presence in
+    inventory, so once a record exists no later run re-downloads even if
+    the m4b is removed (Google Drive sync hiccup, manual cleanup, partial
+    restore, disk migration). This helper surfaces inventory rows with a
+    non-empty `filename` whose file is missing under `books_dir`, so the
+    operator sees the gap on the next weekly run instead of finding out
+    at playback time.
+
+    Records with an empty `filename` are skipped — those have never been
+    downloaded, a distinct state outside the disk-presence check.
+    """
+    missing: list[dict] = []
+    for record in inventory:
+        filename = record.get("filename") or ""
+        if not filename:
+            continue
+        if not (books_dir / filename).is_file():
+            missing.append(record)
+    return missing
+
+
 def map_to_inventory_schema(api_book: dict, region: str = "US") -> dict:
     """Map enriched audible-cli API response to inventory JSON schema.
 
@@ -746,6 +770,22 @@ def main():
     library = fetch_enriched_library(tmp_dir)
     new_books_raw = find_new_books(library, known)
 
+    # Soft-alert disk-presence check: inventory records whose m4b is
+    # missing on disk get surfaced as `status: "missing_on_disk"` so the
+    # operator sees the gap before reaching for playback. No automatic
+    # redownload — preserves operator-enriched metadata and lets a slow
+    # Google Drive sync rehydrate the file on next access.
+    missing_records = find_missing_on_disk(inventory, books_dir)
+    missing_results = [
+        {
+            "asin": r.get("asin", ""),
+            "title": r.get("title", ""),
+            "filename": r.get("filename", ""),
+            "status": "missing_on_disk",
+        }
+        for r in missing_records
+    ]
+
     if not args.json:
         print(f"Audible library: {len(library)}")
         print(f"New books to download: {len(new_books_raw)}")
@@ -754,12 +794,25 @@ def main():
                 a.get("name", "") for a in (b.get("authors") or [])
             )
             print(f"  {b.get('asin')}  {b.get('title', '?')} — {authors}")
+        if missing_records:
+            print(f"Missing on disk: {len(missing_records)}")
+            for r in missing_records:
+                print(f"  {r.get('asin')}  {r.get('title', '?')} — {r.get('filename', '?')}")
 
     if not new_books_raw:
         if args.json:
             print(json.dumps({
-                "new_books": 0, "downloaded": 0, "failed": 0, "books": []
+                "new_books": 0,
+                "downloaded": 0,
+                "failed": 0,
+                "missing_on_disk": len(missing_results),
+                "books": missing_results,
             }))
+        elif missing_results:
+            # "Library up to date" would be misleading when inventory rows
+            # are missing on disk — the operator's library has gaps even
+            # though no new books are pending download.
+            print(f"No new books. {len(missing_results)} missing on disk (see above).")
         else:
             print("Library up to date.")
         return
@@ -772,7 +825,8 @@ def main():
             print(json.dumps({
                 "new_books": len(new_records),
                 "dry_run": True,
-                "books": new_records,
+                "missing_on_disk": len(missing_results),
+                "books": new_records + missing_results,
             }))
         else:
             print("\nDRY RUN — nothing downloaded.")
@@ -824,13 +878,15 @@ def main():
             "downloaded": downloaded,
             "skipped": skipped,
             "failed": failed,
-            "books": results,
+            "missing_on_disk": len(missing_results),
+            "books": results + missing_results,
         }))
     else:
         print(f"\n=== Backup complete ===")
         print(f"Downloaded: {downloaded}")
         print(f"Skipped: {skipped}")
         print(f"Failed: {failed}")
+        print(f"Missing on disk: {len(missing_results)}")
         print(f"Inventory now has: {len(inventory)} books")
 
     # Non-zero exit on any download/decrypt failure so the cadence
