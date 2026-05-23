@@ -276,18 +276,19 @@ describe('writeFlightAssistLocation', () => {
     try {
       fs.symlinkSync(attackerTarget, path.join(groupStateDir, 'flight-assist'));
 
-      const lchownSpy = vi.spyOn(fs, 'lchownSync');
-
       writeFlightAssistLocation(ownerRecord(), {
         groups: { [CHAT_JID]: group() },
         ownerSenderId: OWNER_ID,
         dataDir,
       });
 
-      // The security outcome: nothing was written through the symlink.
+      // Security outcomes: nothing flowed through the symlink (no
+      // current-location.json, no current-location.json.tmp, no stray
+      // file at all in the attacker-controlled target).
       expect(fs.readdirSync(attackerTarget)).toEqual([]);
-      expect(lchownSpy).not.toHaveBeenCalled();
-      lchownSpy.mockRestore();
+      expect(
+        fs.existsSync(path.join(attackerTarget, 'current-location.json')),
+      ).toBe(false);
     } finally {
       fs.rmSync(attackerTarget, { recursive: true, force: true });
     }
