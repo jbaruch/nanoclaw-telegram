@@ -17,11 +17,14 @@ sidecar-adjacent tests in this repo use.
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
@@ -366,6 +369,166 @@ class FindMissingOnDiskTest(unittest.TestCase):
             inventory = [self._inventory_record("ASIN1", "Confusing.m4b")]
             missing = backup.find_missing_on_disk(inventory, books_dir)
             self.assertEqual([r["asin"] for r in missing], ["ASIN1"])
+
+
+class LoadSkiplistTest(unittest.TestCase):
+    """`load_skiplist` parses the operator's ASIN allowlist file."""
+
+    def _write_skiplist(self, content: str) -> Path:
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8",
+        )
+        try:
+            tmp.write(content)
+            tmp.flush()
+        finally:
+            tmp.close()
+        return Path(tmp.name)
+
+    def test_parses_one_asin_per_line(self):
+        path = self._write_skiplist("ASIN1\nASIN2\nASIN3\n")
+        try:
+            self.assertEqual(
+                backup.load_skiplist(path), {"ASIN1", "ASIN2", "ASIN3"},
+            )
+        finally:
+            path.unlink()
+
+    def test_strips_inline_hash_comments(self):
+        # Operator UX target from the issue: `# Title hint` next to the
+        # bare ASIN so a future glance at the file remembers why the
+        # ASIN was filtered without needing to cross-reference inventory.
+        path = self._write_skiplist(
+            "1663704015  # Healing the Wounds (Plus-only)\n"
+            "B079LRSMNN  # Galaxy's Edge\n"
+        )
+        try:
+            self.assertEqual(
+                backup.load_skiplist(path), {"1663704015", "B079LRSMNN"},
+            )
+        finally:
+            path.unlink()
+
+    def test_skips_blank_lines(self):
+        path = self._write_skiplist("\nASIN1\n\n\nASIN2\n")
+        try:
+            self.assertEqual(backup.load_skiplist(path), {"ASIN1", "ASIN2"})
+        finally:
+            path.unlink()
+
+    def test_skips_pure_comment_lines(self):
+        path = self._write_skiplist("# header comment\nASIN1\n# trailing\n")
+        try:
+            self.assertEqual(backup.load_skiplist(path), {"ASIN1"})
+        finally:
+            path.unlink()
+
+    def test_missing_file_returns_empty_set(self):
+        # Bootstrap state, not an error — every weekly run before the
+        # operator's first explicit-ack must work without surfacing a
+        # filesystem error.
+        self.assertEqual(
+            backup.load_skiplist(Path("/nonexistent/skiplist.txt")),
+            set(),
+        )
+
+
+class FindNewBooksSkiplistTest(unittest.TestCase):
+    """`find_new_books` honours the skiplist set."""
+
+    def test_filters_out_skiplist_asins(self):
+        library = [
+            {"asin": "ASIN1", "title": "New"},
+            {"asin": "ASIN2", "title": "Skipped"},
+        ]
+        new = backup.find_new_books(
+            library, known_asins=set(), skiplist_asins={"ASIN2"},
+        )
+        self.assertEqual([b["asin"] for b in new], ["ASIN1"])
+
+    def test_no_skiplist_arg_preserves_legacy_behaviour(self):
+        # Callers from before the skiplist landed pass two positional
+        # args; pin that the third arg defaults to "no filter applied"
+        # so we don't regress the #631 fix's call site.
+        library = [{"asin": "ASIN1", "title": "New"}]
+        new = backup.find_new_books(library, known_asins=set())
+        self.assertEqual([b["asin"] for b in new], ["ASIN1"])
+
+    def test_skiplist_and_known_both_filter(self):
+        library = [
+            {"asin": "ASIN1", "title": "Already have"},
+            {"asin": "ASIN2", "title": "Skipped"},
+            {"asin": "ASIN3", "title": "New"},
+        ]
+        new = backup.find_new_books(
+            library, known_asins={"ASIN1"}, skiplist_asins={"ASIN2"},
+        )
+        self.assertEqual([b["asin"] for b in new], ["ASIN3"])
+
+
+class MainEmptyLibraryJsonTest(unittest.TestCase):
+    """Smoke test for `main()` on the no-new-books JSON path.
+
+    Catches the regression a prior revision of this PR shipped: the
+    `skipped_by_filter` audit-list was being computed against `library`
+    *before* `library = fetch_enriched_library(...)` ran, so any normal
+    invocation raised `NameError` before producing output. The helper
+    tests don't exercise `main()`, so without this case the bug would
+    pass CI again on the next refactor.
+    """
+
+    def _run_main(self, library_dir: Path) -> dict:
+        # Stub fetch_enriched_library so the test stays offline (no
+        # audible-cli, no network). Returns an empty library — covers the
+        # no-new-books JSON branch where the regression originally fired.
+        stdout = io.StringIO()
+        with patch.object(backup, "fetch_enriched_library", return_value=[]), \
+             patch.object(sys, "argv", ["backup.py", "--json"]), \
+             patch.dict(os.environ, {"AUDIOBOOK_DIR": str(library_dir)}), \
+             patch.object(sys, "stdout", stdout):
+            backup.main()
+        return json.loads(stdout.getvalue())
+
+    def test_no_new_books_emits_full_json_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library_dir = Path(tmp)
+            (library_dir / "books.json").write_text("[]")
+            payload = self._run_main(library_dir)
+            self.assertEqual(payload["new_books"], 0)
+            self.assertEqual(payload["downloaded"], 0)
+            self.assertEqual(payload["skipped"], 0)
+            self.assertEqual(payload["failed"], 0)
+            self.assertEqual(payload["missing_on_disk"], 0)
+            self.assertEqual(payload["skipped_by_filter"], [])
+            self.assertEqual(payload["books"], [])
+
+    def test_skiplist_present_surfaces_filter_audit(self):
+        # Inventory is empty (books.json = []), so the skiplist is the
+        # sole filter keeping the synthesized library ASINs out of the
+        # new-books bucket. Proves the audit field reflects the filter
+        # even when nothing makes it through the download branch.
+        with tempfile.TemporaryDirectory() as tmp:
+            library_dir = Path(tmp)
+            (library_dir / "books.json").write_text("[]")
+            (library_dir / backup.SKIPLIST_FILENAME).write_text(
+                "ASIN_SKIP_1\nASIN_SKIP_2\n", encoding="utf-8",
+            )
+            library_fixture = [
+                {"asin": "ASIN_SKIP_1", "title": "Skip me 1"},
+                {"asin": "ASIN_SKIP_2", "title": "Skip me 2"},
+            ]
+            stdout = io.StringIO()
+            with patch.object(
+                backup, "fetch_enriched_library", return_value=library_fixture,
+            ), patch.object(sys, "argv", ["backup.py", "--json"]), \
+               patch.dict(os.environ, {"AUDIOBOOK_DIR": str(library_dir)}), \
+               patch.object(sys, "stdout", stdout):
+                backup.main()
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(
+                payload["skipped_by_filter"], ["ASIN_SKIP_1", "ASIN_SKIP_2"],
+            )
+            self.assertEqual(payload["books"], [])
 
 
 if __name__ == "__main__":
