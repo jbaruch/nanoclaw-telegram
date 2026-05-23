@@ -106,8 +106,6 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - LITELLM_GATEWAY_API_KEY=${LITELLM_GATEWAY_API_KEY}
       - TZ=America/Chicago
-    env_file:
-      - .env
     ports:
       # Internal — exposed on the host so an operator can hit the
       # /health endpoint from the NAS shell during rollout debugging.
