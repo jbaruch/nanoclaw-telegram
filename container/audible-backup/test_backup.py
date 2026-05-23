@@ -503,10 +503,10 @@ class MainEmptyLibraryJsonTest(unittest.TestCase):
             self.assertEqual(payload["books"], [])
 
     def test_skiplist_present_surfaces_filter_audit(self):
-        # Inventory contains ASIN1 (already known) so it doesn't reach
-        # find_new_books anyway; the skiplist test books are arbitrary
-        # ASINs we synthesize via the patched library to prove the audit
-        # field reflects the filter even when nothing makes it through.
+        # Inventory is empty (books.json = []), so the skiplist is the
+        # sole filter keeping the synthesized library ASINs out of the
+        # new-books bucket. Proves the audit field reflects the filter
+        # even when nothing makes it through the download branch.
         with tempfile.TemporaryDirectory() as tmp:
             library_dir = Path(tmp)
             (library_dir / "books.json").write_text("[]")
