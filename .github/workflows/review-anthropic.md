@@ -65,8 +65,17 @@ engine:
 timeout-minutes: 15
 
 network:
+  # The `node` ecosystem identifier (covers registry.npmjs.org + npm
+  # proxies) is required so the reviewer can verify npm-dependency
+  # installability per `jbaruch/coding-policy: dependency-management`
+  # ("Every dependency must be installable in CI"); the Anthropic
+  # engine's `defaults` covers Anthropic API + GitHub but not the npm
+  # registry. Pair-symmetric with the OpenAI workflow's allowlist
+  # entry (see its inline comment for the first observed incident —
+  # jbaruch/nanoclaw#641 OpenAI review #2).
   allowed:
     - defaults
+    - node
 
 # Top-level `steps:` (NOT `pre-steps:`) — these run AFTER gh-aw's
 # `Create gh-aw temp directory` step and BEFORE the agent executes. The

@@ -53,13 +53,21 @@ network:
   # domains): `github` covers github.com / codeload / raw / objects,
   # `threat-detection` covers api.github.com. The Anthropic-side template
   # inherits GitHub via its own `defaults`; this list is the OpenAI-side
-  # equivalent.
+  # equivalent. The `node` ecosystem identifier (covers
+  # registry.npmjs.org + npm proxies) is required so the reviewer can
+  # verify npm-dependency installability per `jbaruch/coding-policy:
+  # dependency-management` ("Every dependency must be installable in
+  # CI"); without it the reviewer flags every PR that adds a new npm
+  # dependency with a runner-firewall-shaped false positive
+  # (jbaruch/nanoclaw#641 OpenAI review #2 was the first observed
+  # incident).
   allowed:
     - defaults
     - github
     - threat-detection
     - ab.chatgpt.com
     - chatgpt.com
+    - node
 
 # Top-level `steps:` (NOT `pre-steps:`) — these run AFTER gh-aw's
 # `Create gh-aw temp directory` step and BEFORE the agent executes. The
