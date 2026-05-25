@@ -12,6 +12,7 @@
  * OneCLI is the only credential path.
  */
 import { OneCLI, OneCLIError, OneCLIRequestError } from '@onecli-sh/sdk';
+import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 import { TRUST_TIERS, type TrustTier } from './trust-tier.js';
 
@@ -33,9 +34,19 @@ interface OneCliEnvOptions {
   apiKey: string;
 }
 
+/**
+ * Read OneCLI config from `.env` via `readEnvFile`, NOT from
+ * `process.env`. The orchestrator's `docker-compose.yml` deliberately
+ * forwards only an explicit allowlist of env vars to the orchestrator
+ * container (per `src/env.ts`: "Does NOT load anything into process.env
+ * — this keeps secrets out of the process environment so they don't
+ * leak to child processes"). Reading from `.env` directly matches
+ * every other credential-read path in the orchestrator.
+ */
 function readEnvOptions(): OneCliEnvOptions | null {
-  const url = process.env.ONECLI_URL;
-  const apiKey = process.env.ONECLI_API_KEY;
+  const env = readEnvFile(['ONECLI_URL', 'ONECLI_API_KEY']);
+  const url = env.ONECLI_URL;
+  const apiKey = env.ONECLI_API_KEY;
   if (!url || !apiKey) return null;
   return { url, apiKey };
 }

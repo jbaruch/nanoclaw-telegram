@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 const {
   ensureAgentMock,
   applyContainerConfigMock,
+  envFileMock,
   FakeOneCLIError,
   FakeOneCLIRequestError,
 } = vi.hoisted(() => {
@@ -30,6 +31,12 @@ const {
   return {
     ensureAgentMock: vi.fn(),
     applyContainerConfigMock: vi.fn(),
+    // envFileMock must be hoisted because the `./env.js` mock factory
+    // below closes over it. Without `vi.hoisted`, the mock factory
+    // (which Vitest hoists above top-level `const` declarations) could
+    // capture an uninitialized binding and throw a TDZ ReferenceError
+    // on the first `readEnvFile()` call from imported code.
+    envFileMock: {} as Record<string, string>,
     FakeOneCLIError,
     FakeOneCLIRequestError,
   };
@@ -46,6 +53,14 @@ vi.mock('@onecli-sh/sdk', () => {
     OneCLIRequestError: FakeOneCLIRequestError,
   };
 });
+
+vi.mock('./env.js', () => ({
+  readEnvFile: vi.fn((keys: string[]) =>
+    Object.fromEntries(
+      keys.filter((k) => k in envFileMock).map((k) => [k, envFileMock[k]]),
+    ),
+  ),
+}));
 
 vi.mock('./logger.js', () => ({
   logger: {
@@ -65,22 +80,11 @@ import {
 } from './onecli-client.js';
 
 describe('onecli-client', () => {
-  const originalUrl = process.env.ONECLI_URL;
-  const originalKey = process.env.ONECLI_API_KEY;
-
   beforeEach(() => {
-    delete process.env.ONECLI_URL;
-    delete process.env.ONECLI_API_KEY;
+    for (const k of Object.keys(envFileMock)) delete envFileMock[k];
     _resetOneCliClient();
     ensureAgentMock.mockReset();
     applyContainerConfigMock.mockReset();
-  });
-
-  afterEach(() => {
-    if (originalUrl === undefined) delete process.env.ONECLI_URL;
-    else process.env.ONECLI_URL = originalUrl;
-    if (originalKey === undefined) delete process.env.ONECLI_API_KEY;
-    else process.env.ONECLI_API_KEY = originalKey;
   });
 
   describe('isOneCliConfigured', () => {
@@ -89,18 +93,18 @@ describe('onecli-client', () => {
     });
 
     it('returns false when only URL is set', () => {
-      process.env.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
       expect(isOneCliConfigured()).toBe(false);
     });
 
     it('returns false when only API key is set', () => {
-      process.env.ONECLI_API_KEY = 'oc_test';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
       expect(isOneCliConfigured()).toBe(false);
     });
 
     it('returns true when both are set', () => {
-      process.env.ONECLI_URL = 'http://localhost:10254';
-      process.env.ONECLI_API_KEY = 'oc_test';
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
       expect(isOneCliConfigured()).toBe(true);
     });
   });
@@ -112,8 +116,8 @@ describe('onecli-client', () => {
     });
 
     it('calls SDK ensureAgent with tier-scoped identifier', async () => {
-      process.env.ONECLI_URL = 'http://localhost:10254';
-      process.env.ONECLI_API_KEY = 'oc_test';
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
       ensureAgentMock.mockResolvedValue({
         name: 'NanoClaw main tier',
         identifier: 'nanoclaw-main',
@@ -129,8 +133,8 @@ describe('onecli-client', () => {
     });
 
     it('logs and resolves on OneCLIRequestError', async () => {
-      process.env.ONECLI_URL = 'http://localhost:10254';
-      process.env.ONECLI_API_KEY = 'oc_test';
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
       ensureAgentMock.mockRejectedValue(
         new FakeOneCLIRequestError('boom', {
           url: 'http://localhost:10254/v1/agents',
@@ -142,16 +146,16 @@ describe('onecli-client', () => {
     });
 
     it('logs and resolves on OneCLIError', async () => {
-      process.env.ONECLI_URL = 'http://localhost:10254';
-      process.env.ONECLI_API_KEY = 'oc_test';
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
       ensureAgentMock.mockRejectedValue(new FakeOneCLIError('missing api key'));
 
       await expect(ensureAgentForTier('untrusted')).resolves.toBeUndefined();
     });
 
     it('propagates unexpected error classes', async () => {
-      process.env.ONECLI_URL = 'http://localhost:10254';
-      process.env.ONECLI_API_KEY = 'oc_test';
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
       ensureAgentMock.mockRejectedValue(new TypeError('bad call'));
 
       await expect(ensureAgentForTier('main')).rejects.toThrow(TypeError);
@@ -169,8 +173,8 @@ describe('onecli-client', () => {
     });
 
     it('calls SDK applyContainerConfig with tier agent + bundle/host opts', async () => {
-      process.env.ONECLI_URL = 'http://localhost:10254';
-      process.env.ONECLI_API_KEY = 'oc_test';
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
       applyContainerConfigMock.mockImplementation((args: string[]) => {
         args.push('-e', 'HTTPS_PROXY=http://onecli');
         return Promise.resolve(true);
@@ -194,8 +198,8 @@ describe('onecli-client', () => {
       // surface this as a WARN — otherwise a misconfigured gateway results
       // in silent fallback with zero diagnostic for the operator.
       const { logger } = await import('./logger.js');
-      process.env.ONECLI_URL = 'http://localhost:10254';
-      process.env.ONECLI_API_KEY = 'oc_test';
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
       applyContainerConfigMock.mockResolvedValue(false);
 
       const args = ['run', '-i', '--rm', 'image'];
@@ -213,8 +217,8 @@ describe('onecli-client', () => {
     });
 
     it('returns false (does not throw) on OneCLIRequestError', async () => {
-      process.env.ONECLI_URL = 'http://localhost:10254';
-      process.env.ONECLI_API_KEY = 'oc_test';
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
       applyContainerConfigMock.mockRejectedValue(
         new FakeOneCLIRequestError('boom', {
           url: 'http://localhost:10254/v1/container-config',
@@ -228,8 +232,8 @@ describe('onecli-client', () => {
     });
 
     it('returns false on OneCLIError', async () => {
-      process.env.ONECLI_URL = 'http://localhost:10254';
-      process.env.ONECLI_API_KEY = 'oc_test';
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
       applyContainerConfigMock.mockRejectedValue(
         new FakeOneCLIError('bad config'),
       );
@@ -240,8 +244,8 @@ describe('onecli-client', () => {
     });
 
     it('propagates unexpected error classes', async () => {
-      process.env.ONECLI_URL = 'http://localhost:10254';
-      process.env.ONECLI_API_KEY = 'oc_test';
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
       applyContainerConfigMock.mockRejectedValue(new TypeError('bad call'));
 
       const args = ['run', '-i', '--rm', 'image'];
