@@ -27,6 +27,11 @@ import { writeShutdownCheckpoints } from './shutdown-checkpoints.js';
 import { computeThresholds } from './threshold.js';
 import { emitSessionTokens } from './usage-telemetry.js';
 import { startCredentialProxy } from './credential-proxy.js';
+import {
+  ensureAgentForTier,
+  isOneCliConfigured,
+  TRUST_TIERS,
+} from './onecli-client.js';
 import './channels/index.js';
 import {
   getChannelFactory,
@@ -2607,6 +2612,13 @@ async function main(): Promise<void> {
     CREDENTIAL_PROXY_PORT,
     PROXY_BIND_HOST,
   );
+
+  // #564 groundwork: when OneCLI is configured (ONECLI_URL + ONECLI_API_KEY
+  // set), register the tier-scoped agents so subsequent container spawns
+  // can attach to them via `applyContainerConfig`. No-op otherwise.
+  if (isOneCliConfigured()) {
+    await Promise.all(TRUST_TIERS.map((tier) => ensureAgentForTier(tier)));
+  }
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {

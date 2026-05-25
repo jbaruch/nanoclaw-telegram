@@ -52,6 +52,8 @@ import {
 import { defaultComputeNextRun } from './cadence-registry.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { registerContainer, unregisterContainer } from './proxy-registry.js';
+import { applyOneCliToSpawn, isOneCliConfigured } from './onecli-client.js';
+import type { TrustTier } from './trust-tier.js';
 import { rebuildCadenceRegistryForGroup } from './db.js';
 import { isHandoffActive } from './handoff.js';
 import { sweepStaleInputs } from './ipc-input-sweep.js';
@@ -3191,7 +3193,7 @@ export async function runContainerAgent(
   // on close + spawn-error. The token is generated here so the URL embedded
   // in the container env is unique per spawn, even across restarts of the
   // same group/session.
-  const trustTier: 'main' | 'trusted' | 'untrusted' = input.isMain
+  const trustTier: TrustTier = input.isMain
     ? 'main'
     : group.containerConfig?.trusted === true
       ? 'trusted'
@@ -3230,6 +3232,17 @@ export async function runContainerAgent(
         attributionToken,
         input.taskAgentModel,
       );
+
+    // #564 groundwork: when OneCLI is configured, mutate containerArgs to add
+    // HTTPS_PROXY env, mount the OneCLI CA bundle, and add
+    // host.docker.internal mapping. The synchronous gate keeps the pre-#635
+    // spawn path microtask-free when OneCLI is off — relevant for tests that
+    // emit 'close' between `runContainerAgent` invocation and the spawn
+    // registering its close handler. The logger.debug below picks up the
+    // mutated args for the audit record.
+    if (isOneCliConfigured()) {
+      await applyOneCliToSpawn(containerArgs, trustTier);
+    }
 
     logger.debug(
       {
