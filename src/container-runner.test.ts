@@ -168,6 +168,8 @@ import {
   resolvePerGroupAgentModel,
   resolveSessionAgentModel,
   DEFAULT_AGENT_MODEL,
+  getRegistryTilesDir,
+  getInstalledTiles,
 } from './container-runner.js';
 import { logger } from './logger.js';
 import type { RegisteredGroup } from './types.js';
@@ -548,6 +550,78 @@ describe('selectTiles', () => {
       'nanoclaw-core',
       'nanoclaw-trusted',
     ]);
+  });
+});
+
+// --- tessl 0.81 plugins/ vs legacy tiles/ registry dir resolution ---
+//
+// tessl >= 0.81 installs to `.tessl/plugins/`; 0.81's `tessl update`
+// migrates an existing tree by writing plugins/ and DELETING tiles/.
+// getRegistryTilesDir must prefer plugins/ when present and fall back to
+// tiles/ for pre-0.81 installs and cold start. TILE_OWNER is mocked to
+// 'test' (see the config mock above). `fs` is globally mocked in this
+// file (existsSync defaults to false), so these tests drive the mock
+// rather than touching the real filesystem — mirroring the usage.jsonl
+// mount tests below.
+describe('getRegistryTilesDir / getInstalledTiles (plugins vs tiles)', () => {
+  // Dynamic `import('fs')` carries the synthetic `default` (esModuleInterop);
+  // the intersection makes that explicit for the describe-scoped handle.
+  let fsModule: typeof import('fs') & { default: typeof import('fs') };
+  let pluginsDir: string;
+  let tilesDir: string;
+
+  const dirent = (name: string) =>
+    ({ name, isDirectory: () => true }) as unknown as import('fs').Dirent;
+
+  beforeEach(async () => {
+    fsModule = await import('fs');
+    const pathMod = await import('path');
+    const tesslRoot = pathMod.join(process.cwd(), 'tessl-workspace', '.tessl');
+    pluginsDir = pathMod.join(tesslRoot, 'plugins', 'test');
+    tilesDir = pathMod.join(tesslRoot, 'tiles', 'test');
+  });
+
+  afterEach(() => {
+    vi.mocked(fsModule.default.existsSync).mockReturnValue(false);
+    vi.mocked(fsModule.default.readdirSync).mockReturnValue([]);
+  });
+
+  it('prefers plugins/ when only plugins/ exists (0.81+)', () => {
+    vi.mocked(fsModule.default.existsSync).mockImplementation(
+      (p) => p === pluginsDir,
+    );
+    expect(getRegistryTilesDir()).toBe(pluginsDir);
+    // `as never` sidesteps the readdirSync overload union (the
+    // withFileTypes:true overload wants Dirent<Buffer>[]).
+    vi.mocked(fsModule.default.readdirSync).mockImplementation(((d: unknown) =>
+      d === pluginsDir ? [dirent('nanoclaw-core')] : []) as never);
+    expect(getInstalledTiles()).toEqual(['nanoclaw-core']);
+  });
+
+  it('falls back to tiles/ when plugins/ is absent (pre-0.81)', () => {
+    vi.mocked(fsModule.default.existsSync).mockReturnValue(false);
+    expect(getRegistryTilesDir()).toBe(tilesDir);
+    vi.mocked(fsModule.default.readdirSync).mockImplementation(((d: unknown) =>
+      d === tilesDir ? [dirent('nanoclaw-core')] : []) as never);
+    expect(getInstalledTiles()).toEqual(['nanoclaw-core']);
+  });
+
+  it('prefers plugins/ over a stale tiles/ when both exist', () => {
+    vi.mocked(fsModule.default.existsSync).mockImplementation(
+      (p) => p === pluginsDir || p === tilesDir,
+    );
+    expect(getRegistryTilesDir()).toBe(pluginsDir);
+  });
+
+  it('returns the tiles/ path and null on a never-installed workspace', () => {
+    vi.mocked(fsModule.default.existsSync).mockReturnValue(false);
+    expect(getRegistryTilesDir()).toBe(tilesDir);
+    vi.mocked(fsModule.default.readdirSync).mockImplementation(() => {
+      const err = new Error('ENOENT') as NodeJS.ErrnoException;
+      err.code = 'ENOENT';
+      throw err;
+    });
+    expect(getInstalledTiles()).toBeNull();
   });
 });
 
