@@ -10,10 +10,10 @@
 // That collapse was overloaded — the orchestrator and the task-scheduler
 // both also branched on `result.result` to populate `task_run_logs.result`
 // for observability. Wrapper scheduled-task skills (`nightly-external-sync`,
-// `entertainment-sync`, `soul-searching-wrapper`) which always finish by
-// calling `send_message` therefore landed with `status='success'` +
-// `result=null` in `task_run_logs`, breaking forensic greps and silent-
-// success accounting (`task_run_logs.status='success'` ≠ task ran).
+// `entertainment-sync`) which always finish by calling `send_message`
+// therefore landed with `status='success'` + `result=null` in
+// `task_run_logs`, breaking forensic greps and silent-success accounting
+// (`task_run_logs.status='success'` ≠ task ran).
 //
 // Fix: split the signals. `result` always carries the SDK's text result
 // when present (so observability is preserved); a new `chat_displayed`
