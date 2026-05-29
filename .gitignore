@@ -42,6 +42,10 @@ groups/global/*
 .vscode/
 .gemini/
 
+# Local agent/tool runtime dirs
+.antigravitycli/
+.playwright-mcp/
+
 # Skills system (local per-installation state)
 .nanoclaw/
 
