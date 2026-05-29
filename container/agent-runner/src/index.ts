@@ -44,6 +44,7 @@ import {
 } from './memory-staleness-reminder.js';
 import { validateComposioArgs } from './composio-arg-validator.js';
 import { detectComposioFidelity } from './composio-fidelity.js';
+import { byairMcpServer } from './byair-mcp.js';
 import {
   COUNTERS_FILENAME,
   DEFAULT_CAP_MATRIX,
@@ -3276,6 +3277,13 @@ async function runQuery(
           },
         }
       : {}),
+    // byAir on-demand flight lookup (#645). Registered raw (the URL
+    // carries the API key inline) and deferred — NOT alwaysLoad — so it
+    // stays behind a ToolSearch hop and off the proactive precheck/wake
+    // loop. Only main/trusted containers receive BYAIR_MCP_URL (see
+    // CONTAINER_VARS in src/container-runner.ts), so the spread is a
+    // no-op everywhere else. See byair-mcp.ts for the raw-vs-shim call.
+    ...byairMcpServer(process.env.BYAIR_MCP_URL),
     ...(fs.existsSync('/home/node/.tessl/api-credentials.json')
       ? {
           tessl: {
