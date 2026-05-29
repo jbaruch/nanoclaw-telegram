@@ -24,7 +24,10 @@
 # Env overrides:
 #   TILE_OWNER          GitHub owner of the tile repos (default: jbaruch)
 #   NANOCLAW_TESSL_ROOT Canonical install root inside the orchestrator
-#                       container (default: /app/tessl-workspace/.tessl/tiles)
+#                       container. Default is auto-detected: prefers
+#                       /app/tessl-workspace/.tessl/plugins when the owner
+#                       install exists there (tessl >= 0.81), else falls
+#                       back to /app/tessl-workspace/.tessl/tiles.
 
 set -euo pipefail
 
@@ -43,7 +46,20 @@ TILE_OWNER_VAL="${TILE_OWNER_VAL:-jbaruch}"
 # via `NANOCLAW_TESSL_ROOT` only when the install layout has been
 # deliberately moved — otherwise leave the default. The script reports
 # this path explicitly so the operator knows which tree was inspected.
-INSTALL_ROOT="${NANOCLAW_TESSL_ROOT:-/app/tessl-workspace/.tessl/tiles}"
+#
+# tessl >= 0.81 installs to `.tessl/plugins/` (older CLIs used
+# `.tessl/tiles/`, which 0.81's `tessl update` migrates+deletes). Probe
+# the container for the OWNER subdir under `plugins/` first — a bare
+# `plugins/` test would mis-select the new root when it exists for a
+# different owner while this owner's install is still under `tiles/`.
+# Fall back to `tiles/` for a pre-0.81 orchestrator image.
+if [ -n "${NANOCLAW_TESSL_ROOT:-}" ]; then
+  INSTALL_ROOT="$NANOCLAW_TESSL_ROOT"
+elif nas "docker exec nanoclaw test -d /app/tessl-workspace/.tessl/plugins/$TILE_OWNER_VAL" >/dev/null 2>&1; then
+  INSTALL_ROOT="/app/tessl-workspace/.tessl/plugins"
+else
+  INSTALL_ROOT="/app/tessl-workspace/.tessl/tiles"
+fi
 
 # Pick a SHA-256 hasher available on the host. Linux defaults to
 # `sha256sum`; macOS ships `shasum -a 256` instead. Probe in that
@@ -73,15 +89,16 @@ echo ""
 # heads-up that an operator running ad-hoc grep / cat against the
 # wrong path will see stale content.
 #
-# Match shape: `*/tessl-workspace/.tessl/tiles` anywhere under /app
-# that ISN'T the canonical INSTALL_ROOT. The bare-shape filter
-# excludes per-group container installs at
-# `/app/data/sessions/<group>/.claude/.tessl/tiles`, which are
-# legitimate runtime installs for the spawned agent containers
-# (different layer; see container-runner.ts session mounts) — those
+# Match shape: `*/tessl-workspace/.tessl/{tiles,plugins}` anywhere
+# under /app that ISN'T the canonical INSTALL_ROOT. Both dir names are
+# matched because tessl >= 0.81 renamed `tiles/` to `plugins/`. The
+# `tessl-workspace`-scoped shape excludes per-group container installs at
+# `/app/data/sessions/<group>/.claude/.tessl/tiles` — the orchestrator's
+# internal mirror (written by container-runner cpSync, not the tessl CLI,
+# so it stays `tiles/`; see container-runner.ts session mounts) — those
 # can drift on their own and warrant their own reconcile, but they
 # are not what the orchestrator's `tessl update` writes.
-LEGACY_PATHS=$(nas "docker exec nanoclaw find /app -maxdepth 5 -type d -path '*/tessl-workspace/.tessl/tiles' 2>/dev/null" || true)
+LEGACY_PATHS=$(nas "docker exec nanoclaw find /app -maxdepth 5 -type d \( -path '*/tessl-workspace/.tessl/tiles' -o -path '*/tessl-workspace/.tessl/plugins' \) 2>/dev/null" || true)
 if [ -n "$LEGACY_PATHS" ]; then
   # `grep -Fvx` does an exact fixed-string line match (no regex), so a
   # path with `.` or `*` doesn't accidentally match the wrong line.
@@ -136,7 +153,13 @@ EOF
       echo "ERR"
       exit 0
     fi
-    local installed_dir=".tessl/tiles/$TILE_OWNER_VAL/$tile"
+    # Local `tessl install` above uses the host CLI, which writes
+    # `.tessl/plugins/` on >= 0.81 and `.tessl/tiles/` on older. Prefer
+    # plugins/, fall back to tiles/.
+    local installed_dir=".tessl/plugins/$TILE_OWNER_VAL/$tile"
+    if [ ! -d "$installed_dir" ]; then
+      installed_dir=".tessl/tiles/$TILE_OWNER_VAL/$tile"
+    fi
     if [ ! -d "$installed_dir" ]; then
       echo "ERR"
       exit 0

@@ -107,15 +107,22 @@ export function selectTiles(
  * Resolve the directory the local Tessl registry installs tiles into.
  * Single source of truth for both spawn-time tile copy and write-time
  * `set_additional_tiles` validation (#305).
+ *
+ * tessl >= 0.81 installs to `.tessl/plugins/`; older CLIs used
+ * `.tessl/tiles/`. 0.81's `tessl update` migrates an existing tree by
+ * writing `plugins/` and DELETING `tiles/`, so once the orchestrator
+ * image's floating `npm install -g tessl` crosses 0.81 the workspace
+ * flips dirs. Prefer `plugins/` when present; fall back to `tiles/` for
+ * pre-0.81 installs and as the cold-start default (so `getInstalledTiles`
+ * still ENOENTs to `null` on a never-installed workspace).
  */
 export function getRegistryTilesDir(): string {
-  return path.join(
-    process.cwd(),
-    'tessl-workspace',
-    '.tessl',
-    'tiles',
-    TILE_OWNER,
-  );
+  const tesslRoot = path.join(process.cwd(), 'tessl-workspace', '.tessl');
+  const pluginsDir = path.join(tesslRoot, 'plugins', TILE_OWNER);
+  if (fs.existsSync(pluginsDir)) {
+    return pluginsDir;
+  }
+  return path.join(tesslRoot, 'tiles', TILE_OWNER);
 }
 
 /**
