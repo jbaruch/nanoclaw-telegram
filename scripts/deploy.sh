@@ -249,8 +249,43 @@ else
 fi
 
 # 3. Update tiles
+#
+# The previous form piped `tessl update` through `| tail -10`, which both
+# truncated the error AND discarded tessl's exit code (a pipeline returns
+# the LAST command's status, so `tail`'s 0 masked a failed sync). Deploys
+# then reported success while applying nothing — the orchestrator kept
+# running stale tiles. See `jbaruch/nanoclaw-host: post-merge-publish-watch`.
+#
+# Two failure modes this guards against:
+#   1. tessl auto-updates its own binary in the background (see
+#      ~/.tessl/auto-update.log). When that swap races this `tessl update`,
+#      the sync fails with a non-zero exit. A single retry after a short
+#      settle clears it (the binary is stable by the second attempt).
+#   2. A genuine sync error (bad manifest, registry outage) — surface the
+#      full output and HARD-FAIL the deploy rather than limp on with stale
+#      tiles.
+# `--accept-warnings` still installs tiles carrying advisory moderation
+# verdicts (e.g. a `.env.example` flagged W008), so those do NOT fail the
+# deploy — only a non-zero `tessl update` exit does.
 echo "3. Updating tiles from registry..."
-docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl update --yes --accept-warnings 2>&1' | tail -10
+tessl_update_attempt=0
+while :; do
+    tessl_update_attempt=$((tessl_update_attempt + 1))
+    # Capture status of the in-container tessl run itself, NOT a piped tail.
+    if docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl update --yes --accept-warnings 2>&1'; then
+        break
+    fi
+    if [ "$tessl_update_attempt" -ge 2 ]; then
+        echo "ERROR: 'tessl update' failed (exit non-zero) after $tessl_update_attempt attempts." >&2
+        echo "       Tiles were NOT updated — aborting deploy so it can't report a false success." >&2
+        echo "       Full tessl output is above. Common cause: the tessl CLI auto-updated its" >&2
+        echo "       binary mid-run (see ~/.tessl/auto-update.log); re-run ./scripts/deploy.sh." >&2
+        exit 1
+    fi
+    echo "  'tessl update' exited non-zero (attempt $tessl_update_attempt) — the tessl CLI" >&2
+    echo "  auto-updates its binary in the background and can race this step; retrying in 15s..." >&2
+    sleep 15
+done
 echo ""
 
 # 3b. Verify every tessl.json in the repo declares mode: managed and
