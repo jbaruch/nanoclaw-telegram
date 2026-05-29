@@ -43,8 +43,12 @@ describe('SECRET_CONTAINER_VARS', () => {
     expect(SECRET_CONTAINER_VARS.has('COMPOSIO_API_KEY')).toBe(true);
   });
 
-  it('lists COMPOSIO_MCP_KEY (MCP gateway, x-consumer-api-key, consumer-scoped ck_* key — independent namespace from the REST key per 2026-05-06 empirical verification)', () => {
-    expect(SECRET_CONTAINER_VARS.has('COMPOSIO_MCP_KEY')).toBe(true);
+  it('lists COMPOSIO_MCP_URL (headless custom-MCP-server URL, x-api-key — account-identifying server id, same env-file treatment as the API key; replaced the retired ck_* COMPOSIO_MCP_KEY when Connect MCP moved to interactive OAuth)', () => {
+    expect(SECRET_CONTAINER_VARS.has('COMPOSIO_MCP_URL')).toBe(true);
+  });
+
+  it('no longer lists COMPOSIO_MCP_KEY (Connect MCP gateway moved to interactive AuthKit-JWT OAuth; the headless path uses the ak_* key against a custom MCP server)', () => {
+    expect(SECRET_CONTAINER_VARS.has('COMPOSIO_MCP_KEY')).toBe(false);
   });
 
   it('lists COMPOSIO_USER_ID (account-identifying — same env-file treatment as the API key, jbaruch/nanoclaw#509)', () => {
@@ -120,16 +124,16 @@ describe('buildSecretEnvFile', () => {
     expect(content).toContain('OTHER_SECRET=sk-b\n');
   });
 
-  it('emits both COMPOSIO_API_KEY and COMPOSIO_MCP_KEY when both are present (independent surfaces — REST + MCP)', () => {
-    // Both Composio keys forward through the same env-file. Earlier
-    // shape (single COMPOSIO_API_KEY, also used for MCP via
-    // x-consumer-api-key) was empirically broken for REST when the
-    // value was a `ck_*` consumer key (the only flavor we had until
-    // the project key model rolled out). The split lets each surface
-    // get its own correctly-scoped value without breaking the other.
+  it('emits both COMPOSIO_API_KEY and COMPOSIO_MCP_URL when both are present (REST + headless custom MCP server, both on the ak_* key)', () => {
+    // Both forward through the same env-file. The `ak_*` project key
+    // (COMPOSIO_API_KEY) authenticates BOTH surfaces via `x-api-key`:
+    // REST and the headless custom MCP server. COMPOSIO_MCP_URL carries
+    // that server's account-specific `/v3/mcp/<id>/mcp` URL, kept off
+    // the docker command line for the same reason COMPOSIO_USER_ID is.
     const result = buildSecretEnvFile({
       COMPOSIO_API_KEY: 'ak-rest-project-key',
-      COMPOSIO_MCP_KEY: 'ck-mcp-consumer-key',
+      COMPOSIO_MCP_URL:
+        'https://backend.composio.dev/v3/mcp/00000000-0000-0000-0000-000000000000/mcp',
     });
     expect(result).not.toBeNull();
     const filePath = result!.args[1];
@@ -137,7 +141,9 @@ describe('buildSecretEnvFile', () => {
 
     const content = fs.readFileSync(filePath, 'utf8');
     expect(content).toContain('COMPOSIO_API_KEY=ak-rest-project-key\n');
-    expect(content).toContain('COMPOSIO_MCP_KEY=ck-mcp-consumer-key\n');
+    expect(content).toContain(
+      'COMPOSIO_MCP_URL=https://backend.composio.dev/v3/mcp/00000000-0000-0000-0000-000000000000/mcp\n',
+    );
   });
 
   it('refuses values containing newlines or NUL bytes', () => {

@@ -3234,6 +3234,14 @@ async function runQuery(
   // the agent discovers them on demand via ToolSearch. `alwaysLoad: true`
   // pins servers whose tools fire on most turns, so they bypass the
   // discovery hop. See https://github.com/jbaruch/nanoclaw/issues/30.
+
+  // Hoisted so the truthiness gate narrows them to `string` inside the
+  // registration block below (TS doesn't narrow `process.env.X` across an
+  // object-literal boundary).
+  const composioMcpUrl = process.env.COMPOSIO_MCP_URL;
+  const composioApiKey = process.env.COMPOSIO_API_KEY;
+  const composioUserId = process.env.COMPOSIO_USER_ID;
+
   const mcpServersConfig = {
     nanoclaw: {
       command: 'node',
@@ -3257,22 +3265,26 @@ async function runQuery(
       // before every reply.
       alwaysLoad: true,
     },
-    ...(process.env.COMPOSIO_MCP_KEY
+    ...(composioMcpUrl && composioApiKey && composioUserId
       ? {
           composio: {
             type: 'http' as const,
-            url: 'https://connect.composio.dev/mcp',
+            // Composio's headless custom-MCP-server endpoint, authenticated
+            // with the project-scoped `ak_*` key via `x-api-key`. This is
+            // NOT the consumer "Connect" gateway (connect.composio.dev/mcp),
+            // which migrated to interactive AuthKit-JWT OAuth and cannot run
+            // in an unattended container. The server's tool surface
+            // (allowed_tools + bound toolkits) is configured in the Composio
+            // dashboard/API; COMPOSIO_MCP_URL carries its `/v3/mcp/<id>/mcp`
+            // URL and `user_id` selects the connected accounts. `.trim()`
+            // guards a stray trailing space in COMPOSIO_USER_ID. See
+            // `SECRET_CONTAINER_VARS` in src/container-runner.ts for the
+            // operator contract.
+            url: `${composioMcpUrl}?user_id=${encodeURIComponent(
+              composioUserId.trim(),
+            )}`,
             headers: {
-              // Composio's MCP gateway uses `x-consumer-api-key` and
-              // accepts a CONSUMER-scoped key (`ck_*` prefix). Verified
-              // empirically 2026-05-06: this is a different namespace
-              // from REST's `x-api-key` header, which takes the
-              // project-scoped `ak_*` key in COMPOSIO_API_KEY — that
-              // key 401s against MCP. The orchestrator forwards both
-              // env vars so each surface gets its own correctly-scoped
-              // secret; see `SECRET_CONTAINER_VARS` in
-              // src/container-runner.ts for the operator contract.
-              'x-consumer-api-key': process.env.COMPOSIO_MCP_KEY,
+              'x-api-key': composioApiKey,
             },
           },
         }
@@ -3294,16 +3306,27 @@ async function runQuery(
       : {}),
   };
 
-  // Migration guard: warn operators who have the old single-key shape
-  // (COMPOSIO_API_KEY set, COMPOSIO_MCP_KEY absent). Without this hint the
-  // MCP registration block above silently falls through to `{}`, and
+  // Config guard: warn when Composio is partially configured. The
+  // registration above needs all three of COMPOSIO_MCP_URL, COMPOSIO_API_KEY,
+  // and COMPOSIO_USER_ID; with any missing it falls through to `{}` and
   // mcp__composio__* tools disappear with no error in the agent turn.
-  if (process.env.COMPOSIO_API_KEY && !process.env.COMPOSIO_MCP_KEY) {
+  const composioVars = [
+    'COMPOSIO_MCP_URL',
+    'COMPOSIO_API_KEY',
+    'COMPOSIO_USER_ID',
+  ] as const;
+  const composioPresent = composioVars.filter((v) => process.env[v]);
+  if (
+    composioPresent.length > 0 &&
+    composioPresent.length < composioVars.length
+  ) {
+    const missing = composioVars.filter((v) => !process.env[v]);
     console.error(
-      '[agent-runner] COMPOSIO_API_KEY is set but COMPOSIO_MCP_KEY is not — ' +
-        'Composio MCP tools (mcp__composio__*) are disabled. ' +
-        'Copy the ck_* consumer key into COMPOSIO_MCP_KEY in .env to restore ' +
-        'MCP access. See .env.example for the two-surface migration guide.',
+      `[agent-runner] Composio MCP partially configured — present: ${composioPresent.join(
+        ', ',
+      )}; missing: ${missing.join(
+        ', ',
+      )}. mcp__composio__* tools are disabled until all three are set in .env.`,
     );
   }
 

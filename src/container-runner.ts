@@ -428,22 +428,21 @@ export function atomicPublishDir(srcDir: string, dstDir: string): void {
  * `-e KEY=value` is fine.
  *
  * What counts as "sensitive" for this set:
- *   - Real credentials (API keys, OAuth tokens, etc.). Composio splits
- *     its auth surface into two independent keys, both treated as
- *     secrets here:
- *       - `COMPOSIO_API_KEY` (the original case, #107) — REST gateway
- *         (`backend.composio.dev`, header `x-api-key`). Project-scoped
- *         key, `ak_*` prefix. Read by the inline-fetch path in
- *         `tessl__composio-fetch`'s precheck (admin tile).
- *       - `COMPOSIO_MCP_KEY` — MCP gateway
- *         (`connect.composio.dev/mcp`, header `x-consumer-api-key`).
- *         Consumer-scoped key, `ck_*` prefix. Read by the agent
- *         runner's MCP server registration so `mcp__composio__*`
- *         tools authenticate.
- *     Both surfaces have independent key namespaces (verified
- *     empirically 2026-05-06): the `ck_*` consumer key 401s against
- *     REST while serving MCP fine, and the `ak_*` project key (when
- *     set) is what REST accepts. Treat them as two separate secrets.
+ *   - Real credentials (API keys, OAuth tokens, etc.). Composio uses
+ *     the project-scoped `ak_*` key (`COMPOSIO_API_KEY`, header
+ *     `x-api-key`, #107) for BOTH surfaces it exposes to us:
+ *       - REST (`backend.composio.dev/api/v3`) — read by the
+ *         inline-fetch path in `tessl__composio-fetch`'s precheck
+ *         (admin tile).
+ *       - A headless custom MCP server
+ *         (`backend.composio.dev/v3/mcp/<id>/mcp`, also `x-api-key`)
+ *         whose URL lives in `COMPOSIO_MCP_URL` — read by the agent
+ *         runner's MCP server registration so `mcp__composio__*` tools
+ *         authenticate.
+ *     The consumer "Connect" gateway (`connect.composio.dev/mcp`)
+ *     migrated to interactive AuthKit-JWT OAuth and can't run in an
+ *     unattended container, so the old `ck_*` `COMPOSIO_MCP_KEY` is
+ *     gone — both surfaces now share the one `ak_*` key.
  *   - Account-identifying values that aren't strictly credentials but
  *     would let an observer correlate the container to a specific user
  *     account at the upstream provider (`COMPOSIO_USER_ID` per #509 —
@@ -473,11 +472,12 @@ export function atomicPublishDir(srcDir: string, dstDir: string): void {
  */
 export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
   'COMPOSIO_API_KEY',
-  // Composio MCP consumer key (separate from COMPOSIO_API_KEY's REST
-  // project key — see the docstring above for the two-surface split).
-  // Read by the agent runner's MCP server registration; sent as
-  // `x-consumer-api-key` to `connect.composio.dev/mcp`.
-  'COMPOSIO_MCP_KEY',
+  // Composio headless custom-MCP-server URL (`/v3/mcp/<id>/mcp`). Read
+  // by the agent runner's MCP server registration; the embedded server
+  // id is account/project-identifying, so it gets the same env-file
+  // treatment as COMPOSIO_USER_ID to stay off `ps`/`docker ps`. Auth is
+  // COMPOSIO_API_KEY via `x-api-key` — there is no separate MCP key.
+  'COMPOSIO_MCP_URL',
   // Composio user_id bound to the connected accounts in the project
   // the COMPOSIO_API_KEY authenticates as. Not a credential per se —
   // identifies WHICH user's connections to act against — but it's
@@ -2735,7 +2735,7 @@ function buildContainerArgs(
 
   const CONTAINER_VARS = [
     'COMPOSIO_API_KEY',
-    'COMPOSIO_MCP_KEY',
+    'COMPOSIO_MCP_URL',
     'COMPOSIO_USER_ID',
     // Forwarded into main/trusted containers so the `gh` CLI authenticates
     // automatically. Same PAT the host-side github_backup handler uses
