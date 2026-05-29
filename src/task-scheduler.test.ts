@@ -1282,8 +1282,8 @@ describe('task scheduler', () => {
 
   it('streamed scheduled-task with chat_displayed=true skips chat-echo + storeMessage but still records task_run_logs.result (#581)', async () => {
     // Wrapper scheduled-task skills (nightly-external-sync,
-    // entertainment-sync, soul-searching-wrapper) always finish by
-    // calling send_message themselves — so the agent-runner sets
+    // entertainment-sync) always finish by calling send_message
+    // themselves — so the agent-runner sets
     // `chat_displayed: true` on the final IPC envelope. Pre-#581 the
     // agent-runner ALSO collapsed `result` to null, which broke
     // `task_run_logs.result` (silent-success: status=success +
