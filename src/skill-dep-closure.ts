@@ -39,9 +39,13 @@
 // (built-ins). The non-capturing `(?:tessl__)?` swallows the prefix when
 // present so the captured group is always the bare blocklist name.
 // Allows single OR double quotes, whitespace anywhere except inside
-// the name itself.
+// the name itself. The `[^)]*` suffix tolerates trailing named params
+// after the skill name (`Skill(skill: "wiki", args: "lint")`) — the
+// name is already captured, so anything up to the closing paren is
+// skipped. Without it, every `args:`-bearing invocation is invisible
+// to the closure and the rescue silently never fires (#652).
 const SKILL_INVOCATION_PATTERN =
-  /Skill\(\s*skill:\s*["'](?:tessl__)?([a-zA-Z0-9_-]+)["']\s*\)/g;
+  /Skill\(\s*skill:\s*["'](?:tessl__)?([a-zA-Z0-9_-]+)["'][^)]*\)/g;
 
 /**
  * Pure: extract every `Skill(skill: "...")` invocation target from a
