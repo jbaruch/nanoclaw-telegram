@@ -79,6 +79,7 @@ import {
   resolveDrainTimeoutMs,
 } from './hard-exit-watchdog.js';
 import { shouldSynthesizeSilentStop } from './silent-stop-synthesis.js';
+import { shouldSuppressEchoedResult } from './empty-turn-echo-suppression.js';
 import { isStaleSessionError } from './stale-session.js';
 import {
   DEFAULT_HYGIENE_WINDOW_MS,
@@ -3055,6 +3056,14 @@ async function runQuery(
   const pendingUserFacingToolUseIds = new Set<string>();
   let userFacingSendSucceeded = false;
 
+  // #651 — did the agent emit any user-facing content this query? Set
+  // true on the first non-empty `text` block or any `tool_use` block.
+  // On a turn that emits nothing (default-silence in a passive group),
+  // the SDK echoes the rendered input prompt into `result.result`; the
+  // success branch below uses this flag to drop that spurious echo so
+  // it isn't published back to chat. See `empty-turn-echo-suppression.ts`.
+  let assistantEmittedContent = false;
+
   // Streaming preview: accumulate assistant text and emit throttled
   let streamingTextAccum = '';
   let lastStreamEmit = 0;
@@ -3939,6 +3948,9 @@ async function runQuery(
           } else if (block.type === 'redacted_thinking') {
             log(`[msg #${messageCount}] redacted_thinking (encrypted)`);
           } else if (block.type === 'text' && block.text) {
+            // #651 — real user-facing text; the result echo below is
+            // legitimate, not the empty-turn prompt leak.
+            assistantEmittedContent = true;
             if (OBSERVER_ENABLED) {
               log(
                 `[msg #${messageCount}] text="${block.text.replace(/\s+/g, ' ').slice(0, 400)}"`,
@@ -3947,6 +3959,8 @@ async function runQuery(
               log(`[msg #${messageCount}] text len=${block.text.length}`);
             }
           } else if (block.type === 'tool_use') {
+            // #651 — a tool call is real work; not an empty turn.
+            assistantEmittedContent = true;
             // Tool inputs frequently carry tokens, email content, IDs,
             // and other sensitive user data. Default emission is just
             // the tool name + id; the full input JSON is gated on
@@ -4121,6 +4135,27 @@ async function runQuery(
           usage: latestUsage,
         });
         sawErrorResult = true;
+      } else if (
+        shouldSuppressEchoedResult(assistantEmittedContent, textResult ?? null)
+      ) {
+        // #651 — the turn emitted no text and no tool_use, yet the SDK
+        // handed back a non-empty `result.result`. On an empty turn the
+        // SDK echoes the rendered input prompt (`Human: <system-reminder>
+        // ...<messages>...`), which the orchestrator would otherwise
+        // publish as a bot reply — leaking the envelope and the next
+        // inbound message into chat. A silent turn has nothing to send,
+        // so drop the echo and emit a clean terminal success. See
+        // `empty-turn-echo-suppression.ts`.
+        log(
+          `Result #${resultCount}: subtype=${subtype} empty assistant turn — ` +
+            `suppressing echoed input prompt (len=${textResult?.length ?? 0})`,
+        );
+        writeOutput({
+          status: 'success',
+          result: null,
+          newSessionId,
+          usage: latestUsage,
+        });
       } else {
         // #47 + #581: if the agent already used send_message / send_file
         // successfully (tracked above), mark `chat_displayed: true`
