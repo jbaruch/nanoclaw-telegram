@@ -85,6 +85,33 @@ On hit:  \`Skill(skill: "tessl__check-cfps")\`
       new Set(['task-tz-sync', 'some_skill_name']),
     );
   });
+
+  it('extracts an invocation carrying an args: param (#652)', () => {
+    // The #652 outage: wiki-lint invokes `Skill(skill: "wiki",
+    // args: "lint")`. The old regex required `)` immediately after
+    // the closing quote, so the args form was invisible — wiki was
+    // never exempted and the maintenance container failed with
+    // "Unknown skill: wiki". The bare and args forms must both match.
+    const md = '`Skill(skill: "wiki", args: "lint")`\n';
+    expect(extractSkillDeps(md)).toEqual(new Set(['wiki']));
+  });
+
+  it('extracts a tessl__-prefixed invocation with args: (#652)', () => {
+    const md = '`Skill(skill: "tessl__resumable-cycle", args: "check foo")`\n';
+    expect(extractSkillDeps(md)).toEqual(new Set(['resumable-cycle']));
+  });
+
+  it('extracts both no-args and args forms in one SKILL.md (#652)', () => {
+    // Mixed shapes in a single skill — morning-brief calls
+    // resumable-cycle with args, then a leaf skill with none.
+    const md = `
+\`Skill(skill: "tessl__resumable-cycle", args: "check")\`
+\`Skill(skill: "tessl__morning-brief")\`
+`;
+    expect(extractSkillDeps(md)).toEqual(
+      new Set(['resumable-cycle', 'morning-brief']),
+    );
+  });
 });
 
 describe('computeEffectiveBlocklist (#544)', () => {
@@ -113,6 +140,20 @@ describe('computeEffectiveBlocklist (#544)', () => {
     const original = new Set(['wiki']);
     const sources = new Map([
       ['wiki-lint', '`Skill(skill: "wiki")`\n'],
+      ['wiki', '# the wiki skill\n'],
+    ]);
+    expect(computeEffectiveBlocklist(original, sources)).toEqual(new Set());
+  });
+
+  it('exempts wiki when wiki-lint invokes it with args: (#652 outage)', () => {
+    // The actual #652 failure shape: wiki-lint's SKILL.md invokes
+    // `Skill(skill: "wiki", args: "lint")`. The old regex couldn't
+    // see the args form, so wiki stayed on the maintenance blocklist
+    // and the spawn failed with "Unknown skill: wiki". The closure
+    // must exempt wiki from the args-bearing invocation too.
+    const original = new Set(['wiki']);
+    const sources = new Map([
+      ['wiki-lint', '`Skill(skill: "wiki", args: "lint")`\n'],
       ['wiki', '# the wiki skill\n'],
     ]);
     expect(computeEffectiveBlocklist(original, sources)).toEqual(new Set());
