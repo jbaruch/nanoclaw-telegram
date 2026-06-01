@@ -376,9 +376,16 @@ export async function fetchSessionizeEventsBatch(
   fetchEvent: (slug: string) => Promise<Record<string, unknown>>,
   concurrency: number,
 ): Promise<Array<Record<string, unknown>>> {
+  // Clamp the step to >= 1: a non-positive or non-finite concurrency would
+  // make `i += step` never advance and hang the host. The sole in-tree
+  // caller passes a fixed positive constant, but the helper is exported.
+  const step =
+    Number.isFinite(concurrency) && concurrency >= 1
+      ? Math.floor(concurrency)
+      : 1;
   const results: Array<Record<string, unknown>> = [];
-  for (let i = 0; i < slugs.length; i += concurrency) {
-    const chunk = slugs.slice(i, i + concurrency);
+  for (let i = 0; i < slugs.length; i += step) {
+    const chunk = slugs.slice(i, i + step);
     const chunkResults = await Promise.all(
       chunk.map(async (slug) => {
         try {

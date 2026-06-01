@@ -271,4 +271,16 @@ describe('fetchSessionizeEventsBatch', () => {
     );
     expect(out).toEqual([]);
   });
+
+  it('clamps a non-positive concurrency to 1 instead of hanging', async () => {
+    // `i += 0` would never advance the loop and hang the host. The clamp
+    // degrades a bad value to serial processing rather than looping forever
+    // — proven here by the call resolving at all (and processing every slug).
+    const out = await fetchSessionizeEventsBatch(
+      ['a', 'b', 'c'],
+      async (slug) => ({ slug }),
+      0,
+    );
+    expect(out.map((r) => r.slug)).toEqual(['a', 'b', 'c']);
+  });
 });
