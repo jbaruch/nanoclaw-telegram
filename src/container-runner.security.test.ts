@@ -1628,9 +1628,25 @@ describe('buildVolumeMounts — shared-memory mount', () => {
     };
   }
 
+  // Trusted (non-main) group: gets auto-memory, but #658 keeps it on a
+  // per-group shared-memory dir — only the main container is unified onto
+  // /workspace/trusted.
+  function makeTrustedGroup(): RegisteredGroup {
+    return {
+      name: 'Trusted',
+      folder: 'trusted-memory-test-group',
+      trigger: '@Trusted',
+      added_at: new Date().toISOString(),
+      containerConfig: { trusted: true },
+    };
+  }
+
   beforeEach(() => {
     seedMessagesDb();
     fs.mkdirSync(path.join(GROUPS_DIR, 'shared-memory-test-group'), {
+      recursive: true,
+    });
+    fs.mkdirSync(path.join(GROUPS_DIR, 'trusted-memory-test-group'), {
       recursive: true,
     });
   });
@@ -1649,20 +1665,20 @@ describe('buildVolumeMounts — shared-memory mount', () => {
     }
   }
 
-  it('both default and maintenance sessions mount the SAME shared-memory host dir over the project memory/ path', () => {
+  it('trusted (non-main): both default and maintenance sessions mount the SAME per-group shared-memory host dir over the project memory/ path', () => {
     withProjectCwd(() => {
-      const group = makeMainGroup();
+      const group = makeTrustedGroup();
 
       const defaultMounts = buildVolumeMounts(
         group,
-        true,
-        'main@g.us',
+        false,
+        'trusted@g.us',
         'default',
       );
       const maintenanceMounts = buildVolumeMounts(
         group,
-        true,
-        'main@g.us',
+        false,
+        'trusted@g.us',
         'maintenance',
       );
 
@@ -1687,6 +1703,54 @@ describe('buildVolumeMounts — shared-memory mount', () => {
       // And the host dir is session-independent (lives under the group's
       // sessions/ root, not under a per-session subdir).
       expect(defaultMemoryMount!.hostPath).toMatch(
+        /sessions\/trusted-memory-test-group\/shared-memory$/,
+      );
+    });
+  });
+
+  it('main (#658): auto-memory dir is sourced from the shared trusted/ corpus, not a per-group shared-memory dir', () => {
+    withProjectCwd(() => {
+      const group = makeMainGroup();
+
+      const defaultMounts = buildVolumeMounts(
+        group,
+        true,
+        'main@g.us',
+        'default',
+      );
+      const maintenanceMounts = buildVolumeMounts(
+        group,
+        true,
+        'main@g.us',
+        'maintenance',
+      );
+
+      const memoryContainerPath =
+        '/home/node/.claude/projects/-workspace-group/memory';
+      const defaultMemoryMount = defaultMounts.find(
+        (m) => m.containerPath === memoryContainerPath,
+      );
+      const maintenanceMemoryMount = maintenanceMounts.find(
+        (m) => m.containerPath === memoryContainerPath,
+      );
+      const trustedMount = defaultMounts.find(
+        (m) => m.containerPath === '/workspace/trusted',
+      );
+
+      expect(defaultMemoryMount).toBeDefined();
+      expect(maintenanceMemoryMount).toBeDefined();
+      expect(trustedMount).toBeDefined();
+      expect(defaultMemoryMount!.readonly).toBe(false);
+
+      // Both sessions resolve to the same host dir, and that dir is the SAME
+      // host path the /workspace/trusted mount uses — one unified corpus.
+      expect(defaultMemoryMount!.hostPath).toBe(
+        maintenanceMemoryMount!.hostPath,
+      );
+      expect(defaultMemoryMount!.hostPath).toBe(trustedMount!.hostPath);
+      expect(defaultMemoryMount!.hostPath).toMatch(/\/trusted$/);
+      // And explicitly NOT the per-group shared-memory dir.
+      expect(defaultMemoryMount!.hostPath).not.toMatch(
         /sessions\/shared-memory-test-group\/shared-memory$/,
       );
     });
@@ -1694,7 +1758,10 @@ describe('buildVolumeMounts — shared-memory mount', () => {
 
   it('migrates pre-existing per-session memory files into shared-memory on spawn', () => {
     withProjectCwd(() => {
-      const group = makeMainGroup();
+      // Trusted (non-main): the per-session → shared-memory migration still
+      // targets a per-group shared-memory dir. (Main is unified onto trusted/
+      // by #658 and is covered by its own test above.)
+      const group = makeTrustedGroup();
 
       // Simulate a pre-#57 deployment: the default session has an accumulated
       // feedback file under its per-session .claude/.
@@ -1715,7 +1782,7 @@ describe('buildVolumeMounts — shared-memory mount', () => {
       );
 
       // Build mounts (which runs the migration loop).
-      buildVolumeMounts(group, true, 'main@g.us', 'default');
+      buildVolumeMounts(group, false, 'trusted@g.us', 'default');
 
       const sharedMemoryDir = path.join(
         DATA_DIR,
@@ -1736,7 +1803,7 @@ describe('buildVolumeMounts — shared-memory mount', () => {
 
   it('migration prefers existing shared-memory content over per-session (shared wins on conflict)', () => {
     withProjectCwd(() => {
-      const group = makeMainGroup();
+      const group = makeTrustedGroup();
 
       const sharedMemoryDir = path.join(
         DATA_DIR,
@@ -1765,7 +1832,7 @@ describe('buildVolumeMounts — shared-memory mount', () => {
         'per-session stale content',
       );
 
-      buildVolumeMounts(group, true, 'main@g.us', 'maintenance');
+      buildVolumeMounts(group, false, 'trusted@g.us', 'maintenance');
 
       // Shared copy was NOT overwritten.
       expect(fs.readFileSync(sharedFile, 'utf-8')).toBe('shared wins');
