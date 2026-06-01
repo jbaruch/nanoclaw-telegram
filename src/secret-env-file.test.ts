@@ -67,6 +67,10 @@ describe('SECRET_CONTAINER_VARS', () => {
     expect(SECRET_CONTAINER_VARS.has('GOOGLE_MAPS_API_KEY')).toBe(true);
   });
 
+  it('lists YOUTUBE_API_KEY (YouTube Data API v3 key — read by the admin tile youtube-comment-check skill, native API per jbaruch/nanoclaw-admin#339)', () => {
+    expect(SECRET_CONTAINER_VARS.has('YOUTUBE_API_KEY')).toBe(true);
+  });
+
   it('does NOT include placeholder vars (proxied through OneCLI)', () => {
     expect(SECRET_CONTAINER_VARS.has('ANTHROPIC_API_KEY')).toBe(false);
     expect(SECRET_CONTAINER_VARS.has('CLAUDE_CODE_OAUTH_TOKEN')).toBe(false);

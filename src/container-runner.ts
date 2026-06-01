@@ -507,6 +507,12 @@ export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
   // Google Maps Distance Matrix API key — read by the same tile.
   // Standard `AIzaSy...` shape, ~$10/1000 requests at our usage.
   'GOOGLE_MAPS_API_KEY',
+  // YouTube Data API v3 key — read by the admin tile's
+  // `youtube-comment-check` skill (Composio's YouTube toolkit has no
+  // comment-threads tool, so it calls the native API directly per
+  // jbaruch/nanoclaw-admin#339). Standard `AIzaSy...` key; goes through
+  // the env-file rather than `-e` so it stays off `ps`/`docker ps`.
+  'YOUTUBE_API_KEY',
 ]);
 
 /**
@@ -2775,6 +2781,12 @@ function buildContainerArgs(
     // Distance Matrix API enabled on a billing-attached project. Marked
     // SECRET below.
     'GOOGLE_MAPS_API_KEY',
+    // YouTube Data API v3 key — read by the admin tile's
+    // `youtube-comment-check` skill, which calls the native API
+    // (commentThreads.list + videos.list) directly because Composio's
+    // YouTube toolkit has no comment-threads tool
+    // (jbaruch/nanoclaw-admin#339). Marked SECRET below.
+    'YOUTUBE_API_KEY',
   ];
 
   const varsToForward = isMain || isTrusted ? CONTAINER_VARS : [];
