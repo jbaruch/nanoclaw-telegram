@@ -2351,12 +2351,20 @@ export function buildVolumeMounts(
   // mkdir, migration, and chown behind the same trust condition.
   const autoMemoryEnabled = isMain || !!group.containerConfig?.trusted;
   if (autoMemoryEnabled) {
-    const sharedMemoryDir = path.join(
-      DATA_DIR,
-      'sessions',
-      group.folder,
-      'shared-memory',
-    );
+    // #658: the main container unifies its auto-memory with the
+    // cross-container `/workspace/trusted` corpus. The maintenance skills
+    // (memory-hygiene, soul-searching, memory-enrich) run only in the
+    // main/maintenance container and read `/workspace/trusted`; sourcing the
+    // auto-memory dir from the same host path means one corpus instead of two.
+    // Side effect the operator accepts: trusted (non-main) containers can write
+    // `/workspace/trusted`, so their content becomes auto-injected into main's
+    // context. Acceptable for a single-operator deployment; untrusted stays
+    // excluded (above) precisely because that injection path is a poisoning
+    // vector. Trusted (non-main) groups keep a per-group shared-memory dir —
+    // their auto-memory is per-chat-context state no maintenance skill reads.
+    const sharedMemoryDir = isMain
+      ? path.join(process.cwd(), 'trusted')
+      : path.join(DATA_DIR, 'sessions', group.folder, 'shared-memory');
     fs.mkdirSync(sharedMemoryDir, { recursive: true });
 
     // Pre-create the overlay mount target inside the `.claude` bind. Docker
