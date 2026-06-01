@@ -2455,7 +2455,14 @@ export function buildVolumeMounts(
       }
     }
 
-    if (sessionUid !== 0) {
+    // The per-group shared-memory dir is orchestrator-created and may hold
+    // docker-auto-mkdir'd root-owned content, so it needs a recursive chown to
+    // the session user. For isMain the dir IS /workspace/trusted — already
+    // chowned (non-recursively) by the trusted-mount block above to the same
+    // HOST_UID, with host-managed files the agent already writes to. Recursively
+    // chowning that whole corpus (incl. the wiki/ subtree) on every spawn is
+    // wasteful and needless, so skip it for main.
+    if (!isMain && sessionUid !== 0) {
       try {
         chownRecursive(sharedMemoryDir, sessionUid, sessionGid);
       } catch (err: unknown) {
