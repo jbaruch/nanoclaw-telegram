@@ -1878,6 +1878,59 @@ server.tool(
 );
 
 server.tool(
+  'sessionize_get_events',
+  'Batch-fetch CFP and conference details from Sessionize for many event slugs in ONE call. Returns an array where each entry is {slug, ...normalized fields} on success or {slug, error} for a slug that failed. Use this instead of repeated sessionize_get_event calls when re-verifying or refreshing a list of events (e.g. nightly CFP sync). Host handles the API key and parallelizes the fetches.',
+  {
+    slugs: z
+      .array(z.string())
+      .describe(
+        'Sessionize event slugs (e.g., ["devoxx-be-2026", "jfokus-2026"]) or full URLs (the slug is extracted automatically per entry)',
+      ),
+  },
+  async (args) => {
+    const slugs = args.slugs.map((s) =>
+      s.replace(/^https?:\/\/sessionize\.com\//, '').replace(/\/$/, ''),
+    );
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const data = {
+      type: 'sessionize_get_events',
+      slugs,
+      requestId,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
+    const timeoutMs = 120_000;
+    const pollMs = 500;
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+      if (fs.existsSync(resultPath)) {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        fs.unlinkSync(resultPath);
+        if (result.error) {
+          return {
+            content: [{ type: 'text' as const, text: `Sessionize error: ${result.error}` }],
+            isError: true,
+          };
+        }
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(result.data) }],
+        };
+      }
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'Sessionize batch request timed out after 120s' }],
+      isError: true,
+    };
+  },
+);
+
+server.tool(
   'sessionize_open_cfps',
   'Fetch all open CFPs from Sessionize for the authenticated speaker account. Returns array of events with CFP dates, location, expenses, isOnline, cfpLink. Host handles the API key (SESSIONIZE_SPEAKER_KEY).',
   {

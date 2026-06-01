@@ -304,6 +304,96 @@ function scriptResultPath(
   return path.join(inputDir, `_script_result_${requestId}.json`);
 }
 
+// Bounded parallelism for `sessionize_get_events`: cap concurrent host-side
+// HTTP fetches so a 100+-slug batch doesn't open one socket per slug at once.
+const SESSIONIZE_BATCH_CONCURRENCY = 10;
+// Upper bound on slugs accepted in a single batch. The IPC payload originates
+// in a container (some run untrusted content), so this caps the work a single
+// request can schedule on the host.
+const SESSIONIZE_BATCH_MAX_SLUGS = 500;
+
+export interface SessionizeNormalizedEvent {
+  name: unknown;
+  cfp_open: boolean;
+  cfp_start: unknown;
+  cfp_end: unknown;
+  cfp_start_local: unknown;
+  cfp_end_local: unknown;
+  conf_start: unknown;
+  conf_end: unknown;
+  location: unknown;
+  city: unknown;
+  country: unknown;
+  timezone: unknown;
+  is_online: unknown;
+  website: unknown;
+  cfp_url: unknown;
+  expenses_covered: Record<string, unknown>;
+  organizer: unknown;
+}
+
+// Map a raw Sessionize universal-event payload to the flat shape the
+// `sessionize_get_event(s)` tools return. Total over any object (missing
+// nested groups default to {}), so it never throws on a partial payload.
+export function normalizeSessionizeEvent(
+  event: Record<string, unknown>,
+  slug: string,
+): SessionizeNormalizedEvent {
+  const cfpDates = (event.cfpDates ?? {}) as Record<string, unknown>;
+  const eventDates = (event.eventDates ?? {}) as Record<string, unknown>;
+  const location = (event.location ?? {}) as Record<string, unknown>;
+  const timezone = (event.timezone ?? {}) as Record<string, unknown>;
+  const expenses = (event.expensesCovered ?? {}) as Record<string, unknown>;
+  return {
+    name: event.name,
+    cfp_open:
+      !!cfpDates.endUtc && new Date(cfpDates.endUtc as string) > new Date(),
+    cfp_start: cfpDates.startUtc,
+    cfp_end: cfpDates.endUtc,
+    cfp_start_local: cfpDates.start,
+    cfp_end_local: cfpDates.end,
+    conf_start: eventDates.start,
+    conf_end: eventDates.end,
+    location: location.full,
+    city: location.city,
+    country: location.country,
+    timezone: timezone.iana,
+    is_online: event.isOnline,
+    website: event.website,
+    cfp_url: event.cfpLink || `https://sessionize.com/${slug}/`,
+    expenses_covered: expenses,
+    organizer: event.organizer,
+  };
+}
+
+// Run `fetchEvent` across `slugs` in chunks of `concurrency`, preserving input
+// order. A thrown fetcher (network failure, timeout, malformed JSON) is
+// isolated to a `{ slug, error }` entry so a single bad slug can't sink the
+// rest of the batch — the failure is surfaced in the result array, never
+// swallowed. The fetcher itself maps a successful fetch to its result shape.
+export async function fetchSessionizeEventsBatch(
+  slugs: string[],
+  fetchEvent: (slug: string) => Promise<Record<string, unknown>>,
+  concurrency: number,
+): Promise<Array<Record<string, unknown>>> {
+  const results: Array<Record<string, unknown>> = [];
+  for (let i = 0; i < slugs.length; i += concurrency) {
+    const chunk = slugs.slice(i, i + concurrency);
+    const chunkResults = await Promise.all(
+      chunk.map(async (slug) => {
+        try {
+          return await fetchEvent(slug);
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return { slug, error: errMsg };
+        }
+      }),
+    );
+    results.push(...chunkResults);
+  }
+  return results;
+}
+
 // Prefix for outbound text emitted by the maintenance-session AyeAye.
 // Without the prefix, a scheduled-task reply looks identical to a
 // user-facing reply in the chat, which confused Baruch when he
@@ -945,6 +1035,8 @@ export async function processTaskIpc(
     branch?: string;
     commitMessage?: string;
     slug?: string;
+    // sessionize_get_events — batch counterpart of `slug`
+    slugs?: string[];
     filter?: Record<string, boolean>;
     dryRun?: boolean;
     command?: string;
@@ -3993,38 +4085,7 @@ export async function processTaskIpc(
           }
 
           const event = (await resp.json()) as Record<string, unknown>;
-          const cfpDates = (event.cfpDates ?? {}) as Record<string, unknown>;
-          const eventDates = (event.eventDates ?? {}) as Record<
-            string,
-            unknown
-          >;
-          const location = (event.location ?? {}) as Record<string, unknown>;
-          const timezone = (event.timezone ?? {}) as Record<string, unknown>;
-          const expenses = (event.expensesCovered ?? {}) as Record<
-            string,
-            unknown
-          >;
-          const normalized = {
-            name: event.name,
-            cfp_open:
-              !!cfpDates.endUtc &&
-              new Date(cfpDates.endUtc as string) > new Date(),
-            cfp_start: cfpDates.startUtc,
-            cfp_end: cfpDates.endUtc,
-            cfp_start_local: cfpDates.start,
-            cfp_end_local: cfpDates.end,
-            conf_start: eventDates.start,
-            conf_end: eventDates.end,
-            location: location.full,
-            city: location.city,
-            country: location.country,
-            timezone: timezone.iana,
-            is_online: event.isOnline,
-            website: event.website,
-            cfp_url: event.cfpLink || `https://sessionize.com/${data.slug}/`,
-            expenses_covered: expenses,
-            organizer: event.organizer,
-          };
+          const normalized = normalizeSessionizeEvent(event, data.slug);
 
           fs.writeFileSync(
             sessionizeResultPath,
@@ -4042,6 +4103,72 @@ export async function processTaskIpc(
             JSON.stringify({ error: errMsg }),
           );
         }
+      }
+      break;
+
+    case 'sessionize_get_events':
+      if (data.requestId && Array.isArray(data.slugs)) {
+        const batchResultPath = scriptResultPath(sourceGroup, data);
+
+        const { readEnvFile: readBatchEnv } = await import('./env.js');
+        const batchVars = readBatchEnv(['SESSIONIZE_EVENT_API_KEY']);
+        const batchApiKey = batchVars.SESSIONIZE_EVENT_API_KEY;
+
+        if (!batchApiKey) {
+          fs.writeFileSync(
+            batchResultPath,
+            JSON.stringify({
+              error: 'SESSIONIZE_EVENT_API_KEY not set in .env',
+            }),
+          );
+          break;
+        }
+
+        const slugs = data.slugs.filter(
+          (s): s is string => typeof s === 'string' && s.length > 0,
+        );
+
+        if (slugs.length > SESSIONIZE_BATCH_MAX_SLUGS) {
+          fs.writeFileSync(
+            batchResultPath,
+            JSON.stringify({
+              error: `Too many slugs: ${slugs.length} (max ${SESSIONIZE_BATCH_MAX_SLUGS}). Split into smaller batches.`,
+            }),
+          );
+          break;
+        }
+
+        logger.info(
+          { count: slugs.length, sourceGroup },
+          'Batch-fetching Sessionize events',
+        );
+
+        const events = await fetchSessionizeEventsBatch(
+          slugs,
+          async (slug) => {
+            const url = `https://sessionize.com/api/universal/event?slug=${encodeURIComponent(slug)}`;
+            const resp = await fetch(url, {
+              headers: { 'X-API-KEY': batchApiKey },
+              signal: AbortSignal.timeout(15_000),
+            });
+            if (!resp.ok) {
+              return {
+                slug,
+                error: `Sessionize API returned ${resp.status}: ${resp.statusText}`,
+              };
+            }
+            const event = (await resp.json()) as Record<string, unknown>;
+            return { slug, ...normalizeSessionizeEvent(event, slug) };
+          },
+          SESSIONIZE_BATCH_CONCURRENCY,
+        );
+
+        const errorCount = events.filter((e) => 'error' in e).length;
+        logger.info(
+          { total: events.length, errors: errorCount },
+          'Batch Sessionize fetch complete',
+        );
+        fs.writeFileSync(batchResultPath, JSON.stringify({ data: events }));
       }
       break;
 
