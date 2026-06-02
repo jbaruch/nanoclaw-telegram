@@ -373,6 +373,92 @@ fi
 echo "  ok — named carve-out manifests declare mode: managed + version: latest"
 echo ""
 
+# 3c. Verify each declared workspace tile actually MATERIALIZED at the
+# registry's latest version.
+#
+# `tessl update` (step 3) can report success — printing `✔ Updated N
+# plugins` and exiting 0 — while silently leaving a tile's on-disk
+# content at the prior version, or absent entirely. When that happens
+# the orchestrator goes on to mount stale/missing tile content into
+# every agent container while this script reports a clean deploy. This
+# step is the deploy's ground-truth check that what landed on disk is
+# what the registry says is latest.
+#
+# Ground truth is the materialized `tile.json` on disk
+# (`tessl-workspace/.tessl/plugins/<owner>/<tile>/tile.json`) — NOT
+# tessl's own `✔ Updated` summary line, and NOT `tessl outdated`
+# (whose "Current" column can read as up-to-date even when the files
+# on disk did not actually advance). The registry's latest version
+# comes from `tessl tile info`, run inside the orchestrator container
+# so it shares step 3's tessl auth and registry view.
+#
+# Hard-fail rather than warn: a stale/missing tile reported as a
+# successful deploy is exactly the silent failure this script must
+# never produce. Aborting here leaves the running orchestrator
+# untouched (steps 4-7 have not run yet) and names the offending
+# tile(s) so the operator can resolve the install before re-deploying.
+echo "3c. Verifying materialized tile versions match the registry latest..."
+TILE_VERSION_OFFENDERS=$(python3 - <<'PY'
+import json, os, re, subprocess
+
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+SEMVER = re.compile(r"(\d+\.\d+\.\d+)")
+PLUGINS = os.path.join("tessl-workspace", ".tessl", "plugins")
+
+try:
+    deps = json.load(
+        open(os.path.join("tessl-workspace", "tessl.json"))
+    ).get("dependencies", {})
+except (OSError, json.JSONDecodeError) as exc:
+    print(f"tessl-workspace/tessl.json: cannot read dependencies ({exc})")
+    deps = {}
+
+for ref in sorted(deps):
+    owner, _, tile = ref.partition("/")
+    tile_json = os.path.join(PLUGINS, owner, tile, "tile.json")
+    if os.path.isfile(tile_json):
+        try:
+            ondisk = json.load(open(tile_json)).get("version")
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"{ref}: on-disk tile.json unreadable ({exc})")
+            continue
+    else:
+        ondisk = None
+    # Registry latest via in-container tessl — same auth + registry
+    # view step 3's `tessl update` used.
+    proc = subprocess.run(
+        ["docker", "exec", "nanoclaw", "tessl", "tile", "info", ref],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        print(f"{ref}: cannot read registry latest (tessl tile info exited {proc.returncode}): {detail}")
+        continue
+    latest = None
+    for line in ANSI.sub("", proc.stdout).splitlines():
+        if "Latest Version" in line:
+            m = SEMVER.search(line)
+            latest = m.group(1) if m else None
+            break
+    if latest is None:
+        print(f"{ref}: registry latest version not found in tessl tile info output")
+        continue
+    if ondisk != latest:
+        shown = ondisk if ondisk else "(absent)"
+        print(f"{ref}: on-disk={shown} registry-latest={latest}")
+PY
+)
+if [[ -n "$TILE_VERSION_OFFENDERS" ]]; then
+    echo "ERROR: 'tessl update' reported success, but these tiles did NOT land at the registry's latest version:" >&2
+    echo "$TILE_VERSION_OFFENDERS" | sed 's/^/  - /' >&2
+    echo "The orchestrator would mount stale or missing tile content into agent containers while this deploy reported success." >&2
+    echo "Aborting before restart. Investigate why the install was skipped for the tile(s) above, resolve it, then re-run deploy." >&2
+    exit 1
+fi
+echo "  ok — every declared workspace tile materialized at the registry latest"
+echo ""
+
 # 4. Clear runtime skill overrides from all groups
 # NOTE: staging/ is NOT cleared here — that's verify-tiles' job after promotion.
 echo "4. Clearing runtime skill overrides..."
