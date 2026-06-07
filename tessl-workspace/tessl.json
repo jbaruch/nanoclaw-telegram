@@ -25,6 +25,12 @@
     },
     "jbaruch/nanoclaw-conferences": {
       "version": "latest"
+    },
+    "jbaruch/nanoclaw-orders": {
+      "version": "latest"
+    },
+    "jbaruch/nanoclaw-media": {
+      "version": "latest"
     }
   }
 }
