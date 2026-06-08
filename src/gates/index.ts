@@ -24,14 +24,31 @@
  *
  * Truth table for the canonical `[trigger, haiku-classifier]` chain:
  *
- *   trigger | haiku    | final | rationale
- *   --------|----------|-------|---------------------------------------
- *   allow   | (skip)   | allow | Stage 1 short-circuit, no Haiku spent
- *   pass    | allow    | allow | Stage 2 caught grey-zone yes
- *   pass    | deny     | deny  | Stage 2 said no, last-gate decisive
- *   deny    | allow    | allow | Stage 1 advisory deny ignored
- *   deny    | deny     | deny  | Both agree on no (last-gate decisive)
- *   deny    | pass     | allow | pass + chain-end fail-open
+ *   trigger | haiku      | final | rationale
+ *   --------|------------|-------|-------------------------------------
+ *   allow   | (skip)     | allow | Stage 1 short-circuit, no Haiku spent
+ *   pass    | allow      | allow | Stage 2 caught grey-zone yes
+ *   pass    | deny       | deny  | Stage 2 said no, last-gate decisive
+ *   deny    | allow      | allow | Stage 1 advisory deny ignored
+ *   deny    | deny       | deny  | Both agree on no (last-gate decisive)
+ *   deny    | pass(ok)   | allow | healthy pass + chain-end fail-open
+ *   deny    | pass(fail) | deny  | classifier FAILED — upstream advisory
+ *           |            |       | deny preserved, not nullified (#671)
+ *   pass    | pass(fail) | allow | classifier FAILED but no upstream deny
+ *           |            |       | to preserve → fail-open
+ *
+ * The `pass(fail)` rows close the #671 money-bleed: the Stage 2 Haiku
+ * classifier returns `pass` ONLY when it could not run (api-error /
+ * timeout / unparseable / no-client), tagged `failed: true`. Under the
+ * plain last-gate-wins rule a failed `pass` let a deterministic trigger
+ * `deny` fall through to fail-open `allow`, so every transient
+ * classifier outage silently degraded every non-strict Stage 2 group to
+ * allow-all (one container spawn per message). A FAILED downstream gate
+ * must never be MORE permissive than a healthy "no": when a gate that
+ * runs after an advisory `deny` fails, the chain preserves that `deny`
+ * instead of fail-opening. A HEALTHY classifier never returns `pass`, so
+ * the `deny | pass(ok) | allow` row is unreachable for this chain today
+ * and stays as documented.
  *
  * Historical note: prior to #97 the combinator was AND-only — `deny`
  * short-circuited from any position and `allow` did not short-circuit.
@@ -52,6 +69,16 @@ export type GateDecisionKind = 'allow' | 'deny' | 'pass';
 export interface GateDecision {
   decision: GateDecisionKind;
   reason: string;
+  /**
+   * Set by a gate that returns `pass` because it could NOT form an
+   * opinion (the Stage 2 classifier's API call errored, timed out, or
+   * returned an unparseable verdict), as distinct from a healthy "no
+   * opinion" pass. `runGateChain` uses this so a FAILED downstream gate
+   * can't nullify an upstream advisory `deny` — a transient classifier
+   * outage must never be MORE permissive than a healthy "no" (#671). A
+   * healthy pass leaves this unset.
+   */
+  failed?: boolean;
 }
 
 /**
@@ -153,6 +180,18 @@ export interface GateRunRecord {
   durationMs: number;
   /** Set when the gate threw — its decision is downgraded to `pass`. */
   error?: { name: string; message: string };
+  /**
+   * True when the gate could not form an opinion — when `error` is set
+   * (it threw, or was unregistered) or it returned `pass` with
+   * `failed: true`. This is the
+   * internal signal `runGateChain` uses to decide whether to preserve an
+   * upstream advisory deny at chain end (#671). The operator-facing
+   * explanation of a preserved deny is the chain's final `reason`
+   * (`upstream deny preserved (downstream gate failed): ...`), which the
+   * `gate decision` log line emits; this per-gate marker is not part of
+   * that log's chain shape.
+   */
+  failed?: boolean;
 }
 
 export interface GateChainResult {
@@ -210,14 +249,21 @@ function nowMs(): number {
  *   - First `allow` → final `allow`, return immediately (later gates
  *     are NOT invoked).
  *   - `deny` from the last gate → final `deny`.
- *   - `deny` from a non-last gate → advisory, fall through.
+ *   - `deny` from a non-last gate → advisory, fall through (but
+ *     remembered — see the fail-preservation rule below).
  *   - `pass` → fall through.
- *   - Chain end with no decisive verdict → fail-open `allow`.
+ *   - Chain end with no decisive verdict → fail-open `allow`, UNLESS a
+ *     gate that ran after the most recent advisory `deny` FAILED (threw,
+ *     or returned `pass` with `failed: true`). In that case the advisory
+ *     `deny` is preserved as the final verdict (#671): a failed gate
+ *     can't be the reason a deterministic `deny` gets nullified into an
+ *     allow-all.
  *
  * Throws are converted to `pass` records so a buggy gate can't
  * black-hole legitimate traffic. Errors are logged with full context
  * so the operator can fix the gate without first having to find the
- * black hole.
+ * black hole. A thrown gate is also marked `failed` so it participates
+ * in the deny-preservation rule above.
  */
 export async function runGateChain(
   gateNames: string[],
@@ -226,6 +272,16 @@ export async function runGateChain(
   const records: GateRunRecord[] = [];
   const chainStart = nowMs();
   const lastIdx = gateNames.length - 1;
+
+  // Deny-preservation state (#671). `advisoryDenyReason` holds the
+  // reason from the most recent non-last `deny` (an advisory deny that
+  // fell through). `safetyNetFailed` tracks whether any gate that ran
+  // AFTER that advisory deny could not form an opinion (threw, or
+  // returned `pass` with `failed: true`). When both hold at chain end,
+  // the advisory deny is preserved instead of fail-opening — a failed
+  // downstream gate must not be more permissive than a healthy "no".
+  let advisoryDenyReason: string | null = null;
+  let safetyNetFailed = false;
 
   const finalize = (
     finalDecision: 'allow' | 'deny',
@@ -256,40 +312,39 @@ export async function runGateChain(
     const gateName = gateNames[i];
     const fn = registry[gateName];
     const start = nowMs();
+    let decision: GateDecision;
+    let errorRecord: GateRunRecord['error'] | undefined;
     if (!fn) {
-      const durationMs = nowMs() - start;
+      // An unregistered gate can't form an opinion. Treat it as a
+      // FAILED pass (not a healthy one) so it flows through the same
+      // failure accounting below and participates in deny-preservation
+      // (#671) — otherwise an unregistered LAST gate after an advisory
+      // deny would silently fall through to fail-open allow.
+      errorRecord = { name: 'GateNotRegistered', message: gateName };
+      decision = { decision: 'pass', reason: 'gate not registered' };
       logger.error(
         { groupFolder: ctx.groupFolder, gateName },
         'gate not registered — treating as pass',
       );
-      records.push({
-        gateName,
-        decision: 'pass',
-        reason: 'gate not registered',
-        durationMs,
-        error: { name: 'GateNotRegistered', message: gateName },
-      });
-      continue;
-    }
-    let decision: GateDecision;
-    let errorRecord: GateRunRecord['error'] | undefined;
-    try {
-      // Await covers both sync and async return types. Sync gates
-      // resolve synchronously through the microtask queue.
-      decision = await fn(ctx);
-    } catch (err) {
-      const e = err instanceof Error ? err : new Error(String(err));
-      errorRecord = { name: e.name, message: e.message };
-      decision = { decision: 'pass', reason: `gate threw: ${e.name}` };
-      logger.error(
-        {
-          groupFolder: ctx.groupFolder,
-          gateName,
-          err: e.message,
-          stack: e.stack,
-        },
-        'gate threw — downgraded to pass',
-      );
+    } else {
+      try {
+        // Await covers both sync and async return types. Sync gates
+        // resolve synchronously through the microtask queue.
+        decision = await fn(ctx);
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        errorRecord = { name: e.name, message: e.message };
+        decision = { decision: 'pass', reason: `gate threw: ${e.name}` };
+        logger.error(
+          {
+            groupFolder: ctx.groupFolder,
+            gateName,
+            err: e.message,
+            stack: e.stack,
+          },
+          'gate threw — downgraded to pass',
+        );
+      }
     }
     const durationMs = nowMs() - start;
     if (durationMs > GATE_WARN_DURATION_MS) {
@@ -313,12 +368,20 @@ export async function runGateChain(
       },
       'gate evaluated',
     );
+    // A gate "failed" — could not form an opinion — when it threw / was
+    // unregistered (errorRecord set) OR returned `pass` with
+    // `failed: true`. The `decision === 'pass'` guard keeps a future gate
+    // from marking an `allow`/`deny` as failed and skewing the rule (#671).
+    const gateFailed =
+      errorRecord !== undefined ||
+      (decision.decision === 'pass' && decision.failed === true);
     records.push({
       gateName,
       decision: decision.decision,
       reason: decision.reason,
       durationMs,
       error: errorRecord,
+      failed: gateFailed || undefined,
     });
 
     if (decision.decision === 'allow') {
@@ -326,16 +389,36 @@ export async function runGateChain(
       // Remaining gates are NOT invoked (cost saving for Stage 2).
       return finalize('allow', decision.reason);
     }
-    if (decision.decision === 'deny' && i === lastIdx) {
-      // Only the last gate's deny is decisive. Intermediate-gate
-      // denies are advisory and fall through to the next gate so a
-      // downstream classifier still gets a chance to allow.
-      return finalize('deny', decision.reason);
+    if (decision.decision === 'deny') {
+      if (i === lastIdx) {
+        // Only the last gate's deny is decisive.
+        return finalize('deny', decision.reason);
+      }
+      // Intermediate-gate deny is advisory and falls through so a
+      // downstream classifier still gets a chance to allow. Remember it
+      // and reset the failure watch: only failures from gates that run
+      // AFTER this deny can justify preserving it.
+      advisoryDenyReason = decision.reason;
+      safetyNetFailed = false;
+      continue;
     }
-    // pass OR (non-last-gate deny) → continue to the next gate.
+    // pass → fall through. If this pass was a FAILURE and we're holding
+    // an advisory deny, the safety net that justified treating that deny
+    // as advisory just collapsed.
+    if (gateFailed && advisoryDenyReason !== null) {
+      safetyNetFailed = true;
+    }
   }
 
-  // Chain end with no decisive allow and no last-gate deny → fail-open.
+  // Chain end. A downstream gate failed after an advisory deny → preserve
+  // the deny rather than fail-opening (#671).
+  if (advisoryDenyReason !== null && safetyNetFailed) {
+    return finalize(
+      'deny',
+      `upstream deny preserved (downstream gate failed): ${advisoryDenyReason}`,
+    );
+  }
+  // Otherwise no decisive allow and no last-gate deny → fail-open.
   const reason =
     gateNames.length === 0
       ? 'no gates configured'

@@ -751,4 +751,40 @@ describe('gateAllowsSpawn — [trigger, haiku-classifier] last-gate-wins', () =>
     );
     expect(allowed).toBe(false);
   });
+
+  it('trigger=deny + haiku=FAIL → spawn DENIED (advisory deny preserved, #671)', async () => {
+    // The money-bleed scenario end-to-end: the classifier can't reach
+    // the API ("Connection error"), so it returns a failed pass. The
+    // deterministic trigger deny (no keyword match) must NOT fall
+    // through to fail-open allow — the chain preserves the deny so the
+    // bot does NOT spawn on an untagged message.
+    const { _setAnthropicClientForTesting } =
+      await import('./haiku-classifier.js');
+    const connErr = Object.assign(new Error('Connection error.'), {
+      code: 'ECONNREFUSED',
+    });
+    _setAnthropicClientForTesting({
+      messages: {
+        create: vi.fn(async () => {
+          throw connErr;
+        }),
+      },
+    } as unknown as import('@anthropic-ai/sdk').default);
+
+    const g: RegisteredGroup = {
+      name: 'WTF',
+      folder: FOLDER,
+      trigger: '@testbot',
+      added_at: '2024-01-01T00:00:00Z',
+      containerConfig: { stage2Enabled: true },
+      triggerPatterns,
+    };
+    const allowed = await gateAllowsSpawn(
+      g,
+      JID,
+      [msg('random chatter unrelated')],
+      ['trigger', 'haiku-classifier'],
+    );
+    expect(allowed).toBe(false);
+  });
 });

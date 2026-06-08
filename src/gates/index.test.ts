@@ -15,6 +15,7 @@ const TEST_GATES = [
   'allow-gate',
   'deny-gate',
   'pass-gate',
+  'failing-pass-gate',
   'throwing-gate',
   'slow-gate',
 ] as const;
@@ -45,6 +46,16 @@ beforeEach(() => {
   registerGate(
     'pass-gate',
     (): GateDecision => ({ decision: 'pass', reason: 'no opinion' }),
+  );
+  // A gate that returns `pass` because it could NOT run — the shape the
+  // Haiku classifier emits on api-error/timeout (#671).
+  registerGate(
+    'failing-pass-gate',
+    (): GateDecision => ({
+      decision: 'pass',
+      reason: 'classifier-failed: api-error',
+      failed: true,
+    }),
   );
   registerGate('throwing-gate', () => {
     throw new Error('boom');
@@ -170,9 +181,78 @@ describe('runGateChain — combinator (last-gate-wins, #97)', () => {
       expect(r.finalDecision).toBe('deny');
     });
 
-    it('[deny, pass] → allow (advisory deny ignored, pass + chain-end fail-open)', async () => {
+    it('[deny, pass] → allow (advisory deny ignored, HEALTHY pass + chain-end fail-open)', async () => {
       const r = await runGateChain(['deny-gate', 'pass-gate'], baseCtx);
       expect(r.finalDecision).toBe('allow');
+    });
+  });
+
+  // #671 — a FAILED downstream gate (classifier api-error/timeout) must
+  // not nullify an upstream advisory deny into allow-all. The failed
+  // `pass` is distinguished from a healthy `pass` by `failed: true`.
+  describe('deny-preservation on downstream gate failure (#671)', () => {
+    it('[deny, failing-pass] → deny (advisory deny preserved, not fail-open)', async () => {
+      const r = await runGateChain(['deny-gate', 'failing-pass-gate'], baseCtx);
+      expect(r.finalDecision).toBe('deny');
+      expect(r.reason).toContain('upstream deny preserved');
+      expect(r.reason).toContain('always deny');
+      // The failing gate is flagged on the chain record — the
+      // combinator-internal signal that drove deny-preservation (not
+      // part of the `gate decision` log shape).
+      expect(r.chain[1].failed).toBe(true);
+    });
+
+    it('[deny, throwing] → deny (thrown last gate also collapses the safety net)', async () => {
+      const r = await runGateChain(['deny-gate', 'throwing-gate'], baseCtx);
+      expect(r.finalDecision).toBe('deny');
+      expect(r.reason).toContain('upstream deny preserved');
+      expect(r.chain[1].failed).toBe(true);
+      expect(r.chain[1].error?.message).toBe('boom');
+    });
+
+    it('[deny, unregistered-last] → deny (an unregistered downstream gate also collapses the safety net)', async () => {
+      // The unregistered-gate branch must participate in deny-preservation
+      // too — otherwise an advisory deny followed by a misconfigured/
+      // missing last gate would fall through to fail-open allow.
+      const r = await runGateChain(['deny-gate', 'no-such-gate'], baseCtx);
+      expect(r.finalDecision).toBe('deny');
+      expect(r.reason).toContain('upstream deny preserved');
+      expect(r.chain[1].failed).toBe(true);
+      expect(r.chain[1].error?.name).toBe('GateNotRegistered');
+    });
+
+    it('[pass, failing-pass] → allow (no upstream deny to preserve → fail-open)', async () => {
+      const r = await runGateChain(['pass-gate', 'failing-pass-gate'], baseCtx);
+      expect(r.finalDecision).toBe('allow');
+    });
+
+    it('[deny, failing-pass, allow] → allow (a healthy allow still rescues)', async () => {
+      const r = await runGateChain(
+        ['deny-gate', 'failing-pass-gate', 'allow-gate'],
+        baseCtx,
+      );
+      expect(r.finalDecision).toBe('allow');
+      expect(r.chain).toHaveLength(3);
+    });
+
+    it('[failing-pass, deny, pass] → allow (failure BEFORE the advisory deny does not preserve it)', async () => {
+      // safetyNetFailed resets at each advisory deny: only a failure
+      // from a gate that runs AFTER the deny can preserve it. The
+      // healthy last pass means the safety net did not fail.
+      const r = await runGateChain(
+        ['failing-pass-gate', 'deny-gate', 'pass-gate'],
+        baseCtx,
+      );
+      expect(r.finalDecision).toBe('allow');
+    });
+
+    it('[deny, failing-pass, deny] → deny (last-gate deny is decisive regardless)', async () => {
+      const r = await runGateChain(
+        ['deny-gate', 'failing-pass-gate', 'deny-gate'],
+        baseCtx,
+      );
+      expect(r.finalDecision).toBe('deny');
+      expect(r.reason).toBe('always deny');
     });
   });
 

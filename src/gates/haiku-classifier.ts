@@ -570,7 +570,10 @@ export const haikuClassifierGate: GateFn = async (
       },
       'haiku classifier verdict',
     );
-    return { decision: 'pass', reason: failureReason(failure) };
+    // `failed: true` so the chain combinator (#671) knows this pass is
+    // a "could not run", not a healthy "no opinion" — a classifier
+    // outage must not nullify an upstream trigger deny into allow-all.
+    return { decision: 'pass', reason: failureReason(failure), failed: true };
   }
 
   const built = await buildPrompt(ctx, strategy);
@@ -631,7 +634,10 @@ export const haikuClassifierGate: GateFn = async (
       },
       'haiku classifier verdict',
     );
-    return { decision: 'pass', reason: failureReason(failure) };
+    // `failed: true` so the chain combinator (#671) knows this pass is
+    // a "could not run", not a healthy "no opinion" — a classifier
+    // outage must not nullify an upstream trigger deny into allow-all.
+    return { decision: 'pass', reason: failureReason(failure), failed: true };
   }
   clearTimeout(timeout);
 
@@ -685,7 +691,10 @@ export const haikuClassifierGate: GateFn = async (
       },
       'haiku classifier verdict',
     );
-    return { decision: 'pass', reason: failureReason(failure) };
+    // `failed: true` so the chain combinator (#671) knows this pass is
+    // a "could not run", not a healthy "no opinion" — a classifier
+    // outage must not nullify an upstream trigger deny into allow-all.
+    return { decision: 'pass', reason: failureReason(failure), failed: true };
   }
 
   const durationMs = Date.now() - startedAt;

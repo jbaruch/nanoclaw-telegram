@@ -239,6 +239,9 @@ describe('haikuClassifierGate — failure modes', () => {
     const result = await haikuClassifierGate(buildCtx());
     expect(result.decision).toBe('pass');
     expect(result.reason).toContain('classifier-failed: api-error');
+    // #671 — failure-pass must be tagged so the chain combinator does
+    // not let it nullify an upstream trigger deny into allow-all.
+    expect(result.failed).toBe(true);
     const verdictLog = errSpy.mock.calls.find(
       (c) => typeof c[1] === 'string' && c[1] === 'haiku classifier verdict',
     );
@@ -266,6 +269,7 @@ describe('haikuClassifierGate — failure modes', () => {
     const result = await haikuClassifierGate(buildCtx());
     expect(result.decision).toBe('pass');
     expect(result.reason).toContain('classifier-failed: timeout');
+    expect(result.failed).toBe(true);
     const verdictLog = errSpy.mock.calls.find(
       (c) => typeof c[1] === 'string' && c[1] === 'haiku classifier verdict',
     );
@@ -294,6 +298,7 @@ describe('haikuClassifierGate — failure modes', () => {
     const result = await haikuClassifierGate(buildCtx());
     expect(result.decision).toBe('pass');
     expect(result.reason).toContain('classifier-failed: unparseable');
+    expect(result.failed).toBe(true);
     const verdictLog = errSpy.mock.calls.find(
       (c) => typeof c[1] === 'string' && c[1] === 'haiku classifier verdict',
     );
@@ -306,6 +311,7 @@ describe('haikuClassifierGate — failure modes', () => {
     const result = await haikuClassifierGate(buildCtx());
     expect(result.decision).toBe('pass');
     expect(result.reason).toContain('classifier-failed: no-client');
+    expect(result.failed).toBe(true);
     expect(errSpy).toHaveBeenCalled();
   });
 });
