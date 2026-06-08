@@ -631,11 +631,14 @@ export function buildSecretEnvFile(
  * for the `model` field on `Options`.
  *
  * NOTE: changing the model family may require matching changes in
- * agent-runner's `query()` call. Opus 4.7 specifically needs
- * `thinking: { type: 'adaptive', display: 'summarized' }` (manual
- * `type: 'enabled'` is rejected; `display` defaults to `'omitted'` on 4.7
- * which would silently empty out thinking content) and does not support
- * `effort: 'max'` well. The current runner is set up for 4.7's expectations.
+ * agent-runner's `query()` call. The current default (Opus 4.8) and its
+ * predecessor 4.7 both take `thinking: { type: 'adaptive', display:
+ * 'summarized' }` (manual `type: 'enabled'` is rejected; `display` would
+ * otherwise default to `'omitted'` and silently empty out thinking
+ * content) and run on the env-driven `xhigh` effort, not `effort: 'max'`.
+ * The runner is set up for these expectations — re-verify them before a
+ * cross-family bump (Sonnet/Haiku already degrade `xhigh` → `high`
+ * gracefully in the SDK).
  */
 // Operators can override at deploy time without editing source — handy for
 // running a fork on a cheaper model (Sonnet) without forking just to change
@@ -664,7 +667,7 @@ export function buildSecretEnvFile(
  *   helper returns, instead of duplicating the string in two places where
  *   a default-model bump could silently drift.
  */
-export const DEFAULT_AGENT_MODEL = 'claude-opus-4-7[1m]';
+export const DEFAULT_AGENT_MODEL = 'claude-opus-4-8[1m]';
 const KNOWN_MODEL_PREFIX_RE = /^(claude|opus|sonnet|haiku)/i;
 export function resolveAgentModel(raw: string | undefined): string {
   const trimmed = raw?.trim();
