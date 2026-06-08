@@ -15,6 +15,7 @@
 #   5. Kill ALL running agent containers (forces fresh tile load)
 #   6. Clear ALL sessions from DB
 #   7. Restart orchestrator
+#   8. Ensure the nanoclaw-litellm gateway is up (self-heal #609)
 #
 # Flags (mutually exclusive):
 #   --tiles-only  Skip git pull and image rebuilds (only tile content changed).
@@ -645,21 +646,17 @@ if ! DEPLOY_KILL_START=$(python3 -c "from datetime import datetime, timezone; pr
     DEPLOY_KILL_START=""
     DEPLOY_KILLS_LOG=""
 fi
-# `grep` exits 1 when no agents match — the empty-string case is
-# handled by the `[[ -z ... ]]` check on the next line.
-#
-# Exclusions:
-# - `nanoclaw` itself (orchestrator) — restart is handled in step 7,
-#   not via the agent-close path.
-# - `nanoclaw-litellm` (#610 LiteLLM router) — infrastructure
-#   sidecar, not an agent. Has no `/workspace/ipc/input` mount, so
-#   the `_close` sentinel would be unresolvable and the grace-window
-#   timer would force-kill it every deploy (verified on the
-#   2026-05-22 deploy where the LiteLLM container exited 137 with
-#   empty logs after exactly 30s post-spawn). Any future
-#   infrastructure containers added to docker-compose.yml that match
-#   `^nanoclaw-` must be appended to this exclude pattern.
-AGENTS=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -Ev '^nanoclaw(-litellm)?$' || true)
+# Build the list of agent containers to signal. The exclusion of
+# infrastructure containers (orchestrator, #609 LiteLLM gateway) lives
+# in scripts/exclude-infra-containers.sh — its header documents which
+# names are dropped and why the litellm match targets the gateway's full
+# compose container name `nanoclaw-litellm-nanoclaw-litellm-<idx>`: a bare
+# `^nanoclaw-litellm$` anchor missed that name and force-killed the
+# gateway every deploy, while a loose prefix would wrongly drop a
+# per-group agent whose slug starts with `litellm`. The filter exits 0 on
+# no match, so `|| true` here guards a `docker ps` failure only. The
+# empty-list case is handled by the `[[ -z ... ]]` check on the next line.
+AGENTS=$(docker ps --format '{{.Names}}' | bash scripts/exclude-infra-containers.sh || true)
 if [[ -z "$AGENTS" ]]; then
     echo "  no agent containers running"
 else
@@ -730,7 +727,7 @@ else
     elapsed=0
     while (( elapsed < GRACE_SECONDS )); do
         still_running_count=0
-        currently_running=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -v '^nanoclaw$' || true)
+        currently_running=$(docker ps --format '{{.Names}}' | bash scripts/exclude-infra-containers.sh || true)
         while IFS= read -r name; do
             [[ -z "$name" ]] && continue
             if [[ -n "${ORIGINAL_AGENTS[$name]:-}" ]]; then
@@ -752,7 +749,7 @@ else
     # and the kill below — `docker kill` on a dead container is a
     # benign race, not a failure.
     HOLDOUTS=()
-    currently_running=$(docker ps --format '{{.Names}}' | grep '^nanoclaw-' | grep -v '^nanoclaw$' || true)
+    currently_running=$(docker ps --format '{{.Names}}' | bash scripts/exclude-infra-containers.sh || true)
     while IFS= read -r name; do
         [[ -z "$name" ]] && continue
         if [[ -n "${ORIGINAL_AGENTS[$name]:-}" ]]; then
@@ -807,6 +804,27 @@ echo ""
 echo "7. Restarting orchestrator..."
 docker compose restart nanoclaw
 echo ""
+
+# 8. Ensure the nanoclaw-litellm gateway is running (#609 LiteLLM
+# migration). It is a separate UGOS Pro compose project, so step 7's
+# `docker compose restart nanoclaw` does not touch it. `restart: always`
+# does NOT recover it after a manual/graceful stop — Docker suppresses
+# the restart policy until the next explicit start — so any stop (a UGOS
+# UI stop, a stray `docker stop`, an earlier deploy that force-killed it)
+# leaves the orchestrator silently bypassing to Anthropic-direct until a
+# human starts it. Re-up here so every deploy self-heals the gateway.
+# Idempotent: `up -d` starts it if down, no-op if already running. Run
+# against the UGOS-symlinked dir so the compose project name resolves to
+# `nanoclaw-litellm` (the registered project), not the repo dir basename.
+LITELLM_PROJECT_DIR=/volume1/docker/nanoclaw-litellm
+if [ -d "$LITELLM_PROJECT_DIR" ]; then
+    echo "8. Ensuring nanoclaw-litellm gateway is up..."
+    ( cd "$LITELLM_PROJECT_DIR" && docker compose up -d )
+    echo ""
+else
+    echo "8. Skipped — $LITELLM_PROJECT_DIR not present (gateway not provisioned on this host)"
+    echo ""
+fi
 
 echo "=== Deploy complete ==="
 echo "All groups will get fresh tiles on next message."
