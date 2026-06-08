@@ -28,6 +28,23 @@ model_list:
       api_base: https://api.anthropic.com
       api_key: os.environ/ANTHROPIC_API_KEY
 
+  # ---- claude-opus-4-8 (the orchestrator default since #667; main-tier
+  # and hard-tier base). Without these rows the router rejects a
+  # claude-opus-4-8 request with a 400 "Invalid model name" — which is NOT
+  # a 5xx, so the credential-proxy's Anthropic-direct bypass does not fire
+  # and the main spawn errors. Mirrors the 4-7 pair. ----
+  - model_name: claude-opus-4-8
+    litellm_params:
+      model: anthropic/claude-opus-4-8
+      api_base: https://www.litellm.ai
+      api_key: os.environ/LITELLM_GATEWAY_API_KEY
+
+  - model_name: claude-opus-4-8-anthropic-direct
+    litellm_params:
+      model: anthropic/claude-opus-4-8
+      api_base: https://api.anthropic.com
+      api_key: os.environ/ANTHROPIC_API_KEY
+
   # ---- claude-sonnet-4-6 ----
   - model_name: claude-sonnet-4-6
     litellm_params:
@@ -60,6 +77,7 @@ router_settings:
   # the primary deployment. Same-name retries are not used here so
   # the second hop is provably the second-row deployment.
   fallbacks:
+    - claude-opus-4-8: ["claude-opus-4-8-anthropic-direct"]
     - claude-opus-4-7: ["claude-opus-4-7-anthropic-direct"]
     - claude-sonnet-4-6: ["claude-sonnet-4-6-anthropic-direct"]
     - claude-haiku-4-5-20251001: ["claude-haiku-4-5-20251001-anthropic-direct"]
