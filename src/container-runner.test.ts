@@ -167,6 +167,9 @@ import {
   resolveAgentModel,
   resolvePerGroupAgentModel,
   resolveSessionAgentModel,
+  resolveTierBaseModel,
+  TRUSTED_TIER_MODEL,
+  UNTRUSTED_TIER_MODEL,
   DEFAULT_AGENT_MODEL,
   getRegistryTilesDir,
   getInstalledTiles,
@@ -1409,6 +1412,43 @@ describe('resolveAgentModel', () => {
 });
 
 // ----------------------------------------------------------------------
+// resolveTierBaseModel — per-trust-tier base model (#613 Stage 1).
+// main keeps the global default (Opus); trusted → Sonnet; untrusted →
+// Haiku. This is the BASE; per-group/maintenance/task overrides win on
+// top via resolveSessionAgentModel.
+// ----------------------------------------------------------------------
+describe('resolveTierBaseModel', () => {
+  const GLOBAL = 'claude-opus-4-7[1m]';
+
+  it('main tier keeps the global default', () => {
+    expect(resolveTierBaseModel(true, false, GLOBAL)).toBe(GLOBAL);
+  });
+
+  it('main precedence: isMain wins even when trusted is also true', () => {
+    // A main group can carry trusted=true in its config; main routing
+    // must not be downgraded to the trusted-tier model.
+    expect(resolveTierBaseModel(true, true, GLOBAL)).toBe(GLOBAL);
+  });
+
+  it('trusted (non-main) tier routes to Sonnet', () => {
+    expect(resolveTierBaseModel(false, true, GLOBAL)).toBe(TRUSTED_TIER_MODEL);
+    expect(TRUSTED_TIER_MODEL).toBe('claude-sonnet-4-6');
+  });
+
+  it('untrusted (non-main, non-trusted) tier routes to Haiku', () => {
+    expect(resolveTierBaseModel(false, false, GLOBAL)).toBe(
+      UNTRUSTED_TIER_MODEL,
+    );
+    expect(UNTRUSTED_TIER_MODEL).toBe('claude-haiku-4-5-20251001');
+  });
+
+  it('the cheaper tiers carry no [1m] extended-context suffix', () => {
+    expect(TRUSTED_TIER_MODEL).not.toContain('[1m]');
+    expect(UNTRUSTED_TIER_MODEL).not.toContain('[1m]');
+  });
+});
+
+// ----------------------------------------------------------------------
 // resolvePerGroupAgentModel — per-group AGENT_MODEL override (#395).
 // Stricter than resolveAgentModel: empty AND unknown-prefix both fall
 // back to the global default, so a fat-fingered IPC `set_agent_model`
@@ -1741,14 +1781,17 @@ describe('per-group AGENT_MODEL override on container spawn', () => {
     vi.useRealTimers();
   });
 
-  it('uses the global default AGENT_MODEL when no per-group override is set', async () => {
+  it('uses the untrusted-tier base model when no per-group override is set (#613)', async () => {
+    // testGroup is untrusted (isMain:false, no containerConfig.trusted),
+    // so the no-override base is the untrusted tier model (Haiku), not the
+    // global Opus default — see resolveTierBaseModel.
     const promise = runContainerAgent(testGroup, testInput, () => {});
     fakeProc.emit('close', 0);
     await vi.advanceTimersByTimeAsync(10);
     await promise;
 
     const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
-    expect(args).toContain(`AGENT_MODEL=${DEFAULT_AGENT_MODEL}`);
+    expect(args).toContain(`AGENT_MODEL=${UNTRUSTED_TIER_MODEL}`);
   });
 
   // #418: spawn-time AGENT_MODEL log fires UNCONDITIONALLY so cost /
@@ -1771,7 +1814,12 @@ describe('per-group AGENT_MODEL override on container spawn', () => {
     expect(infoCalls.length).toBe(1);
     expect(infoCalls[0]![0]).toEqual(
       expect.objectContaining({
-        agentModel: DEFAULT_AGENT_MODEL,
+        // Untrusted tier base (Haiku). `globalDefault` stays the true
+        // orchestrator-wide AGENT_MODEL; `source` is global_default
+        // relative to the tier base (no per-group/task override).
+        agentModel: UNTRUSTED_TIER_MODEL,
+        tier: 'untrusted',
+        tierBaseModel: UNTRUSTED_TIER_MODEL,
         globalDefault: DEFAULT_AGENT_MODEL,
         source: 'global_default',
       }),
@@ -1823,8 +1871,8 @@ describe('per-group AGENT_MODEL override on container spawn', () => {
     await promise;
 
     const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
-    // Failed closed: bad prefix → global default, not the typo.
-    expect(args).toContain(`AGENT_MODEL=${DEFAULT_AGENT_MODEL}`);
+    // Failed closed: bad prefix → tier base (untrusted → Haiku), not the typo.
+    expect(args).toContain(`AGENT_MODEL=${UNTRUSTED_TIER_MODEL}`);
     expect(args).not.toContain('AGENT_MODEL=claud-opus-4-7');
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ agentModel: 'claud-opus-4-7' }),
@@ -1845,7 +1893,8 @@ describe('per-group AGENT_MODEL override on container spawn', () => {
     await promise;
 
     const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
-    expect(args).toContain(`AGENT_MODEL=${DEFAULT_AGENT_MODEL}`);
+    // Empty override → no override → untrusted tier base (Haiku).
+    expect(args).toContain(`AGENT_MODEL=${UNTRUSTED_TIER_MODEL}`);
     // Empty override is the "no override" signal — no warn log.
     const warnCalls = vi
       .mocked(logger.warn)
@@ -1983,7 +2032,7 @@ describe('maintenanceAgentModel override on container spawn (#509)', () => {
     );
   });
 
-  it('maintenance spawn with no overrides at all falls through to global default', async () => {
+  it('maintenance spawn with no overrides at all falls through to the tier base', async () => {
     const maintInput = { ...testInput, sessionName: 'maintenance' };
     const promise = runContainerAgent(testGroup, maintInput, () => {});
     fakeProc.emit('close', 0);
@@ -1991,7 +2040,12 @@ describe('maintenanceAgentModel override on container spawn (#509)', () => {
     await promise;
 
     const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
-    expect(args).toContain(`AGENT_MODEL=${DEFAULT_AGENT_MODEL}`);
+    // testGroup is untrusted, so the no-override base is the untrusted tier
+    // model (Haiku). A scheduled/maintenance task bases on its registered
+    // group's tier (task-scheduler selects the group by `task.group_folder`
+    // and derives isMain from it), so a maintenance run on this untrusted
+    // group bases on Haiku; per-task `agentModel:` overrides route on top.
+    expect(args).toContain(`AGENT_MODEL=${UNTRUSTED_TIER_MODEL}`);
 
     const infoCalls = vi
       .mocked(logger.info)
@@ -2002,7 +2056,7 @@ describe('maintenanceAgentModel override on container spawn (#509)', () => {
       );
     expect(infoCalls[0]![0]).toEqual(
       expect.objectContaining({
-        agentModel: DEFAULT_AGENT_MODEL,
+        agentModel: UNTRUSTED_TIER_MODEL,
         sessionName: 'maintenance',
         source: 'global_default',
       }),

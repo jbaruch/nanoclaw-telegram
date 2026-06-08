@@ -679,6 +679,41 @@ export function resolveAgentModel(raw: string | undefined): string {
 }
 
 /**
+ * Per-trust-tier base model (#613 Stage 1 — Claude tier-down). The base
+ * model for EVERY container spawn — inbound chat AND scheduled/maintenance
+ * runs alike — keyed to the spawn's trust tier instead of every tier
+ * defaulting to Opus:
+ *
+ *   - main      → the global default (`AGENT_MODEL`) — quality floor kept
+ *   - trusted   → Sonnet 4.6 (near-Opus reasoning, materially cheaper)
+ *   - untrusted → Haiku 4.5 (low-stakes; keeps the Claude prompt-cache
+ *                 discount on hostile content)
+ *
+ * Same-family Claude SKUs, so the agent-runner's `query()` config (tuned
+ * for Opus, with `xhigh` effort gracefully falling back on Sonnet/Haiku)
+ * needs no change. No `[1m]` suffix on the cheaper tiers — the extended-
+ * context tier is reserved for main's long sessions.
+ *
+ * This is the BASE for a spawn: per-group / maintenance / per-task
+ * overrides (`resolveSessionAgentModel`) still win on top. Scheduled-task
+ * model selection (trivial → Haiku, substantive → Sonnet) is set per-task
+ * via each skill's `agentModel:` frontmatter, not here.
+ *
+ * Exported so tests pin the tier→model mapping independently.
+ */
+export const TRUSTED_TIER_MODEL = 'claude-sonnet-4-6';
+export const UNTRUSTED_TIER_MODEL = 'claude-haiku-4-5-20251001';
+export function resolveTierBaseModel(
+  isMain: boolean,
+  trusted: boolean,
+  globalDefault: string,
+): string {
+  if (isMain) return globalDefault;
+  if (trusted) return TRUSTED_TIER_MODEL;
+  return UNTRUSTED_TIER_MODEL;
+}
+
+/**
  * Resolve a per-group `containerConfig.agentModel` override to the value
  * actually forwarded to the spawned container (#395). Stricter than the
  * global `resolveAgentModel`:
@@ -2850,18 +2885,33 @@ function buildContainerArgs(
   // (NOT the global default), so a typo on a maintenance-pinned
   // group lands on the maintenance value, not Opus.
   const isMaintenanceSpawn = sessionName === MAINTENANCE_SESSION_NAME;
+  // #613 Stage 1 — Claude tier-down. The spawn's BASE model is keyed to
+  // the group's trust tier (main → global default, trusted → Sonnet,
+  // untrusted → Haiku); per-group / maintenance / per-task overrides still
+  // win on top via resolveSessionAgentModel. This applies to every spawn,
+  // including scheduled/maintenance runs — task-scheduler selects the group
+  // by `task.group_folder` and derives `isMain` from it, so a scheduled
+  // task bases on its registered group's tier. Per-task `agentModel:`
+  // frontmatter (trivial → Haiku, substantive → Sonnet) overrides that base.
+  const tierBaseModel = resolveTierBaseModel(isMain, isTrusted, AGENT_MODEL);
   const { effective: effectiveAgentModel, source: agentModelSource } =
     resolveSessionAgentModel(
       group.containerConfig,
       isMaintenanceSpawn,
-      AGENT_MODEL,
+      tierBaseModel,
       taskAgentModel,
     );
   logger.info(
     {
       groupFolder: group.folder,
       sessionName,
+      tier: isMain ? 'main' : isTrusted ? 'trusted' : 'untrusted',
       agentModel: effectiveAgentModel,
+      // `tierBaseModel` is the tier-keyed base passed as the resolver's
+      // default; `globalDefault` is the true orchestrator-wide AGENT_MODEL.
+      // When they differ, a tier-down is in effect and `source` reads
+      // `global_default` against the tier base (no per-group/task override).
+      tierBaseModel,
       globalDefault: AGENT_MODEL,
       source: agentModelSource,
       // Include the per-task raw value so an unknown-prefix fallback
