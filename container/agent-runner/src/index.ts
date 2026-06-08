@@ -45,6 +45,7 @@ import {
 import { validateComposioArgs } from './composio-arg-validator.js';
 import { detectComposioFidelity } from './composio-fidelity.js';
 import { byairMcpServer } from './byair-mcp.js';
+import { installStdioResilience } from './stdio-resilience.js';
 import {
   COUNTERS_FILENAME,
   DEFAULT_CAP_MATRIX,
@@ -4670,4 +4671,8 @@ async function main(): Promise<void> {
   }
 }
 
+// Guard the stdout/stderr pipes to the orchestrator before any output: a
+// concurrent-spawn burst can close the read end mid-write, and an unhandled
+// EPIPE 'error' event would otherwise crash the runner (jbaruch/nanoclaw#560).
+installStdioResilience();
 main().then(() => process.exit(0));
