@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import Anthropic from '@anthropic-ai/sdk';
 
 import { _initTestDatabase } from '../db.js';
 import {
@@ -8,6 +9,7 @@ import {
   resolveGatesForGroup,
 } from '../index.js';
 import {
+  RecoverableGateError,
   _unregisterGateForTesting,
   listRegisteredGates,
   registerGate,
@@ -17,22 +19,23 @@ import type { NewMessage, RegisteredGroup } from '../types.js';
 const TEST_GATE = 'test-router-allow';
 const TEST_DENY = 'test-router-deny';
 const TEST_THROW = 'test-router-throw';
+const TEST_UNEXPECTED_THROW = 'test-router-unexpected-throw';
 
 beforeEach(() => {
   _initTestDatabase();
   _setRegisteredGroups({});
-  for (const g of [TEST_GATE, TEST_DENY, TEST_THROW]) {
+  for (const g of [TEST_GATE, TEST_DENY, TEST_THROW, TEST_UNEXPECTED_THROW]) {
     if (listRegisteredGates().includes(g)) _unregisterGateForTesting(g);
   }
   registerGate(TEST_GATE, () => ({ decision: 'allow', reason: 'router test' }));
   registerGate(TEST_DENY, () => ({ decision: 'deny', reason: 'router test' }));
   registerGate(TEST_THROW, () => {
-    throw new Error('router test boom');
+    throw new RecoverableGateError('router test boom');
   });
 });
 
 afterEach(() => {
-  for (const g of [TEST_GATE, TEST_DENY, TEST_THROW]) {
+  for (const g of [TEST_GATE, TEST_DENY, TEST_THROW, TEST_UNEXPECTED_THROW]) {
     if (listRegisteredGates().includes(g)) _unregisterGateForTesting(g);
   }
 });
@@ -303,6 +306,15 @@ describe('gateAllowsSpawn', () => {
     expect(
       await gateAllowsSpawn(group(), 'g@g.us', [msg('hi')], [TEST_THROW]),
     ).toBe(true);
+  });
+
+  it('unexpected gate throw propagates to the caller', async () => {
+    registerGate(TEST_UNEXPECTED_THROW, () => {
+      throw new Error('router test unexpected boom');
+    });
+    await expect(
+      gateAllowsSpawn(group(), 'g@g.us', [msg('hi')], [TEST_UNEXPECTED_THROW]),
+    ).rejects.toThrow('router test unexpected boom');
   });
 
   it('built-in trigger gate denies when no patterns configured does not apply (pass)', async () => {
@@ -580,7 +592,14 @@ describe('gateAllowsSpawn — stage2Enabled integration', () => {
     const { _setAnthropicClientForTesting } =
       await import('./haiku-classifier.js');
     _setAnthropicClientForTesting(
-      buildHaikuMockClient({ throwError: new Error('rate limited') }),
+      buildHaikuMockClient({
+        throwError: new Anthropic.APIError(
+          429,
+          { type: 'rate_limit_error', message: 'rate limited' },
+          'rate limited',
+          new Headers(),
+        ),
+      }),
     );
     const g: RegisteredGroup = {
       name: 'Stage2 Test',

@@ -4,6 +4,7 @@ import {
   GateContext,
   GateDecision,
   GATE_WARN_DURATION_MS,
+  RecoverableGateError,
   _unregisterGateForTesting,
   listRegisteredGates,
   registerGate,
@@ -58,7 +59,7 @@ beforeEach(() => {
     }),
   );
   registerGate('throwing-gate', () => {
-    throw new Error('boom');
+    throw new RecoverableGateError('boom');
   });
   registerGate('slow-gate', (): GateDecision => {
     const target = Date.now() + GATE_WARN_DURATION_MS + 20;
@@ -330,7 +331,7 @@ describe('runGateChain — async gates', () => {
     });
     registerGate(ASYNC_THROW, async (): Promise<GateDecision> => {
       await new Promise((r) => setTimeout(r, 1));
-      throw new Error('async boom');
+      throw new RecoverableGateError('async boom');
     });
   });
 
@@ -403,6 +404,104 @@ describe('runGateChain — failure handling', () => {
       (c) => typeof c[1] === 'string' && c[1].includes('downgraded to pass'),
     );
     expect(call).toBeDefined();
+  });
+});
+
+describe('runGateChain — programmer-defect propagation (#674)', () => {
+  // A code bug in a gate (TypeError / ReferenceError / RangeError /
+  // SyntaxError) must propagate so it surfaces loudly per
+  // `coding-policy: error-handling`, NOT be downgraded to a fail-open
+  // `pass` that silently degrades the chain. Only an explicit
+  // `RecoverableGateError` still downgrades so a known operational blip
+  // can't black-hole legitimate traffic.
+  const DEFECT_GATE = 'defect-gate';
+  const UNEXPECTED_THROW_GATE = 'unexpected-throw-gate';
+  const RECOVERABLE_THROW_GATE = 'recoverable-throw-gate';
+
+  afterEach(() => {
+    for (const g of [
+      DEFECT_GATE,
+      UNEXPECTED_THROW_GATE,
+      RECOVERABLE_THROW_GATE,
+    ]) {
+      if (listRegisteredGates().includes(g)) _unregisterGateForTesting(g);
+    }
+  });
+
+  it.each([
+    ['TypeError', TypeError],
+    ['ReferenceError', ReferenceError],
+    ['RangeError', RangeError],
+    ['SyntaxError', SyntaxError],
+  ] as const)(
+    'propagates a %s thrown by a gate (not downgraded)',
+    async (_name, ErrCtor) => {
+      registerGate(DEFECT_GATE, (): GateDecision => {
+        throw new ErrCtor('synthetic gate code bug');
+      });
+      await expect(
+        runGateChain([DEFECT_GATE, 'allow-gate'], baseCtx),
+      ).rejects.toThrow(ErrCtor);
+    },
+  );
+
+  it('propagates a defect from a non-last gate — later gates are not run', async () => {
+    const downstream = vi.fn(
+      (): GateDecision => ({ decision: 'allow', reason: 'should not run' }),
+    );
+    _unregisterGateForTesting('allow-gate');
+    registerGate('allow-gate', downstream);
+    registerGate(DEFECT_GATE, (): GateDecision => {
+      throw new TypeError('boom');
+    });
+    await expect(
+      runGateChain([DEFECT_GATE, 'allow-gate'], baseCtx),
+    ).rejects.toBeInstanceOf(TypeError);
+    expect(downstream).not.toHaveBeenCalled();
+  });
+
+  it('a plain Error now propagates instead of being downgraded', async () => {
+    registerGate(UNEXPECTED_THROW_GATE, (): GateDecision => {
+      throw new Error('transient DB read failure');
+    });
+    await expect(
+      runGateChain([UNEXPECTED_THROW_GATE, 'allow-gate'], baseCtx),
+    ).rejects.toThrow('transient DB read failure');
+  });
+
+  it('an explicit RecoverableGateError is downgraded to a failed pass', async () => {
+    registerGate(RECOVERABLE_THROW_GATE, (): GateDecision => {
+      throw new RecoverableGateError('transient DB read failure');
+    });
+    const result = await runGateChain(
+      [RECOVERABLE_THROW_GATE, 'allow-gate'],
+      baseCtx,
+    );
+    expect(result.finalDecision).toBe('allow');
+    expect(result.chain[0].decision).toBe('pass');
+    expect(result.chain[0].error?.message).toBe('transient DB read failure');
+    expect(result.chain[0].failed).toBe(true);
+  });
+
+  it('logs gate context (gateName) before propagating an unexpected error', async () => {
+    // The caller's catch (`group-queue.ts` `runForGroup`) logs only
+    // `{ groupJid, err }`, so the chain must log gateName/groupFolder
+    // before rethrowing or that triage context is lost.
+    const errSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    registerGate(UNEXPECTED_THROW_GATE, (): GateDecision => {
+      throw new TypeError('boom');
+    });
+    await expect(
+      runGateChain([UNEXPECTED_THROW_GATE], baseCtx),
+    ).rejects.toThrow(TypeError);
+    const propagateLog = errSpy.mock.calls.find(
+      (c) =>
+        typeof c[1] === 'string' &&
+        c[1].includes('propagating') &&
+        typeof c[0] === 'object' &&
+        (c[0] as { gateName?: string }).gateName === UNEXPECTED_THROW_GATE,
+    );
+    expect(propagateLog).toBeDefined();
   });
 });
 

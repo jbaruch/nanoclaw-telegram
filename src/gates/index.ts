@@ -173,6 +173,19 @@ export interface GateContext {
  */
 export type GateFn = (ctx: GateContext) => GateDecision | Promise<GateDecision>;
 
+/**
+ * Gates may throw this for an explicitly recoverable operational failure that
+ * should degrade to a failed `pass` instead of propagating. Any other throw is
+ * treated as unexpected and is re-thrown per `coding-policy: error-handling`.
+ */
+export class RecoverableGateError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    Object.setPrototypeOf(this, new.target.prototype);
+    this.name = 'RecoverableGateError';
+  }
+}
+
 export interface GateRunRecord {
   gateName: string;
   decision: GateDecisionKind;
@@ -259,11 +272,17 @@ function nowMs(): number {
  *     can't be the reason a deterministic `deny` gets nullified into an
  *     allow-all.
  *
- * Throws are converted to `pass` records so a buggy gate can't
- * black-hole legitimate traffic. Errors are logged with full context
- * so the operator can fix the gate without first having to find the
- * black hole. A thrown gate is also marked `failed` so it participates
- * in the deny-preservation rule above.
+ * A gate that throws an explicit {@link RecoverableGateError} is
+ * converted to a FAILED `pass` record so a transient operational blip
+ * can't black-hole legitimate traffic; the throw is logged with full
+ * context and the record is marked `failed` so it participates in the
+ * deny-preservation rule above. Any other throw is NOT swallowed — it
+ * propagates out of the chain per `coding-policy: error-handling` (let
+ * unexpected exceptions propagate) so a code bug or unclassified error
+ * surfaces loudly instead of silently degrading the chain to fail-open.
+ * The caller's per-group retry/backoff (`group-queue.ts` `runForGroup`)
+ * contains the throw to one group (eventually the circuit breaker), not
+ * the orchestrator.
  */
 export async function runGateChain(
   gateNames: string[],
@@ -332,7 +351,27 @@ export async function runGateChain(
         // resolve synchronously through the microtask queue.
         decision = await fn(ctx);
       } catch (err) {
-        const e = err instanceof Error ? err : new Error(String(err));
+        if (!(err instanceof RecoverableGateError)) {
+          // Per `coding-policy: error-handling`, swallow ONLY the
+          // explicitly recoverable gate failure shape. Any other
+          // exception is unexpected/unclassified and must propagate so
+          // it surfaces loudly instead of degrading the chain. Log the
+          // gate context first: the caller's catch (`group-queue.ts`
+          // `runForGroup`) logs only `{ groupJid, err }`, so without this
+          // the gateName/groupFolder needed for triage would be lost.
+          const ue = err instanceof Error ? err : new Error(String(err));
+          logger.error(
+            {
+              groupFolder: ctx.groupFolder,
+              gateName,
+              err: ue.message,
+              stack: ue.stack,
+            },
+            'gate threw an unexpected error — propagating',
+          );
+          throw err;
+        }
+        const e = err;
         errorRecord = { name: e.name, message: e.message };
         decision = { decision: 'pass', reason: `gate threw: ${e.name}` };
         logger.error(
