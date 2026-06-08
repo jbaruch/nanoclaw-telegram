@@ -35,6 +35,7 @@ import {
   storeChatMetadata,
   storeLocation,
   storeMessage,
+  updateGroupTrigger,
   updateTask,
   walkTzSegments,
 } from './db.js';
@@ -1580,6 +1581,43 @@ describe('registered group trigger pattern JSON schema', () => {
     // re-prepended for the legacy `RegisteredGroup.trigger` slot.
     expect(group!.trigger).toBe('@mention-ping');
     expect(group!.triggerPatterns!.patterns[1].kind).toBe('regex');
+  });
+});
+
+// #670 — updateGroupTrigger strips triggerPatterns before serializing so
+// the column re-derives from the new `trigger`. Its RETURN value is
+// mirrored into the in-memory registry the trigger gate reads, so it must
+// carry the persisted patterns — returning `triggerPatterns: undefined`
+// left the gate fail-open until the next reload.
+describe('updateGroupTrigger trigger-pattern hydration (#670)', () => {
+  it('returns a group whose triggerPatterns reflects the new trigger', () => {
+    setRegisteredGroup('upd@g.us', {
+      name: 'Upd',
+      folder: 'telegram_upd',
+      trigger: '@old',
+      added_at: '2024-01-01T00:00:00.000Z',
+      requiresTrigger: true,
+    });
+
+    const updated = updateGroupTrigger('upd@g.us', '@AyeAye', true);
+    expect(updated).toBeDefined();
+    expect(updated!.trigger).toBe('@AyeAye');
+    expect(updated!.requiresTrigger).toBe(true);
+    // The returned object is cached into the gate's in-memory registry —
+    // it must carry the persisted keyword pattern, not undefined.
+    expect(updated!.triggerPatterns).toBeDefined();
+    expect(updated!.triggerPatterns!.patterns).toHaveLength(1);
+    expect(updated!.triggerPatterns!.patterns[0]).toMatchObject({
+      pattern: '@AyeAye',
+      kind: 'keyword',
+      source: 'owner-set',
+    });
+    // DB agrees with the returned object.
+    expect(getTriggerPatterns('upd@g.us')!.patterns[0].pattern).toBe('@AyeAye');
+  });
+
+  it('returns undefined for a JID that is not registered', () => {
+    expect(updateGroupTrigger('missing@g.us', '@x', true)).toBeUndefined();
   });
 });
 

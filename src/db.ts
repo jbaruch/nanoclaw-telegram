@@ -3546,7 +3546,12 @@ export function updateGroupTrigger(
     ...(requiresTrigger === undefined ? {} : { requiresTrigger }),
   };
   setRegisteredGroup(jid, updated);
-  return updated;
+  // `triggerPatterns` was stripped above so the serializer re-derives the
+  // column from the new `trigger`. Re-read the persisted config back into
+  // the returned object: callers mirror this into the in-memory registry
+  // the gate reads, and an object with `triggerPatterns: undefined` would
+  // leave the trigger gate fail-open until the next reload (#670).
+  return { ...updated, triggerPatterns: getTriggerPatterns(jid) ?? undefined };
 }
 
 /**

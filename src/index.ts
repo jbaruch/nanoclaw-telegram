@@ -74,6 +74,7 @@ import {
   getMessageById,
   getMessagesSince,
   getTaskById,
+  getTriggerPatterns,
   markSessionForReset,
   recordSessionTurn,
   runTzHeartbeatAdvisory,
@@ -1292,6 +1293,29 @@ export function applyNewGroupContainerConfigDefaults(
   };
 }
 
+/**
+ * Return a copy of `group` whose `triggerPatterns` reflects what is
+ * actually persisted in the DB for `jid`.
+ *
+ * `setRegisteredGroup` synthesizes the `trigger_pattern` column from
+ * `group.trigger` when the caller supplied no `triggerPatterns` config —
+ * and the IPC `register_group` payload only ever carries the `trigger`
+ * string, never a config. The gate path reads `triggerPatterns` straight
+ * from the in-memory registry and never re-reads the DB, so caching the
+ * raw payload object (with `triggerPatterns: undefined`) makes the
+ * trigger gate see "no patterns configured" and fail-open on every
+ * message until the next `loadState()` reload. Re-reading the
+ * synthesized config keeps the cache consistent with the row (#670).
+ *
+ * Exported for unit testing; callers should use `registerGroup`.
+ */
+export function hydrateRegisteredGroupTriggerPatterns(
+  group: RegisteredGroup,
+  jid: string,
+): RegisteredGroup {
+  return { ...group, triggerPatterns: getTriggerPatterns(jid) ?? undefined };
+}
+
 function registerGroup(jid: string, group: RegisteredGroup): void {
   let groupDir: string;
   try {
@@ -1309,8 +1333,11 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   // Existing groups keep whatever they already have on disk.
   group = applyNewGroupContainerConfigDefaults(group, !registeredGroups[jid]);
 
-  registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
+  // Cache the group with its persisted trigger patterns, not the raw
+  // payload (which carries `triggerPatterns: undefined`) — otherwise the
+  // trigger gate fail-opens until the next reload (#670).
+  registeredGroups[jid] = hydrateRegisteredGroupTriggerPatterns(group, jid);
 
   // Create group folder
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
