@@ -5902,6 +5902,32 @@ interface ScheduledReminderJson {
 }
 
 /**
+ * A scheduled-reminders row is bindable into `scheduled_reminders` only
+ * when every NOT NULL column has a present, correctly-typed value. The
+ * JSON-era writer emitted rows with a null/missing `reminder_offset_min`
+ * (observed in production); binding that throws a NOT NULL `SqliteError`
+ * that rolls the whole-file transaction back (#676). Every source column
+ * is NOT NULL (`created_at` / `schema_version` are defaulted, not
+ * sourced), so all five fields are required.
+ */
+function missingRequiredScheduledReminderFields(
+  row: Record<string, unknown>,
+): string[] {
+  const missing: string[] = [];
+  if (typeof row.event_id !== 'string') missing.push('event_id');
+  if (typeof row.title !== 'string') missing.push('title');
+  if (typeof row.utc_time !== 'string') missing.push('utc_time');
+  if (
+    typeof row.reminder_offset_min !== 'number' ||
+    !Number.isFinite(row.reminder_offset_min)
+  ) {
+    missing.push('reminder_offset_min');
+  }
+  if (typeof row.task_id !== 'string') missing.push('task_id');
+  return missing;
+}
+
+/**
  * Per-group import of `scheduled-reminders.json` into the
  * `scheduled_reminders` table created by state-004 (#296). The JSON-era
  * shape is the wrapped form `{ "reminders": [...] }` written by the
@@ -5915,10 +5941,16 @@ interface ScheduledReminderJson {
  * source side (each reminder corresponds to exactly one calendar event).
  * The INSERT uses `ON CONFLICT(event_id) DO NOTHING` so a re-run with
  * leftover rows (e.g. operator copied a partial DB back over an already-
- * imported one) is a silent no-op on the PK conflict, while NOT NULL
- * violations still throw and surface via the constraint-class catch
- * helper. Per-file work is wrapped in a single transaction so a
- * mid-import crash can't leave the table half-populated.
+ * imported one) is a silent no-op on the PK conflict. A row missing a
+ * required NOT NULL field is validated out and skipped per row (#676) —
+ * chiefly a null `reminder_offset_min` from the JSON-era writer — rather
+ * than letting the bind throw a NOT NULL `SqliteError` that rolls the
+ * WHOLE file back: that rollback lost every good reminder in the file
+ * AND, because the catch `continue`d before the source was renamed,
+ * re-threw on every startup. Per-file work is wrapped in a single
+ * transaction so a mid-import crash can't leave the table half-populated;
+ * the constraint-class catch helper stays as a defensive net for any
+ * violation the per-row guard doesn't anticipate.
  */
 function migrateScheduledRemindersJsonFiles(): MigrationSummary {
   const summary = newMigrationSummary('scheduled-reminders');
@@ -6030,6 +6062,25 @@ function migrateScheduledRemindersJsonFiles(): MigrationSummary {
             logger.warn(
               { folder },
               `${fileLabel} migration: skipping non-object row`,
+            );
+            counts.skipped++;
+            continue;
+          }
+          const missing = missingRequiredScheduledReminderFields(reminder);
+          if (missing.length > 0) {
+            // #676 — skip a row missing a required NOT NULL field rather
+            // than let the bind throw a NOT NULL SqliteError that rolls
+            // the whole file back (losing every good reminder in it and
+            // re-throwing every startup because the source never renamed).
+            logger.warn(
+              {
+                folder,
+                missing,
+                ...(typeof reminder.event_id === 'string'
+                  ? { event_id: reminder.event_id }
+                  : {}),
+              },
+              `${fileLabel} migration: skipping row missing required NOT NULL field(s)`,
             );
             counts.skipped++;
             continue;

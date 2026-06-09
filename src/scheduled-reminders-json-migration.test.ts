@@ -288,90 +288,118 @@ describe('scheduled-reminders.json → SQLite migration (#296)', () => {
     });
   });
 
-  it('rolls back and leaves the source file in place when a row violates a NOT NULL constraint', async () => {
-    // ON CONFLICT(event_id) DO NOTHING (NOT `INSERT OR IGNORE`)
-    // intentionally lets NOT NULL violations throw inside the per-file
-    // transaction. The transaction rolls back so no partial rows land,
-    // the catch helper turns the throw into a warn, and the source
-    // file stays in place for human triage.
+  it('skips rows missing required NOT NULL fields, imports the rest, and renames the source (#676)', async () => {
+    // Pre-#676 a row with a null/missing NOT NULL field (chiefly
+    // `reminder_offset_min`, observed null in production) threw a NOT
+    // NULL SqliteError inside the per-file transaction and rolled the
+    // WHOLE file back — every good reminder in it was lost, and because
+    // the catch `continue`d before the rename the source re-threw on
+    // every startup. Each bad row is now validated out and skipped so
+    // the good rows import and the source is retired (the loop ends).
     await runWithTempDir(async (tempDir) => {
-      const goodFile = writeRemindersWrapped(tempDir, 'good', [
+      const filePath = writeRemindersWrapped(tempDir, 'telegram_main', [
         {
-          event_id: 'evt-good',
+          event_id: 'evt-good-1',
           title: 'Standup',
           utc_time: '2026-04-30T13:00:00Z',
           reminder_offset_min: 15,
-          task_id: 'task-good',
+          task_id: 'task-good-1',
         },
-      ]);
-      // Bypass the schema's TS type to write a contract-violating
-      // fixture: reminder row missing `task_id`. NOT NULL on `task_id`
-      // throws inside the transaction.
-      const badFile = writeRemindersWrapped(tempDir, 'bad', [
+        // Bad: reminder_offset_min is null — the exact production shape
+        // from the #676 startup-loop stack trace.
         {
-          event_id: 'evt-bad',
-          title: 'Broken',
-          utc_time: '2026-04-30T13:00:00Z',
-          reminder_offset_min: 15,
-          // task_id intentionally missing
+          event_id: 'evt-null-offset',
+          title: 'Null offset',
+          utc_time: '2026-04-30T14:00:00Z',
+          reminder_offset_min: null,
+          task_id: 'task-null',
         },
-      ]);
+        // Bad: task_id missing entirely.
+        {
+          event_id: 'evt-no-task',
+          title: 'Missing task',
+          utc_time: '2026-04-30T15:00:00Z',
+          reminder_offset_min: 10,
+        },
+        {
+          event_id: 123,
+          title: 'Bad event id',
+          utc_time: '2026-04-30T15:30:00Z',
+          reminder_offset_min: 10,
+          task_id: 'task-bad-event-id',
+        },
+        {
+          event_id: 'evt-good-2',
+          title: 'Lunch',
+          utc_time: '2026-04-30T16:30:00Z',
+          reminder_offset_min: 5,
+          task_id: 'task-good-2',
+        },
+        // Cast through unknown: the fixture deliberately violates the
+        // ScheduledReminderJson contract to exercise the runtime guard.
+      ] as unknown as Array<Record<string, unknown>>);
 
       vi.resetModules();
       const { initDatabase, _closeDatabase } = await import('./db.js');
       const { logger } = await import('./logger.js');
       const warnSpy = vi.spyOn(logger, 'warn');
       try {
-        initDatabase();
+        expect(() => initDatabase()).not.toThrow();
         const db = new Database(path.join(tempDir, 'store', 'messages.db'));
         try {
-          // Bad file's transaction rolled back: zero rows for the bad
-          // event_id.
-          const badCount = (
-            db
-              .prepare(
-                'SELECT COUNT(*) AS n FROM scheduled_reminders WHERE event_id = ?',
-              )
-              .get('evt-bad') as { n: number }
-          ).n;
-          expect(badCount).toBe(0);
-          // Good file still imported.
-          const goodCount = (
-            db
-              .prepare(
-                'SELECT COUNT(*) AS n FROM scheduled_reminders WHERE event_id = ?',
-              )
-              .get('evt-good') as { n: number }
-          ).n;
-          expect(goodCount).toBe(1);
+          const ids = db
+            .prepare(
+              'SELECT event_id FROM scheduled_reminders ORDER BY event_id',
+            )
+            .all() as Array<{ event_id: string }>;
+          // The two good rows imported; the three bad rows skipped.
+          expect(ids.map((r) => r.event_id)).toEqual([
+            'evt-good-1',
+            'evt-good-2',
+          ]);
         } finally {
           db.close();
         }
-        // Good file renamed; bad file left in place.
-        expect(fs.existsSync(goodFile)).toBe(false);
-        expect(fs.existsSync(badFile)).toBe(true);
-        // Per-file warn fired with the constraint-violation message
-        // (catch is narrowed to constraint-class SqliteError per
-        // `coding-policy: error-handling`).
-        const constraintWarnFired = warnSpy.mock.calls.some((call) => {
-          const msg = call.find((arg) => typeof arg === 'string') as
-            | string
-            | undefined;
-          return Boolean(msg && msg.includes('violated a DB constraint'));
-        });
-        expect(constraintWarnFired).toBe(true);
-        const errCodeIsConstraint = warnSpy.mock.calls.some((call) => {
-          const meta = call.find(
-            (arg) =>
-              typeof arg === 'object' &&
-              arg !== null &&
-              'errCode' in (arg as object),
-          ) as { errCode?: string } | undefined;
-          return Boolean(
-            meta?.errCode && meta.errCode.startsWith('SQLITE_CONSTRAINT_'),
-          );
-        });
-        expect(errCodeIsConstraint).toBe(true);
+        // Source retired — re-run is a no-op, no re-throw on next boot.
+        expect(fs.existsSync(filePath)).toBe(false);
+        const renamed = fs
+          .readdirSync(path.dirname(filePath))
+          .filter((f) => f.startsWith('scheduled-reminders.json.migrated-'));
+        expect(renamed).toHaveLength(1);
+        const skipWarns = warnSpy.mock.calls
+          .filter(
+            (call) =>
+              call[1] ===
+              'scheduled-reminders.json migration: skipping row missing required NOT NULL field(s)',
+          )
+          .map((call) => call[0] as Record<string, unknown>);
+        expect(skipWarns).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              folder: 'telegram_main',
+              event_id: 'evt-null-offset',
+              missing: ['reminder_offset_min'],
+            }),
+            expect.objectContaining({
+              folder: 'telegram_main',
+              event_id: 'evt-no-task',
+              missing: ['task_id'],
+            }),
+            expect.objectContaining({
+              folder: 'telegram_main',
+              missing: ['event_id'],
+            }),
+          ]),
+        );
+        expect(skipWarns).toHaveLength(3);
+        const badEventIdWarn = skipWarns.find(
+          (warn) =>
+            Array.isArray(warn.missing) &&
+            warn.missing.length === 1 &&
+            warn.missing[0] === 'event_id',
+        );
+        expect(badEventIdWarn).toBeDefined();
+        expect(badEventIdWarn).not.toHaveProperty('event_id');
       } finally {
         warnSpy.mockRestore();
         _closeDatabase();
