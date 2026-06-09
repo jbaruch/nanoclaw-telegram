@@ -316,6 +316,92 @@ describe('haikuClassifierGate — failure modes', () => {
   });
 });
 
+describe('haikuClassifierGate — LiteLLM→direct bypass (#675)', () => {
+  // The classifier shares the credential proxy's bypass behaviour: when
+  // the primary (gateway) attempt fails on a recoverable shape, it
+  // retries against ANTHROPIC_BYPASS_URL so a gateway blip can't take
+  // Stage 2 down while agent-container spawns ride the proxy bypass.
+
+  it('primary 5xx → retries via bypass and returns the bypass verdict', async () => {
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const primary = buildMockClient({
+      throwError: new Anthropic.APIError(
+        503,
+        undefined,
+        'gateway unavailable',
+        new Headers(),
+      ),
+    });
+    const bypass = buildMockClient({
+      response: buildToolUseResponse('yes', 'reached via direct bypass'),
+    });
+    _setAnthropicClientForTesting(primary.client, bypass.client);
+    const result = await haikuClassifierGate(buildCtx());
+    expect(result.decision).toBe('allow');
+    expect(result.reason).toContain('reached via direct bypass');
+    expect(primary.calls).toHaveLength(1);
+    expect(bypass.calls).toHaveLength(1);
+    const bypassWarn = warnSpy.mock.calls.find(
+      (c) =>
+        typeof c[1] === 'string' &&
+        c[1].includes('retrying via ANTHROPIC_BYPASS_URL'),
+    );
+    expect(bypassWarn).toBeDefined();
+  });
+
+  it('primary connection error → retries via bypass (the #671 Connection-error asymmetry)', async () => {
+    const primary = buildMockClient({
+      throwError: new Anthropic.APIConnectionError({
+        message: 'Connection error.',
+      }),
+    });
+    const bypass = buildMockClient({
+      response: buildToolUseResponse('no', 'direct said no'),
+    });
+    _setAnthropicClientForTesting(primary.client, bypass.client);
+    const result = await haikuClassifierGate(buildCtx());
+    expect(result.decision).toBe('deny');
+    expect(bypass.calls).toHaveLength(1);
+  });
+
+  it('primary 4xx → does NOT bypass, falls back to a failed pass', async () => {
+    // A 4xx (rate limit / bad request) is not bypass-eligible — the
+    // direct attempt would just fail the same way. The gate falls back
+    // to its existing failed-pass handling without a wasted second call.
+    const primary = buildMockClient({
+      throwError: new Anthropic.APIError(
+        429,
+        { type: 'rate_limit_error', message: 'slow down' },
+        'rate limited',
+        new Headers(),
+      ),
+    });
+    const bypass = buildMockClient({
+      response: buildToolUseResponse('yes', 'should not be reached'),
+    });
+    _setAnthropicClientForTesting(primary.client, bypass.client);
+    const result = await haikuClassifierGate(buildCtx());
+    expect(result.decision).toBe('pass');
+    expect(result.reason).toContain('classifier-failed: api-error');
+    expect(result.failed).toBe(true);
+    expect(bypass.calls).toHaveLength(0);
+  });
+
+  it('primary fails AND bypass fails → failed pass (chain combinator decides)', async () => {
+    const primary = buildMockClient({
+      throwError: new Anthropic.APIConnectionError({ message: 'gw down' }),
+    });
+    const bypass = buildMockClient({
+      throwError: new Anthropic.APIConnectionError({ message: 'direct down' }),
+    });
+    _setAnthropicClientForTesting(primary.client, bypass.client);
+    const result = await haikuClassifierGate(buildCtx());
+    expect(result.decision).toBe('pass');
+    expect(result.failed).toBe(true);
+    expect(bypass.calls).toHaveLength(1);
+  });
+});
+
 describe('haikuClassifierGate — prompt assembly', () => {
   it('emits two text system blocks with ephemeral cache_control on both', async () => {
     const { client, calls } = buildMockClient({

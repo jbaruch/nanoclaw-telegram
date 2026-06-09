@@ -33,6 +33,12 @@ import { readEnvFile } from '../env.js';
 import { getRegisteredGroup, getRecentSenderName } from '../db.js';
 import { logger } from '../logger.js';
 import {
+  createMessageWithBypass,
+  parseAnthropicUrlOrDefault,
+  resolveBypassTarget,
+  type AnthropicClientPair,
+} from '../anthropic-bypass.js';
+import {
   appendUsageRecord,
   buildUsageRecord,
   resolveUsageLogPath,
@@ -367,49 +373,99 @@ const CLASSIFY_TOOL: Anthropic.Tool = {
 };
 
 /**
- * Lazy Anthropic client. Reads ANTHROPIC_API_KEY from `.env` via the
- * same path the credential proxy uses (see `credential-proxy.ts`),
- * so we share the host's existing API key without introducing a new
- * env var. Cached across calls.
+ * Lazy Anthropic client pair. Reads ANTHROPIC_API_KEY from `.env` via
+ * the same path the credential proxy uses (see `credential-proxy.ts`),
+ * so we share the host's existing API key without introducing a new env
+ * var. Cached across calls.
  *
- * Returns null when the host is OAuth-only (no in-process API key);
- * the gate falls back to `pass` in that case so OAuth installs don't
+ * Two clients (#675): `primary` points at `ANTHROPIC_BASE_URL` (the
+ * `nanoclaw-litellm` gateway, like every other host egress); `bypass`
+ * points at `ANTHROPIC_BYPASS_URL` (anthropic-direct) and is used as a
+ * fallback when the gateway is unreachable or 5xx-ing — mirroring the
+ * credential proxy's socket-level bypass so the classifier's egress
+ * reachability matches the agent containers' (the asymmetry #671
+ * observed: container haiku spawns rode the proxy bypass while the
+ * classifier's direct call died on `Connection error`). `bypass` is
+ * `null` when bypass is disabled for this config (same-origin / no key).
+ *
+ * Returns null when the host is OAuth-only (no in-process API key); the
+ * gate falls back to `pass` in that case so OAuth installs don't
  * spuriously fail Stage 2.
  */
-let cachedClient: Anthropic | null = null;
-let cachedClientResolved = false;
+let cachedClients: AnthropicClientPair | null = null;
+let cachedClientsResolved = false;
 
-function getAnthropicClient(): Anthropic | null {
-  if (cachedClientResolved) return cachedClient;
-  cachedClientResolved = true;
-  const secrets = readEnvFile(['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL']);
+function getAnthropicClients(): AnthropicClientPair | null {
+  if (cachedClientsResolved) return cachedClients;
+  cachedClientsResolved = true;
+  const secrets = readEnvFile([
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_BASE_URL',
+    'ANTHROPIC_BYPASS_URL',
+  ]);
   if (!secrets.ANTHROPIC_API_KEY) {
     logger.warn(
       'haiku-classifier: ANTHROPIC_API_KEY not configured — classifier disabled (returns pass)',
     );
+    cachedClients = null;
     return null;
   }
-  cachedClient = new Anthropic({
+  // A malformed ANTHROPIC_BASE_URL degrades the PRIMARY client to
+  // anthropic-direct (via parseAnthropicUrlOrDefault) rather than handing
+  // the SDK a bad baseURL — consistent with the bypass path and the
+  // credential proxy. Valid / unset values pass through byte-identical
+  // (raw value, or `undefined` to let the SDK default). The raw value is
+  // not logged per `coding-policy: no-secrets` (an endpoint URL can embed
+  // a credential).
+  const baseResolved = parseAnthropicUrlOrDefault(secrets.ANTHROPIC_BASE_URL);
+  if (baseResolved.fellBackToDefault) {
+    logger.warn(
+      'haiku-classifier: ANTHROPIC_BASE_URL is not a valid URL (value omitted — may contain credentials) — falling back to anthropic-direct',
+    );
+  }
+  const primary = new Anthropic({
     apiKey: secrets.ANTHROPIC_API_KEY,
-    baseURL: secrets.ANTHROPIC_BASE_URL || undefined,
+    baseURL: baseResolved.fellBackToDefault
+      ? baseResolved.url.toString()
+      : secrets.ANTHROPIC_BASE_URL || undefined,
   });
-  return cachedClient;
+  // resolveBypassTarget resolves both endpoint vars the same way (no
+  // throw on a malformed value), so a bad bypass URL degrades to
+  // anthropic-direct rather than disabling the path.
+  const { enabled, bypassUrl } = resolveBypassTarget({
+    baseUrl: secrets.ANTHROPIC_BASE_URL,
+    bypassUrl: secrets.ANTHROPIC_BYPASS_URL,
+    hasApiKey: true,
+  });
+  const bypass = enabled
+    ? new Anthropic({ apiKey: secrets.ANTHROPIC_API_KEY, baseURL: bypassUrl })
+    : null;
+  cachedClients = { primary, bypass };
+  return cachedClients;
 }
 
 /**
- * Test seam: inject a mocked Anthropic client. Production never
- * calls this.
+ * Test seam: inject mocked Anthropic clients. Production never calls
+ * this.
+ *
+ * `client === undefined` resets the cache so the next call re-resolves
+ * from env. `client === null` simulates the no-API-key path (classifier
+ * disabled). A client sets the `primary`; `bypassClient` (default
+ * `null`) sets the bypass leg — omit it to exercise the no-bypass path,
+ * which is what every pre-#675 test wants.
  */
 export function _setAnthropicClientForTesting(
   client: Anthropic | null | undefined,
+  bypassClient: Anthropic | null = null,
 ): void {
   if (client === undefined) {
-    cachedClient = null;
-    cachedClientResolved = false;
+    cachedClients = null;
+    cachedClientsResolved = false;
     return;
   }
-  cachedClient = client;
-  cachedClientResolved = true;
+  cachedClients =
+    client === null ? null : { primary: client, bypass: bypassClient };
+  cachedClientsResolved = true;
 }
 
 interface BuildPromptResult {
@@ -553,8 +609,8 @@ export const haikuClassifierGate: GateFn = async (
   const modelId = group?.containerConfig?.stage2ModelId ?? DEFAULT_MODEL_ID;
   const strategy = resolveContextStrategy(strategyName, ctx.groupFolder);
 
-  const client = getAnthropicClient();
-  if (!client) {
+  const clients = getAnthropicClients();
+  if (!clients) {
     const failure: ClassifierFailure = {
       kind: 'no-client',
       detail: 'no Anthropic API key configured',
@@ -587,7 +643,8 @@ export const haikuClassifierGate: GateFn = async (
   const apiStartedAt = Date.now();
   let response: Anthropic.Message;
   try {
-    response = await client.messages.create(
+    response = await createMessageWithBypass(
+      clients,
       {
         model: modelId,
         max_tokens: MAX_TOKENS,
@@ -597,6 +654,19 @@ export const haikuClassifierGate: GateFn = async (
         messages: [{ role: 'user', content: built.userText }],
       },
       { signal: controller.signal },
+      (bypassErr) =>
+        logger.warn(
+          {
+            groupFolder: ctx.groupFolder,
+            modelId,
+            strategy: strategy.name,
+            err:
+              bypassErr instanceof Error
+                ? `${bypassErr.name}: ${bypassErr.message}`
+                : String(bypassErr),
+          },
+          'haiku-classifier: primary egress failed, retrying via ANTHROPIC_BYPASS_URL',
+        ),
     );
   } catch (err) {
     clearTimeout(timeout);

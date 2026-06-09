@@ -21,6 +21,12 @@ import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 import { lookupContainer } from './proxy-registry.js';
 import {
+  BYPASS_TRIGGER_STATUS_CODES,
+  isReachabilityErrorCode,
+  parseAnthropicUrlOrDefault,
+  resolveBypassTarget,
+} from './anthropic-bypass.js';
+import {
   appendUsageRecord,
   noteCaptureWrite,
   noteMessagesRequest,
@@ -72,8 +78,11 @@ const USAGE_CAPTURE_BUFFER_CAP = 10 * 1024 * 1024;
  * Bypass is automatically disabled when the primary and bypass URLs
  * resolve to the same origin — there's nothing to fall back TO if the
  * primary is already Anthropic-direct.
+ *
+ * The bypass-eligibility decision (status codes, reachability errnos,
+ * same-origin/no-key disable) is shared with the SDK-layer classifier
+ * bypass via `anthropic-bypass.ts` (#675) so the two paths can't drift.
  */
-const BYPASS_TRIGGER_STATUS_CODES = new Set([500, 502, 503, 504]);
 const BYPASS_IDLE_TIMEOUT_MS = 3000;
 
 export interface CredentialProxyOptions {
@@ -106,16 +115,41 @@ export function startCredentialProxy(
   const oauthToken =
     secrets.CLAUDE_CODE_OAUTH_TOKEN || secrets.ANTHROPIC_AUTH_TOKEN;
 
-  const upstreamUrl = new URL(
-    secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
+  // A malformed ANTHROPIC_BASE_URL / ANTHROPIC_BYPASS_URL must not crash
+  // the proxy at startup — degrade to anthropic-direct (the safe default)
+  // with a warn, consistent with resolveBypassTarget's no-throw handling
+  // (#675). Shared `parseAnthropicUrlOrDefault` so the proxy and the
+  // classifier handle a bad endpoint env var the same way.
+  // The raw env value is deliberately NOT logged: an endpoint URL can
+  // embed a credential (`https://user:pass@host`, `?api_key=…`) and the
+  // logger only redacts a narrow Telegram-token pattern. The env-var name
+  // is enough for the operator to go inspect the value themselves.
+  const upstreamResolved = parseAnthropicUrlOrDefault(
+    secrets.ANTHROPIC_BASE_URL,
   );
-  const bypassUrl = new URL(
-    secrets.ANTHROPIC_BYPASS_URL || 'https://api.anthropic.com',
+  if (upstreamResolved.fellBackToDefault) {
+    logger.warn(
+      'credential-proxy: ANTHROPIC_BASE_URL is not a valid URL (value omitted — may contain credentials) — falling back to anthropic-direct',
+    );
+  }
+  const upstreamUrl = upstreamResolved.url;
+  const bypassResolved = parseAnthropicUrlOrDefault(
+    secrets.ANTHROPIC_BYPASS_URL,
   );
-  // Same-origin bypass is a no-op — skip the second attempt entirely
-  // so we don't double-bill the same target on every error.
-  const bypassEnabled =
-    upstreamUrl.origin !== bypassUrl.origin && authMode === 'api-key';
+  if (bypassResolved.fellBackToDefault) {
+    logger.warn(
+      'credential-proxy: ANTHROPIC_BYPASS_URL is not a valid URL (value omitted — may contain credentials) — falling back to anthropic-direct',
+    );
+  }
+  const bypassUrl = bypassResolved.url;
+  // Same-origin bypass is a no-op — skip the second attempt entirely so
+  // we don't double-bill the same target on every error. Shared with the
+  // classifier bypass (#675) so the enable rule can't drift.
+  const { enabled: bypassEnabled } = resolveBypassTarget({
+    baseUrl: secrets.ANTHROPIC_BASE_URL,
+    bypassUrl: secrets.ANTHROPIC_BYPASS_URL,
+    hasApiKey: authMode === 'api-key',
+  });
   const idleTimeoutMs = opts.idleTimeoutMs ?? BYPASS_IDLE_TIMEOUT_MS;
 
   const usageLogPath = resolveUsageLogPath();
@@ -615,11 +649,10 @@ export function startCredentialProxy(
 
           upstream.on('error', (err) => {
             const code = (err as NodeJS.ErrnoException).code;
+            // Shared errno set (#675) plus the proxy-specific idle-timeout
+            // sentinel, which has no errno of its own.
             const isReachabilityError =
-              code === 'ECONNREFUSED' ||
-              code === 'ENOTFOUND' ||
-              code === 'EHOSTUNREACH' ||
-              code === 'ECONNRESET' ||
+              isReachabilityErrorCode(code) ||
               err.message === 'credential-proxy idle timeout';
             if (!fromBypass && bypassEnabled && isReachabilityError) {
               logger.warn(
