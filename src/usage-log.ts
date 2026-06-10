@@ -25,7 +25,7 @@ export interface ModelPricing {
 }
 
 /**
- * Anthropic public pricing (as of 2026-05). Update when Anthropic
+ * Anthropic public pricing (as of 2026-06). Update when Anthropic
  * changes prices.
  *
  * Source: https://www.anthropic.com/pricing
@@ -35,7 +35,7 @@ export interface ModelPricing {
  *   2. Strip a `-YYYYMMDD` date suffix and retry.
  *   3. Family-prefix fallback: pick the latest-known entry in the same
  *      family (opus / sonnet / haiku). #479 sub-#2: catches the "next
- *      major bump" case (e.g. `claude-opus-4-8`) where Sonnet's prior
+ *      major bump" case (e.g. `claude-opus-4-9`) where Sonnet's prior
  *      blanket fallback would have logged ~5× too low for Opus traffic.
  *   4. Last-resort fallback to Sonnet with a warn log, AND the resulting
  *      record is flagged `cost_unknown: true` so cost reports surface
@@ -69,6 +69,13 @@ export const PRICING: Record<string, ModelPricing> = {
     cache_r: 0.1,
     cache_c_5m: 1.25,
     cache_c_1h: 2,
+  },
+  'claude-opus-4-8': {
+    in_: 5,
+    out: 25,
+    cache_r: 0.5,
+    cache_c_5m: 6.25,
+    cache_c_1h: 10,
   },
   'claude-opus-4-7': {
     in_: 5,
@@ -160,7 +167,7 @@ function latestEntryInFamily(family: Family): string | null {
  * Sub-#2 of #479: replaced the old "fall back to Sonnet for any
  * unknown model" with family-prefix fallback. The blanket Sonnet
  * fallback would log ~5× too low for any future Opus traffic
- * (`claude-opus-4-8` etc.) until the pricing table caught up.
+ * (`claude-opus-4-9` etc.) until the pricing table caught up.
  */
 export function resolvePricing(model: string): PricingResult {
   if (PRICING[model]) {
@@ -176,7 +183,7 @@ export function resolvePricing(model: string): PricingResult {
     };
   }
   // Family fallback — pick the latest known entry in the same family
-  // so a next-version bump (`claude-opus-4-8`) is priced as Opus, not
+  // so a next-version bump (`claude-opus-4-9`) is priced as Opus, not
   // Sonnet, until the table is updated.
   const family = detectFamily(model);
   if (family) {
@@ -299,7 +306,7 @@ export interface UsageRecord {
   cost_unknown?: boolean;
   /**
    * #479 sub-#2: present (`true`) when pricing came from a same-family
-   * fallback (e.g. `claude-opus-4-8` → `claude-opus-4-7` rates).
+   * fallback (e.g. `claude-opus-4-9` → `claude-opus-4-8` rates).
    * `cost_micro` is in the right ballpark but not exact. Aggregators
    * may include these rows in totals while flagging them as
    * approximate.

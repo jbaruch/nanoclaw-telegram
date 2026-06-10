@@ -43,12 +43,19 @@ describe('resolvePricing', () => {
     expect(result.cost_unknown).toBe(false);
   });
 
+  it('returns exact match for opus-4-8 (no fallback flags)', () => {
+    const result = resolvePricing('claude-opus-4-8');
+    expect(result.pricing).toBe(PRICING['claude-opus-4-8']);
+    expect(result.approximate).toBe(false);
+    expect(result.cost_unknown).toBe(false);
+  });
+
   it('falls back within-family for next-version Opus (#479 sub-#2)', () => {
-    // The bug this fix prevents: a future `claude-opus-4-8` would
+    // The bug this fix prevents: a future `claude-opus-4-9` would
     // previously be priced as Sonnet (~5× too low for Opus traffic).
     // After the fix it falls back to the latest known Opus entry.
-    const result = resolvePricing('claude-opus-4-8');
-    expect(result.pricing).toBe(PRICING['claude-opus-4-7']);
+    const result = resolvePricing('claude-opus-4-9');
+    expect(result.pricing).toBe(PRICING['claude-opus-4-8']);
     expect(result.approximate).toBe(true);
     expect(result.cost_unknown).toBe(false);
   });
@@ -278,15 +285,15 @@ describe('parseUsageFromBody', () => {
     // Opus pricing (good enough) and flagged approximate.
     const body = JSON.stringify({
       id: 'msg_future',
-      model: 'claude-opus-4-8',
+      model: 'claude-opus-4-9',
       usage: { input_tokens: 1000, output_tokens: 500 },
     });
     const rec = parseUsageFromBody(body, CTX, 100, null);
     expect(rec).not.toBeNull();
-    expect(rec!.model).toBe('claude-opus-4-8');
+    expect(rec!.model).toBe('claude-opus-4-9');
     expect(rec!.cost_approximate).toBe(true);
     expect(rec!.cost_unknown).toBeUndefined();
-    // Cost is computed at Opus 4.7 rates: 1000*5 + 500*25 = 17500
+    // Cost is computed at Opus 4.8 rates: 1000*5 + 500*25 = 17500
     // → 17500 / 1e6 * 1e8 = 1,750,000 microcents.
     expect(rec!.cost_micro).toBe(1750000);
   });
