@@ -10,6 +10,7 @@ import {
   parseSkillNameFromPrompt,
   parseDrainTimeoutMsFromFrontmatter,
   resolveDrainTimeoutMs,
+  shouldArmHardExitWatchdog,
 } from './hard-exit-watchdog.js';
 
 describe('decideHardExitWatchdog (#545 / #589)', () => {
@@ -152,9 +153,9 @@ describe('decideHardExitWatchdog (#545 / #589)', () => {
 
 describe('parseSkillNameFromPrompt (#589)', () => {
   it('extracts the first Skill(skill: "...") invocation', () => {
-    expect(parseSkillNameFromPrompt('Skill(skill: "tessl__morning-brief")')).toBe(
-      'tessl__morning-brief',
-    );
+    expect(
+      parseSkillNameFromPrompt('Skill(skill: "tessl__morning-brief")'),
+    ).toBe('tessl__morning-brief');
   });
 
   it('accepts single quotes', () => {
@@ -170,7 +171,9 @@ describe('parseSkillNameFromPrompt (#589)', () => {
   });
 
   it('returns undefined when no Skill() call is present', () => {
-    expect(parseSkillNameFromPrompt('please summarize this thread')).toBeUndefined();
+    expect(
+      parseSkillNameFromPrompt('please summarize this thread'),
+    ).toBeUndefined();
   });
 
   it('returns the first invocation when multiple appear', () => {
@@ -228,7 +231,9 @@ drain_timeout_ms: 0
   });
 
   it('returns undefined when there is no frontmatter block', () => {
-    expect(parseDrainTimeoutMsFromFrontmatter('# Just a header\n')).toBeUndefined();
+    expect(
+      parseDrainTimeoutMsFromFrontmatter('# Just a header\n'),
+    ).toBeUndefined();
   });
 
   it('returns undefined when the frontmatter block is unterminated', () => {
@@ -294,7 +299,9 @@ drain_timeout_ms: ${DRAIN_TIMEOUT_MS_MAX + 1}
 drain_timeout_ms: ${DRAIN_TIMEOUT_MS_MAX}
 ---
 `;
-    expect(parseDrainTimeoutMsFromFrontmatter(atMax)).toBe(DRAIN_TIMEOUT_MS_MAX);
+    expect(parseDrainTimeoutMsFromFrontmatter(atMax)).toBe(
+      DRAIN_TIMEOUT_MS_MAX,
+    );
   });
 });
 
@@ -421,9 +428,27 @@ describe('resolveDrainTimeoutMs (#589)', () => {
     fs.chmodSync(skillDir, 0o000);
     try {
       const prompt = 'Skill(skill: "tessl__locked")';
-      expect(() => resolveDrainTimeoutMs(prompt, restrictedRoot, 90_000)).toThrow();
+      expect(() =>
+        resolveDrainTimeoutMs(prompt, restrictedRoot, 90_000),
+      ).toThrow();
     } finally {
       fs.chmodSync(skillDir, 0o700);
     }
+  });
+});
+
+describe('shouldArmHardExitWatchdog (#589 reopened)', () => {
+  // Maintenance one-shot spawns defer to the host-side
+  // MAINTENANCE_CONTAINER_TIMEOUT inactivity bound, so the in-container
+  // post-close watchdog is disabled for them. The compose turn that
+  // stalled on an LLM / proxy blip emits no SDK event for the whole
+  // stall and would otherwise trip the in-container budget before
+  // `send_message` fires.
+  it('does NOT arm for maintenance sessions (host inactivity timeout is the single bound)', () => {
+    expect(shouldArmHardExitWatchdog(true)).toBe(false);
+  });
+
+  it('arms for interactive / default sessions (post-close idle is a real stuck-iterator signal there)', () => {
+    expect(shouldArmHardExitWatchdog(false)).toBe(true);
   });
 });

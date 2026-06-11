@@ -44,6 +44,23 @@
  *      blocking). A Bash that legitimately runs 60s+ now keeps the
  *      watchdog re-armed instead of tripping on the silent idle
  *      window between those two events.
+ *
+ * #589 (reopened) — the budget bumps above (30s → activity-aware →
+ * 90s) never closed the gap for ONE-SHOT MAINTENANCE spawns, because
+ * the idle clock only advances on SDK message events. The window
+ * between a `tool_result` and the NEXT assistant turn — an LLM
+ * inference request in flight — emits no SDK event, and a compose turn
+ * that stalls on a slow / failing LLM call (credential-proxy failover)
+ * blows past any fixed budget before `send_message` ever fires. The
+ * in-container watchdog is a tighter, redundant duplicate of the
+ * host-side maintenance inactivity timeout
+ * (`MAINTENANCE_CONTAINER_TIMEOUT`, src/container-runner.ts), so for
+ * maintenance it is disabled (see `shouldArmHardExitWatchdog`): the
+ * host timer is the single bound. The per-skill `drain_timeout_ms`
+ * override and the in-flight `tool_use` re-arm still apply to
+ * interactive / default sessions, where `_close` means the multi-turn
+ * conversation genuinely idled and a long post-close compose is not
+ * expected.
  */
 
 import * as fs from 'fs';
@@ -91,6 +108,24 @@ export function decideHardExitWatchdog(
     return { action: 'exit', idleMs };
   }
   return { action: 'rearm', rearmInMs: budgetMs - idleMs, idleMs };
+}
+
+/**
+ * #589 (reopened) — decide whether to arm the in-container post-close
+ * hard-exit watchdog at all. Maintenance one-shot spawns defer to the
+ * host-side `MAINTENANCE_CONTAINER_TIMEOUT` inactivity bound: the
+ * in-container watchdog is a tighter duplicate whose post-close idle
+ * budget became the entire compose window (close flips early when no
+ * follow-up IPC is expected), so a compose turn stalled on an LLM /
+ * proxy blip tripped it before `send_message` fired. Interactive /
+ * default sessions keep the watchdog — there `_close` means the
+ * conversation genuinely idled and a long post-close compose is not
+ * expected, so growing idleness is a real stuck-iterator signal.
+ */
+export function shouldArmHardExitWatchdog(
+  isMaintenanceSession: boolean,
+): boolean {
+  return !isMaintenanceSession;
 }
 
 /**

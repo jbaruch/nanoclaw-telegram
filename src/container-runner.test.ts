@@ -328,6 +328,72 @@ describe('container-runner timeout behavior', () => {
     expect(result.error).toContain('timed out');
   });
 
+  it('maintenance session reaped mid-compose (streamed preview, no terminal result) resolves as killed (#589)', async () => {
+    // #589 (reopened) — streamed PREVIEW output is NOT a delivered
+    // result. A maintenance one-shot that reaches a terminal result
+    // exits naturally within seconds, so hitting the inactivity timeout
+    // after only preview output means the agent was reaped mid-compose
+    // (e.g. the morning-brief compose turn stalled on an LLM / proxy
+    // blip). Pre-fix this resolved a misleading 'success'; now it must
+    // resolve 'killed' so the run is recorded non-success + retriable.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    // Streaming preview during compose — sets hadStreamingOutput and
+    // resets the inactivity timer, but carries no terminal result.
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      streamText: 'composing the brief…',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    // No further activity — cross the 5-min maintenance inactivity
+    // window so the host reaps the still-composing container.
+    await vi.advanceTimersByTimeAsync(300_001);
+    fakeProc.emit('close', 137);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('killed');
+    expect(result.error).toMatch(/reaped|incomplete|inactivity/i);
+  });
+
+  it('default session that streamed output and times out still resolves as success (interactive idle cleanup unchanged, #589)', async () => {
+    // Guard against over-reach: the #589 killed-reclassification is
+    // maintenance-only. A default/interactive session that streamed a
+    // reply and is reaped after the idle period is still the legitimate
+    // idle-cleanup success path.
+    const onOutput = vi.fn(async () => {});
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      streamText: 'streaming a reply…',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Cross the default IDLE_TIMEOUT + 30s floor (1_830_000ms).
+    await vi.advanceTimersByTimeAsync(1_830_000);
+    fakeProc.emit('close', 137);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('success');
+  });
+
   it('default session keeps the IDLE_TIMEOUT+30s graceful-close floor', async () => {
     const onOutput = vi.fn(async () => {});
     // No sessionName → falls through to DEFAULT_SESSION_NAME.

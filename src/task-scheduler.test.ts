@@ -2876,6 +2876,84 @@ describe('interval cadence end-to-end (#438)', () => {
     await vi.advanceTimersByTimeAsync(10);
   });
 
+  it('records status=killed when the terminal output status is killed (maintenance reaped mid-compose, #589)', async () => {
+    // #589 (reopened) — container-runner resolves status='killed' when a
+    // maintenance container is reaped by the inactivity timeout after
+    // streaming preview output but before a terminal result. The
+    // scheduler must persist task_run_logs.status='killed' (retriable)
+    // with the reason in the error column, NOT a misleading 'success'.
+    // No forcedCloseAt stamp here — this is the in-band terminal status,
+    // a distinct kill source from #496's closeAllActiveContainers path.
+    const RECURRING_GROUP = {
+      name: 'Main',
+      folder: 'main',
+      trigger: 'always',
+      added_at: '2026-01-01T00:00:00.000Z',
+      isMain: true,
+    };
+
+    createTask({
+      id: 'reaped-task',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'run',
+      schedule_type: 'cron',
+      schedule_value: '0 13 * * *',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, _onOutput) => {
+        return {
+          status: 'killed',
+          result: null,
+          error:
+            'Maintenance container reaped by inactivity timeout after 300000ms with no terminal result — incomplete run (reaped mid-compose)',
+        };
+      },
+    );
+
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+      wipeSessionJsonl: () => 0,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    const { _rawQueryForTests } = await import('./db.js');
+    const rows = _rawQueryForTests<{ status: string; error: string | null }>(
+      `SELECT status, error FROM task_run_logs WHERE task_id = ?`,
+      ['reaped-task'],
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].status).toBe('killed');
+    expect(rows[0].error).toMatch(/reaped|incomplete|inactivity/i);
+
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
   it('keeps status=success when the queue reports no forcedCloseAt stamp (normal path)', async () => {
     const RECURRING_GROUP = {
       name: 'Main',

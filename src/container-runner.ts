@@ -1239,7 +1239,17 @@ export interface ContainerOutput {
   // empty result (the original #581 bug). A precheck script that
   // crashes / emits non-JSON / omits `wake_agent` is `'error'`, not
   // `'precheck_skipped'`.
-  status: 'success' | 'error' | 'precheck_skipped';
+  //
+  // `'killed'` (#589 reopened) — resolved host-side (never emitted by
+  // the agent-runner) when a maintenance container is reaped by the
+  // MAINTENANCE_CONTAINER_TIMEOUT inactivity timer after streaming
+  // preview output but before producing a terminal result. A healthy
+  // maintenance one-shot exits naturally (scheduleClose → `_close`)
+  // within seconds of its terminal result, so a maintenance inactivity
+  // timeout means the run was reaped mid-compose — incomplete and
+  // retriable, not the misleading `'success'` that hid the original
+  // #589 silent-stop.
+  status: 'success' | 'error' | 'killed' | 'precheck_skipped';
   result: string | null;
   newSessionId?: string;
   error?: string;
@@ -3661,9 +3671,38 @@ export async function runContainerAgent(
             ].join('\n'),
           );
 
-          // Timeout after output = idle cleanup, not failure.
-          // The agent already sent its response; this is just the
-          // container being reaped after the idle period expired.
+          // #589 (reopened) — for MAINTENANCE one-shots, streamed
+          // preview output is NOT a delivered result. A healthy
+          // maintenance run reaches a terminal result and exits
+          // naturally (scheduleClose → `_close`) within seconds, so
+          // hitting this inactivity timeout means the agent was reaped
+          // MID-COMPOSE before producing / sending its result (e.g. the
+          // morning-brief compose turn stalled on an LLM / proxy blip).
+          // Resolving `'success'` here hid that incomplete run (the
+          // original #589 silent-stop). Classify `'killed'` so
+          // `task_run_logs` records non-success and the run is
+          // retriable / redeliverable.
+          if (hadStreamingOutput && isMaintenanceSession) {
+            logger.warn(
+              { group: group.name, containerName, duration, code },
+              'Maintenance container reaped by inactivity timeout after streaming output but before a terminal result — classifying killed (incomplete, retriable) (#589)',
+            );
+            outputChain.then(() => {
+              resolve({
+                status: 'killed',
+                result: null,
+                newSessionId,
+                error: `Maintenance container reaped by inactivity timeout after ${timeoutMs}ms with no terminal result — incomplete run (reaped mid-compose)`,
+              });
+            });
+            return;
+          }
+
+          // Interactive / default session: timeout after output = idle
+          // cleanup, not failure. The agent already streamed its reply
+          // (and, for multi-turn chats, sent it via `send_message`);
+          // this is just the container being reaped after the idle
+          // period expired. Unchanged from the pre-#589 contract.
           if (hadStreamingOutput) {
             logger.info(
               { group: group.name, containerName, duration, code },
