@@ -34,8 +34,9 @@ export interface AgentResult {
   // `'precheck_skipped'` comes only from the scheduled-task `runScript`
   // branch in `container/agent-runner/src/index.ts`; `'killed'` is
   // resolved host-side in `src/container-runner.ts` only when a
-  // maintenance container is reaped mid-compose. Slash commands take a
-  // different code path that exits via `'success'` / `'error'`.
+  // maintenance container is reaped by the inactivity timeout after
+  // streamed output. Slash commands take a different code path that
+  // exits via `'success'` / `'error'`.
   status: 'success' | 'error' | 'killed' | 'precheck_skipped';
   result?: string | object | null;
 }

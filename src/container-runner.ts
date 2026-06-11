@@ -1242,13 +1242,15 @@ export interface ContainerOutput {
   //
   // `'killed'` (#589 reopened) — resolved host-side (never emitted by
   // the agent-runner) when a maintenance container is reaped by the
-  // MAINTENANCE_CONTAINER_TIMEOUT inactivity timer after streaming
-  // preview output but before producing a terminal result. A healthy
-  // maintenance one-shot exits naturally (scheduleClose → `_close`)
-  // within seconds of its terminal result, so a maintenance inactivity
-  // timeout means the run was reaped mid-compose — incomplete and
-  // retriable, not the misleading `'success'` that hid the original
-  // #589 silent-stop.
+  // MAINTENANCE_CONTAINER_TIMEOUT inactivity timer after streamed
+  // output. A healthy maintenance one-shot exits naturally
+  // (scheduleClose → `_close`) within seconds of its terminal result,
+  // so reaching this inactivity timeout overwhelmingly means the run
+  // was still working — incomplete and retriable, not the misleading
+  // `'success'` that hid the original #589 silent-stop. (Stream markers
+  // include terminal ones, so this can't prove no terminal result was
+  // produced; the rare delivered-then-hung shape is over-reported as
+  // killed. Precise terminal-result tracking is #682.)
   status: 'success' | 'error' | 'killed' | 'precheck_skipped';
   result: string | null;
   newSessionId?: string;

@@ -1296,15 +1296,17 @@ async function runTask(
     } else if (output.status === 'killed') {
       // #589 (reopened) — container-runner resolves 'killed' when a
       // maintenance container is reaped by the host inactivity timeout
-      // mid-compose (streamed preview, no terminal result). Flag the
-      // run incomplete so the runStatus mapping below records 'killed'
-      // (retriable) instead of a misleading 'success'. Carry the reason
-      // into the row's error column without flipping the status to
-      // 'error' — see the override after the runStatus ternary.
+      // after streamed output (overwhelmingly still-working; see the
+      // ContainerOutput `'killed'` doc note on the rare delivered-then-
+      // hung shape). Flag the run incomplete so the runStatus mapping
+      // below records 'killed' (retriable) instead of a misleading
+      // 'success'. Carry the reason into the row's error column without
+      // flipping the status to 'error' — see the override after the
+      // runStatus ternary.
       killedMidRun = true;
       killedReason =
         output.error ||
-        'Maintenance container reaped mid-run before producing a terminal result — incomplete run';
+        'Maintenance container reaped by the inactivity timeout after streamed output — treating as incomplete (retriable)';
     } else {
       if (output.status === 'precheck_skipped') {
         // #581 follow-up — terminal status mirrored to the outer
@@ -1379,7 +1381,7 @@ async function runTask(
     error = killedReason;
     logger.warn(
       { taskId: task.id, durationMs },
-      'Task run reclassified as killed — maintenance container reaped mid-compose before producing a terminal result (#589); recovery/redelivery should treat this as a non-success retriable run',
+      'Task run reclassified as killed — maintenance container reaped by the inactivity timeout after streamed output (#589); recovery/redelivery should treat this as a non-success retriable run',
     );
   }
   if (wasForcedClosed && runStatus === 'success') {

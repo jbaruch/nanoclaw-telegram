@@ -2912,7 +2912,7 @@ describe('interval cadence end-to-end (#438)', () => {
           status: 'killed',
           result: null,
           error:
-            'Maintenance container reaped by inactivity timeout after 300000ms with no terminal result — incomplete run (reaped mid-compose)',
+            'Maintenance container reaped by inactivity timeout after 300000ms following streamed output — treating as incomplete (retriable)',
         };
       },
     );
