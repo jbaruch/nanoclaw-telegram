@@ -3675,24 +3675,33 @@ export async function runContainerAgent(
           // preview output is NOT a delivered result. A healthy
           // maintenance run reaches a terminal result and exits
           // naturally (scheduleClose → `_close`) within seconds, so
-          // hitting this inactivity timeout means the agent was reaped
-          // MID-COMPOSE before producing / sending its result (e.g. the
-          // morning-brief compose turn stalled on an LLM / proxy blip).
-          // Resolving `'success'` here hid that incomplete run (the
-          // original #589 silent-stop). Classify `'killed'` so
-          // `task_run_logs` records non-success and the run is
-          // retriable / redeliverable.
+          // hitting this inactivity timeout overwhelmingly means the
+          // agent was still working (e.g. the morning-brief compose turn
+          // stalled on an LLM / proxy blip). Resolving `'success'` here
+          // hid that incomplete run (the original #589 silent-stop).
+          // Classify `'killed'` so `task_run_logs` records non-success
+          // and the run is retriable / redeliverable.
+          //
+          // `hadStreamingOutput` is set for ANY output marker, terminal
+          // ones included, so this branch cannot prove no terminal
+          // result was produced — the rare "delivered, then the SDK
+          // iterator hung until the host reaped it" shape lands here too
+          // and is over-reported as killed (a downstream redelivery
+          // de-dupe absorbs that; a duplicate brief beats a missing
+          // one). The message therefore states only what is known —
+          // reaped after streaming output — not "no terminal result".
+          // Precisely tracking terminal-result observation is #682.
           if (hadStreamingOutput && isMaintenanceSession) {
             logger.warn(
               { group: group.name, containerName, duration, code },
-              'Maintenance container reaped by inactivity timeout after streaming output but before a terminal result — classifying killed (incomplete, retriable) (#589)',
+              'Maintenance container reaped by inactivity timeout after streaming output — classifying killed (incomplete, retriable) (#589)',
             );
             outputChain.then(() => {
               resolve({
                 status: 'killed',
                 result: null,
                 newSessionId,
-                error: `Maintenance container reaped by inactivity timeout after ${timeoutMs}ms with no terminal result — incomplete run (reaped mid-compose)`,
+                error: `Maintenance container reaped by inactivity timeout after ${timeoutMs}ms following streamed output — treating as incomplete (retriable)`,
               });
             });
             return;
