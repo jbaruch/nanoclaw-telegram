@@ -1240,17 +1240,19 @@ export interface ContainerOutput {
   // crashes / emits non-JSON / omits `wake_agent` is `'error'`, not
   // `'precheck_skipped'`.
   //
-  // `'killed'` (#589 reopened) — resolved host-side (never emitted by
-  // the agent-runner) when a maintenance container is reaped by the
-  // MAINTENANCE_CONTAINER_TIMEOUT inactivity timer after streamed
-  // output. A healthy maintenance one-shot exits naturally
-  // (scheduleClose → `_close`) within seconds of its terminal result,
-  // so reaching this inactivity timeout overwhelmingly means the run
-  // was still working — incomplete and retriable, not the misleading
-  // `'success'` that hid the original #589 silent-stop. (Stream markers
-  // include terminal ones, so this can't prove no terminal result was
-  // produced; the rare delivered-then-hung shape is over-reported as
-  // killed. Precise terminal-result tracking is #682.)
+  // `'killed'` (#589 reopened / #682) — resolved host-side (never
+  // emitted by the agent-runner) when a maintenance container ends
+  // without delivering a terminal result. A healthy maintenance
+  // one-shot reaches a terminal result and exits naturally
+  // (scheduleClose → `_close`) within seconds, so a run that produced
+  // only streaming previews and then either (a) was reaped by the
+  // MAINTENANCE_CONTAINER_TIMEOUT inactivity timer or (b) exited
+  // cleanly (code 0) was incomplete — reaped/exited mid-compose, not
+  // the misleading `'success'` that hid the original #589 silent-stop.
+  // #682 gates this on the precise `hadTerminalResult` signal (a marker
+  // with no `streamText`), so a run that DID deliver a terminal result
+  // and then idled out keeps its `'success'` — only a no-terminal-
+  // result end is `'killed'`. Incomplete + retriable / redeliverable.
   status: 'success' | 'error' | 'killed' | 'precheck_skipped';
   result: string | null;
   newSessionId?: string;
@@ -3529,6 +3531,21 @@ export async function runContainerAgent(
                 newSessionId = parsed.newSessionId;
               }
               hadStreamingOutput = true;
+              // #682 — distinguish a TERMINAL result marker from an
+              // intermediate streaming PREVIEW. The agent-runner emits a
+              // preview marker — the only `writeOutput` carrying
+              // `streamText` (container/agent-runner/src/index.ts) — on
+              // every throttled assistant-text snapshot; every terminal
+              // marker (real result, empty-turn success, #461 silent-stop
+              // synthesis, error, precheck-skip) omits `streamText`.
+              // `hadStreamingOutput` flips for ANY marker, so it can't
+              // tell "delivered a result" from "only previewed"; this
+              // flag can. A clean exit that produced only previews never
+              // delivered a result — recording it `success` is the
+              // silent-success shape #682 closes.
+              if (parsed.streamText === undefined) {
+                hadTerminalResult = true;
+              }
               // Activity detected — reset the hard timeout
               resetTimeout();
               // Call onOutput for all markers (including null results)
@@ -3572,6 +3589,12 @@ export async function runContainerAgent(
 
       let timedOut = false;
       let hadStreamingOutput = false;
+      // #682 — set true once a TERMINAL result marker (one without
+      // `streamText`) is observed. The precise "did the run actually
+      // deliver a terminal result?" signal the clean-exit and timeout
+      // classifications below gate on, distinct from `hadStreamingOutput`
+      // (which flips for streaming previews too).
+      let hadTerminalResult = false;
       // Untrusted containers get shorter timeout (5 min vs 30 min default)
       const UNTRUSTED_TIMEOUT = 300_000;
       const defaultTimeout =
@@ -3673,47 +3696,50 @@ export async function runContainerAgent(
             ].join('\n'),
           );
 
-          // #589 (reopened) — for MAINTENANCE one-shots, streamed
+          // #589 (reopened) / #682 — for MAINTENANCE one-shots, streamed
           // preview output is NOT a delivered result. A healthy
           // maintenance run reaches a terminal result and exits
-          // naturally (scheduleClose → `_close`) within seconds, so
-          // hitting this inactivity timeout overwhelmingly means the
-          // agent was still working (e.g. the morning-brief compose turn
-          // stalled on an LLM / proxy blip). Resolving `'success'` here
-          // hid that incomplete run (the original #589 silent-stop).
-          // Classify `'killed'` so `task_run_logs` records non-success
-          // and the run is retriable / redeliverable.
+          // naturally (scheduleClose → `_close`) within seconds, so a
+          // run still alive at this inactivity timeout having produced
+          // only previews was reaped mid-compose (e.g. the morning-brief
+          // compose turn stalled on an LLM / proxy blip). Resolving
+          // `'success'` here hid that incomplete run (the original #589
+          // silent-stop). Classify `'killed'` so `task_run_logs` records
+          // non-success and the run is retriable / redeliverable.
           //
-          // `hadStreamingOutput` is set for ANY output marker, terminal
-          // ones included, so this branch cannot prove no terminal
-          // result was produced — the rare "delivered, then the SDK
-          // iterator hung until the host reaped it" shape lands here too
-          // and is over-reported as killed (a downstream redelivery
-          // de-dupe absorbs that; a duplicate brief beats a missing
-          // one). The message therefore states only what is known —
-          // reaped after streaming output — not "no terminal result".
-          // Precisely tracking terminal-result observation is #682.
-          if (hadStreamingOutput && isMaintenanceSession) {
+          // #682 replaced #589's `hadStreamingOutput` gate with the
+          // precise `hadTerminalResult` signal: the rare "delivered a
+          // terminal result, then the SDK iterator hung until the host
+          // reaped it" shape now keeps its idle-cleanup `success` (the
+          // work landed) instead of being over-reported as killed. Only
+          // a reap after previews-but-no-terminal-result is `killed`.
+          if (
+            isMaintenanceSession &&
+            hadStreamingOutput &&
+            !hadTerminalResult
+          ) {
             logger.warn(
               { group: group.name, containerName, duration, code },
-              'Maintenance container reaped by inactivity timeout after streaming output — classifying killed (incomplete, retriable) (#589)',
+              'Maintenance container reaped by inactivity timeout having streamed only preview output (no terminal result) — classifying killed (incomplete, retriable) (#682)',
             );
             outputChain.then(() => {
               resolve({
                 status: 'killed',
                 result: null,
                 newSessionId,
-                error: `Maintenance container reaped by inactivity timeout after ${timeoutMs}ms following streamed output — treating as incomplete (retriable)`,
+                error: `Maintenance container reaped by inactivity timeout after ${timeoutMs}ms having streamed only preview output and no terminal result — incomplete run (reaped mid-compose), retriable`,
               });
             });
             return;
           }
 
-          // Interactive / default session: timeout after output = idle
-          // cleanup, not failure. The agent already streamed its reply
-          // (and, for multi-turn chats, sent it via `send_message`);
-          // this is just the container being reaped after the idle
-          // period expired. Unchanged from the pre-#589 contract.
+          // Interactive / default session, OR a maintenance run that
+          // delivered a terminal result before idling out: timeout after
+          // output = idle cleanup, not failure. The agent already
+          // streamed its reply (and, for multi-turn chats, sent it via
+          // `send_message`); this is just the container being reaped
+          // after the idle period expired. Unchanged from the pre-#589
+          // contract.
           if (hadStreamingOutput) {
             logger.info(
               { group: group.name, containerName, duration, code },
@@ -3834,6 +3860,41 @@ export async function runContainerAgent(
 
         // Streaming mode: wait for output chain to settle, return completion marker
         if (onOutput) {
+          // #682 — a clean exit (code 0) is recorded `success` only when
+          // the run actually delivered a terminal result. A MAINTENANCE
+          // container that exits 0 having produced only streaming
+          // previews (or nothing) never reached a terminal result — e.g.
+          // an in-container `process.exit(0)` fired mid-compose before
+          // the SDK loop / #461 silent-stop synthesis could emit one
+          // (the 2026-06-11 morning-brief shape: the hard-exit watchdog
+          // `process.exit(0)`'d after streaming the compose preview but
+          // before `send_message`). `code === 0` + `timedOut === false`
+          // lands here, and the old unconditional `success` made that
+          // incomplete run indistinguishable from a genuine delivery —
+          // zero alerting fired and the brief was never sent. Classify
+          // `killed` so `task_run_logs` records a non-success, retriable
+          // run. The #461 silent-stop no-op success is NOT mis-flagged:
+          // it emits a terminal marker (`{status:'success', result:''}`,
+          // no `streamText`), so `hadTerminalResult` is set and it stays
+          // `success`. Scoped to maintenance to mirror #683 — the
+          // `'killed'` status is consumed by the task-scheduler, and
+          // interactive idle-cleanup `success` semantics are unchanged.
+          if (isMaintenanceSession && !hadTerminalResult) {
+            outputChain.then(() => {
+              logger.warn(
+                { group: group.name, duration, newSessionId },
+                'Maintenance container exited cleanly (code 0) without delivering a terminal result — classifying killed (incomplete, retriable) (#682)',
+              );
+              resolve({
+                status: 'killed',
+                result: null,
+                newSessionId,
+                error:
+                  'Maintenance container exited cleanly (code 0) without delivering a terminal result — incomplete run (exited before producing/sending a result), retriable',
+              });
+            });
+            return;
+          }
           outputChain.then(() => {
             logger.info(
               { group: group.name, duration, newSessionId },

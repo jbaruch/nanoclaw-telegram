@@ -394,6 +394,127 @@ describe('container-runner timeout behavior', () => {
     expect(result.status).toBe('success');
   });
 
+  it('maintenance session that exits cleanly (code 0) after only preview output resolves as killed (#682)', async () => {
+    // #682 — the 2026-06-11 morning-brief shape: the in-container
+    // hard-exit watchdog `process.exit(0)`'d after streaming the compose
+    // preview but before `send_message` / a terminal result. code 0 +
+    // timedOut=false lands in the normal streaming-mode exit path, which
+    // used to record a misleading 'success' with an empty result — zero
+    // alerting fired and the brief was never sent. It must now resolve
+    // 'killed' so the incomplete run is recorded non-success + retriable.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    // Streaming preview only — no terminal marker.
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      streamText: 'composing the brief…',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Clean exit (code 0), NOT a timeout.
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('killed');
+    expect(result.error).toMatch(/terminal result|incomplete/i);
+  });
+
+  it('maintenance session that delivered a terminal result (incl. #461 silent-stop no-op) and exits cleanly stays success (#682)', async () => {
+    // #682 guard — the careful part. A #461 silent-stop no-op success
+    // emits a TERMINAL marker (`{status:'success', result:''}`, no
+    // `streamText`), so `hadTerminalResult` is set and the clean exit
+    // keeps 'success'. Only a clean exit with NO terminal result at all
+    // is 'killed' — this is what keeps legitimate quiet no-ops honest.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    // #461 silent-stop synthesis terminal marker — empty result, no streamText.
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: '',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('success');
+  });
+
+  it('default session that exits cleanly after only preview output stays success (interactive unchanged, #682)', async () => {
+    // Over-reach guard: #682's killed-on-clean-exit is maintenance-only.
+    // A default / interactive clean exit keeps 'success' semantics — the
+    // 'killed' status is consumed by the task-scheduler, not the chat path.
+    const onOutput = vi.fn(async () => {});
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      streamText: 'streaming a reply…',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('success');
+  });
+
+  it('maintenance session that delivered a terminal result then idled out resolves as success (#682 refines #589 over-report)', async () => {
+    // #682 — #589's timeout branch over-reported killed for the
+    // delivered-then-hung shape because `hadStreamingOutput` couldn't
+    // tell a terminal marker from a preview. With `hadTerminalResult`, a
+    // run that DID deliver its result and then idled until the host
+    // reaped it keeps idle-cleanup 'success' — the work landed.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    // Terminal result delivered (no streamText).
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'brief sent',
+      newSessionId: 'session-789',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Then idles out — cross the 5-min maintenance inactivity window.
+    await vi.advanceTimersByTimeAsync(300_001);
+    fakeProc.emit('close', 137);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('success');
+  });
+
   it('default session keeps the IDLE_TIMEOUT+30s graceful-close floor', async () => {
     const onOutput = vi.fn(async () => {});
     // No sessionName → falls through to DEFAULT_SESSION_NAME.

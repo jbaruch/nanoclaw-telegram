@@ -1294,19 +1294,19 @@ async function runTask(
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
     } else if (output.status === 'killed') {
-      // #589 (reopened) — container-runner resolves 'killed' when a
-      // maintenance container is reaped by the host inactivity timeout
-      // after streamed output (overwhelmingly still-working; see the
-      // ContainerOutput `'killed'` doc note on the rare delivered-then-
-      // hung shape). Flag the run incomplete so the runStatus mapping
-      // below records 'killed' (retriable) instead of a misleading
-      // 'success'. Carry the reason into the row's error column without
-      // flipping the status to 'error' — see the override after the
-      // runStatus ternary.
+      // #589 (reopened) / #682 — container-runner resolves 'killed' when
+      // a maintenance container ends without delivering a terminal
+      // result: either reaped by the host inactivity timeout, or exited
+      // cleanly (code 0) having streamed only previews. See the
+      // ContainerOutput `'killed'` doc note. Flag the run incomplete so
+      // the runStatus mapping below records 'killed' (retriable) instead
+      // of a misleading 'success'. Carry the reason into the row's error
+      // column without flipping the status to 'error' — see the override
+      // after the runStatus ternary.
       killedMidRun = true;
       killedReason =
         output.error ||
-        'Maintenance container reaped by the inactivity timeout after streamed output — treating as incomplete (retriable)';
+        'Maintenance container ended without delivering a terminal result — incomplete run, retriable';
     } else {
       if (output.status === 'precheck_skipped') {
         // #581 follow-up — terminal status mirrored to the outer
@@ -1374,14 +1374,14 @@ async function runTask(
         ? 'killed'
         : 'success';
   if (killedMidRun && runStatus === 'killed' && !error) {
-    // #589 (reopened) — carry the maintenance-timeout reason into the
-    // row's error column (status stays 'killed', not 'error') so audits
-    // and the recovery/redelivery path see an actionable, non-success
-    // run rather than a misleading bookkeeping success.
+    // #589 (reopened) / #682 — carry the kill reason into the row's
+    // error column (status stays 'killed', not 'error') so audits and
+    // the recovery/redelivery path see an actionable, non-success run
+    // rather than a misleading bookkeeping success.
     error = killedReason;
     logger.warn(
       { taskId: task.id, durationMs },
-      'Task run reclassified as killed — maintenance container reaped by the inactivity timeout after streamed output (#589); recovery/redelivery should treat this as a non-success retriable run',
+      'Task run reclassified as killed — maintenance container ended without delivering a terminal result (#682); recovery/redelivery should treat this as a non-success retriable run',
     );
   }
   if (wasForcedClosed && runStatus === 'success') {
