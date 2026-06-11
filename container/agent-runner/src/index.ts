@@ -78,6 +78,7 @@ import {
   decideHardExitWatchdog,
   HARD_EXIT_IDLE_BUDGET_MS,
   resolveDrainTimeoutMs,
+  shouldArmHardExitWatchdog,
 } from './hard-exit-watchdog.js';
 import { shouldSynthesizeSilentStop } from './silent-stop-synthesis.js';
 import { shouldSuppressEchoedResult } from './empty-turn-echo-suppression.js';
@@ -2984,7 +2985,15 @@ async function runQuery(
     '/home/node/.claude/skills',
     HARD_EXIT_IDLE_BUDGET_MS,
   );
-  if (drainBudgetMs !== HARD_EXIT_IDLE_BUDGET_MS) {
+  // #589 (reopened) — only interactive / default sessions arm the
+  // in-container post-close watchdog; maintenance defers to the host
+  // MAINTENANCE_CONTAINER_TIMEOUT bound. The per-skill override is
+  // therefore moot for maintenance, so don't emit a misleading
+  // "override = Xms" line for a session that won't arm the watchdog.
+  if (
+    drainBudgetMs !== HARD_EXIT_IDLE_BUDGET_MS &&
+    shouldArmHardExitWatchdog(isMaintenanceSession)
+  ) {
     log(
       `Hard-exit watchdog: per-skill drain_timeout_ms override = ${drainBudgetMs}ms (default ${HARD_EXIT_IDLE_BUDGET_MS}ms)`,
     );
@@ -2996,6 +3005,20 @@ async function runQuery(
       closedDuringQuery = true;
       stream.end();
       ipcPolling = false;
+      // #589 (reopened) — maintenance one-shot spawns do NOT arm the
+      // in-container watchdog. `_close` flips early (no follow-up IPC
+      // is expected), so the post-close idle budget would become the
+      // entire compose window, and a compose turn stalled on an LLM /
+      // proxy blip emits no SDK event and trips before `send_message`
+      // fires. The host MAINTENANCE_CONTAINER_TIMEOUT inactivity timer
+      // (src/container-runner.ts) is the single bound for these spawns;
+      // a stuck SDK iterator is reclassified there as `killed`.
+      if (!shouldArmHardExitWatchdog(isMaintenanceSession)) {
+        log(
+          'Hard-exit watchdog: maintenance session — deferring to host inactivity timeout (not arming in-container watchdog)',
+        );
+        return;
+      }
       // #461 + #545 + #589 — activity-aware hard-exit watchdog with
       // per-skill budget override and in-flight tool_use re-arm. The
       // decision (`exit` vs `rearm`) lives in `hard-exit-watchdog.ts`

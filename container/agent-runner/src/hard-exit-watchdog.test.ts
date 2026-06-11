@@ -10,6 +10,7 @@ import {
   parseSkillNameFromPrompt,
   parseDrainTimeoutMsFromFrontmatter,
   resolveDrainTimeoutMs,
+  shouldArmHardExitWatchdog,
 } from './hard-exit-watchdog.js';
 
 describe('decideHardExitWatchdog (#545 / #589)', () => {
@@ -425,5 +426,21 @@ describe('resolveDrainTimeoutMs (#589)', () => {
     } finally {
       fs.chmodSync(skillDir, 0o700);
     }
+  });
+});
+
+describe('shouldArmHardExitWatchdog (#589 reopened)', () => {
+  // Maintenance one-shot spawns defer to the host-side
+  // MAINTENANCE_CONTAINER_TIMEOUT inactivity bound, so the in-container
+  // post-close watchdog is disabled for them. The compose turn that
+  // stalled on an LLM / proxy blip emits no SDK event for the whole
+  // stall and would otherwise trip the in-container budget before
+  // `send_message` fires.
+  it('does NOT arm for maintenance sessions (host inactivity timeout is the single bound)', () => {
+    expect(shouldArmHardExitWatchdog(true)).toBe(false);
+  });
+
+  it('arms for interactive / default sessions (post-close idle is a real stuck-iterator signal there)', () => {
+    expect(shouldArmHardExitWatchdog(false)).toBe(true);
   });
 });
