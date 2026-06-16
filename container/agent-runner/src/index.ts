@@ -45,7 +45,11 @@ import {
 import { validateComposioArgs } from './composio-arg-validator.js';
 import { detectComposioFidelity } from './composio-fidelity.js';
 import { byairMcpServer } from './byair-mcp.js';
-import { installStdioResilience } from './stdio-resilience.js';
+import {
+  createTerminalDeliveryTracker,
+  installStdioResilience,
+  installUncaughtEpipeGuard,
+} from './stdio-resilience.js';
 import {
   COUNTERS_FILENAME,
   DEFAULT_CAP_MATRIX,
@@ -354,7 +358,17 @@ async function readStdin(): Promise<string> {
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
+// Per-turn terminal-delivery state for the uncaught-EPIPE teardown
+// guard (#685). `markDelivered()` fires on any TERMINAL `writeOutput`
+// (no `streamText` — preview snapshots are the only markers that carry
+// it, the same discriminator the host uses for `hadTerminalResult`,
+// #682); the query loop calls `resetTurn()` at each turn's start; the
+// guard reads `hasDelivered()` to decide whether a teardown crash exits
+// 0 (work landed) or 1 (could not deliver).
+const terminalDelivery = createTerminalDeliveryTracker();
+
 function writeOutput(output: ContainerOutput): void {
+  if (output.streamText === undefined) terminalDelivery.markDelivered();
   console.log(OUTPUT_START_MARKER);
   console.log(JSON.stringify(output));
   console.log(OUTPUT_END_MARKER);
@@ -4589,6 +4603,15 @@ async function main(): Promise<void> {
     while (true) {
       log(`Starting query (session: ${sessionId || 'new'})...`);
 
+      // #685 — reset per turn so the uncaught-EPIPE guard's exit code
+      // reflects THIS turn's delivery, not a prior turn's. The runner is
+      // a persistent multi-turn loop (it loops back here after
+      // `waitForIpcMessage` below): without the reset, an EPIPE during a
+      // later, still-undelivered turn would wrongly exit 0 carrying the
+      // previous turn's terminal-delivery flag. A terminal `writeOutput`
+      // (no `streamText`) flips it back true once this turn delivers.
+      terminalDelivery.resetTurn();
+
       let queryResult;
       try {
         queryResult = await runQuery(
@@ -4698,4 +4721,9 @@ async function main(): Promise<void> {
 // concurrent-spawn burst can close the read end mid-write, and an unhandled
 // EPIPE 'error' event would otherwise crash the runner (jbaruch/nanoclaw#560).
 installStdioResilience();
+// Backstop for an EPIPE on a socket the runner doesn't own (Agent SDK
+// keep-alive, MCP child pipes) during post-delivery teardown — exits
+// cleanly instead of crashing with a noisy unhandled-error stack and a
+// false-failure exit 1 (jbaruch/nanoclaw#685).
+installUncaughtEpipeGuard(terminalDelivery.hasDelivered);
 main().then(() => process.exit(0));

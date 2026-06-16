@@ -3,6 +3,9 @@ import { EventEmitter } from 'node:events';
 import {
   makeStdioErrorHandler,
   installStdioResilience,
+  makeUncaughtEpipeHandler,
+  installUncaughtEpipeGuard,
+  createTerminalDeliveryTracker,
 } from './stdio-resilience.js';
 
 const epipe = (): NodeJS.ErrnoException =>
@@ -57,6 +60,66 @@ describe('installStdioResilience', () => {
     const stderr = new EventEmitter();
     installStdioResilience(stdout, stderr, vi.fn() as unknown as ExitFnMock);
     expect(() => stderr.emit('error', epipe())).not.toThrow();
+  });
+});
+
+describe('makeUncaughtEpipeHandler', () => {
+  it('exits 0 on a teardown EPIPE after a terminal result was delivered', () => {
+    const exit = vi.fn() as unknown as ExitFnMock;
+    makeUncaughtEpipeHandler(() => true, exit)(epipe());
+    expect(exit).toHaveBeenCalledWith(0);
+  });
+
+  it('exits 1 on an EPIPE before any terminal result was delivered', () => {
+    const exit = vi.fn() as unknown as ExitFnMock;
+    makeUncaughtEpipeHandler(() => false, exit)(epipe());
+    expect(exit).toHaveBeenCalledWith(1);
+  });
+
+  it('rethrows a non-EPIPE uncaught exception and does not exit (lets unexpected defects propagate)', () => {
+    const exit = vi.fn() as unknown as ExitFnMock;
+    const handler = makeUncaughtEpipeHandler(() => true, exit);
+    expect(() => handler(enospc())).toThrow('no space left on device');
+    expect(exit).not.toHaveBeenCalled();
+  });
+});
+
+describe('installUncaughtEpipeGuard', () => {
+  it('routes an uncaughtException EPIPE through the handler, exiting per delivery state', () => {
+    const proc = new EventEmitter();
+    const exit = vi.fn() as unknown as ExitFnMock;
+    let delivered = false;
+    installUncaughtEpipeGuard(() => delivered, proc, exit);
+
+    proc.emit('uncaughtException', epipe());
+    expect(exit).toHaveBeenLastCalledWith(1);
+
+    delivered = true;
+    proc.emit('uncaughtException', epipe());
+    expect(exit).toHaveBeenLastCalledWith(0);
+  });
+});
+
+describe('createTerminalDeliveryTracker', () => {
+  it('starts undelivered', () => {
+    expect(createTerminalDeliveryTracker().hasDelivered()).toBe(false);
+  });
+
+  it('reports delivered after markDelivered', () => {
+    const t = createTerminalDeliveryTracker();
+    t.markDelivered();
+    expect(t.hasDelivered()).toBe(true);
+  });
+
+  it('resetTurn clears a prior turn delivered state (the #685 multi-turn fix)', () => {
+    const t = createTerminalDeliveryTracker();
+    t.markDelivered();
+    // A new turn begins — a pre-delivery EPIPE on this turn must NOT
+    // inherit the previous turn's delivered state.
+    t.resetTurn();
+    expect(t.hasDelivered()).toBe(false);
+    t.markDelivered();
+    expect(t.hasDelivered()).toBe(true);
   });
 });
 
