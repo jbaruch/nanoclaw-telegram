@@ -1117,7 +1117,11 @@ describe('task scheduler', () => {
         consumeForcedCloseAt: vi.fn(() => null),
       } as never,
       onProcess: () => {},
-      sendMessage: async () => {},
+      // Return a Telegram message id: on a `tg:` chat the bot-row write
+      // (and its chat-metadata upsert) is gated on delivery (#681), so a
+      // void return would model a swallowed send and skip the upsert this
+      // test asserts.
+      sendMessage: async () => 'tg-msg-id',
       wipeSessionJsonl: () => 0,
     });
 
