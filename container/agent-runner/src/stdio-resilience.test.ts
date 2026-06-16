@@ -76,16 +76,11 @@ describe('makeUncaughtEpipeHandler', () => {
     expect(exit).toHaveBeenCalledWith(1);
   });
 
-  it('reports and exits 1 on a non-EPIPE defect without re-throwing (safe inside an uncaughtException listener)', () => {
+  it('rethrows a non-EPIPE uncaught exception and does not exit (lets unexpected defects propagate)', () => {
     const exit = vi.fn() as unknown as ExitFnMock;
-    const reportFatal = vi.fn();
-    const err = enospc();
-    const handler = makeUncaughtEpipeHandler(() => true, exit, reportFatal);
-    // Must NOT throw — re-throwing inside an uncaughtException listener
-    // is a footgun. It reports the defect and exits non-zero instead.
-    expect(() => handler(err)).not.toThrow();
-    expect(reportFatal).toHaveBeenCalledWith(err);
-    expect(exit).toHaveBeenCalledWith(1);
+    const handler = makeUncaughtEpipeHandler(() => true, exit);
+    expect(() => handler(enospc())).toThrow('no space left on device');
+    expect(exit).not.toHaveBeenCalled();
   });
 });
 

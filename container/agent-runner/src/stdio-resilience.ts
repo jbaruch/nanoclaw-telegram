@@ -89,7 +89,6 @@ export function installStdioResilience(
 export function makeUncaughtEpipeHandler(
   hasDeliveredTerminalResult: () => boolean,
   exit: ExitFn,
-  reportFatal: (err: unknown) => void = (err) => console.error(err),
 ): (err: NodeJS.ErrnoException) => void {
   return (err) => {
     // outer-boundary-process-contract — rationale in the function doc above.
@@ -97,14 +96,11 @@ export function makeUncaughtEpipeHandler(
       exit(hasDeliveredTerminalResult() ? 0 : 1);
       return;
     }
-    // Non-EPIPE: a genuine defect. Re-throwing here is a footgun — this
-    // runs inside an `uncaughtException` listener, where Node treats a
-    // throw as a fatal "error in handler" (exit 7, double-printed
-    // stacks). Emit the diagnostic and exit non-zero so the crash stays
-    // loud and deterministic — the same end state as Node's default
-    // uncaught-exception path.
-    reportFatal(err);
-    exit(1);
+    // Non-EPIPE: an unexpected defect. Per `coding-policy:
+    // error-handling`, the EPIPE-only filter must let everything else
+    // propagate — re-throw so the runtime's default uncaught-exception
+    // path crashes the process loudly (matching `makeStdioErrorHandler`).
+    throw err;
   };
 }
 
