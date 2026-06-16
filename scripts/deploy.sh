@@ -808,18 +808,20 @@ echo ""
 # 8. Ensure the nanoclaw-litellm gateway is running (#609 LiteLLM
 # migration). It is a separate UGOS Pro compose project, so step 7's
 # `docker compose restart nanoclaw` does not touch it. `restart: always`
-# does NOT recover it after a manual/graceful stop — Docker suppresses
-# the restart policy until the next explicit start — so any stop (a UGOS
-# UI stop, a stray `docker stop`, an earlier deploy that force-killed it)
-# leaves the orchestrator silently bypassing to Anthropic-direct until a
-# human starts it. Re-up here so every deploy self-heals the gateway.
-# Idempotent: `up -d` starts it if down, no-op if already running. Run
-# against the UGOS-symlinked dir so the compose project name resolves to
-# `nanoclaw-litellm` (the registered project), not the repo dir basename.
+# does NOT recover it after an external stop/kill — Docker suppresses the
+# restart policy until the next explicit start — so a UGOS UI stop, a
+# stray `docker stop`, or a deploy-time race that force-kills the
+# freshly-started container leaves the orchestrator silently bypassing to
+# anthropic-direct until a human restarts it. The verify-and-re-up loop
+# (which confirms the container reached `running` rather than
+# fire-and-forgetting `up -d`) lives in scripts/ensure-gateway-up.sh so
+# its retry control flow is CI-tested with docker stubbed
+# (scripts/test_ensure_gateway_up.py); run it against the UGOS-symlinked
+# dir so the compose project name resolves to `nanoclaw-litellm`.
 LITELLM_PROJECT_DIR=/volume1/docker/nanoclaw-litellm
 if [ -d "$LITELLM_PROJECT_DIR" ]; then
     echo "8. Ensuring nanoclaw-litellm gateway is up..."
-    ( cd "$LITELLM_PROJECT_DIR" && docker compose up -d )
+    bash scripts/ensure-gateway-up.sh "$LITELLM_PROJECT_DIR"
     echo ""
 else
     echo "8. Skipped — $LITELLM_PROJECT_DIR not present (gateway not provisioned on this host)"
