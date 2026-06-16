@@ -89,6 +89,7 @@ export function installStdioResilience(
 export function makeUncaughtEpipeHandler(
   hasDeliveredTerminalResult: () => boolean,
   exit: ExitFn,
+  reportFatal: (err: unknown) => void = (err) => console.error(err),
 ): (err: NodeJS.ErrnoException) => void {
   return (err) => {
     // outer-boundary-process-contract — rationale in the function doc above.
@@ -96,7 +97,14 @@ export function makeUncaughtEpipeHandler(
       exit(hasDeliveredTerminalResult() ? 0 : 1);
       return;
     }
-    throw err;
+    // Non-EPIPE: a genuine defect. Re-throwing here is a footgun — this
+    // runs inside an `uncaughtException` listener, where Node treats a
+    // throw as a fatal "error in handler" (exit 7, double-printed
+    // stacks). Emit the diagnostic and exit non-zero so the crash stays
+    // loud and deterministic — the same end state as Node's default
+    // uncaught-exception path.
+    reportFatal(err);
+    exit(1);
   };
 }
 
@@ -109,4 +117,32 @@ export function installUncaughtEpipeGuard(
     'uncaughtException',
     makeUncaughtEpipeHandler(hasDeliveredTerminalResult, exit),
   );
+}
+
+/**
+ * Per-turn terminal-delivery state for the uncaught-EPIPE guard (#685).
+ *
+ * The runner is a persistent multi-turn loop. `markDelivered()` fires
+ * when a turn writes its terminal result marker; `resetTurn()` clears it
+ * at the start of the next turn; `hasDelivered()` is what the guard
+ * reads to choose a teardown EPIPE's exit code. Tracking delivery
+ * per-turn rather than process-globally keeps a pre-delivery EPIPE on a
+ * LATER turn exiting non-zero instead of inheriting an earlier turn's
+ * delivered state.
+ */
+export function createTerminalDeliveryTracker(): {
+  markDelivered: () => void;
+  resetTurn: () => void;
+  hasDelivered: () => boolean;
+} {
+  let delivered = false;
+  return {
+    markDelivered: () => {
+      delivered = true;
+    },
+    resetTurn: () => {
+      delivered = false;
+    },
+    hasDelivered: () => delivered,
+  };
 }

@@ -5,6 +5,7 @@ import {
   installStdioResilience,
   makeUncaughtEpipeHandler,
   installUncaughtEpipeGuard,
+  createTerminalDeliveryTracker,
 } from './stdio-resilience.js';
 
 const epipe = (): NodeJS.ErrnoException =>
@@ -75,11 +76,16 @@ describe('makeUncaughtEpipeHandler', () => {
     expect(exit).toHaveBeenCalledWith(1);
   });
 
-  it('rethrows a non-EPIPE uncaught exception and does not exit', () => {
+  it('reports and exits 1 on a non-EPIPE defect without re-throwing (safe inside an uncaughtException listener)', () => {
     const exit = vi.fn() as unknown as ExitFnMock;
-    const handler = makeUncaughtEpipeHandler(() => true, exit);
-    expect(() => handler(enospc())).toThrow('no space left on device');
-    expect(exit).not.toHaveBeenCalled();
+    const reportFatal = vi.fn();
+    const err = enospc();
+    const handler = makeUncaughtEpipeHandler(() => true, exit, reportFatal);
+    // Must NOT throw — re-throwing inside an uncaughtException listener
+    // is a footgun. It reports the defect and exits non-zero instead.
+    expect(() => handler(err)).not.toThrow();
+    expect(reportFatal).toHaveBeenCalledWith(err);
+    expect(exit).toHaveBeenCalledWith(1);
   });
 });
 
@@ -96,6 +102,29 @@ describe('installUncaughtEpipeGuard', () => {
     delivered = true;
     proc.emit('uncaughtException', epipe());
     expect(exit).toHaveBeenLastCalledWith(0);
+  });
+});
+
+describe('createTerminalDeliveryTracker', () => {
+  it('starts undelivered', () => {
+    expect(createTerminalDeliveryTracker().hasDelivered()).toBe(false);
+  });
+
+  it('reports delivered after markDelivered', () => {
+    const t = createTerminalDeliveryTracker();
+    t.markDelivered();
+    expect(t.hasDelivered()).toBe(true);
+  });
+
+  it('resetTurn clears a prior turn delivered state (the #685 multi-turn fix)', () => {
+    const t = createTerminalDeliveryTracker();
+    t.markDelivered();
+    // A new turn begins — a pre-delivery EPIPE on this turn must NOT
+    // inherit the previous turn's delivered state.
+    t.resetTurn();
+    expect(t.hasDelivered()).toBe(false);
+    t.markDelivered();
+    expect(t.hasDelivered()).toBe(true);
   });
 });
 

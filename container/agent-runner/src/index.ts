@@ -46,6 +46,7 @@ import { validateComposioArgs } from './composio-arg-validator.js';
 import { detectComposioFidelity } from './composio-fidelity.js';
 import { byairMcpServer } from './byair-mcp.js';
 import {
+  createTerminalDeliveryTracker,
   installStdioResilience,
   installUncaughtEpipeGuard,
 } from './stdio-resilience.js';
@@ -357,16 +358,17 @@ async function readStdin(): Promise<string> {
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
-// Flips once the runner hands the host a TERMINAL result marker (any
-// `writeOutput` without `streamText` — preview snapshots are the only
-// markers that carry it, the same discriminator the host uses for
-// `hadTerminalResult`, #682). Read by the uncaught-EPIPE teardown guard
-// (#685) to decide whether a post-delivery teardown crash exits 0
-// (work landed) or 1 (could not deliver).
-let deliveredTerminalResult = false;
+// Per-turn terminal-delivery state for the uncaught-EPIPE teardown
+// guard (#685). `markDelivered()` fires on any TERMINAL `writeOutput`
+// (no `streamText` — preview snapshots are the only markers that carry
+// it, the same discriminator the host uses for `hadTerminalResult`,
+// #682); the query loop calls `resetTurn()` at each turn's start; the
+// guard reads `hasDelivered()` to decide whether a teardown crash exits
+// 0 (work landed) or 1 (could not deliver).
+const terminalDelivery = createTerminalDeliveryTracker();
 
 function writeOutput(output: ContainerOutput): void {
-  if (output.streamText === undefined) deliveredTerminalResult = true;
+  if (output.streamText === undefined) terminalDelivery.markDelivered();
   console.log(OUTPUT_START_MARKER);
   console.log(JSON.stringify(output));
   console.log(OUTPUT_END_MARKER);
@@ -4608,7 +4610,7 @@ async function main(): Promise<void> {
       // later, still-undelivered turn would wrongly exit 0 carrying the
       // previous turn's terminal-delivery flag. A terminal `writeOutput`
       // (no `streamText`) flips it back true once this turn delivers.
-      deliveredTerminalResult = false;
+      terminalDelivery.resetTurn();
 
       let queryResult;
       try {
@@ -4723,5 +4725,5 @@ installStdioResilience();
 // keep-alive, MCP child pipes) during post-delivery teardown — exits
 // cleanly instead of crashing with a noisy unhandled-error stack and a
 // false-failure exit 1 (jbaruch/nanoclaw#685).
-installUncaughtEpipeGuard(() => deliveredTerminalResult);
+installUncaughtEpipeGuard(terminalDelivery.hasDelivered);
 main().then(() => process.exit(0));
