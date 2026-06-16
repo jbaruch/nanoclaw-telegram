@@ -984,8 +984,10 @@ export function setLastGroupSync(): void {
  * path (`src/index.ts`), and the scheduled-task forward
  * (`src/task-scheduler.ts`) — so all of them apply the identical gate.
  *
- * @internal — test-only export, should not be part of the public
- * `.d.ts` surface (we build with `stripInternal: true`).
+ * `@internal` — not part of the public API surface; `stripInternal:
+ * true` keeps it out of the published `.d.ts`. It is exercised directly
+ * by unit tests AND called by the production write sites listed above —
+ * not a test-only export.
  */
 export function shouldStoreBotMessage(
   chatJid: string,
