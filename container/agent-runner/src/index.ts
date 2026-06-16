@@ -4601,6 +4601,15 @@ async function main(): Promise<void> {
     while (true) {
       log(`Starting query (session: ${sessionId || 'new'})...`);
 
+      // #685 — reset per turn so the uncaught-EPIPE guard's exit code
+      // reflects THIS turn's delivery, not a prior turn's. The runner is
+      // a persistent multi-turn loop (it loops back here after
+      // `waitForIpcMessage` below): without the reset, an EPIPE during a
+      // later, still-undelivered turn would wrongly exit 0 carrying the
+      // previous turn's terminal-delivery flag. A terminal `writeOutput`
+      // (no `streamText`) flips it back true once this turn delivers.
+      deliveredTerminalResult = false;
+
       let queryResult;
       try {
         queryResult = await runQuery(
