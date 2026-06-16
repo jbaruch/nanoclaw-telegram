@@ -816,10 +816,49 @@ echo ""
 # Idempotent: `up -d` starts it if down, no-op if already running. Run
 # against the UGOS-symlinked dir so the compose project name resolves to
 # `nanoclaw-litellm` (the registered project), not the repo dir basename.
+#
+# Verify it STAYED up, don't just fire-and-forget `up -d`: a deploy-time
+# race against the concurrent orchestrator restart + agent-runner image
+# rebuild has SIGKILLed the freshly-started gateway ~1s later (exit 137,
+# NOT OOM). Because that external kill suppresses `restart: always`, the
+# gateway then stays down and the orchestrator silently bypasses to
+# anthropic-direct (degraded: no LiteLLM cost tier-down) with only a
+# stream of "Connection error" lines to show for it. Re-up + recheck a
+# bounded number of times so the self-heal actually heals.
 LITELLM_PROJECT_DIR=/volume1/docker/nanoclaw-litellm
+
+# Running iff the project's (single) compose container exists AND its
+# Docker state is `running`. Invoked only as an `if` condition, so
+# `set -e` is suspended for the body — an empty `ps -q` (nothing up) or
+# a failed inspect just yields "not running" rather than aborting.
+litellm_gateway_running() {
+    local cid
+    cid=$(cd "$LITELLM_PROJECT_DIR" && docker compose ps -q | head -1)
+    [ -n "$cid" ] || return 1
+    [ "$(docker inspect -f '{{.State.Status}}' "$cid")" = "running" ]
+}
+
 if [ -d "$LITELLM_PROJECT_DIR" ]; then
     echo "8. Ensuring nanoclaw-litellm gateway is up..."
     ( cd "$LITELLM_PROJECT_DIR" && docker compose up -d )
+    gw_attempt=1
+    gw_max=3
+    while true; do
+        sleep 5
+        if litellm_gateway_running; then
+            echo "  ok — gateway running (verified, attempt ${gw_attempt}/${gw_max})"
+            break
+        fi
+        if [ "$gw_attempt" -ge "$gw_max" ]; then
+            echo "  WARNING: nanoclaw-litellm gateway not running after ${gw_max} start attempts." >&2
+            echo "  Orchestrator will bypass to anthropic-direct (degraded: no LiteLLM cost tier-down)." >&2
+            echo "  Inspect: cd $LITELLM_PROJECT_DIR && docker compose logs --tail 50" >&2
+            break
+        fi
+        echo "  gateway not up (attempt ${gw_attempt}/${gw_max}) — re-upping..."
+        ( cd "$LITELLM_PROJECT_DIR" && docker compose up -d )
+        gw_attempt=$((gw_attempt + 1))
+    done
     echo ""
 else
     echo "8. Skipped — $LITELLM_PROJECT_DIR not present (gateway not provisioned on this host)"
