@@ -89,6 +89,7 @@ import {
   updateGroupTrigger,
   setRouterState,
   setSession,
+  shouldStoreBotMessage,
   storeChatMetadata,
   storeLocation,
   storeMessage,
@@ -106,7 +107,7 @@ import {
 import { resolveGroupFolderPath } from './group-folder.js';
 import { writeFlightAssistLocation } from './flight-assist-location.js';
 import { initBotPool } from './channels/telegram.js';
-import { shouldStoreBotMessage, startIpcWatcher } from './ipc.js';
+import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   buildAgentContextFromDb,
@@ -2857,7 +2858,11 @@ async function main(): Promise<void> {
         return;
       }
       const text = formatOutbound(rawText, channel.name as ChannelType);
-      if (text) await channel.sendMessage(jid, text);
+      if (!text) return;
+      // Return the channel-native message id so the scheduled-task
+      // forward can record `telegram_message_id` and gate its bot-row
+      // write on delivery (#681).
+      return channel.sendMessage(jid, text);
     },
     wipeSessionJsonl,
   });

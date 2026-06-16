@@ -44,6 +44,7 @@ import {
   getTaskById,
   getTasksForGroup,
   setTaskAgentModel,
+  shouldStoreBotMessage,
   storeMessage,
   updateTask,
   type TripitSegment,
@@ -427,41 +428,6 @@ export function applyMaintenancePrefix(
   if (sessionName !== MAINTENANCE_SESSION_NAME) return text;
   if (text.startsWith(MAINTENANCE_MESSAGE_PREFIX)) return text;
   return MAINTENANCE_MESSAGE_PREFIX + text;
-}
-
-/**
- * Decide whether to record a `bot-…` row in `messages.db` after the
- * IPC `send_message` handler dispatches a send. For Telegram we MUST
- * have a Telegram-native message id back from the channel — its
- * absence is the only reliable signal that the send was swallowed
- * (400 from a bad reply_to, network blip, malformed HTML even after
- * the plain-text fallback, blocked-by-user, rate-limit, etc.). A
- * row written without that id is a phantom: the heartbeat /
- * unanswered-cron treats it as evidence of a reply on a chat the
- * user never received anything in, and downstream agents quote-reply
- * to a message id Telegram has no record of.
- *
- * Non-Telegram channels are not gated — their `Channel.sendMessage`
- * contract permits returning `void` on success (see `src/types.ts`),
- * so absence of an id isn't a failure signal there. Until those
- * channels grow their own success-id surface, the gate would punish
- * a passing send.
- *
- * The undefined check is `!== undefined` rather than truthiness on
- * purpose, matching the comment on `sentMsgId` upstream: a future
- * Telegram id of `''` or `'0'` (we don't expect this today, but the
- * contract is `string | undefined`) must still record the row.
- *
- * @internal — test-only export, should not be part of the public
- * `.d.ts` surface (we build with `stripInternal: true`).
- */
-export function shouldStoreBotMessage(
-  chatJid: string,
-  sentMsgId: string | undefined,
-): boolean {
-  const isTelegram = chatJid.startsWith('tg:');
-  if (!isTelegram) return true;
-  return sentMsgId !== undefined;
 }
 
 export function startIpcWatcher(deps: IpcDeps): void {

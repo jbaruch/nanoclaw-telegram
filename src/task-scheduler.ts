@@ -30,6 +30,7 @@ import {
   pruneCompletedTasks,
   setTaskNextRun,
   setTaskSessionId,
+  shouldStoreBotMessage,
   storeChatMetadata,
   storeMessage,
   updateTask,
@@ -770,7 +771,14 @@ export interface SchedulerDependencies {
     containerName: string,
     groupFolder: string,
   ) => void;
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  /**
+   * Send a message to the chat. Returns the channel-native message id
+   * (Telegram message id) when the send lands, `void` for non-id
+   * channels or a swallowed send — mirroring `Channel.sendMessage` so
+   * the scheduled-task forward can record `telegram_message_id` and
+   * gate the bot-row write on delivery (#681).
+   */
+  sendMessage: (jid: string, text: string) => Promise<string | void>;
   /**
    * Wipe the on-disk session artifacts (JSONL transcript and the
    * sibling per-session tool-results directory) for a just-finished
@@ -1137,10 +1145,37 @@ async function runTask(
           // already wrote to messages.db, so re-sending here would
           // duplicate the user-visible reply AND double-row the DB.
           // Result text is still captured above for task_run_logs.
-          if (cleanResult && !streamedOutput.chat_displayed) {
-            await deps.sendMessage(task.chat_jid, cleanResult);
-            // Store the bot send so `messages.db` reflects every send
-            // out of this session. Without this, scheduled-task sends
+          //
+          // #681 — skill-invoking scheduled tasks (heartbeat, monitors,
+          // morning-brief — anything whose prompt carries a
+          // `Skill(skill: "tessl__…")` call, i.e. `taskSkill` is set)
+          // must surface ONLY via an explicit send_message (which sets
+          // `chat_displayed`). Their leftover terminal text — a bare
+          // `Ready.` / `✓`, a `Cycle complete.` ack, an internal status
+          // dump, even a hallucinated "host-fix-required" bug report —
+          // is internal-by-default and must NOT auto-forward; if the
+          // skill had something for the user it would have called
+          // send_message. Raw reminders / one-shots have no skill call
+          // (`taskSkill === undefined`) and their terminal text IS the
+          // intended surface, so they keep forwarding. `result` is
+          // still captured above either way for task_run_logs.
+          if (
+            cleanResult &&
+            !streamedOutput.chat_displayed &&
+            taskSkill === undefined
+          ) {
+            const sendResult = await deps.sendMessage(
+              task.chat_jid,
+              cleanResult,
+            );
+            // Normalize `string | void` to `string | undefined`; only
+            // persist a telegram_message_id when the channel returned
+            // one (mirrors the inbound send path in src/index.ts).
+            const sentMsgId =
+              typeof sendResult === 'string' ? sendResult : undefined;
+            // Store the bot send so `messages.db` reflects every
+            // delivered send out of this session. Without this,
+            // scheduled-task sends
             // (heartbeat, housekeeping, morning-brief, etc.) reach
             // Telegram but leave no DB row — the "ghost heartbeat" /
             // "no trace in messages.db" class of jbaruch/nanoclaw#81.
@@ -1189,42 +1224,65 @@ async function runTask(
               inferredChannel = 'whatsapp';
               inferredIsGroup = false;
             }
-            // Wrap the DB writes so a SQLite error (FK constraint,
-            // disk full, schema mid-migration) never rejects the
-            // `onOutput` promise. The streaming output chain in
-            // `container-runner.ts` awaits this via `.then(...)` with
-            // no `.catch(...)`, so a throw here can wedge the run
-            // from ever resolving and stall the scheduler loop. The
-            // send already succeeded; a missing DB row is recoverable
-            // (at worst we'd get a duplicate in `unanswered` on the
-            // next cycle) — stalling the scheduler is not.
-            try {
-              storeChatMetadata(
-                task.chat_jid,
-                sendTimestamp,
-                undefined,
-                inferredChannel,
-                inferredIsGroup,
-              );
-              storeMessage({
-                id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-                chat_jid: task.chat_jid,
-                sender: ASSISTANT_NAME,
-                sender_name: ASSISTANT_NAME,
-                content: cleanResult,
-                timestamp: sendTimestamp,
-                is_from_me: true,
-                is_bot_message: true,
-              });
-            } catch (dbErr) {
-              logger.error(
+            // #681 — gate the bot-row write on actual delivery, the
+            // same `shouldStoreBotMessage` contract the inbound
+            // (src/index.ts) and IPC (src/ipc.ts) send paths use: on
+            // Telegram a missing message id means the send was
+            // swallowed, and a phantom row would make heartbeat's
+            // answered-check treat a never-delivered send as a reply.
+            // Non-Telegram channels return `void` on success, so the
+            // gate is a no-op there. The `telegram_message_id` closes
+            // the NULL-tgid observability hole — pre-#681 every
+            // scheduled-task send recorded a row with no native id, so
+            // a leak could not be traced back to a real Telegram send.
+            if (shouldStoreBotMessage(task.chat_jid, sentMsgId)) {
+              // Wrap the DB writes so a SQLite error (FK constraint,
+              // disk full, schema mid-migration) never rejects the
+              // `onOutput` promise. The streaming output chain in
+              // `container-runner.ts` awaits this via `.then(...)` with
+              // no `.catch(...)`, so a throw here can wedge the run
+              // from ever resolving and stall the scheduler loop. The
+              // send already succeeded; a missing DB row is recoverable
+              // (at worst we'd get a duplicate in `unanswered` on the
+              // next cycle) — stalling the scheduler is not.
+              try {
+                storeChatMetadata(
+                  task.chat_jid,
+                  sendTimestamp,
+                  undefined,
+                  inferredChannel,
+                  inferredIsGroup,
+                );
+                storeMessage({
+                  id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                  chat_jid: task.chat_jid,
+                  sender: ASSISTANT_NAME,
+                  sender_name: ASSISTANT_NAME,
+                  content: cleanResult,
+                  timestamp: sendTimestamp,
+                  is_from_me: true,
+                  is_bot_message: true,
+                  telegram_message_id: sentMsgId,
+                });
+              } catch (dbErr) {
+                logger.error(
+                  {
+                    taskId: task.id,
+                    chatJid: task.chat_jid,
+                    err: dbErr,
+                    preview: cleanResult.slice(0, 200),
+                  },
+                  '[task-scheduler] storeChatMetadata/storeMessage failed after send — continuing, send already landed in Telegram',
+                );
+              }
+            } else {
+              logger.warn(
                 {
                   taskId: task.id,
                   chatJid: task.chat_jid,
-                  err: dbErr,
-                  preview: cleanResult.slice(0, 200),
+                  contentLen: cleanResult.length,
                 },
-                '[task-scheduler] storeChatMetadata/storeMessage failed after send — continuing, send already landed in Telegram',
+                '[task-scheduler] Skipping bot-message storeMessage — channel returned no message id (delivery failed)',
               );
             }
           }
