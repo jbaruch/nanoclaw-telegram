@@ -66,12 +66,32 @@ export function installStdioResilience(
  *     policy above, never a silent success.
  * A non-EPIPE uncaught exception is a genuine defect and rethrows so it
  * still crashes loudly (matching `makeStdioErrorHandler`).
+ *
+ * outer-boundary-process-contract (coding-policy: error-handling): this
+ * handler runs at the runner's OUTERMOST process boundary — a
+ * `process.on('uncaughtException')` filter, not an inner try/catch — so
+ * the carve-out audit applies:
+ *   - Caller's silent-failure shape: the host
+ *     (`src/container-runner.ts` `container.on('close')`) reads a
+ *     non-zero container exit as a failed run and records
+ *     `status:'error'`, even when a terminal result was already streamed.
+ *   - What the handler emits: on EPIPE it calls `exit(0)` when the
+ *     terminal result was delivered, else `exit(1)`. It never swallows —
+ *     a non-EPIPE error is re-thrown.
+ *   - Why propagation breaks the contract: the default (no handler) is a
+ *     crash — a noisy unhandled-error stack and exit 1 that the host
+ *     mis-records as a failed maintenance run even though the verdict
+ *     already landed.
+ * The filter is EPIPE-only; signals and deliberate exits aren't
+ * delivered as `uncaughtException`, so the process stays killable and
+ * every non-EPIPE defect still surfaces.
  */
 export function makeUncaughtEpipeHandler(
   hasDeliveredTerminalResult: () => boolean,
   exit: ExitFn,
 ): (err: NodeJS.ErrnoException) => void {
   return (err) => {
+    // outer-boundary-process-contract — rationale in the function doc above.
     if (err.code === 'EPIPE') {
       exit(hasDeliveredTerminalResult() ? 0 : 1);
       return;
