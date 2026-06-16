@@ -35,6 +35,9 @@ jobs:
       - name: Python tests (deploy agent-grep predicate)
         run: python3 -m unittest scripts.test_deploy_agent_grep
 
+      - name: Python tests (deploy gateway verify-and-re-up)
+        run: python3 -m unittest scripts.test_ensure_gateway_up
+
       # audible-backup sidecar lives under a hyphenated directory, so
       # we invoke unittest from inside it rather than via dotted
       # module path (Python's import system rejects `-` in package
