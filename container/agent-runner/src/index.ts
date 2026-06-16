@@ -45,7 +45,10 @@ import {
 import { validateComposioArgs } from './composio-arg-validator.js';
 import { detectComposioFidelity } from './composio-fidelity.js';
 import { byairMcpServer } from './byair-mcp.js';
-import { installStdioResilience } from './stdio-resilience.js';
+import {
+  installStdioResilience,
+  installUncaughtEpipeGuard,
+} from './stdio-resilience.js';
 import {
   COUNTERS_FILENAME,
   DEFAULT_CAP_MATRIX,
@@ -354,7 +357,16 @@ async function readStdin(): Promise<string> {
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
+// Flips once the runner hands the host a TERMINAL result marker (any
+// `writeOutput` without `streamText` — preview snapshots are the only
+// markers that carry it, the same discriminator the host uses for
+// `hadTerminalResult`, #682). Read by the uncaught-EPIPE teardown guard
+// (#685) to decide whether a post-delivery teardown crash exits 0
+// (work landed) or 1 (could not deliver).
+let deliveredTerminalResult = false;
+
 function writeOutput(output: ContainerOutput): void {
+  if (output.streamText === undefined) deliveredTerminalResult = true;
   console.log(OUTPUT_START_MARKER);
   console.log(JSON.stringify(output));
   console.log(OUTPUT_END_MARKER);
@@ -4698,4 +4710,9 @@ async function main(): Promise<void> {
 // concurrent-spawn burst can close the read end mid-write, and an unhandled
 // EPIPE 'error' event would otherwise crash the runner (jbaruch/nanoclaw#560).
 installStdioResilience();
+// Backstop for an EPIPE on a socket the runner doesn't own (Agent SDK
+// keep-alive, MCP child pipes) during post-delivery teardown — exits
+// cleanly instead of crashing with a noisy unhandled-error stack and a
+// false-failure exit 1 (jbaruch/nanoclaw#685).
+installUncaughtEpipeGuard(() => deliveredTerminalResult);
 main().then(() => process.exit(0));

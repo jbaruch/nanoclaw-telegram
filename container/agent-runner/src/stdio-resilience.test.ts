@@ -3,6 +3,8 @@ import { EventEmitter } from 'node:events';
 import {
   makeStdioErrorHandler,
   installStdioResilience,
+  makeUncaughtEpipeHandler,
+  installUncaughtEpipeGuard,
 } from './stdio-resilience.js';
 
 const epipe = (): NodeJS.ErrnoException =>
@@ -57,6 +59,43 @@ describe('installStdioResilience', () => {
     const stderr = new EventEmitter();
     installStdioResilience(stdout, stderr, vi.fn() as unknown as ExitFnMock);
     expect(() => stderr.emit('error', epipe())).not.toThrow();
+  });
+});
+
+describe('makeUncaughtEpipeHandler', () => {
+  it('exits 0 on a teardown EPIPE after a terminal result was delivered', () => {
+    const exit = vi.fn() as unknown as ExitFnMock;
+    makeUncaughtEpipeHandler(() => true, exit)(epipe());
+    expect(exit).toHaveBeenCalledWith(0);
+  });
+
+  it('exits 1 on an EPIPE before any terminal result was delivered', () => {
+    const exit = vi.fn() as unknown as ExitFnMock;
+    makeUncaughtEpipeHandler(() => false, exit)(epipe());
+    expect(exit).toHaveBeenCalledWith(1);
+  });
+
+  it('rethrows a non-EPIPE uncaught exception and does not exit', () => {
+    const exit = vi.fn() as unknown as ExitFnMock;
+    const handler = makeUncaughtEpipeHandler(() => true, exit);
+    expect(() => handler(enospc())).toThrow('no space left on device');
+    expect(exit).not.toHaveBeenCalled();
+  });
+});
+
+describe('installUncaughtEpipeGuard', () => {
+  it('routes an uncaughtException EPIPE through the handler, exiting per delivery state', () => {
+    const proc = new EventEmitter();
+    const exit = vi.fn() as unknown as ExitFnMock;
+    let delivered = false;
+    installUncaughtEpipeGuard(() => delivered, proc, exit);
+
+    proc.emit('uncaughtException', epipe());
+    expect(exit).toHaveBeenLastCalledWith(1);
+
+    delivered = true;
+    proc.emit('uncaughtException', epipe());
+    expect(exit).toHaveBeenLastCalledWith(0);
   });
 });
 
