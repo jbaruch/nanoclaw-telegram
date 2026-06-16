@@ -958,6 +958,45 @@ export function setLastGroupSync(): void {
 }
 
 /**
+ * Decide whether to record a `bot-…` row in `messages.db` after a
+ * send dispatches. For Telegram we MUST have a Telegram-native message
+ * id back from the channel — its absence is the only reliable signal
+ * that the send was swallowed (400 from a bad reply_to, network blip,
+ * malformed HTML even after the plain-text fallback, blocked-by-user,
+ * rate-limit, etc.). A row written without that id is a phantom: the
+ * heartbeat / unanswered-cron treats it as evidence of a reply on a
+ * chat the user never received anything in, and downstream agents
+ * quote-reply to a message id Telegram has no record of.
+ *
+ * Non-Telegram channels are not gated — their `Channel.sendMessage`
+ * contract permits returning `void` on success (see `src/types.ts`),
+ * so absence of an id isn't a failure signal there. Until those
+ * channels grow their own success-id surface, the gate would punish
+ * a passing send.
+ *
+ * The undefined check is `!== undefined` rather than truthiness on
+ * purpose, matching the comment on `sentMsgId` upstream: a future
+ * Telegram id of `''` or `'0'` (we don't expect this today, but the
+ * contract is `string | undefined`) must still record the row.
+ *
+ * Shared by every bot-row write site — IPC `send_message` /
+ * `send_message_to_chat` handlers (`src/ipc.ts`), the inbound send
+ * path (`src/index.ts`), and the scheduled-task forward
+ * (`src/task-scheduler.ts`) — so all of them apply the identical gate.
+ *
+ * @internal — test-only export, should not be part of the public
+ * `.d.ts` surface (we build with `stripInternal: true`).
+ */
+export function shouldStoreBotMessage(
+  chatJid: string,
+  sentMsgId: string | undefined,
+): boolean {
+  const isTelegram = chatJid.startsWith('tg:');
+  if (!isTelegram) return true;
+  return sentMsgId !== undefined;
+}
+
+/**
  * Store a message with full content.
  * Only call this for registered groups where message history is needed.
  */

@@ -1383,6 +1383,248 @@ describe('task scheduler', () => {
     expect(rows[0].result).toContain(streamedText);
   });
 
+  it('does NOT forward a skill-invoking task terminal text but still records the result (#681)', async () => {
+    // Maintenance / monitor / brief tasks carry a
+    // `Skill(skill: "tessl__…")` call in their prompt. Their leftover
+    // terminal assistant text — a bare `Ready.` ack, a status dump,
+    // even a hallucinated "host-fix-required" bug report — is
+    // internal-by-default: the only intended surface is an explicit
+    // send_message (which would set `chat_displayed`). The auto-forward
+    // must be suppressed. But `task_run_logs.result` must STILL capture
+    // the text so silent-success accounting and forensic greps see it.
+    const MAIN_GROUP = {
+      name: 'Main',
+      folder: 'main',
+      trigger: 'always',
+      added_at: '2026-01-01T00:00:00.000Z',
+      isMain: true,
+    };
+    const chatJid = 'tg:-1003859124897';
+    storeChatMetadata(chatJid, '2026-01-01T00:00:00.000Z', 'Main');
+
+    createTask({
+      id: 'skill-leak-task',
+      group_folder: 'main',
+      chat_jid: chatJid,
+      // Heartbeat-shaped prompt: the skill call is wrapped in a
+      // directive, not prefix-only — parseTaskSkill scans the whole
+      // string, so the gate still recognises it as a skill task.
+      prompt: 'MANDATORY FIRST ACTION: Skill(skill: "tessl__heartbeat")',
+      schedule_type: 'once',
+      schedule_value: '2026-01-01T00:00:00.000Z',
+      context_mode: 'group',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    const streamedText = 'Ready.';
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result: streamedText,
+        } as ContainerOutput);
+        return { status: 'success', result: streamedText };
+      },
+    );
+
+    const sentTexts: string[] = [];
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+
+    startSchedulerLoop({
+      registeredGroups: () => ({ [chatJid]: MAIN_GROUP }),
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
+      onProcess: () => {},
+      sendMessage: async (_jid: string, text: string) => {
+        sentTexts.push(text);
+        return 'tg-id-should-never-be-reached';
+      },
+      wipeSessionJsonl: () => 0,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    // The skill task stayed silent — no auto-forward of `Ready.`.
+    expect(sentTexts).toEqual([]);
+    // And no bot row was written for the chat.
+    expect(getLastBotMessageTimestamp(chatJid, 'bot')).toBeFalsy();
+    // But the result IS captured in task_run_logs (observability).
+    const rows = _rawQueryForTests<{ result: string | null }>(
+      `SELECT result FROM task_run_logs WHERE task_id = ?`,
+      ['skill-leak-task'],
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].result).toContain('Ready.');
+  });
+
+  it('records telegram_message_id on a reminder forward when the channel returns one (#681)', async () => {
+    // Raw reminders / one-shots have no `Skill(...)` call — their
+    // terminal text IS the intended surface, so they keep forwarding.
+    // The bot row must carry the Telegram-native message id so any send
+    // is traceable (closing the NULL-telegram_message_id hole).
+    const MAIN_GROUP = {
+      name: 'Main',
+      folder: 'main',
+      trigger: 'always',
+      added_at: '2026-01-01T00:00:00.000Z',
+      isMain: true,
+    };
+    const chatJid = 'tg:-100888';
+    storeChatMetadata(chatJid, '2026-01-01T00:00:00.000Z', 'Main');
+
+    createTask({
+      id: 'reminder-tgid-task',
+      group_folder: 'main',
+      chat_jid: chatJid,
+      prompt: 'remind the user to stretch',
+      schedule_type: 'once',
+      schedule_value: '2026-01-01T00:00:00.000Z',
+      context_mode: 'group',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    const streamedText = 'Reminder: time to stretch';
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result: streamedText,
+        } as ContainerOutput);
+        return { status: 'success', result: streamedText };
+      },
+    );
+
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+
+    startSchedulerLoop({
+      registeredGroups: () => ({ [chatJid]: MAIN_GROUP }),
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
+      onProcess: () => {},
+      sendMessage: async () => 'tg-4242',
+      wipeSessionJsonl: () => 0,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    const rows = _rawQueryForTests<{
+      telegram_message_id: string | null;
+      content: string;
+    }>(
+      `SELECT telegram_message_id, content FROM messages WHERE chat_jid = ? AND is_bot_message = 1`,
+      [chatJid],
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].telegram_message_id).toBe('tg-4242');
+    expect(rows[0].content).toContain('stretch');
+  });
+
+  it('skips the bot row on a Telegram reminder forward when the channel returns no id (#681/#428)', async () => {
+    // A Telegram send that returns no native id was swallowed (bad
+    // reply_to, rate-limit, blocked). Recording a `bot-…` row anyway is
+    // a phantom — heartbeat's answered-check would treat a never-
+    // delivered send as a reply. The send is still attempted; only the
+    // DB row is gated.
+    const MAIN_GROUP = {
+      name: 'Main',
+      folder: 'main',
+      trigger: 'always',
+      added_at: '2026-01-01T00:00:00.000Z',
+      isMain: true,
+    };
+    const chatJid = 'tg:-100999';
+    storeChatMetadata(chatJid, '2026-01-01T00:00:00.000Z', 'Main');
+
+    createTask({
+      id: 'reminder-noid-task',
+      group_folder: 'main',
+      chat_jid: chatJid,
+      prompt: 'remind the user to drink water',
+      schedule_type: 'once',
+      schedule_value: '2026-01-01T00:00:00.000Z',
+      context_mode: 'group',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+
+    const streamedText = 'Reminder: drink water';
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result: streamedText,
+        } as ContainerOutput);
+        return { status: 'success', result: streamedText };
+      },
+    );
+
+    const sentTexts: string[] = [];
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+
+    startSchedulerLoop({
+      registeredGroups: () => ({ [chatJid]: MAIN_GROUP }),
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
+      onProcess: () => {},
+      // Returns void — the Telegram channel swallowed the send.
+      sendMessage: async (_jid: string, text: string) => {
+        sentTexts.push(text);
+      },
+      wipeSessionJsonl: () => 0,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    // The send was attempted...
+    expect(sentTexts).toEqual([streamedText]);
+    // ...but no phantom bot row — delivery was unconfirmed.
+    expect(getLastBotMessageTimestamp(chatJid, 'bot')).toBeFalsy();
+  });
+
   it('computeNextRun skips missed intervals without infinite loop', () => {
     // Task was due 10 intervals ago (missed)
     const ms = 60000;
