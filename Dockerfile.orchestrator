@@ -2,7 +2,7 @@
 # Runs the orchestrator (Telegram bot, message router, credential proxy)
 # inside a container, spawning sibling agent containers via Docker socket.
 
-FROM node:22-slim
+FROM node:24-slim
 
 # Install Docker CLI, build tools for native modules (better-sqlite3),
 # the sqlite3 CLI (used by src/db-dump.ts for `.dump` per-table SQL
