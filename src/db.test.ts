@@ -469,6 +469,64 @@ describe('getMessageById', () => {
   });
 });
 
+// --- reply_to_message_id single join target (#691) ---
+
+describe('reply_to_message_id single join target (#691)', () => {
+  // The Telegram channel now stamps telegram_message_id on inbound rows
+  // too (the write path in src/channels/telegram.ts mirrors this), so a
+  // direct SQL consumer can resolve reply_to_message_id against ONE
+  // column regardless of direction. This is the going-forward contract
+  // the migration backfills for existing rows.
+  it('resolves a reply to an inbound parent via telegram_message_id', () => {
+    storeChatMetadata('tg:-100123', '2024-01-01T00:00:00.000Z');
+
+    // Inbound user message — channel stamps both `id` and
+    // telegram_message_id with the Telegram ID (9933).
+    storeMessage({
+      id: '9933',
+      chat_jid: 'tg:-100123',
+      sender: 'user@test',
+      sender_name: 'User',
+      content: 'parent',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      telegram_message_id: '9933',
+    });
+
+    const parent = _rawQueryForTests<{ id: string }>(
+      `SELECT id FROM messages WHERE chat_jid = ? AND telegram_message_id = ?`,
+      ['tg:-100123', '9933'],
+    );
+    expect(parent).toHaveLength(1);
+    expect(parent[0].id).toBe('9933');
+  });
+
+  it('resolves a reply to a bot parent via the same telegram_message_id column', () => {
+    storeChatMetadata('tg:-100123', '2024-01-01T00:00:00.000Z');
+
+    // Bot send — synthetic id, Telegram ID 9935 in telegram_message_id.
+    storeMessage({
+      id: 'bot-1781782593519-50x84',
+      chat_jid: 'tg:-100123',
+      sender: 'Andy',
+      sender_name: 'Andy',
+      content: 'bot parent',
+      timestamp: '2024-01-01T00:00:02.000Z',
+      is_from_me: true,
+      is_bot_message: true,
+      telegram_message_id: '9935',
+    });
+
+    // Same single-column join the inbound case uses — no direction-
+    // dependent branching at the call site.
+    const parent = _rawQueryForTests<{ id: string }>(
+      `SELECT id FROM messages WHERE chat_jid = ? AND telegram_message_id = ?`,
+      ['tg:-100123', '9935'],
+    );
+    expect(parent).toHaveLength(1);
+    expect(parent[0].id).toBe('bot-1781782593519-50x84');
+  });
+});
+
 // --- getMessagesSince ---
 
 describe('getMessagesSince', () => {
