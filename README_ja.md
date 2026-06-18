@@ -144,7 +144,7 @@ Telegram対応を追加したい場合、コアコードベースにTelegramを�
 ## 必要条件
 
 - macOSまたはLinux
-- Node.js 20以上
+- Node.js 24以上
 - [Claude Code](https://claude.ai/download)
 - [Apple Container](https://github.com/apple/container)（macOS）または[Docker](https://docker.com/products/docker-desktop)（macOS/Linux）
 
