@@ -271,6 +271,24 @@ describe('database migrations', () => {
         null,
         null,
       );
+      // LEGACY bot send from a DB that predates the telegram_message_id
+      // column: synthetic `bot-` id, telegram_message_id NULL, and the
+      // real Telegram ID was never recorded. The backfill MUST leave it
+      // NULL — copying the synthetic id in would plant a non-Telegram
+      // value in the indexed join column. (#691 review: gpt-5.4 policy
+      // reviewer + Copilot both flagged this.)
+      insertMsg.run(
+        'bot-1700000000000-legacy',
+        'tg:-100123',
+        'Andy',
+        'Andy',
+        'old bot send',
+        '2026-01-01T00:00:04.000Z',
+        1,
+        1,
+        null,
+        null,
+      );
       legacyDb.close();
 
       vi.resetModules();
@@ -292,6 +310,11 @@ describe('database migrations', () => {
       );
       // WhatsApp row stays NULL — backfill is scoped to tg:% chats.
       expect(rowsById('wa-msg-1').telegram_message_id).toBeNull();
+      // Legacy bot row stays NULL — the `id NOT LIKE 'bot-%'` guard
+      // keeps the synthetic id out of the Telegram-native ID column.
+      expect(
+        rowsById('bot-1700000000000-legacy').telegram_message_id,
+      ).toBeNull();
 
       // The payoff: reply_to_message_id resolves against a SINGLE column
       // for BOTH directions. The bot row replies to the inbound row
@@ -327,6 +350,12 @@ describe('database migrations', () => {
         .prepare(`SELECT telegram_message_id FROM messages WHERE id = ?`)
         .get('wa-msg-1') as { telegram_message_id: string | null };
       expect(reWa.telegram_message_id).toBeNull();
+      const reLegacyBot = reopened
+        .prepare(`SELECT telegram_message_id FROM messages WHERE id = ?`)
+        .get('bot-1700000000000-legacy') as {
+        telegram_message_id: string | null;
+      };
+      expect(reLegacyBot.telegram_message_id).toBeNull();
       reopened.close();
       reclose();
     } finally {

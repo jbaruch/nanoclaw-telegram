@@ -17,6 +17,7 @@ import { registerChannel, ChannelOpts } from './registry.js';
 import { sanitizeTelegramHtml } from './telegram-sanitize.js';
 import {
   Channel,
+  NewMessage,
   OnChatMetadata,
   OnInboundMessage,
   OnLocation,
@@ -1184,6 +1185,22 @@ export class TelegramChannel implements Channel {
     this.opts = opts;
   }
 
+  /**
+   * Deliver an inbound Telegram message to the orchestrator, stamping
+   * telegram_message_id from the row's `id` (the Telegram-native message
+   * id) so reply_to_message_id has a single join target for inbound rows
+   * too (#691). Centralized here so EVERY inbound path — text, media,
+   * storeNonText, and any future handler — gets the stamp without
+   * per-handler duplication or drift. Only inbound rows flow through
+   * here; bot sends store telegram_message_id directly via storeMessage.
+   */
+  private deliverInbound(chatJid: string, msg: NewMessage): void {
+    this.opts.onMessage(chatJid, {
+      ...msg,
+      telegram_message_id: msg.telegram_message_id ?? msg.id,
+    });
+  }
+
   async connect(): Promise<void> {
     this.bot = new Bot(this.botToken, {
       client: {
@@ -1390,7 +1407,7 @@ export class TelegramChannel implements Channel {
       content = resolveMessageLinks(content);
 
       // Deliver message — startMessageLoop() will pick it up
-      this.opts.onMessage(chatJid, {
+      this.deliverInbound(chatJid, {
         id: msgId,
         chat_jid: chatJid,
         sender,
@@ -1402,10 +1419,6 @@ export class TelegramChannel implements Channel {
         reply_to_message_id: replyToMessageId,
         reply_to_message_content: replyToMessageContent,
         reply_to_sender_name: replyToSenderName,
-        // Normalize the Telegram ID onto telegram_message_id for inbound
-        // too (#691), so reply_to_message_id has a single join target
-        // across both directions. `id` keeps the Telegram ID as well.
-        telegram_message_id: msgId,
       });
 
       logger.info(
@@ -1442,7 +1455,7 @@ export class TelegramChannel implements Channel {
         'telegram',
         isGroup,
       );
-      this.opts.onMessage(chatJid, {
+      this.deliverInbound(chatJid, {
         id: ctx.message.message_id.toString(),
         chat_jid: chatJid,
         sender: ctx.from?.id?.toString() || '',
@@ -1486,7 +1499,7 @@ export class TelegramChannel implements Channel {
         placeholder = '[Image]';
       }
 
-      this.opts.onMessage(chatJid, {
+      this.deliverInbound(chatJid, {
         id: ctx.message.message_id.toString(),
         chat_jid: chatJid,
         sender: ctx.from?.id?.toString() || '',
@@ -1542,7 +1555,7 @@ export class TelegramChannel implements Channel {
         content = '[Voice message - transcription failed]';
       }
 
-      this.opts.onMessage(chatJid, {
+      this.deliverInbound(chatJid, {
         id: msgId,
         chat_jid: chatJid,
         sender: ctx.from?.id?.toString() || '',
@@ -1601,7 +1614,7 @@ export class TelegramChannel implements Channel {
         content = `[Document: ${fileName} - no file_id]${caption}`;
       }
 
-      this.opts.onMessage(chatJid, {
+      this.deliverInbound(chatJid, {
         id: ctx.message.message_id.toString(),
         chat_jid: chatJid,
         sender: ctx.from?.id?.toString() || '',

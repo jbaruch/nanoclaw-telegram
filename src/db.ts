@@ -574,11 +574,22 @@ function createSchema(database: Database.Database): void {
   // `telegram_message_id` as the single join target for all Telegram
   // rows. Idempotent (only touches NULL rows) and index-served by
   // idx_messages_chat_telegram_id, so it stays cheap on every startup.
+  //
+  // The `id NOT LIKE 'bot-%'` guard is load-bearing: on a DB that
+  // predates the telegram_message_id column, the ALTER above leaves
+  // EVERY pre-existing row NULL — including legacy bot sends whose `id`
+  // is the synthetic `bot-<ts>-<rand>` and whose real Telegram ID was
+  // never recorded (pre-#80). Copying that synthetic id into
+  // telegram_message_id would plant a non-Telegram value in the column,
+  // breaking the "Telegram-native ID only" contract and poisoning the
+  // join. Those rows stay NULL (their Telegram ID is unrecoverable);
+  // only rows whose `id` IS the Telegram-native ID are normalized.
   database.exec(
     `UPDATE messages
         SET telegram_message_id = id
       WHERE telegram_message_id IS NULL
-        AND chat_jid LIKE 'tg:%'`,
+        AND chat_jid LIKE 'tg:%'
+        AND id NOT LIKE 'bot-%'`,
   );
 
   // Backfill registered_groups.trigger_pattern from legacy string shape
