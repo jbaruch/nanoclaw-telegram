@@ -85,6 +85,10 @@ import {
   shouldArmHardExitWatchdog,
 } from './hard-exit-watchdog.js';
 import { shouldSynthesizeSilentStop } from './silent-stop-synthesis.js';
+import {
+  resolveRequiresDelivery,
+  shouldStampNoDelivery,
+} from './delivery-requirement.js';
 import { shouldSuppressEchoedResult } from './empty-turn-echo-suppression.js';
 import { isStaleSessionError } from './stale-session.js';
 import {
@@ -240,6 +244,20 @@ interface ContainerOutput {
     cache_read_input_tokens?: number;
     cache_creation_input_tokens?: number;
   };
+  /**
+   * #689 — set `true` on a TERMINAL success marker when a
+   * `requires_delivery` skill (morning-brief) ended a `runQuery`
+   * without delivering any user-facing content. The status stays
+   * `success` so the host's `scheduleClose` still drains the
+   * maintenance slot promptly (no #461 wedge), but the host
+   * (`src/container-runner.ts`) honours this flag to resolve the run as
+   * `killed` (incomplete / retriable) instead of recording a silent
+   * success — the #589/#682 lineage #689 reopened. Absent on every
+   * marker from a skill that did NOT declare `requires_delivery`, and
+   * on any run that did deliver (`send_message` succeeded or a
+   * non-empty result was emitted). See `delivery-requirement.ts`.
+   */
+  noDelivery?: boolean;
 }
 
 interface SessionEntry {
@@ -2865,6 +2883,13 @@ async function runQuery(
   lastAssistantUuid?: string;
   closedDuringQuery: boolean;
   errorResult: boolean;
+  // #689 — true when a `requires_delivery` skill ended this runQuery
+  // without delivering any user-facing content. `main()` reads it to
+  // stamp `noDelivery` on the post-query session-update marker (the
+  // terminal marker on the `!closedDuringQuery` path), so the host
+  // resolves the run `killed` even when the silent-stop synthesis
+  // didn't fire (a result event landed but carried no delivery).
+  noDelivery: boolean;
 }> {
   const stream = new MessageStream();
   stream.push(prompt);
@@ -2999,6 +3024,16 @@ async function runQuery(
     '/home/node/.claude/skills',
     HARD_EXIT_IDLE_BUDGET_MS,
   );
+  // #689 — does the invoked skill declare `requires_delivery: true`?
+  // If so, a run that drains without delivering any user-facing content
+  // is incomplete, not a silent success. Resolved once from the
+  // prompt's `Skill(skill: "...")` invocation, same as `drainBudgetMs`;
+  // `false` for every skill that doesn't declare it. Drives the
+  // `noDelivery` stamp on the terminal markers below.
+  const requiresDelivery = resolveRequiresDelivery(
+    prompt,
+    '/home/node/.claude/skills',
+  );
   // #589 (reopened) — only interactive / default sessions arm the
   // in-container post-close watchdog; maintenance defers to the host
   // MAINTENANCE_CONTAINER_TIMEOUT bound. The per-skill override is
@@ -3093,6 +3128,13 @@ async function runQuery(
   // staring at silence.
   const pendingUserFacingToolUseIds = new Set<string>();
   let userFacingSendSucceeded = false;
+  // #689 — did this runQuery deliver ANY user-facing content? Set true
+  // when a `send_message` / `send_file` tool call succeeds (delivery via
+  // tool) OR when a success result carrying non-empty text is emitted
+  // (delivery via forwarded result text). Drives the `noDelivery` stamp
+  // on the terminal markers: a `requires_delivery` skill that ends a run
+  // with this still `false` delivered nothing — the silent-success shape.
+  let deliveredUserFacingContent = false;
 
   // #651 — did the agent emit any user-facing content this query? Set
   // true on the first non-empty `text` block or any `tool_use` block.
@@ -4075,6 +4117,10 @@ async function runQuery(
               block.is_error !== true
             ) {
               userFacingSendSucceeded = true;
+              // #689 — a successful send_message / send_file is a
+              // user-facing delivery, so a later silent-stop synthesis
+              // must NOT stamp `noDelivery` even with no SDK result event.
+              deliveredUserFacingContent = true;
             }
             // #589 — clear the tool_use from the in-flight set so the
             // watchdog stops re-arming on its account. The set keeps
@@ -4188,12 +4234,24 @@ async function runQuery(
           `Result #${resultCount}: subtype=${subtype} empty assistant turn — ` +
             `suppressing echoed input prompt (len=${textResult?.length ?? 0})`,
         );
-        writeOutput({
+        // #689 — an empty turn whose echoed prompt is suppressed
+        // delivered nothing to the user. Stamp `noDelivery` for a
+        // requires_delivery run (the same logic as the SDK-result and
+        // synthesis paths) so a run whose `_close` was consumed mid-query
+        // — `main()` then skips the post-query session-update — still
+        // reaches the host as a non-delivery terminal and resolves
+        // `killed` instead of a masked success.
+        const echoSuppressedOutput: ContainerOutput = {
           status: 'success',
           result: null,
           newSessionId,
           usage: latestUsage,
-        });
+        };
+        writeOutput(
+          shouldStampNoDelivery(requiresDelivery, deliveredUserFacingContent)
+            ? { ...echoSuppressedOutput, noDelivery: true }
+            : echoSuppressedOutput,
+        );
       } else {
         // #47 + #581: if the agent already used send_message / send_file
         // successfully (tracked above), mark `chat_displayed: true`
@@ -4210,13 +4268,33 @@ async function runQuery(
         log(
           `Result #${resultCount}: subtype=${subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
         );
+        // #689 — a non-empty result text is forwarded to chat by the
+        // task-scheduler (unless chat_displayed suppresses it as a
+        // post-send closing thought, in which case the send already
+        // counted as delivery above). Either way, content reached the
+        // user this run.
+        if (textResult) {
+          deliveredUserFacingContent = true;
+        }
+        // #689 — stamp `noDelivery` directly on this SDK-result success
+        // marker when a requires_delivery run produced an empty/null
+        // result and never sent. Without this, an empty-result run whose
+        // `_close` was consumed mid-query (so `main()` skips the
+        // post-query session-update marker, lines below) would surface
+        // ONLY this unstamped success to the host and record yet another
+        // silent success. The synthesis path can't cover it — a result
+        // event fired, so `resultCount > 0` and the silent-stop
+        // synthesis is skipped.
+        const successOutput = buildSuccessOutput(
+          textResult ?? null,
+          userFacingSendSucceeded,
+          newSessionId,
+          latestUsage,
+        );
         writeOutput(
-          buildSuccessOutput(
-            textResult ?? null,
-            userFacingSendSucceeded,
-            newSessionId,
-            latestUsage,
-          ),
+          shouldStampNoDelivery(requiresDelivery, deliveredUserFacingContent)
+            ? { ...successOutput, noDelivery: true }
+            : successOutput,
         );
       }
       // Break out of the for-await loop after receiving the result.
@@ -4240,14 +4318,25 @@ async function runQuery(
   // decision is unit-testable without spinning the SDK iterator —
   // see `silent-stop-synthesis.ts`.
   if (shouldSynthesizeSilentStop(resultCount, sawErrorResult)) {
+    // #689 — a `requires_delivery` skill that reaches this synthesis
+    // having delivered nothing (no send_message, no result text) drained
+    // mid-compose: the brief never reached chat. Stamp `noDelivery` so
+    // the host resolves it `killed` (retriable) instead of recording the
+    // synthesized success as a real delivery. The status stays `success`
+    // so `scheduleClose` still drains the slot promptly (no #461 wedge).
+    const noDelivery = shouldStampNoDelivery(
+      requiresDelivery,
+      deliveredUserFacingContent,
+    );
     log(
-      `No SDK result event observed; synthesizing terminal success (closedDuringQuery=${closedDuringQuery})`,
+      `No SDK result event observed; synthesizing terminal success (closedDuringQuery=${closedDuringQuery}, noDelivery=${noDelivery})`,
     );
     writeOutput({
       status: 'success',
       result: '',
       newSessionId,
       usage: latestUsage,
+      ...(noDelivery ? { noDelivery: true } : {}),
     });
   }
 
@@ -4276,6 +4365,10 @@ async function runQuery(
     lastAssistantUuid,
     closedDuringQuery,
     errorResult: sawErrorResult,
+    noDelivery: shouldStampNoDelivery(
+      requiresDelivery,
+      deliveredUserFacingContent,
+    ),
   };
 }
 
@@ -4689,8 +4782,18 @@ async function main(): Promise<void> {
         break;
       }
 
-      // Emit session update so host can track it
-      writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+      // Emit session update so host can track it. #689 — if a
+      // `requires_delivery` skill ended this query without delivering,
+      // stamp `noDelivery` so the host resolves the run `killed`
+      // (retriable) instead of recording this session-update as a
+      // delivered success. Status stays `success` so `scheduleClose`
+      // still drains the slot promptly.
+      writeOutput({
+        status: 'success',
+        result: null,
+        newSessionId: sessionId,
+        ...(queryResult.noDelivery ? { noDelivery: true } : {}),
+      });
 
       log('Query ended, waiting for next IPC message...');
 

@@ -227,7 +227,7 @@ export function parseDrainTimeoutMsFromFrontmatter(
  * "anything `path.join` would accept" so an attacker can't slip a
  * dotted segment past the regex.
  */
-const SAFE_SKILL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+export const SAFE_SKILL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 /**
  * Resolve the effective idle budget for the current runQuery. Reads

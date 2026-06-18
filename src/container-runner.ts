@@ -1289,6 +1289,20 @@ export interface ContainerOutput {
     cache_read_input_tokens?: number;
     cache_creation_input_tokens?: number;
   };
+  /**
+   * #689 — stamped `true` by the agent-runner on a TERMINAL `success`
+   * marker when a `requires_delivery` skill (morning-brief) ended a
+   * runQuery without delivering any user-facing content. The status
+   * stays `success` so this container's `scheduleClose` still drains
+   * the maintenance slot promptly (no #461 wedge), but the close
+   * handler below resolves the run as `killed` (incomplete / retriable)
+   * rather than recording the synthesized success as a real delivery —
+   * the silent success of the #589/#682 lineage #689 reopened. Absent
+   * on every marker from a skill that didn't declare `requires_delivery`
+   * and on any run that did deliver. See the agent-runner's
+   * `delivery-requirement.ts`.
+   */
+  noDelivery?: boolean;
 }
 
 interface VolumeMount {
@@ -3545,6 +3559,21 @@ export async function runContainerAgent(
               // silent-success shape #682 closes.
               if (parsed.streamText === undefined) {
                 hadTerminalResult = true;
+                // #689 — latch: a `requires_delivery` skill stamped this
+                // TERMINAL `success` marker `noDelivery` because it ran
+                // without delivering any user-facing content. We keep
+                // the slot-draining `success` semantics (scheduleClose
+                // still fires), but the close handler below downgrades
+                // the resolved run to `killed` (retriable). Latched so a
+                // later plain session-update success marker can't clear
+                // it. Scoped inside the terminal-marker guard (same
+                // `streamText === undefined` discriminator as
+                // `hadTerminalResult`): the runner only ever stamps
+                // `noDelivery` on terminal markers, and a preview marker
+                // must never trip the downgrade.
+                if (parsed.noDelivery === true) {
+                  sawNoDeliveryMarker = true;
+                }
               }
               // Activity detected — reset the hard timeout
               resetTimeout();
@@ -3595,6 +3624,14 @@ export async function runContainerAgent(
       // classifications below gate on, distinct from `hadStreamingOutput`
       // (which flips for streaming previews too).
       let hadTerminalResult = false;
+      // #689 — set true once a terminal marker stamped `noDelivery`
+      // (a `requires_delivery` skill that ended a run without delivering
+      // user-facing content) is observed. Latched across markers so a
+      // trailing plain session-update success can't clear it. The
+      // clean-exit and timeout classifications below downgrade such a
+      // maintenance run to `killed` despite `hadTerminalResult` being
+      // set by the same (success-status) marker.
+      let sawNoDeliveryMarker = false;
       // Untrusted containers get shorter timeout (5 min vs 30 min default)
       const UNTRUSTED_TIMEOUT = 300_000;
       const defaultTimeout =
@@ -3713,21 +3750,36 @@ export async function runContainerAgent(
           // reaped it" shape now keeps its idle-cleanup `success` (the
           // work landed) instead of being over-reported as killed. Only
           // a reap after previews-but-no-terminal-result is `killed`.
+          //
+          // #689 — `sawNoDeliveryMarker` also forces `killed` here: a
+          // `requires_delivery` skill that emitted a terminal marker
+          // (so `hadTerminalResult` is set) stamped `noDelivery` because
+          // it never delivered to chat. Without this, such a run reaped
+          // at the inactivity timeout would fall through to the
+          // `hadStreamingOutput` idle-cleanup `success` below.
           if (
             isMaintenanceSession &&
             hadStreamingOutput &&
-            !hadTerminalResult
+            (!hadTerminalResult || sawNoDeliveryMarker)
           ) {
             logger.warn(
-              { group: group.name, containerName, duration, code },
-              'Maintenance container reaped by inactivity timeout having streamed only preview output (no terminal result) — classifying killed (incomplete, retriable) (#682)',
+              {
+                group: group.name,
+                containerName,
+                duration,
+                code,
+                sawNoDeliveryMarker,
+              },
+              'Maintenance container reaped by inactivity timeout without delivering user-facing content — classifying killed (incomplete, retriable) (#682/#689)',
             );
             outputChain.then(() => {
               resolve({
                 status: 'killed',
                 result: null,
                 newSessionId,
-                error: `Maintenance container reaped by inactivity timeout after ${timeoutMs}ms having streamed only preview output and no terminal result — incomplete run (reaped mid-compose), retriable`,
+                error: sawNoDeliveryMarker
+                  ? `Maintenance container reaped by inactivity timeout after ${timeoutMs}ms; the requires_delivery skill delivered no user-facing content (noDelivery marker) — incomplete run (reaped mid-compose), retriable`
+                  : `Maintenance container reaped by inactivity timeout after ${timeoutMs}ms having streamed only preview output and no terminal result — incomplete run (reaped mid-compose), retriable`,
               });
             });
             return;
@@ -3879,18 +3931,35 @@ export async function runContainerAgent(
           // `success`. Scoped to maintenance to mirror #683 — the
           // `'killed'` status is consumed by the task-scheduler, and
           // interactive idle-cleanup `success` semantics are unchanged.
-          if (isMaintenanceSession && !hadTerminalResult) {
+          //
+          // #689 — `sawNoDeliveryMarker` extends this to the case where
+          // a `requires_delivery` skill DID emit a terminal marker
+          // (so `hadTerminalResult` is set) but stamped it `noDelivery`
+          // because the run delivered nothing to chat — the silent
+          // success that defeated the #682 `!hadTerminalResult` gate
+          // (morning-brief composed but never sent). Either signal
+          // classifies the maintenance run `killed`.
+          if (
+            isMaintenanceSession &&
+            (!hadTerminalResult || sawNoDeliveryMarker)
+          ) {
             outputChain.then(() => {
               logger.warn(
-                { group: group.name, duration, newSessionId },
-                'Maintenance container exited cleanly (code 0) without delivering a terminal result — classifying killed (incomplete, retriable) (#682)',
+                {
+                  group: group.name,
+                  duration,
+                  newSessionId,
+                  sawNoDeliveryMarker,
+                },
+                'Maintenance container exited cleanly (code 0) without delivering user-facing content — classifying killed (incomplete, retriable) (#682/#689)',
               );
               resolve({
                 status: 'killed',
                 result: null,
                 newSessionId,
-                error:
-                  'Maintenance container exited cleanly (code 0) without delivering a terminal result — incomplete run (exited before producing/sending a result), retriable',
+                error: sawNoDeliveryMarker
+                  ? 'Maintenance container exited cleanly (code 0) but the requires_delivery skill delivered no user-facing content (noDelivery marker) — incomplete run (composed but never sent), retriable'
+                  : 'Maintenance container exited cleanly (code 0) without delivering a terminal result — incomplete run (exited before producing/sending a result), retriable',
               });
             });
             return;

@@ -515,6 +515,224 @@ describe('container-runner timeout behavior', () => {
     expect(result.status).toBe('success');
   });
 
+  it('maintenance noDelivery marker reaped by the inactivity timeout resolves as killed (#689 timeout branch)', async () => {
+    // #689 — the host applies the noDelivery downgrade on BOTH close
+    // paths. This covers the inactivity-timeout/reap branch: even though
+    // a terminal marker was emitted (so `hadTerminalResult` is set), the
+    // latched `sawNoDeliveryMarker` forces `killed` rather than the
+    // delivered-then-idled-out `success` of the #682 refinement above.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: '',
+      newSessionId: 'session-689t',
+      noDelivery: true,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Idle past the 5-min maintenance inactivity window so the host
+    // reaps the container via the timeout path.
+    await vi.advanceTimersByTimeAsync(300_001);
+    fakeProc.emit('close', 137);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('killed');
+    expect(result.error).toMatch(/noDelivery|deliver|incomplete/i);
+  });
+
+  it('maintenance session whose terminal success marker is stamped noDelivery resolves as killed (#689)', async () => {
+    // #689 — the recurring 1/7 morning-brief silent success. The
+    // compose-and-send turn drained without delivering, so the runner's
+    // silent-stop synthesis emitted a TERMINAL success marker (no
+    // streamText → hadTerminalResult set) — which defeated #682's
+    // `!hadTerminalResult` gate and recorded a misleading 'success'.
+    // The runner now stamps that marker `noDelivery: true` for a
+    // requires_delivery skill that delivered nothing, and the host must
+    // resolve 'killed' (incomplete, retriable) so recovery redelivers.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: '',
+      noDelivery: true,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('killed');
+    expect(result.error).toMatch(/noDelivery|deliver|incomplete/i);
+  });
+
+  it('maintenance SDK-result success marker stamped noDelivery (empty result, closed-during-query) resolves as killed (#689)', async () => {
+    // The result-event gap: a requires_delivery run that DID get an SDK
+    // result event but with empty/null text and no send stamps
+    // `noDelivery` directly on the buildSuccessOutput marker (the
+    // silent-stop synthesis is skipped because resultCount > 0, and the
+    // post-query session-update is skipped when _close was consumed
+    // mid-query). The host must still resolve `killed` from this single
+    // stamped `result:null` success marker.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      newSessionId: 'session-689r',
+      noDelivery: true,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('killed');
+  });
+
+  it('maintenance empty-turn echo-suppression success stamped noDelivery resolves as killed (#689)', async () => {
+    // The third terminal-success site: an empty assistant turn whose
+    // echoed prompt is suppressed emits `{status:'success', result:null}`.
+    // For a requires_delivery run with `_close` consumed mid-query (so
+    // the post-query session-update is skipped), this is the only marker
+    // the host sees — it must carry `noDelivery` and resolve `killed`.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      newSessionId: 'session-689e',
+      noDelivery: true,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('killed');
+  });
+
+  it('noDelivery latch survives a trailing plain session-update success marker (#689)', async () => {
+    // The runner emits TWO terminal success markers on the failing path:
+    // the noDelivery-stamped silent-stop synthesis, then the plain
+    // post-query session-update. The host must latch the first so the
+    // second can't clear the downgrade back to 'success'.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: '',
+      noDelivery: true,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    // Trailing plain session-update success — no noDelivery flag.
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      newSessionId: 'session-689',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('killed');
+  });
+
+  it('maintenance terminal success WITHOUT noDelivery stays success (#689 over-reach guard)', async () => {
+    // The careful part: a #461 silent-stop no-op success from a skill
+    // that did NOT declare requires_delivery (or that DID deliver)
+    // carries no noDelivery flag, so the legitimate quiet no-op keeps
+    // its 'success'. Only the stamped marker downgrades.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: '',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('success');
+  });
+
+  it('default session with a noDelivery marker stays success (#689 maintenance-scoped)', async () => {
+    // Over-reach guard: the noDelivery downgrade is maintenance-only,
+    // mirroring #682. An interactive session never carries the flag in
+    // practice, but if one did, the chat path's success semantics stay
+    // unchanged.
+    const onOutput = vi.fn(async () => {});
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: '',
+      noDelivery: true,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('success');
+  });
+
   it('default session keeps the IDLE_TIMEOUT+30s graceful-close floor', async () => {
     const onOutput = vi.fn(async () => {});
     // No sessionName → falls through to DEFAULT_SESSION_NAME.
