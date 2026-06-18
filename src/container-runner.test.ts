@@ -515,6 +515,128 @@ describe('container-runner timeout behavior', () => {
     expect(result.status).toBe('success');
   });
 
+  it('maintenance session whose terminal success marker is stamped noDelivery resolves as killed (#689)', async () => {
+    // #689 — the recurring 1/7 morning-brief silent success. The
+    // compose-and-send turn drained without delivering, so the runner's
+    // silent-stop synthesis emitted a TERMINAL success marker (no
+    // streamText → hadTerminalResult set) — which defeated #682's
+    // `!hadTerminalResult` gate and recorded a misleading 'success'.
+    // The runner now stamps that marker `noDelivery: true` for a
+    // requires_delivery skill that delivered nothing, and the host must
+    // resolve 'killed' (incomplete, retriable) so recovery redelivers.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: '',
+      noDelivery: true,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('killed');
+    expect(result.error).toMatch(/noDelivery|deliver|incomplete/i);
+  });
+
+  it('noDelivery latch survives a trailing plain session-update success marker (#689)', async () => {
+    // The runner emits TWO terminal success markers on the failing path:
+    // the noDelivery-stamped silent-stop synthesis, then the plain
+    // post-query session-update. The host must latch the first so the
+    // second can't clear the downgrade back to 'success'.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: '',
+      noDelivery: true,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    // Trailing plain session-update success — no noDelivery flag.
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      newSessionId: 'session-689',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('killed');
+  });
+
+  it('maintenance terminal success WITHOUT noDelivery stays success (#689 over-reach guard)', async () => {
+    // The careful part: a #461 silent-stop no-op success from a skill
+    // that did NOT declare requires_delivery (or that DID deliver)
+    // carries no noDelivery flag, so the legitimate quiet no-op keeps
+    // its 'success'. Only the stamped marker downgrades.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: '',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('success');
+  });
+
+  it('default session with a noDelivery marker stays success (#689 maintenance-scoped)', async () => {
+    // Over-reach guard: the noDelivery downgrade is maintenance-only,
+    // mirroring #682. An interactive session never carries the flag in
+    // practice, but if one did, the chat path's success semantics stay
+    // unchanged.
+    const onOutput = vi.fn(async () => {});
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: '',
+      noDelivery: true,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('success');
+  });
+
   it('default session keeps the IDLE_TIMEOUT+30s graceful-close floor', async () => {
     const onOutput = vi.fn(async () => {});
     // No sessionName → falls through to DEFAULT_SESSION_NAME.
