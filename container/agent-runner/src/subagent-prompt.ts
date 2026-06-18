@@ -14,6 +14,33 @@
  * branch (caught in PR #164 review).
  */
 
+/**
+ * Decide whether to attach the general-purpose subagent definitions for
+ * this spawn. The definitions ship a large cached prompt — every
+ * installed skill's name plus the full rule/behavior chain — as agent
+ * context on session creation, so it is re-created on every cold cache.
+ *
+ * Maintenance-session spawns (cadence tasks: heartbeat, composio-fetch,
+ * morning-brief, nightly-*) provably never call `Task`/`TeamCreate` —
+ * 0 of 7869 production maintenance runs over the audit window spawned a
+ * subagent — yet they fire on short cadences (e.g. every 30 min) that
+ * always outlast the prompt-cache TTL, so each wake pays full
+ * cache-creation for definitions it never uses. Skipping the surface for
+ * maintenance removes the dominant cold-cache cost of those wakes.
+ *
+ * Default: include for default/user-facing sessions, skip for
+ * maintenance. The `MAINTENANCE_LOAD_SUBAGENTS=1` escape hatch forces
+ * inclusion if a future maintenance task genuinely needs to fan out to a
+ * subagent.
+ */
+export function shouldIncludeSubagentDefinitions(
+  isMaintenanceSession: boolean,
+  env: Record<string, string | undefined> = {},
+): boolean {
+  if (!isMaintenanceSession) return true;
+  return env.MAINTENANCE_LOAD_SUBAGENTS === '1';
+}
+
 export interface SubagentRuleFilePathsInput {
   isMain: boolean;
   soulMdPath: string;

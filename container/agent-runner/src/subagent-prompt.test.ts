@@ -1,9 +1,50 @@
 import { describe, it, expect } from 'vitest';
 
-import { buildSubagentRuleFilePaths } from './subagent-prompt.js';
+import {
+  buildSubagentRuleFilePaths,
+  shouldIncludeSubagentDefinitions,
+} from './subagent-prompt.js';
 
 const SOUL = '/workspace/global/SOUL.md';
 const FORMATTING = '/workspace/global/FORMATTING.md';
+
+describe('shouldIncludeSubagentDefinitions', () => {
+  it('includes for a default (non-maintenance) session', () => {
+    expect(shouldIncludeSubagentDefinitions(false, {})).toBe(true);
+  });
+
+  it('skips for a maintenance session by default', () => {
+    expect(shouldIncludeSubagentDefinitions(true, {})).toBe(false);
+  });
+
+  it('force-includes for maintenance when MAINTENANCE_LOAD_SUBAGENTS=1', () => {
+    expect(
+      shouldIncludeSubagentDefinitions(true, {
+        MAINTENANCE_LOAD_SUBAGENTS: '1',
+      }),
+    ).toBe(true);
+  });
+
+  it('only the exact "1" opt-in flips a maintenance session', () => {
+    // Any other value (typo, "true", "0", empty) keeps the cost-saving
+    // default of skipping — the escape hatch must be deliberate.
+    for (const v of ['true', '0', 'yes', '', 'TRUE']) {
+      expect(
+        shouldIncludeSubagentDefinitions(true, {
+          MAINTENANCE_LOAD_SUBAGENTS: v,
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it('ignores the opt-in flag for a non-maintenance session (already included)', () => {
+    expect(
+      shouldIncludeSubagentDefinitions(false, {
+        MAINTENANCE_LOAD_SUBAGENTS: '0',
+      }),
+    ).toBe(true);
+  });
+});
 
 describe('buildSubagentRuleFilePaths', () => {
   it('non-main subagents get SOUL + FORMATTING + per-group MEMORY + per-group rules', () => {

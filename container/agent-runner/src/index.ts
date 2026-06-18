@@ -109,7 +109,10 @@ import {
   createSilentTurnState,
   decideSilentTurnAudit,
 } from './silent-turn-audit.js';
-import { buildSubagentRuleFilePaths } from './subagent-prompt.js';
+import {
+  buildSubagentRuleFilePaths,
+  shouldIncludeSubagentDefinitions,
+} from './subagent-prompt.js';
 import { wrapUntrustedInput } from './untrusted-input-sources.js';
 import {
   inferReadSource,
@@ -3300,12 +3303,24 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
+  // Whether to attach the general-purpose subagent definitions at all.
+  // Maintenance spawns never fan out to a subagent (0/7869 production
+  // runs called Task/TeamCreate), so for them we skip the entire
+  // discover-skills + build-prompt surface below — it would otherwise
+  // ship a large cached agent prompt that is re-created on every cold
+  // cache. See `shouldIncludeSubagentDefinitions` for the contract and
+  // the MAINTENANCE_LOAD_SUBAGENTS escape hatch.
+  const includeSubagentDefinitions = shouldIncludeSubagentDefinitions(
+    isMaintenanceSession,
+    process.env,
+  );
+
   // Discover installed skill names for subagent definitions.
   // Subagents spawned via TeamCreate don't inherit the parent's skills
   // or settingSources — they only get what's explicitly defined here.
   const skillsDir = '/home/node/.claude/skills';
   const installedSkills: string[] = [];
-  if (fs.existsSync(skillsDir)) {
+  if (includeSubagentDefinitions && fs.existsSync(skillsDir)) {
     for (const entry of fs.readdirSync(skillsDir)) {
       if (fs.statSync(path.join(skillsDir, entry)).isDirectory()) {
         installedSkills.push(entry);
@@ -3419,95 +3434,116 @@ async function runQuery(
     );
   }
 
-  // Subagent tools — same as parent minus TeamCreate/TeamDelete (no nesting)
-  const subagentTools = [
-    'Bash',
-    'Read',
-    'Write',
-    'Edit',
-    'Glob',
-    'Grep',
-    'WebSearch',
-    'WebFetch',
-    'TodoWrite',
-    'ToolSearch',
-    'Skill',
-    'NotebookEdit',
-    'mcp__nanoclaw__*',
-  ];
+  // General-purpose subagent definition. Built only when this spawn may
+  // actually fan out to a subagent — maintenance spawns skip the whole
+  // surface (see includeSubagentDefinitions above), leaving an empty
+  // `agents` map so no large cached subagent prompt is created per wake.
+  type AgentDefinition = {
+    description: string;
+    prompt: string;
+    tools: string[];
+    skills: string[];
+    mcpServers: string[];
+  };
+  let agentDefinitions: Record<string, AgentDefinition> = {};
+  if (includeSubagentDefinitions) {
+    // Subagent tools — same as parent minus TeamCreate/TeamDelete (no nesting)
+    const subagentTools = [
+      'Bash',
+      'Read',
+      'Write',
+      'Edit',
+      'Glob',
+      'Grep',
+      'WebSearch',
+      'WebFetch',
+      'TodoWrite',
+      'ToolSearch',
+      'Skill',
+      'NotebookEdit',
+      'mcp__nanoclaw__*',
+    ];
 
-  // Define a general-purpose subagent that inherits all skills and MCP
-  // servers. When the main agent uses TeamCreate, it can reference this
-  // agent type and the subagent will have full access to skills/rules.
-  // Build subagent prompt with all rules and behavioral instructions.
-  // Subagents don't inherit settingSources, CLAUDE.md, or .tessl/RULES.md
-  // from the parent — they only get what's in their prompt + skills array.
-  // Read all rule/context files and inject them into the subagent prompt.
-  const subagentPromptParts: string[] = [
-    'You are a background agent with the same capabilities as the main agent.',
-    'Follow ALL rules below. Use skills via the Skill tool.',
-    'Report results via mcp__nanoclaw__send_message.',
-  ];
+    // Define a general-purpose subagent that inherits all skills and MCP
+    // servers. When the main agent uses TeamCreate, it can reference this
+    // agent type and the subagent will have full access to skills/rules.
+    // Build subagent prompt with all rules and behavioral instructions.
+    // Subagents don't inherit settingSources, CLAUDE.md, or .tessl/RULES.md
+    // from the parent — they only get what's in their prompt + skills array.
+    // Read all rule/context files and inject them into the subagent prompt.
+    const subagentPromptParts: string[] = [
+      'You are a background agent with the same capabilities as the main agent.',
+      'Follow ALL rules below. Use skills via the Skill tool.',
+      'Report results via mcp__nanoclaw__send_message.',
+    ];
 
-  // Build the rule/behavior chain. Group CLAUDE.md is now a thin
-  // pointer (post-#153), so loading it would only inject @import lines
-  // as raw text — this loader doesn't resolve @imports. The helper
-  // enumerates the imported targets directly and adds main-only files
-  // (project-root RULES.md + ADMIN.md) when the container is main.
-  // See `subagent-prompt.ts` for unit tests covering the branching.
-  const ruleFiles = buildSubagentRuleFilePaths({
-    isMain: !!containerInput.isMain,
-    soulMdPath,
-    formattingMdPath,
-  });
-  for (const rulePath of ruleFiles) {
-    if (fs.existsSync(rulePath)) {
-      const content = fs.readFileSync(rulePath, 'utf-8').trim();
-      if (content) {
-        subagentPromptParts.push(
-          `\n---\n# ${path.basename(rulePath)}\n${content}`,
-        );
-      }
-    }
-  }
-
-  // Also load individual rule files referenced in RULES.md
-  const tesslTilesDir = '/home/node/.claude/.tessl/tiles';
-  if (fs.existsSync(tesslTilesDir)) {
-    const walkRules = (dir: string) => {
-      for (const entry of fs.readdirSync(dir)) {
-        const fullPath = path.join(dir, entry);
-        const stat = fs.statSync(fullPath);
-        if (stat.isDirectory()) {
-          walkRules(fullPath);
-        } else if (entry.endsWith('.md') && fullPath.includes('/rules/')) {
-          const content = fs.readFileSync(fullPath, 'utf-8').trim();
-          if (content) {
-            subagentPromptParts.push(`\n---\n# Rule: ${entry}\n${content}`);
-          }
+    // Build the rule/behavior chain. Group CLAUDE.md is now a thin
+    // pointer (post-#153), so loading it would only inject @import lines
+    // as raw text — this loader doesn't resolve @imports. The helper
+    // enumerates the imported targets directly and adds main-only files
+    // (project-root RULES.md + ADMIN.md) when the container is main.
+    // See `subagent-prompt.ts` for unit tests covering the branching.
+    const ruleFiles = buildSubagentRuleFilePaths({
+      isMain: !!containerInput.isMain,
+      soulMdPath,
+      formattingMdPath,
+    });
+    for (const rulePath of ruleFiles) {
+      if (fs.existsSync(rulePath)) {
+        const content = fs.readFileSync(rulePath, 'utf-8').trim();
+        if (content) {
+          subagentPromptParts.push(
+            `\n---\n# ${path.basename(rulePath)}\n${content}`,
+          );
         }
       }
+    }
+
+    // Also load individual rule files referenced in RULES.md
+    const tesslTilesDir = '/home/node/.claude/.tessl/tiles';
+    if (fs.existsSync(tesslTilesDir)) {
+      const walkRules = (dir: string) => {
+        for (const entry of fs.readdirSync(dir)) {
+          const fullPath = path.join(dir, entry);
+          const stat = fs.statSync(fullPath);
+          if (stat.isDirectory()) {
+            walkRules(fullPath);
+          } else if (entry.endsWith('.md') && fullPath.includes('/rules/')) {
+            const content = fs.readFileSync(fullPath, 'utf-8').trim();
+            if (content) {
+              subagentPromptParts.push(`\n---\n# Rule: ${entry}\n${content}`);
+            }
+          }
+        }
+      };
+      walkRules(tesslTilesDir);
+    }
+
+    const subagentPrompt = subagentPromptParts.join('\n');
+    log(
+      `Subagent prompt built: ${subagentPrompt.length} chars, ${installedSkills.length} skills`,
+    );
+
+    agentDefinitions = {
+      'general-purpose': {
+        description:
+          'General-purpose agent with full access to all skills, MCP tools, ' +
+          'and rules. Use for any background task that needs the same ' +
+          'capabilities as the main agent (heartbeat, research, analysis, etc.).',
+        prompt: subagentPrompt,
+        tools: subagentTools,
+        skills: installedSkills,
+        mcpServers: Object.keys(mcpServersConfig),
+      },
     };
-    walkRules(tesslTilesDir);
+  } else {
+    log(
+      'Maintenance session: skipping general-purpose subagent definitions ' +
+        '(maintenance spawns never call Task/TeamCreate; this avoids ' +
+        'creating the cached all-skills+rules subagent prompt on every ' +
+        'wake). Set MAINTENANCE_LOAD_SUBAGENTS=1 to force-include.',
+    );
   }
-
-  const subagentPrompt = subagentPromptParts.join('\n');
-  log(
-    `Subagent prompt built: ${subagentPrompt.length} chars, ${installedSkills.length} skills`,
-  );
-
-  const agentDefinitions = {
-    'general-purpose': {
-      description:
-        'General-purpose agent with full access to all skills, MCP tools, ' +
-        'and rules. Use for any background task that needs the same ' +
-        'capabilities as the main agent (heartbeat, research, analysis, etc.).',
-      prompt: subagentPrompt,
-      tools: subagentTools,
-      skills: installedSkills,
-      mcpServers: Object.keys(mcpServersConfig),
-    },
-  };
 
   for await (const message of query({
     prompt: stream,
