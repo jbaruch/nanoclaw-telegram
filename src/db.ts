@@ -174,6 +174,12 @@ function createSchema(database: Database.Database): void {
       timestamp TEXT,
       is_from_me INTEGER,
       is_bot_message INTEGER DEFAULT 0,
+      -- Telegram message ID, populated for BOTH directions on tg:%
+      -- chats (#691). Inbound rows also keep the Telegram ID in id;
+      -- bot sends keep a synthetic bot-<ts>-<rand> in id. This is the
+      -- single column reply_to_message_id joins against:
+      --   WHERE chat_jid = ? AND telegram_message_id = <reply_to_message_id>
+      -- NULL for non-Telegram channels (their platform ID lives in id).
       telegram_message_id TEXT,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
@@ -554,6 +560,25 @@ function createSchema(database: Database.Database): void {
   database.exec(
     `CREATE INDEX IF NOT EXISTS idx_messages_chat_telegram_id
        ON messages(chat_jid, telegram_message_id)`,
+  );
+
+  // Normalize `telegram_message_id` to hold the Telegram message ID for
+  // BOTH directions (#691). Inbound rows historically stored the
+  // Telegram ID only in `id` (leaving `telegram_message_id` NULL), while
+  // bot sends store a synthetic `bot-<ts>-<rand>` in `id` and the
+  // Telegram ID in `telegram_message_id`. That split meant
+  // `reply_to_message_id` (always a bare Telegram ID) had no single
+  // column to join against: `WHERE id = ?` silently missed every reply
+  // to a bot message, and `WHERE telegram_message_id = ?` missed every
+  // reply to an inbound one. Backfilling inbound rows gives
+  // `telegram_message_id` as the single join target for all Telegram
+  // rows. Idempotent (only touches NULL rows) and index-served by
+  // idx_messages_chat_telegram_id, so it stays cheap on every startup.
+  database.exec(
+    `UPDATE messages
+        SET telegram_message_id = id
+      WHERE telegram_message_id IS NULL
+        AND chat_jid LIKE 'tg:%'`,
   );
 
   // Backfill registered_groups.trigger_pattern from legacy string shape

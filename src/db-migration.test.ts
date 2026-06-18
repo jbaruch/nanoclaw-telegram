@@ -165,6 +165,176 @@ describe('database migrations', () => {
     }
   });
 
+  // #691 — normalize telegram_message_id to hold the Telegram ID for
+  // BOTH directions. Pre-fix, inbound rows stored the Telegram ID only
+  // in `id` (telegram_message_id NULL) while bot sends stored it in
+  // telegram_message_id, so reply_to_message_id (always a bare Telegram
+  // ID) had no single column to join against. The backfill copies `id`
+  // into telegram_message_id for existing tg:% rows that lack it, giving
+  // reply_to_message_id one join target across both directions.
+  it('backfills telegram_message_id from id for inbound tg:% rows (#691)', async () => {
+    const repoRoot = process.cwd();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-db-test-'));
+
+    try {
+      process.chdir(tempDir);
+      fs.mkdirSync(path.join(tempDir, 'store'), { recursive: true });
+
+      const dbPath = path.join(tempDir, 'store', 'messages.db');
+      const legacyDb = new Database(dbPath);
+      // Shape after the telegram_message_id column already exists but
+      // before #691 normalized inbound rows: inbound tg rows have the
+      // Telegram ID only in `id`; the bot row has it in
+      // telegram_message_id; a non-Telegram (WhatsApp) row has neither.
+      legacyDb.exec(`
+        CREATE TABLE chats (
+          jid TEXT PRIMARY KEY,
+          name TEXT,
+          last_message_time TEXT,
+          channel TEXT,
+          is_group INTEGER
+        );
+        CREATE TABLE messages (
+          id TEXT,
+          chat_jid TEXT,
+          sender TEXT,
+          sender_name TEXT,
+          content TEXT,
+          timestamp TEXT,
+          is_from_me INTEGER,
+          is_bot_message INTEGER DEFAULT 0,
+          reply_to_message_id TEXT,
+          reply_to_message_content TEXT,
+          reply_to_sender_name TEXT,
+          telegram_message_id TEXT,
+          PRIMARY KEY (id, chat_jid),
+          FOREIGN KEY (chat_jid) REFERENCES chats(jid)
+        );
+      `);
+      const insertChat = legacyDb.prepare(
+        `INSERT INTO chats (jid, name, last_message_time, channel, is_group) VALUES (?, ?, ?, ?, ?)`,
+      );
+      insertChat.run(
+        'tg:-100123',
+        'TG Group',
+        '2026-01-01T00:00:00.000Z',
+        'telegram',
+        1,
+      );
+      insertChat.run(
+        'room@g.us',
+        'WA Group',
+        '2026-01-01T00:00:00.000Z',
+        'whatsapp',
+        1,
+      );
+      const insertMsg = legacyDb.prepare(
+        `INSERT INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, telegram_message_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      // Inbound user message — Telegram ID 9933 lives only in `id`.
+      insertMsg.run(
+        '9933',
+        'tg:-100123',
+        'user@test',
+        'User',
+        'hi bot',
+        '2026-01-01T00:00:01.000Z',
+        0,
+        0,
+        '9859',
+        null,
+      );
+      // Bot send — synthetic id, Telegram ID already in telegram_message_id.
+      insertMsg.run(
+        'bot-1781782593519-50x84',
+        'tg:-100123',
+        'Andy',
+        'Andy',
+        'reply',
+        '2026-01-01T00:00:02.000Z',
+        1,
+        1,
+        '9933',
+        '9935',
+      );
+      // Non-Telegram (WhatsApp) inbound — must stay NULL after backfill.
+      insertMsg.run(
+        'wa-msg-1',
+        'room@g.us',
+        'wa@test',
+        'WA User',
+        'whatsapp',
+        '2026-01-01T00:00:03.000Z',
+        0,
+        0,
+        null,
+        null,
+      );
+      legacyDb.close();
+
+      vi.resetModules();
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      initDatabase();
+
+      const upgradedDb = new Database(dbPath);
+      const rowsById = (id: string) =>
+        upgradedDb.prepare(`SELECT * FROM messages WHERE id = ?`).get(id) as {
+          id: string;
+          telegram_message_id: string | null;
+        };
+
+      // Inbound tg row backfilled: telegram_message_id now equals `id`.
+      expect(rowsById('9933').telegram_message_id).toBe('9933');
+      // Bot row untouched — already had the Telegram ID.
+      expect(rowsById('bot-1781782593519-50x84').telegram_message_id).toBe(
+        '9935',
+      );
+      // WhatsApp row stays NULL — backfill is scoped to tg:% chats.
+      expect(rowsById('wa-msg-1').telegram_message_id).toBeNull();
+
+      // The payoff: reply_to_message_id resolves against a SINGLE column
+      // for BOTH directions. The bot row replies to the inbound row
+      // (9933) and the inbound row replies to an earlier message (9859);
+      // both parents are now findable by telegram_message_id.
+      const resolveParent = (replyToId: string) =>
+        upgradedDb
+          .prepare(
+            `SELECT id FROM messages WHERE chat_jid = ? AND telegram_message_id = ?`,
+          )
+          .get('tg:-100123', replyToId) as { id: string } | undefined;
+      // Reply-to an inbound parent (9933) → finds the inbound row.
+      expect(resolveParent('9933')?.id).toBe('9933');
+      // Reply-to a bot parent (9935) → finds the bot row.
+      expect(resolveParent('9935')?.id).toBe('bot-1781782593519-50x84');
+
+      upgradedDb.close();
+      _closeDatabase();
+
+      // Idempotence: a second boot must not re-touch already-backfilled
+      // rows or crash. Only NULL telegram_message_id on tg:% rows match,
+      // and there are none left.
+      vi.resetModules();
+      const { initDatabase: reinit, _closeDatabase: reclose } =
+        await import('./db.js');
+      reinit();
+      const reopened = new Database(dbPath);
+      const reInbound = reopened
+        .prepare(`SELECT telegram_message_id FROM messages WHERE id = ?`)
+        .get('9933') as { telegram_message_id: string | null };
+      expect(reInbound.telegram_message_id).toBe('9933');
+      const reWa = reopened
+        .prepare(`SELECT telegram_message_id FROM messages WHERE id = ?`)
+        .get('wa-msg-1') as { telegram_message_id: string | null };
+      expect(reWa.telegram_message_id).toBeNull();
+      reopened.close();
+      reclose();
+    } finally {
+      process.chdir(repoRoot);
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   // #93/#130 — self-resuming cycles. Pre-existing scheduled_tasks
   // tables (every install before this change) lack the
   // continuation_cycle_id column. The migration must add it without

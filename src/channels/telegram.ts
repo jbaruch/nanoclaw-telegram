@@ -1402,6 +1402,10 @@ export class TelegramChannel implements Channel {
         reply_to_message_id: replyToMessageId,
         reply_to_message_content: replyToMessageContent,
         reply_to_sender_name: replyToSenderName,
+        // Normalize the Telegram ID onto telegram_message_id for inbound
+        // too (#691), so reply_to_message_id has a single join target
+        // across both directions. `id` keeps the Telegram ID as well.
+        telegram_message_id: msgId,
       });
 
       logger.info(
