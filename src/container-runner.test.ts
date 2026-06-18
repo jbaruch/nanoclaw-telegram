@@ -580,6 +580,36 @@ describe('container-runner timeout behavior', () => {
     expect(result.status).toBe('killed');
   });
 
+  it('maintenance empty-turn echo-suppression success stamped noDelivery resolves as killed (#689)', async () => {
+    // The third terminal-success site: an empty assistant turn whose
+    // echoed prompt is suppressed emits `{status:'success', result:null}`.
+    // For a requires_delivery run with `_close` consumed mid-query (so
+    // the post-query session-update is skipped), this is the only marker
+    // the host sees — it must carry `noDelivery` and resolve `killed`.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      newSessionId: 'session-689e',
+      noDelivery: true,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('killed');
+  });
+
   it('noDelivery latch survives a trailing plain session-update success marker (#689)', async () => {
     // The runner emits TWO terminal success markers on the failing path:
     // the noDelivery-stamped silent-stop synthesis, then the plain

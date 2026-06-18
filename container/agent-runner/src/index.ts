@@ -4234,12 +4234,24 @@ async function runQuery(
           `Result #${resultCount}: subtype=${subtype} empty assistant turn — ` +
             `suppressing echoed input prompt (len=${textResult?.length ?? 0})`,
         );
-        writeOutput({
+        // #689 — an empty turn whose echoed prompt is suppressed
+        // delivered nothing to the user. Stamp `noDelivery` for a
+        // requires_delivery run (the same logic as the SDK-result and
+        // synthesis paths) so a run whose `_close` was consumed mid-query
+        // — `main()` then skips the post-query session-update — still
+        // reaches the host as a non-delivery terminal and resolves
+        // `killed` instead of a masked success.
+        const echoSuppressedOutput: ContainerOutput = {
           status: 'success',
           result: null,
           newSessionId,
           usage: latestUsage,
-        });
+        };
+        writeOutput(
+          shouldStampNoDelivery(requiresDelivery, deliveredUserFacingContent)
+            ? { ...echoSuppressedOutput, noDelivery: true }
+            : echoSuppressedOutput,
+        );
       } else {
         // #47 + #581: if the agent already used send_message / send_file
         // successfully (tracked above), mark `chat_displayed: true`
