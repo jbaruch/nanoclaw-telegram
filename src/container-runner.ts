@@ -3559,16 +3559,21 @@ export async function runContainerAgent(
               // silent-success shape #682 closes.
               if (parsed.streamText === undefined) {
                 hadTerminalResult = true;
-              }
-              // #689 — latch: a `requires_delivery` skill stamped this
-              // terminal `success` marker `noDelivery` because it ran
-              // without delivering any user-facing content. We keep the
-              // slot-draining `success` semantics (scheduleClose still
-              // fires), but the close handler below downgrades the
-              // resolved run to `killed` (retriable). Latched so a later
-              // plain session-update success marker can't clear it.
-              if (parsed.noDelivery === true) {
-                sawNoDeliveryMarker = true;
+                // #689 — latch: a `requires_delivery` skill stamped this
+                // TERMINAL `success` marker `noDelivery` because it ran
+                // without delivering any user-facing content. We keep
+                // the slot-draining `success` semantics (scheduleClose
+                // still fires), but the close handler below downgrades
+                // the resolved run to `killed` (retriable). Latched so a
+                // later plain session-update success marker can't clear
+                // it. Scoped inside the terminal-marker guard (same
+                // `streamText === undefined` discriminator as
+                // `hadTerminalResult`): the runner only ever stamps
+                // `noDelivery` on terminal markers, and a preview marker
+                // must never trip the downgrade.
+                if (parsed.noDelivery === true) {
+                  sawNoDeliveryMarker = true;
+                }
               }
               // Activity detected — reset the hard timeout
               resetTimeout();

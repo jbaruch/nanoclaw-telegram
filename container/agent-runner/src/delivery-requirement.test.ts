@@ -6,7 +6,26 @@ import * as path from 'path';
 import {
   parseRequiresDeliveryFromFrontmatter,
   resolveRequiresDelivery,
+  shouldStampNoDelivery,
 } from './delivery-requirement.js';
+
+describe('shouldStampNoDelivery (#689)', () => {
+  // The predicate every terminal-marker site shares: stamp noDelivery
+  // iff the skill requires delivery AND nothing was delivered.
+
+  it('stamps when delivery is required and nothing was delivered', () => {
+    expect(shouldStampNoDelivery(true, false)).toBe(true);
+  });
+
+  it('does NOT stamp when delivery occurred', () => {
+    expect(shouldStampNoDelivery(true, true)).toBe(false);
+  });
+
+  it('does NOT stamp when the skill does not require delivery', () => {
+    expect(shouldStampNoDelivery(false, false)).toBe(false);
+    expect(shouldStampNoDelivery(false, true)).toBe(false);
+  });
+});
 
 describe('parseRequiresDeliveryFromFrontmatter (#689)', () => {
   // The pure frontmatter parser the runner consults to decide whether a

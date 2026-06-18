@@ -85,7 +85,10 @@ import {
   shouldArmHardExitWatchdog,
 } from './hard-exit-watchdog.js';
 import { shouldSynthesizeSilentStop } from './silent-stop-synthesis.js';
-import { resolveRequiresDelivery } from './delivery-requirement.js';
+import {
+  resolveRequiresDelivery,
+  shouldStampNoDelivery,
+} from './delivery-requirement.js';
 import { shouldSuppressEchoedResult } from './empty-turn-echo-suppression.js';
 import { isStaleSessionError } from './stale-session.js';
 import {
@@ -4261,13 +4264,25 @@ async function runQuery(
         if (textResult) {
           deliveredUserFacingContent = true;
         }
+        // #689 — stamp `noDelivery` directly on this SDK-result success
+        // marker when a requires_delivery run produced an empty/null
+        // result and never sent. Without this, an empty-result run whose
+        // `_close` was consumed mid-query (so `main()` skips the
+        // post-query session-update marker, lines below) would surface
+        // ONLY this unstamped success to the host and record yet another
+        // silent success. The synthesis path can't cover it — a result
+        // event fired, so `resultCount > 0` and the silent-stop
+        // synthesis is skipped.
+        const successOutput = buildSuccessOutput(
+          textResult ?? null,
+          userFacingSendSucceeded,
+          newSessionId,
+          latestUsage,
+        );
         writeOutput(
-          buildSuccessOutput(
-            textResult ?? null,
-            userFacingSendSucceeded,
-            newSessionId,
-            latestUsage,
-          ),
+          shouldStampNoDelivery(requiresDelivery, deliveredUserFacingContent)
+            ? { ...successOutput, noDelivery: true }
+            : successOutput,
         );
       }
       // Break out of the for-await loop after receiving the result.
@@ -4297,7 +4312,10 @@ async function runQuery(
     // the host resolves it `killed` (retriable) instead of recording the
     // synthesized success as a real delivery. The status stays `success`
     // so `scheduleClose` still drains the slot promptly (no #461 wedge).
-    const noDelivery = requiresDelivery && !deliveredUserFacingContent;
+    const noDelivery = shouldStampNoDelivery(
+      requiresDelivery,
+      deliveredUserFacingContent,
+    );
     log(
       `No SDK result event observed; synthesizing terminal success (closedDuringQuery=${closedDuringQuery}, noDelivery=${noDelivery})`,
     );
@@ -4335,7 +4353,10 @@ async function runQuery(
     lastAssistantUuid,
     closedDuringQuery,
     errorResult: sawErrorResult,
-    noDelivery: requiresDelivery && !deliveredUserFacingContent,
+    noDelivery: shouldStampNoDelivery(
+      requiresDelivery,
+      deliveredUserFacingContent,
+    ),
   };
 }
 

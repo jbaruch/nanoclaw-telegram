@@ -548,6 +548,38 @@ describe('container-runner timeout behavior', () => {
     expect(result.error).toMatch(/noDelivery|deliver|incomplete/i);
   });
 
+  it('maintenance SDK-result success marker stamped noDelivery (empty result, closed-during-query) resolves as killed (#689)', async () => {
+    // The result-event gap: a requires_delivery run that DID get an SDK
+    // result event but with empty/null text and no send stamps
+    // `noDelivery` directly on the buildSuccessOutput marker (the
+    // silent-stop synthesis is skipped because resultCount > 0, and the
+    // post-query session-update is skipped when _close was consumed
+    // mid-query). The host must still resolve `killed` from this single
+    // stamped `result:null` success marker.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      newSessionId: 'session-689r',
+      noDelivery: true,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('killed');
+  });
+
   it('noDelivery latch survives a trailing plain session-update success marker (#689)', async () => {
     // The runner emits TWO terminal success markers on the failing path:
     // the noDelivery-stamped silent-stop synthesis, then the plain

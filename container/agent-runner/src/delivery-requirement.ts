@@ -90,6 +90,22 @@ export function parseRequiresDeliveryFromFrontmatter(content: string): boolean {
 }
 
 /**
+ * Decide whether a terminal `success` marker should be stamped
+ * `noDelivery`. True only when the invoked skill requires delivery AND
+ * the run delivered no user-facing content. Centralises the predicate
+ * the runner applies at every terminal-marker site (the silent-stop
+ * synthesis, the SDK-result success marker, the post-query
+ * session-update) so the no-delivery decision is identical across all
+ * of them and unit-testable without spinning the SDK iterator.
+ */
+export function shouldStampNoDelivery(
+  requiresDelivery: boolean,
+  deliveredUserFacingContent: boolean,
+): boolean {
+  return requiresDelivery && !deliveredUserFacingContent;
+}
+
+/**
  * Resolve whether the skill invoked by `prompt` requires delivery.
  * Reads the prompt's `Skill(skill: "...")` invocation, looks up the
  * named skill's SKILL.md under `skillsDir`, and returns its
