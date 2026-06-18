@@ -97,6 +97,38 @@ export interface ContainerConfig {
    */
   useCustomPrompt?: boolean;
   /**
+   * Per-group session turn-cap override (#561). When set to a positive
+   * integer, this group's session-length turn cap replaces the global
+   * `SESSION_TURN_CAP` for reset decisions (`shouldMarkForReset`). The
+   * global cap is one knob and must cover the busiest group; this lets a
+   * quiet group run a tighter cap — freeing context (and dropping
+   * maintenance spend) sooner — without guillotining a group that
+   * legitimately runs long.
+   *
+   * The `set_session_caps` IPC write path enforces a positive **integer**
+   * (turns are discrete); the read-time resolver (`resolveSessionCaps`)
+   * is the more lenient validation boundary for a hand-edited
+   * `container_config` row — it accepts any positive finite value and
+   * inherits the global on undefined / null / non-finite / non-positive /
+   * non-number. A fat-fingered override can't silently disable or zero a
+   * group's cap — it falls back, mirroring `resolvePerGroupAgentModel`.
+   *
+   * Independent of the global enable state: a positive override caps this
+   * group even when the global cap is disabled (global `<= 0`) — the
+   * override means "this group wants a cap", not "tighten the global".
+   * Disabling a cap stays a global-only operation.
+   *
+   * Cleared via the `set_session_caps` IPC with `sessionTurnCap: null`.
+   */
+  sessionTurnCap?: number;
+  /**
+   * Per-group session token-cap override (#561). Same resolution and
+   * fallback semantics as `sessionTurnCap`, applied to the cumulative
+   * `total_input_tokens` cap (global `SESSION_TOKEN_CAP`). Cleared via
+   * the `set_session_caps` IPC with `sessionTokenCap: null`.
+   */
+  sessionTokenCap?: number;
+  /**
    * Host-side Stage 1 gate chain (#80). Names of gates from
    * `src/gates/index.ts` registry, evaluated in `gateNames` order
    * (the per-group config order, not registration order). Combinator

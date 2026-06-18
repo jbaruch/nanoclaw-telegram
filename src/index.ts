@@ -97,6 +97,7 @@ import {
 import {
   buildHandoffPrefix,
   buildResetNotification,
+  resolveLiveSessionCaps,
   shouldMarkForReset,
 } from './session-length-cap.js';
 import {
@@ -2082,12 +2083,26 @@ async function runAgent(
             // latch keeps the diagnostic shape clean).
             if (snapshotHandoffPrefix) snapshotHandoffPrefix = null;
 
+            // Per-group cap override (#561): a quiet group may pin a
+            // tighter turn/token cap via containerConfig; absent/invalid
+            // values inherit the global SESSION_*_CAP. Resolved from the
+            // LIVE registry (by folder), not the spawn-captured `group`,
+            // so a `set_session_caps` IPC that lands mid-session takes
+            // effect on this container's next turn — not only on its next
+            // spawn. Falls back to the captured config if the live entry
+            // is gone (group unregistered mid-run).
+            const effectiveCaps = resolveLiveSessionCaps(
+              registeredGroups,
+              group.folder,
+              group.containerConfig,
+              { tokenCap: SESSION_TOKEN_CAP, turnCap: SESSION_TURN_CAP },
+            );
             const verdict = shouldMarkForReset(
               {
                 totalInputTokens: snapshot.total_input_tokens,
                 turnCount: snapshot.turn_count,
               },
-              { tokenCap: SESSION_TOKEN_CAP, turnCap: SESSION_TURN_CAP },
+              effectiveCaps,
             );
             if (verdict.reset && !sessionLengthMarked) {
               sessionLengthMarked = true;

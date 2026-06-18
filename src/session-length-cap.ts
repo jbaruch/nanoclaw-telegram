@@ -31,6 +31,85 @@ export interface SessionLengthCaps {
 }
 
 /**
+ * Per-group cap overrides as carried on `ContainerConfig` (#561).
+ * Fields are `unknown`-typed on purpose: this resolver is the
+ * validation boundary, so a malformed value from a hand-edited
+ * `container_config` JSON row (string, object, NaN) is handled here
+ * rather than trusted from the type.
+ */
+export interface SessionCapOverride {
+  sessionTurnCap?: unknown;
+  sessionTokenCap?: unknown;
+}
+
+/**
+ * Resolve the effective caps for a group: a positive finite per-group
+ * override wins; anything else inherits the global default. Each cap
+ * resolves independently — a group may pin only its turn cap and leave
+ * the token cap on the global value.
+ *
+ * Non-positive overrides intentionally fall back rather than disable:
+ * disabling a cap is a global-only operation (`<= 0` on the global
+ * config), and a fat-fingered per-group `0` / negative must not silently
+ * remove a group's bound. Mirrors `resolvePerGroupAgentModel`'s
+ * invalid-falls-back contract.
+ */
+export function resolveSessionCaps(
+  override: SessionCapOverride | undefined,
+  defaults: SessionLengthCaps,
+): SessionLengthCaps {
+  return {
+    tokenCap: resolveCap(override?.sessionTokenCap, defaults.tokenCap),
+    turnCap: resolveCap(override?.sessionTurnCap, defaults.turnCap),
+  };
+}
+
+function resolveCap(raw: unknown, fallback: number): number {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0
+    ? raw
+    : fallback;
+}
+
+/**
+ * Structural view of a registry entry — just the fields the live-cap
+ * lookup needs. Kept minimal so this module stays DB-free (no
+ * `RegisteredGroup` import) and the seam is trivially testable.
+ */
+export interface GroupCapEntry {
+  folder: string;
+  containerConfig?: SessionCapOverride;
+}
+
+/**
+ * Resolve effective caps for a group looked up **live** from the
+ * registry by folder, rather than from a `group` object captured when
+ * the container spawned. This is the seam that makes a `set_session_caps`
+ * IPC — which replaces the registry entry via `registerGroup` — take
+ * effect on an already-active container's **next turn**, not only on its
+ * next spawn: the per-turn cap check reads the current registry value
+ * here instead of the stale captured config.
+ *
+ * Falls back to `fallbackConfig` (the captured group's config) when no
+ * live entry matches the folder — e.g. the group was unregistered
+ * mid-run — so the check degrades to spawn-time behavior rather than
+ * dropping the cap entirely.
+ *
+ * The `Object.values(...).find` scan is O(groups); the registry holds a
+ * single-digit number of registered groups (keyed by JID, looked up here
+ * by the stable `folder` the caller has), so the per-turn cost is
+ * negligible and not worth a second by-folder index.
+ */
+export function resolveLiveSessionCaps(
+  registry: Record<string, GroupCapEntry>,
+  folder: string,
+  fallbackConfig: SessionCapOverride | undefined,
+  defaults: SessionLengthCaps,
+): SessionLengthCaps {
+  const live = Object.values(registry).find((g) => g.folder === folder);
+  return resolveSessionCaps(live?.containerConfig ?? fallbackConfig, defaults);
+}
+
+/**
  * Snapshot of a session's accumulated state at the moment of the
  * threshold check. Sourced from the `session_length_state` row.
  */

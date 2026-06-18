@@ -2170,6 +2170,230 @@ describe('set_agent_model', () => {
   });
 });
 
+// --- set_session_caps (#561) ---
+//
+// Per-group `containerConfig.sessionTurnCap` / `sessionTokenCap`
+// overrides. Authorisation mirrors set_agent_model — main can target any
+// group; non-main can target only its own folder. Sibling containerConfig
+// fields must survive untouched.
+
+describe('set_session_caps', () => {
+  it('main group can set both caps on a registered group', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_session_caps',
+        groupFolder: 'other-group',
+        sessionTurnCap: 40,
+        sessionTokenCap: 500_000,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const cfg = getRegisteredGroup('other@g.us')?.containerConfig;
+    expect(cfg?.sessionTurnCap).toBe(40);
+    expect(cfg?.sessionTokenCap).toBe(500_000);
+  });
+
+  it('updates only the provided cap, leaving the other untouched', async () => {
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      containerConfig: { sessionTurnCap: 40, sessionTokenCap: 500_000 },
+    });
+    groups['other@g.us'] = getRegisteredGroup('other@g.us')!;
+
+    await processTaskIpc(
+      {
+        type: 'set_session_caps',
+        groupFolder: 'other-group',
+        sessionTurnCap: 25,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const cfg = getRegisteredGroup('other@g.us')?.containerConfig;
+    expect(cfg?.sessionTurnCap).toBe(25);
+    // Token cap left unchanged because it was omitted.
+    expect(cfg?.sessionTokenCap).toBe(500_000);
+  });
+
+  it('non-main group can set caps on its own folder', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_session_caps',
+        groupFolder: 'other-group',
+        sessionTurnCap: 30,
+      },
+      'other-group',
+      false,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.sessionTurnCap,
+    ).toBe(30);
+  });
+
+  it('non-main group cannot set caps on another group', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_session_caps',
+        groupFolder: 'third-group',
+        sessionTurnCap: 30,
+      },
+      'other-group',
+      false,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('third@g.us')?.containerConfig?.sessionTurnCap,
+    ).toBeUndefined();
+  });
+
+  it('clears a cap when payload is null, inheriting the global default', async () => {
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      containerConfig: { sessionTurnCap: 40 },
+    });
+    groups['other@g.us'] = getRegisteredGroup('other@g.us')!;
+
+    await processTaskIpc(
+      {
+        type: 'set_session_caps',
+        groupFolder: 'other-group',
+        sessionTurnCap: null,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.sessionTurnCap,
+    ).toBeUndefined();
+  });
+
+  it('preserves sibling containerConfig fields on update', async () => {
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      containerConfig: { trusted: true, agentModel: 'opus' },
+    });
+    groups['other@g.us'] = getRegisteredGroup('other@g.us')!;
+
+    await processTaskIpc(
+      {
+        type: 'set_session_caps',
+        groupFolder: 'other-group',
+        sessionTurnCap: 40,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const cfg = getRegisteredGroup('other@g.us')?.containerConfig;
+    expect(cfg?.sessionTurnCap).toBe(40);
+    expect(cfg?.trusted).toBe(true);
+    expect(cfg?.agentModel).toBe('opus');
+  });
+
+  it('rejects a non-positive cap (no silent disable)', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_session_caps',
+        groupFolder: 'other-group',
+        sessionTurnCap: 0,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.sessionTurnCap,
+    ).toBeUndefined();
+  });
+
+  it('rejects a fractional cap (turns/tokens are discrete counts)', async () => {
+    // Closes the raw-IPC path that bypasses the MCP tool's `.int()`
+    // schema — 12.5 turns is nonsensical and must not persist.
+    await processTaskIpc(
+      {
+        type: 'set_session_caps',
+        groupFolder: 'other-group',
+        sessionTurnCap: 12.5,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.sessionTurnCap,
+    ).toBeUndefined();
+  });
+
+  it('rejects a non-number cap (defense vs malformed payload)', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_session_caps',
+        groupFolder: 'other-group',
+        sessionTurnCap: '40' as unknown as number,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.sessionTurnCap,
+    ).toBeUndefined();
+  });
+
+  it('rejects a request with neither cap provided', async () => {
+    setRegisteredGroup('other@g.us', {
+      ...OTHER_GROUP,
+      containerConfig: { sessionTurnCap: 40 },
+    });
+    groups['other@g.us'] = getRegisteredGroup('other@g.us')!;
+
+    await processTaskIpc(
+      {
+        type: 'set_session_caps',
+        groupFolder: 'other-group',
+      } as Parameters<typeof processTaskIpc>[0],
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    // Existing value untouched — the no-op request must not clear it.
+    expect(
+      getRegisteredGroup('other@g.us')?.containerConfig?.sessionTurnCap,
+    ).toBe(40);
+  });
+
+  it('set_session_caps on unregistered groupFolder is a no-op', async () => {
+    await processTaskIpc(
+      {
+        type: 'set_session_caps',
+        groupFolder: 'never-registered-folder',
+        sessionTurnCap: 40,
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const allFolders = Object.values(groups).map((g) => g.folder);
+    expect(allFolders).not.toContain('never-registered-folder');
+  });
+});
+
 // --- set_maintenance_agent_model (#509) ---
 //
 // Per-session-slot model override that applies only to the maintenance

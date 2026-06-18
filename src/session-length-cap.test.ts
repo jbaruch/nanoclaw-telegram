@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   buildHandoffPrefix,
   buildResetNotification,
+  resolveLiveSessionCaps,
+  resolveSessionCaps,
   shouldMarkForReset,
 } from './session-length-cap.js';
 
@@ -93,6 +95,156 @@ describe('shouldMarkForReset', () => {
         { tokenCap: 0, turnCap: 0 },
       ),
     ).toEqual({ reset: false });
+  });
+});
+
+describe('resolveSessionCaps', () => {
+  const DEFAULTS = { tokenCap: 1_000_000, turnCap: 100 };
+
+  it('inherits both global caps when no override is present', () => {
+    expect(resolveSessionCaps(undefined, DEFAULTS)).toEqual(DEFAULTS);
+    expect(resolveSessionCaps({}, DEFAULTS)).toEqual(DEFAULTS);
+  });
+
+  it('applies a positive per-group turn cap, inherits the token cap', () => {
+    expect(resolveSessionCaps({ sessionTurnCap: 40 }, DEFAULTS)).toEqual({
+      tokenCap: 1_000_000,
+      turnCap: 40,
+    });
+  });
+
+  it('applies a positive per-group token cap, inherits the turn cap', () => {
+    expect(resolveSessionCaps({ sessionTokenCap: 500_000 }, DEFAULTS)).toEqual({
+      tokenCap: 500_000,
+      turnCap: 100,
+    });
+  });
+
+  it('applies both per-group overrides independently', () => {
+    expect(
+      resolveSessionCaps(
+        { sessionTurnCap: 40, sessionTokenCap: 250_000 },
+        DEFAULTS,
+      ),
+    ).toEqual({ tokenCap: 250_000, turnCap: 40 });
+  });
+
+  it('falls back to global on non-positive overrides (no silent disable)', () => {
+    expect(
+      resolveSessionCaps({ sessionTurnCap: 0, sessionTokenCap: -5 }, DEFAULTS),
+    ).toEqual(DEFAULTS);
+  });
+
+  it('falls back to global on non-finite and non-number overrides', () => {
+    expect(
+      resolveSessionCaps(
+        {
+          sessionTurnCap: Number.NaN,
+          sessionTokenCap: Number.POSITIVE_INFINITY,
+        },
+        DEFAULTS,
+      ),
+    ).toEqual(DEFAULTS);
+    expect(
+      resolveSessionCaps(
+        // Malformed values from a hand-edited container_config row.
+        { sessionTurnCap: '40', sessionTokenCap: null },
+        DEFAULTS,
+      ),
+    ).toEqual(DEFAULTS);
+  });
+
+  it('passes a per-group cap through to a reset verdict end-to-end', () => {
+    const caps = resolveSessionCaps({ sessionTurnCap: 40 }, DEFAULTS);
+    // 40 turns with the tightened cap trips; it would not under the
+    // global 100.
+    expect(
+      shouldMarkForReset({ totalInputTokens: 1, turnCount: 40 }, caps),
+    ).toEqual({ reset: true, reason: 'turn_cap', observed: 40, cap: 40 });
+    expect(
+      shouldMarkForReset({ totalInputTokens: 1, turnCount: 40 }, DEFAULTS),
+    ).toEqual({ reset: false });
+  });
+});
+
+describe('resolveLiveSessionCaps', () => {
+  const DEFAULTS = { tokenCap: 1_000_000, turnCap: 100 };
+
+  it('resolves from the live registry entry matched by folder', () => {
+    const registry = {
+      'jid-a': { folder: 'group-a', containerConfig: { sessionTurnCap: 40 } },
+      'jid-b': { folder: 'group-b' },
+    };
+    expect(
+      resolveLiveSessionCaps(registry, 'group-a', undefined, DEFAULTS),
+    ).toEqual({ tokenCap: 1_000_000, turnCap: 40 });
+  });
+
+  it('prefers the live registry config over the captured fallback', () => {
+    // The captured (spawn-time) config still says 100; the live registry
+    // entry has been updated to 30. The live value must win.
+    const registry = {
+      'jid-a': { folder: 'group-a', containerConfig: { sessionTurnCap: 30 } },
+    };
+    expect(
+      resolveLiveSessionCaps(
+        registry,
+        'group-a',
+        { sessionTurnCap: 100 },
+        DEFAULTS,
+      ),
+    ).toEqual({ tokenCap: 1_000_000, turnCap: 30 });
+  });
+
+  it('picks up a cap change made mid-session on the next resolution (the no-respawn outcome)', () => {
+    // Simulates set_session_caps landing while a default container is
+    // still active: the per-turn check re-reads the registry, so the
+    // very next turn sees the new cap without a respawn.
+    const registry: Record<
+      string,
+      { folder: string; containerConfig?: { sessionTurnCap?: number } }
+    > = {
+      'jid-a': { folder: 'group-a' },
+    };
+    const captured = registry['jid-a'].containerConfig;
+
+    expect(
+      resolveLiveSessionCaps(registry, 'group-a', captured, DEFAULTS).turnCap,
+    ).toBe(100); // inherits global before any override
+
+    // set_session_caps replaces the registry entry (registerGroup writes
+    // a fresh object — the captured `captured` reference is unchanged).
+    registry['jid-a'] = {
+      folder: 'group-a',
+      containerConfig: { sessionTurnCap: 25 },
+    };
+
+    expect(
+      resolveLiveSessionCaps(registry, 'group-a', captured, DEFAULTS).turnCap,
+    ).toBe(25); // next turn honors the override with no respawn
+  });
+
+  it('falls back to the captured config when no live entry matches the folder', () => {
+    // Group unregistered mid-run: the registry no longer has the folder,
+    // so the check degrades to the spawn-time config rather than dropping
+    // the cap entirely.
+    const registry = {
+      'jid-b': { folder: 'group-b', containerConfig: { sessionTurnCap: 10 } },
+    };
+    expect(
+      resolveLiveSessionCaps(
+        registry,
+        'group-a',
+        { sessionTurnCap: 50 },
+        DEFAULTS,
+      ),
+    ).toEqual({ tokenCap: 1_000_000, turnCap: 50 });
+  });
+
+  it('inherits the global default when neither live nor fallback override is present', () => {
+    expect(resolveLiveSessionCaps({}, 'group-a', undefined, DEFAULTS)).toEqual(
+      DEFAULTS,
+    );
   });
 });
 

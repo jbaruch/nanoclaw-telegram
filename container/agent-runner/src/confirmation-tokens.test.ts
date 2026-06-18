@@ -59,13 +59,17 @@ describe('classifyDestructiveOp', () => {
     expect(
       classifyDestructiveOp('mcp__nanoclaw__set_task_agent_model', {}),
     ).toEqual({ scope: 'set_task_agent_model', label: expect.any(String) });
+    expect(
+      classifyDestructiveOp('mcp__nanoclaw__set_session_caps', {}),
+    ).toEqual({ scope: 'set_session_caps', label: expect.any(String) });
   });
 
-  it('gates the three AGENT_MODEL set_* tools through decideConfirmation when chain is untrusted (#595)', () => {
+  it('gates the config set_* tools through decideConfirmation when chain is untrusted (#595)', () => {
     for (const toolName of [
       'mcp__nanoclaw__set_agent_model',
       'mcp__nanoclaw__set_maintenance_agent_model',
       'mcp__nanoclaw__set_task_agent_model',
+      'mcp__nanoclaw__set_session_caps',
     ]) {
       const denied = decideConfirmation({
         toolName,

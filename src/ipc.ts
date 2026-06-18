@@ -994,6 +994,13 @@ export async function processTaskIpc(
     // the per-group `agentModel` → global `AGENT_MODEL` ladder, which is
     // the pre-#509 behavior).
     maintenanceAgentModel?: string | null;
+    // For set_session_caps (#561). Positive number = per-group cap
+    // override; `null` = clear the override (fall back to the global
+    // SESSION_TURN_CAP / SESSION_TOKEN_CAP). A field left `undefined`
+    // leaves that cap unchanged; both undefined is rejected at the
+    // handler. Non-positive / non-finite numbers are rejected.
+    sessionTurnCap?: number | null;
+    sessionTokenCap?: number | null;
     // For set_additional_tiles (#305). Array of tile names from the
     // local registry to overlay on top of the trust-tier baseline.
     // `null` or `[]` clears the override. Anything else (string,
@@ -2050,6 +2057,115 @@ export async function processTaskIpc(
           source: sourceGroup,
         },
         'set_maintenance_agent_model: updated per-group MAINTENANCE_AGENT_MODEL override',
+      );
+      const availableGroups = deps.getAvailableGroups();
+      deps.writeGroupsSnapshot(
+        sourceGroup,
+        isMain,
+        availableGroups,
+        new Set(Object.keys(registeredGroups)),
+      );
+      break;
+    }
+
+    case 'set_session_caps': {
+      // Partial update: per-group session-length cap overrides (#561).
+      // The global SESSION_TURN_CAP / SESSION_TOKEN_CAP is one knob and
+      // must cover the busiest group; this lets a quiet group pin a
+      // tighter cap so its context (and maintenance spend) frees sooner.
+      // Authorization mirrors set_agent_model — owner-of-the-bill: a
+      // non-main caller can only touch its own folder. Sibling
+      // containerConfig fields are preserved verbatim.
+      const groupFolder =
+        typeof data.groupFolder === 'string' ? data.groupFolder.trim() : '';
+      if (!groupFolder) {
+        logger.warn(
+          { data },
+          'Invalid set_session_caps request - missing/empty groupFolder',
+        );
+        break;
+      }
+      // Each cap independently accepts a positive integer (set), null
+      // (clear → inherit global), or undefined (leave unchanged). Reject
+      // non-integer / non-positive numbers so a stored override is always
+      // meaningful — turns and tokens are discrete counts, and disabling
+      // a cap stays a global-only op. Integer-tightening here (not only
+      // in the MCP `.int()` schema) closes the raw-IPC path that would
+      // otherwise persist a fractional cap like 12.5.
+      const validCap = (v: unknown): v is number | null | undefined =>
+        v === undefined ||
+        v === null ||
+        (typeof v === 'number' && Number.isInteger(v) && v > 0);
+      if (!validCap(data.sessionTurnCap) || !validCap(data.sessionTokenCap)) {
+        logger.warn(
+          { data },
+          'Invalid set_session_caps request - caps must be a positive integer, null, or omitted',
+        );
+        break;
+      }
+      // Both omitted is a no-op request — reject so a malformed payload
+      // doesn't masquerade as a successful clear.
+      if (
+        data.sessionTurnCap === undefined &&
+        data.sessionTokenCap === undefined
+      ) {
+        logger.warn(
+          { data },
+          'Invalid set_session_caps request - at least one of sessionTurnCap / sessionTokenCap required',
+        );
+        break;
+      }
+      let targetJid: string | undefined;
+      let targetGroup: RegisteredGroup | undefined;
+      for (const [jid, g] of Object.entries(registeredGroups)) {
+        if (g.folder === groupFolder) {
+          targetJid = jid;
+          targetGroup = g;
+          break;
+        }
+      }
+      if (!targetJid || !targetGroup) {
+        logger.warn(
+          { groupFolder },
+          'set_session_caps: group not registered (use register_group first)',
+        );
+        break;
+      }
+      if (!isMain && groupFolder !== sourceGroup) {
+        logger.warn(
+          { sourceGroup, groupFolder },
+          'Unauthorized set_session_caps attempt blocked',
+        );
+        break;
+      }
+      const nextContainerConfig: RegisteredGroup['containerConfig'] = {
+        ...(targetGroup.containerConfig ?? {}),
+      };
+      // A provided field updates; null clears (delete → serialises absent
+      // so the runtime falls through to the global cap); undefined leaves
+      // the existing value untouched.
+      if (data.sessionTurnCap === null) {
+        delete nextContainerConfig.sessionTurnCap;
+      } else if (data.sessionTurnCap !== undefined) {
+        nextContainerConfig.sessionTurnCap = data.sessionTurnCap;
+      }
+      if (data.sessionTokenCap === null) {
+        delete nextContainerConfig.sessionTokenCap;
+      } else if (data.sessionTokenCap !== undefined) {
+        nextContainerConfig.sessionTokenCap = data.sessionTokenCap;
+      }
+      deps.registerGroup(targetJid, {
+        ...targetGroup,
+        containerConfig: nextContainerConfig,
+      });
+      logger.info(
+        {
+          groupFolder,
+          sessionTurnCap: nextContainerConfig.sessionTurnCap ?? null,
+          sessionTokenCap: nextContainerConfig.sessionTokenCap ?? null,
+          source: sourceGroup,
+        },
+        'set_session_caps: updated per-group session-length cap override',
       );
       const availableGroups = deps.getAvailableGroups();
       deps.writeGroupsSnapshot(

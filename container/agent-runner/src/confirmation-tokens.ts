@@ -45,6 +45,7 @@ export type DestructiveScope =
   | 'set_agent_model'
   | 'set_maintenance_agent_model'
   | 'set_task_agent_model'
+  | 'set_session_caps'
   | 'register_group'
   | 'unregister_group'
   | 'promote_staging'
@@ -319,6 +320,10 @@ export function classifyDestructiveOp(
     'mcp__nanoclaw__set_task_agent_model': {
       scope: 'set_task_agent_model',
       label: "pin a scheduled task's Claude model (cost impact)",
+    },
+    'mcp__nanoclaw__set_session_caps': {
+      scope: 'set_session_caps',
+      label: "change a group's session-length reset caps",
     },
     'mcp__nanoclaw__register_group': {
       scope: 'register_group',

@@ -27,6 +27,11 @@ import {
   buildSetTaskAgentModelPayload,
   describeAgentModelChange,
 } from './agent-model-payload.js';
+import {
+  buildSetSessionCapsPayload,
+  describeSessionCapsChange,
+  isEmptySessionCapsUpdate,
+} from './session-caps-payload.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -1246,6 +1251,69 @@ Top rung of the \`resolveSessionAgentModel\` ladder (\`per-row → maintenance �
         {
           type: 'text' as const,
           text: `Per-task AGENT_MODEL update requested for ${args.task_id} → ${describeAgentModelChange(data.agentModel, 'cleared (use ladder)')}. (No-op if the task doesn't exist; rejected if the task is cadence-registry-owned — edit the skill's SKILL.md \`agentModel:\` frontmatter instead. Cross-folder writes from a non-main tier are rejected by the host.)`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  'set_session_caps',
+  `Change a registered group's per-group session-length reset caps (#561) without re-stating other containerConfig fields.
+
+The session-length cap resets a session (fresh context + brief handoff) once it crosses a cumulative turn count or input-token total. The global \`SESSION_TURN_CAP\` / \`SESSION_TOKEN_CAP\` is one knob and must cover the busiest group; this pins a tighter cap on a quiet group so its context — and its maintenance spend — frees sooner, without lowering the global and guillotining a group that legitimately runs long. Pass a positive integer to set a cap, \`null\` to clear it (fall back to the global default), or omit a field to leave it unchanged. Non-positive values are rejected host-side — disabling a cap is a global-only operation. Other containerConfig fields (trusted, agentModel, additionalTiles, etc.) are preserved verbatim. Non-main tiers may call this on their own group only; cross-folder writes are rejected by the host's owner-of-bill check.`,
+  {
+    groupFolder: z
+      .string()
+      .trim()
+      .min(1)
+      .describe(
+        'The folder name of an already-registered group (e.g., "telegram_family-chat"). Whitespace-only rejected.',
+      ),
+    sessionTurnCap: z
+      .number()
+      .int()
+      .positive()
+      .nullable()
+      .optional()
+      .describe(
+        'Per-group turn cap (positive integer), `null` to clear back to the global SESSION_TURN_CAP, or omit to leave unchanged.',
+      ),
+    sessionTokenCap: z
+      .number()
+      .int()
+      .positive()
+      .nullable()
+      .optional()
+      .describe(
+        'Per-group cumulative input-token cap (positive integer), `null` to clear back to the global SESSION_TOKEN_CAP, or omit to leave unchanged.',
+      ),
+  },
+  async (args) => {
+    // Both caps omitted is a no-op the host rejects — guard here so the
+    // tool returns an actionable error instead of writing an IPC file and
+    // claiming success on an empty change set.
+    if (isEmptySessionCapsUpdate(args)) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text' as const,
+            text: 'No change requested: pass at least one of `sessionTurnCap` / `sessionTokenCap` (a positive integer to set, or `null` to clear back to the global default).',
+          },
+        ],
+      };
+    }
+
+    const data = buildSetSessionCapsPayload(args, new Date());
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Per-group session-cap update requested for ${args.groupFolder}: ${describeSessionCapsChange(data)}. (No-op if the groupFolder isn't registered — call register_group first. Cross-folder writes from a non-main tier are rejected by the host.)`,
         },
       ],
     };
