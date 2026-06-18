@@ -15,7 +15,7 @@
  * the list misses; both outcomes are equally "Stage 1 missed" for
  * keyword-discovery purposes, hence `!= allow`.)
  *
- * Tokenisation uses `Intl.Segmenter` (Node 22 supports it) so mixed
+ * Tokenisation uses `Intl.Segmenter` (Node 24 supports it) so mixed
  * RU/EN messages tokenise correctly — a naive `\w+` regex corrupts
  * Cyrillic.
  *
