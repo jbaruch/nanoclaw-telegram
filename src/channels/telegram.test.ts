@@ -760,6 +760,56 @@ describe('TelegramChannel', () => {
     });
   });
 
+  // --- telegram_message_id stamping (#691) ---
+
+  // The production inbound stamping path: every inbound handler routes
+  // through `deliverInbound`, which stamps telegram_message_id from the
+  // Telegram-native `id` so reply_to_message_id has a single join target
+  // for inbound rows too. Exercised end-to-end through the grammy mock
+  // (handler → onMessage payload), not by hand-supplying the field.
+  describe('telegram_message_id stamping (#691)', () => {
+    it('stamps telegram_message_id from id on inbound text messages', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({ text: 'a reply parent', messageId: 4242 });
+      await triggerTextMessage(ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          id: '4242',
+          telegram_message_id: '4242',
+          is_from_me: false,
+        }),
+      );
+    });
+
+    it('stamps telegram_message_id on inbound media (non-text) paths too', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      // Media flows through a different handler than text, but the same
+      // centralized deliverInbound — so it must get the stamp as well.
+      const ctx = createMediaCtx({
+        messageId: 7777,
+        extra: { photo: [{ file_id: 'f1', width: 100, height: 100 }] },
+      });
+      await triggerMediaMessage('message:photo', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          id: '7777',
+          telegram_message_id: '7777',
+          is_from_me: false,
+        }),
+      );
+    });
+  });
+
   // --- Non-text messages ---
 
   describe('non-text messages', () => {
