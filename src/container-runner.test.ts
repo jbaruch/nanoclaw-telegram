@@ -515,6 +515,40 @@ describe('container-runner timeout behavior', () => {
     expect(result.status).toBe('success');
   });
 
+  it('maintenance noDelivery marker reaped by the inactivity timeout resolves as killed (#689 timeout branch)', async () => {
+    // #689 — the host applies the noDelivery downgrade on BOTH close
+    // paths. This covers the inactivity-timeout/reap branch: even though
+    // a terminal marker was emitted (so `hadTerminalResult` is set), the
+    // latched `sawNoDeliveryMarker` forces `killed` rather than the
+    // delivered-then-idled-out `success` of the #682 refinement above.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: '',
+      newSessionId: 'session-689t',
+      noDelivery: true,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Idle past the 5-min maintenance inactivity window so the host
+    // reaps the container via the timeout path.
+    await vi.advanceTimersByTimeAsync(300_001);
+    fakeProc.emit('close', 137);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('killed');
+    expect(result.error).toMatch(/noDelivery|deliver|incomplete/i);
+  });
+
   it('maintenance session whose terminal success marker is stamped noDelivery resolves as killed (#689)', async () => {
     // #689 — the recurring 1/7 morning-brief silent success. The
     // compose-and-send turn drained without delivering, so the runner's
