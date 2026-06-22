@@ -114,6 +114,7 @@ import {
 } from './silent-turn-audit.js';
 import {
   buildSubagentRuleFilePaths,
+  buildSubagentRulesDirective,
   shouldIncludeSubagentDefinitions,
 } from './subagent-prompt.js';
 import { wrapUntrustedInput } from './untrusted-input-sources.js';
@@ -3512,24 +3513,17 @@ async function runQuery(
       }
     }
 
-    // Also load individual rule files referenced in RULES.md
+    // #696 — the bulk tile-rules surface (every
+    // `<tilesDir>/**/rules/*.md`) used to be inlined here, which put
+    // ~97.5K tokens into the MAIN agent's cached prefix on every
+    // interactive turn for a subagent that fires ~never. Externalize it
+    // to a read-on-spawn directive: the subagent reads the files itself
+    // (it runs in this container with Read access) only when actually
+    // spawned. The small per-group files above stay inlined for
+    // voice/formatting fidelity. See `buildSubagentRulesDirective`.
     const tesslTilesDir = '/home/node/.claude/.tessl/tiles';
     if (fs.existsSync(tesslTilesDir)) {
-      const walkRules = (dir: string) => {
-        for (const entry of fs.readdirSync(dir)) {
-          const fullPath = path.join(dir, entry);
-          const stat = fs.statSync(fullPath);
-          if (stat.isDirectory()) {
-            walkRules(fullPath);
-          } else if (entry.endsWith('.md') && fullPath.includes('/rules/')) {
-            const content = fs.readFileSync(fullPath, 'utf-8').trim();
-            if (content) {
-              subagentPromptParts.push(`\n---\n# Rule: ${entry}\n${content}`);
-            }
-          }
-        }
-      };
-      walkRules(tesslTilesDir);
+      subagentPromptParts.push(buildSubagentRulesDirective(tesslTilesDir));
     }
 
     const subagentPrompt = subagentPromptParts.join('\n');

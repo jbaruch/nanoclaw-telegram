@@ -41,6 +41,41 @@ export function shouldIncludeSubagentDefinitions(
   return env.MAINTENANCE_LOAD_SUBAGENTS === '1';
 }
 
+/**
+ * Read-on-spawn directive for the bulk tile rules (#696).
+ *
+ * The general-purpose subagent used to inline the full text of every
+ * `<tilesDir>/**​/rules/*.md` into its prompt. The SDK puts that whole
+ * block in the MAIN agent's cached prefix, so it was paid via
+ * `cache_read` on every interactive turn (~97.5K tokens) for a
+ * capability that fires ~never (0/200 recent interactive runs). The
+ * subagent runs inside the container where those files already exist and
+ * it has `Read`/`Glob`/`Bash`, so the bulk is loaded lazily — by the
+ * subagent itself, only when one is actually spawned — instead of riding
+ * every turn's prefix.
+ *
+ * The small per-group behavior-critical files (SOUL, formatting, MEMORY,
+ * RULES, ADMIN) stay inlined via `buildSubagentRuleFilePaths` so a
+ * spawned subagent's voice/formatting fidelity is still guaranteed
+ * in-context; only this heavy tile-rules surface is externalized.
+ */
+export function buildSubagentRulesDirective(tilesDir: string): string {
+  return [
+    '\n---',
+    '# Operating rules (MANDATORY — read before acting)',
+    `Your full operating rules live in markdown files under \`${tilesDir}\` —`,
+    'every file matching `*/rules/*.md`. They are mandatory policy, not',
+    'optional reference.',
+    '',
+    'Before taking ANY other action, enumerate and read them in full:',
+    '```bash',
+    `find ${tilesDir} -path '*/rules/*.md'`,
+    '```',
+    'then Read each path the command lists. Do this first, every spawn —',
+    'do not skip it because a task looks simple.',
+  ].join('\n');
+}
+
 export interface SubagentRuleFilePathsInput {
   isMain: boolean;
   soulMdPath: string;

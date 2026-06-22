@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 
 import {
   buildSubagentRuleFilePaths,
+  buildSubagentRulesDirective,
   shouldIncludeSubagentDefinitions,
 } from './subagent-prompt.js';
 
@@ -88,5 +89,42 @@ describe('buildSubagentRuleFilePaths', () => {
     });
     expect(files).not.toContain('/workspace/project/.tessl/RULES.md');
     expect(files).not.toContain('/workspace/project/groups/main/ADMIN.md');
+  });
+});
+
+describe('buildSubagentRulesDirective (#696)', () => {
+  const TILES = '/home/node/.claude/.tessl/tiles';
+
+  it('names the passed tiles dir and the rules glob', () => {
+    const d = buildSubagentRulesDirective(TILES);
+    expect(d).toContain(TILES);
+    expect(d).toContain('*/rules/*.md');
+  });
+
+  it('embeds a runnable enumeration command for the exact dir', () => {
+    // The subagent must be able to find the files itself — the directive
+    // carries the literal find command against the same dir.
+    expect(buildSubagentRulesDirective(TILES)).toContain(
+      `find ${TILES} -path '*/rules/*.md'`,
+    );
+  });
+
+  it('instructs reading before acting and marks the rules mandatory', () => {
+    // The whole point of externalizing the bulk is that the subagent
+    // pulls it on spawn — so the directive must be an explicit
+    // read-first / mandatory instruction, not a soft hint.
+    const d = buildSubagentRulesDirective(TILES);
+    expect(d).toMatch(/MANDATORY/);
+    expect(d).toMatch(/before .*action/i);
+    expect(d).toMatch(/\bRead\b/);
+  });
+
+  it('reflects a different tiles dir verbatim', () => {
+    // No hardcoded path — the directive is parameterized so a relocated
+    // mount (or a test fixture) is honored.
+    const alt = '/somewhere/else/tiles';
+    const d = buildSubagentRulesDirective(alt);
+    expect(d).toContain(alt);
+    expect(d).not.toContain(TILES);
   });
 });
