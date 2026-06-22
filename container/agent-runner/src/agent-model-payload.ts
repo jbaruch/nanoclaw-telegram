@@ -92,7 +92,5 @@ export function describeAgentModelChange(
   normalised: string | null,
   clearedFallbackDescription: string,
 ): string {
-  return normalised === null
-    ? clearedFallbackDescription
-    : `"${normalised}"`;
+  return normalised === null ? clearedFallbackDescription : `"${normalised}"`;
 }

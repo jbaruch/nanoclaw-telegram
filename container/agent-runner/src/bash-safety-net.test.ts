@@ -95,7 +95,9 @@ describe('evaluateBashCommand', () => {
       expect(evaluateBashCommand('mkfs /dev/sda1').deny).toBe(true);
     });
     it('denies mkfs after a shell separator', () => {
-      expect(evaluateBashCommand('cd /tmp && mkfs.ext4 /dev/sda1').deny).toBe(true);
+      expect(evaluateBashCommand('cd /tmp && mkfs.ext4 /dev/sda1').deny).toBe(
+        true,
+      );
       expect(evaluateBashCommand('echo go; mkfs /dev/sda1').deny).toBe(true);
     });
     it('allows benign command containing the substring "mkfs" without word boundary', () => {
@@ -114,11 +116,14 @@ describe('evaluateBashCommand', () => {
       ).toBe(true);
     });
     it('denies dd of=/dev/nvme0n1', () => {
-      expect(evaluateBashCommand('dd if=/tmp/x of=/dev/nvme0n1').deny).toBe(true);
+      expect(evaluateBashCommand('dd if=/tmp/x of=/dev/nvme0n1').deny).toBe(
+        true,
+      );
     });
     it('allows dd to a regular file', () => {
       expect(
-        evaluateBashCommand('dd if=/dev/zero of=/tmp/zeros bs=1M count=10').deny,
+        evaluateBashCommand('dd if=/dev/zero of=/tmp/zeros bs=1M count=10')
+          .deny,
       ).toBe(false);
     });
   });
@@ -152,7 +157,9 @@ describe('evaluateBashCommand', () => {
 
   describe('chown -R on mount roots', () => {
     it('denies chown -R on /workspace', () => {
-      expect(evaluateBashCommand('chown -R node:node /workspace').deny).toBe(true);
+      expect(evaluateBashCommand('chown -R node:node /workspace').deny).toBe(
+        true,
+      );
     });
     it('denies chown -R on $HOME', () => {
       expect(evaluateBashCommand('chown -R node:node $HOME').deny).toBe(true);

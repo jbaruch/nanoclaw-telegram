@@ -9,10 +9,17 @@ import {
 
 const TOOL = 'mcp__nanoclaw__send_message';
 
-function baseState(overrides: { latestInboundId?: string | null; repliedToInbound?: boolean } = {}) {
+function baseState(
+  overrides: {
+    latestInboundId?: string | null;
+    repliedToInbound?: boolean;
+  } = {},
+) {
   return {
     latestInboundId:
-      'latestInboundId' in overrides ? (overrides.latestInboundId ?? null) : 'msg_42',
+      'latestInboundId' in overrides
+        ? (overrides.latestInboundId ?? null)
+        : 'msg_42',
     repliedToInbound: overrides.repliedToInbound ?? false,
   };
 }
@@ -172,7 +179,9 @@ describe('extractLatestInboundId', () => {
 
   it('handles attribute order variations', () => {
     expect(
-      extractLatestInboundId('<message sender="x" id="msg_99" time="t">hi</message>'),
+      extractLatestInboundId(
+        '<message sender="x" id="msg_99" time="t">hi</message>',
+      ),
     ).toBe('msg_99');
   });
 });

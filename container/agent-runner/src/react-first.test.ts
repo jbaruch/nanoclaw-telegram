@@ -28,30 +28,33 @@ describe('decideReactFirst', () => {
   });
 
   it('skips on a scheduled task', () => {
-    expect(
-      decideReactFirst({ ...baseGate, isScheduledTask: true }),
-    ).toEqual({ react: false, skippedBy: 'scheduled-task' });
+    expect(decideReactFirst({ ...baseGate, isScheduledTask: true })).toEqual({
+      react: false,
+      skippedBy: 'scheduled-task',
+    });
   });
 
   it('skips when the prompt is wrapped as [SCHEDULED TASK]', () => {
     expect(
       decideReactFirst({
         ...baseGate,
-        prompt: '[SCHEDULED TASK]\n\nScript output:\n{...}\n\nInstructions:\n...',
+        prompt:
+          '[SCHEDULED TASK]\n\nScript output:\n{...}\n\nInstructions:\n...',
       }),
     ).toEqual({ react: false, skippedBy: 'scheduled-task-prompt-wrap' });
   });
 
   it('skips when assistantName is missing', () => {
-    expect(
-      decideReactFirst({ ...baseGate, assistantName: undefined }),
-    ).toEqual({ react: false, skippedBy: 'no-assistant-name' });
+    expect(decideReactFirst({ ...baseGate, assistantName: undefined })).toEqual(
+      { react: false, skippedBy: 'no-assistant-name' },
+    );
   });
 
   it('skips when assistantName is empty', () => {
-    expect(
-      decideReactFirst({ ...baseGate, assistantName: '' }),
-    ).toEqual({ react: false, skippedBy: 'no-assistant-name' });
+    expect(decideReactFirst({ ...baseGate, assistantName: '' })).toEqual({
+      react: false,
+      skippedBy: 'no-assistant-name',
+    });
   });
 
   it('subagent gate beats scheduled-task gate', () => {
@@ -78,15 +81,16 @@ describe('decideReactFirst', () => {
   // `addressedToUs` from isMain / 1:1-DM / trigger-match /
   // reply-to-our-bot and pipes it through ContainerInput.
   it('skips when the orchestrator marks the inbound not-addressed', () => {
-    expect(
-      decideReactFirst({ ...baseGate, addressedToUs: false }),
-    ).toEqual({ react: false, skippedBy: 'not-addressed' });
+    expect(decideReactFirst({ ...baseGate, addressedToUs: false })).toEqual({
+      react: false,
+      skippedBy: 'not-addressed',
+    });
   });
 
   it('reacts when the orchestrator marks the inbound addressed', () => {
-    expect(
-      decideReactFirst({ ...baseGate, addressedToUs: true }),
-    ).toEqual({ react: true });
+    expect(decideReactFirst({ ...baseGate, addressedToUs: true })).toEqual({
+      react: true,
+    });
   });
 
   it('treats undefined addressedToUs as "no signal" and falls through to react', () => {
@@ -94,9 +98,9 @@ describe('decideReactFirst', () => {
     // should not regress the historical default. Channel-routed
     // inbounds — the path that produced the original leak — always
     // set the flag explicitly.
-    expect(
-      decideReactFirst({ ...baseGate, addressedToUs: undefined }),
-    ).toEqual({ react: true });
+    expect(decideReactFirst({ ...baseGate, addressedToUs: undefined })).toEqual(
+      { react: true },
+    );
   });
 
   it('subagent gate beats not-addressed gate', () => {

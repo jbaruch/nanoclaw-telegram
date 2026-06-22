@@ -108,9 +108,7 @@ const FIDELITY_RULES: FidelityRule[] = [
  * We accept any shape: string, object, array — and stringify before
  * scanning so embedded JSON payloads are covered.
  */
-export function detectComposioFidelity(
-  toolResult: unknown,
-): FidelityDecision {
+export function detectComposioFidelity(toolResult: unknown): FidelityDecision {
   const text = stringifyResult(toolResult);
   if (text.length === 0) {
     return { fabricated: false, findings: [], reinjection: '' };
@@ -217,8 +215,7 @@ function stringifyResult(toolResult: unknown): string {
 
 function buildReinjection(findings: FidelityFinding[]): string {
   const lines = findings.map(
-    (f) =>
-      `- ${f.rule}: ${f.count} ids matching, e.g. ${f.samples.join(', ')}`,
+    (f) => `- ${f.rule}: ${f.count} ids matching, e.g. ${f.samples.join(', ')}`,
   );
   return (
     'Composio fidelity check: the previous tool result contains ' +

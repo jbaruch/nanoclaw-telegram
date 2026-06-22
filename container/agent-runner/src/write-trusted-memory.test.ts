@@ -56,16 +56,13 @@ function makeMockFs(opts?: {
 describe('performOperatorApprovedWrite — happy path', () => {
   it('writes a valid trusted-path file with a non-empty justification', () => {
     const { fs: mockFs, calls } = makeMockFs();
-    const result = performOperatorApprovedWrite(
-      {
-        file_path: '/workspace/trusted/MEMORY.md',
-        content: '# Memory\n- Amir born 1980-03-05',
-        operator_justification:
-          'operator dictated Amir\'s birthday in turn 14',
-        fs: mockFs,
-        pid: 12345,
-      },
-    );
+    const result = performOperatorApprovedWrite({
+      file_path: '/workspace/trusted/MEMORY.md',
+      content: '# Memory\n- Amir born 1980-03-05',
+      operator_justification: "operator dictated Amir's birthday in turn 14",
+      fs: mockFs,
+      pid: 12345,
+    });
     expect(result).toEqual({
       ok: true,
       path: '/workspace/trusted/MEMORY.md',
@@ -94,15 +91,13 @@ describe('performOperatorApprovedWrite — happy path', () => {
 
   it('creates nested parent dirs (daily/2026-05-19.md)', () => {
     const { fs: mockFs, calls } = makeMockFs();
-    const result = performOperatorApprovedWrite(
-      {
-        file_path: '/workspace/trusted/daily/2026-05-19.md',
-        content: 'daily log',
-        operator_justification: 'operator filed daily log in turn 3',
-        fs: mockFs,
-        pid: 1,
-      },
-    );
+    const result = performOperatorApprovedWrite({
+      file_path: '/workspace/trusted/daily/2026-05-19.md',
+      content: 'daily log',
+      operator_justification: 'operator filed daily log in turn 3',
+      fs: mockFs,
+      pid: 1,
+    });
     expect(result.ok).toBe(true);
     expect(calls[0]).toEqual({
       kind: 'mkdir',
@@ -114,15 +109,12 @@ describe('performOperatorApprovedWrite — happy path', () => {
     // Empty content is a legitimate operator request — explicitly
     // wiping a file — so we don't reject it.
     const { fs: mockFs } = makeMockFs();
-    const result = performOperatorApprovedWrite(
-      {
-        file_path: '/workspace/trusted/scratch.md',
-        content: '',
-        operator_justification:
-          'operator asked to clear scratch.md in turn 9',
-        fs: mockFs,
-      },
-    );
+    const result = performOperatorApprovedWrite({
+      file_path: '/workspace/trusted/scratch.md',
+      content: '',
+      operator_justification: 'operator asked to clear scratch.md in turn 9',
+      fs: mockFs,
+    });
     expect(result.ok).toBe(true);
   });
 });
@@ -130,14 +122,12 @@ describe('performOperatorApprovedWrite — happy path', () => {
 describe('performOperatorApprovedWrite — file_path validation', () => {
   it('rejects an empty file_path', () => {
     const { fs: mockFs, calls } = makeMockFs();
-    const result = performOperatorApprovedWrite(
-      {
-        file_path: '',
-        content: 'x',
-        operator_justification: 'operator dictated value in turn 1',
-        fs: mockFs,
-      },
-    );
+    const result = performOperatorApprovedWrite({
+      file_path: '',
+      content: 'x',
+      operator_justification: 'operator dictated value in turn 1',
+      fs: mockFs,
+    });
     expect(result).toEqual({
       ok: false,
       error: 'file_path must be a non-empty string.',
@@ -147,14 +137,12 @@ describe('performOperatorApprovedWrite — file_path validation', () => {
 
   it('rejects relative paths (they resolve under /workspace/group, not trusted/)', () => {
     const { fs: mockFs, calls } = makeMockFs();
-    const result = performOperatorApprovedWrite(
-      {
-        file_path: 'notes.md',
-        content: 'x',
-        operator_justification: 'operator dictated value in turn 1',
-        fs: mockFs,
-      },
-    );
+    const result = performOperatorApprovedWrite({
+      file_path: 'notes.md',
+      content: 'x',
+      operator_justification: 'operator dictated value in turn 1',
+      fs: mockFs,
+    });
     expect(result.ok).toBe(false);
     if (result.ok === false) {
       expect(result.error).toContain('must resolve under /workspace/trusted/');
@@ -164,28 +152,24 @@ describe('performOperatorApprovedWrite — file_path validation', () => {
 
   it('rejects absolute paths outside /workspace/trusted/', () => {
     const { fs: mockFs, calls } = makeMockFs();
-    const result = performOperatorApprovedWrite(
-      {
-        file_path: '/etc/passwd',
-        content: 'x',
-        operator_justification: 'operator dictated value in turn 1',
-        fs: mockFs,
-      },
-    );
+    const result = performOperatorApprovedWrite({
+      file_path: '/etc/passwd',
+      content: 'x',
+      operator_justification: 'operator dictated value in turn 1',
+      fs: mockFs,
+    });
     expect(result.ok).toBe(false);
     expect(calls).toHaveLength(0);
   });
 
   it('rejects path-traversal escapes that resolve outside trusted/', () => {
     const { fs: mockFs, calls } = makeMockFs();
-    const result = performOperatorApprovedWrite(
-      {
-        file_path: '/workspace/trusted/../../etc/shadow',
-        content: 'x',
-        operator_justification: 'operator dictated value in turn 1',
-        fs: mockFs,
-      },
-    );
+    const result = performOperatorApprovedWrite({
+      file_path: '/workspace/trusted/../../etc/shadow',
+      content: 'x',
+      operator_justification: 'operator dictated value in turn 1',
+      fs: mockFs,
+    });
     expect(result.ok).toBe(false);
     expect(calls).toHaveLength(0);
   });
@@ -196,14 +180,12 @@ describe('performOperatorApprovedWrite — file_path validation', () => {
     // if the operator really wants to land content there, they
     // can promote a quarantined file by host-side rename.
     const { fs: mockFs, calls } = makeMockFs();
-    const result = performOperatorApprovedWrite(
-      {
-        file_path: '/workspace/trusted/quarantine/sid_abc/MEMORY.md',
-        content: 'x',
-        operator_justification: 'operator dictated value in turn 1',
-        fs: mockFs,
-      },
-    );
+    const result = performOperatorApprovedWrite({
+      file_path: '/workspace/trusted/quarantine/sid_abc/MEMORY.md',
+      content: 'x',
+      operator_justification: 'operator dictated value in turn 1',
+      fs: mockFs,
+    });
     expect(result.ok).toBe(false);
     expect(calls).toHaveLength(0);
   });
@@ -212,14 +194,12 @@ describe('performOperatorApprovedWrite — file_path validation', () => {
 describe('performOperatorApprovedWrite — operator_justification validation', () => {
   it('rejects an empty justification', () => {
     const { fs: mockFs, calls } = makeMockFs();
-    const result = performOperatorApprovedWrite(
-      {
-        file_path: '/workspace/trusted/MEMORY.md',
-        content: 'x',
-        operator_justification: '',
-        fs: mockFs,
-      },
-    );
+    const result = performOperatorApprovedWrite({
+      file_path: '/workspace/trusted/MEMORY.md',
+      content: 'x',
+      operator_justification: '',
+      fs: mockFs,
+    });
     expect(result.ok).toBe(false);
     if (result.ok === false) {
       expect(result.error).toContain('operator_justification must be at least');
@@ -229,28 +209,24 @@ describe('performOperatorApprovedWrite — operator_justification validation', (
 
   it('rejects a whitespace-only justification', () => {
     const { fs: mockFs, calls } = makeMockFs();
-    const result = performOperatorApprovedWrite(
-      {
-        file_path: '/workspace/trusted/MEMORY.md',
-        content: 'x',
-        operator_justification: '       \n\t  ',
-        fs: mockFs,
-      },
-    );
+    const result = performOperatorApprovedWrite({
+      file_path: '/workspace/trusted/MEMORY.md',
+      content: 'x',
+      operator_justification: '       \n\t  ',
+      fs: mockFs,
+    });
     expect(result.ok).toBe(false);
     expect(calls).toHaveLength(0);
   });
 
   it('rejects a sub-8-character justification ("ok")', () => {
     const { fs: mockFs, calls } = makeMockFs();
-    const result = performOperatorApprovedWrite(
-      {
-        file_path: '/workspace/trusted/MEMORY.md',
-        content: 'x',
-        operator_justification: 'ok',
-        fs: mockFs,
-      },
-    );
+    const result = performOperatorApprovedWrite({
+      file_path: '/workspace/trusted/MEMORY.md',
+      content: 'x',
+      operator_justification: 'ok',
+      fs: mockFs,
+    });
     expect(result.ok).toBe(false);
     expect(calls).toHaveLength(0);
   });
@@ -300,22 +276,17 @@ describe('performOperatorApprovedWrite — atomic write semantics', () => {
     };
 
     try {
-      const result = performOperatorApprovedWrite(
-        {
-          file_path: canonical,
-          content: 'hello operator',
-          operator_justification:
-            'operator dictated content in turn 7',
-          fs: proxy,
-          pid: 9999,
-        },
-      );
+      const result = performOperatorApprovedWrite({
+        file_path: canonical,
+        content: 'hello operator',
+        operator_justification: 'operator dictated content in turn 7',
+        fs: proxy,
+        pid: 9999,
+      });
       expect(result.ok).toBe(true);
       // Target exists with the right content; no .tmp leftover.
       expect(fs.existsSync(targetWithinTmp)).toBe(true);
-      expect(fs.readFileSync(targetWithinTmp, 'utf-8')).toBe(
-        'hello operator',
-      );
+      expect(fs.readFileSync(targetWithinTmp, 'utf-8')).toBe('hello operator');
       expect(fs.existsSync(`${targetWithinTmp}.tmp.9999`)).toBe(false);
     } finally {
       fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -329,14 +300,12 @@ describe('performOperatorApprovedWrite — fs error handling', () => {
       code: 'EACCES',
     }) as NodeJS.ErrnoException;
     const { fs: mockFs } = makeMockFs({ failMkdir: err });
-    const result = performOperatorApprovedWrite(
-      {
-        file_path: '/workspace/trusted/MEMORY.md',
-        content: 'x',
-        operator_justification: 'operator dictated value in turn 1',
-        fs: mockFs,
-      },
-    );
+    const result = performOperatorApprovedWrite({
+      file_path: '/workspace/trusted/MEMORY.md',
+      content: 'x',
+      operator_justification: 'operator dictated value in turn 1',
+      fs: mockFs,
+    });
     expect(result.ok).toBe(false);
     if (result.ok === false) {
       expect(result.error).toContain('permission denied');
@@ -348,14 +317,12 @@ describe('performOperatorApprovedWrite — fs error handling', () => {
       code: 'ENOSPC',
     }) as NodeJS.ErrnoException;
     const { fs: mockFs } = makeMockFs({ failWrite: err });
-    const result = performOperatorApprovedWrite(
-      {
-        file_path: '/workspace/trusted/MEMORY.md',
-        content: 'x',
-        operator_justification: 'operator dictated value in turn 1',
-        fs: mockFs,
-      },
-    );
+    const result = performOperatorApprovedWrite({
+      file_path: '/workspace/trusted/MEMORY.md',
+      content: 'x',
+      operator_justification: 'operator dictated value in turn 1',
+      fs: mockFs,
+    });
     expect(result.ok).toBe(false);
     if (result.ok === false) {
       expect(result.error).toContain('no space');
@@ -370,14 +337,12 @@ describe('performOperatorApprovedWrite — fs error handling', () => {
       failWrite: new Error('totally unexpected') as NodeJS.ErrnoException,
     });
     expect(() =>
-      performOperatorApprovedWrite(
-        {
-          file_path: '/workspace/trusted/MEMORY.md',
-          content: 'x',
-          operator_justification: 'operator dictated value in turn 1',
-          fs: mockFs,
-        },
-      ),
+      performOperatorApprovedWrite({
+        file_path: '/workspace/trusted/MEMORY.md',
+        content: 'x',
+        operator_justification: 'operator dictated value in turn 1',
+        fs: mockFs,
+      }),
     ).toThrow('totally unexpected');
   });
 });
@@ -390,8 +355,7 @@ describe('performOperatorApprovedWrite — structured logging', () => {
       {
         file_path: '/workspace/trusted/MEMORY.md',
         content: 'x',
-        operator_justification:
-          'operator dictated Amir\'s birthday in turn 14',
+        operator_justification: "operator dictated Amir's birthday in turn 14",
         fs: mockFs,
       },
       (payload) => logs.push(payload),
@@ -401,8 +365,7 @@ describe('performOperatorApprovedWrite — structured logging', () => {
       {
         event: 'memory_quarantine.operator_approved_write',
         path: '/workspace/trusted/MEMORY.md',
-        justification:
-          'operator dictated Amir\'s birthday in turn 14',
+        justification: "operator dictated Amir's birthday in turn 14",
       },
     ]);
   });
@@ -432,8 +395,7 @@ describe('performOperatorApprovedWrite — structured logging', () => {
       {
         file_path: '/etc/passwd',
         content: 'x',
-        operator_justification:
-          'operator dictated value in turn 1',
+        operator_justification: 'operator dictated value in turn 1',
         fs: mockFs,
       },
       (payload) => logs.push(payload),
@@ -479,14 +441,12 @@ describe('performOperatorApprovedWrite — defaults', () => {
     // test above, but we additionally pin the behaviour here by
     // observing the mock call list when input.pid is omitted.
     const { fs: mockFs, calls } = makeMockFs();
-    performOperatorApprovedWrite(
-      {
-        file_path: '/workspace/trusted/x.md',
-        content: 'x',
-        operator_justification: 'operator dictated in turn 1',
-        fs: mockFs,
-      },
-    );
+    performOperatorApprovedWrite({
+      file_path: '/workspace/trusted/x.md',
+      content: 'x',
+      operator_justification: 'operator dictated in turn 1',
+      fs: mockFs,
+    });
     const writeCall = calls.find((c) => c.kind === 'write');
     expect(writeCall).toBeDefined();
     expect(writeCall!.args[0]).toBe(

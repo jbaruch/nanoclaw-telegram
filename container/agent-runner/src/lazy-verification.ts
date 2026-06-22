@@ -69,19 +69,23 @@ const BANNED_PHRASES: { pattern: RegExp; label: string }[] = [
   },
   {
     label: 'cant-access-this',
-    pattern: /\b(?:can(?:'?|no)t|unable to) access (?:this|the (?:site|page|url))\b/i,
+    pattern:
+      /\b(?:can(?:'?|no)t|unable to) access (?:this|the (?:site|page|url))\b/i,
   },
   {
     label: 'cant-read-this-site',
-    pattern: /\b(?:can(?:'?|no)t|unable to) read (?:this site|the (?:site|page))\b/i,
+    pattern:
+      /\b(?:can(?:'?|no)t|unable to) read (?:this site|the (?:site|page))\b/i,
   },
   {
     label: 'couldnt-load-the-page',
-    pattern: /\b(?:could(?:n'?|no)t|failed to|was unable to) load (?:the (?:page|site)|this (?:page|site)|it)\b/i,
+    pattern:
+      /\b(?:could(?:n'?|no)t|failed to|was unable to) load (?:the (?:page|site)|this (?:page|site)|it)\b/i,
   },
   {
     label: 'content-loads-dynamically',
-    pattern: /\bcontent (?:is |gets )?(?:load(?:s|ed|ing)?|render(?:s|ed|ing)?) dynamically\b/i,
+    pattern:
+      /\bcontent (?:is |gets )?(?:load(?:s|ed|ing)?|render(?:s|ed|ing)?) dynamically\b/i,
   },
 ];
 
@@ -107,8 +111,16 @@ const TRIED_STATEMENT_RE = /\bTried\b[^.\n]+(?:[—–\-:][^.\n]+)/gi;
 export function detectLazyVerification(
   lastAssistantMessage: unknown,
 ): LazyVerificationDecision {
-  if (typeof lastAssistantMessage !== 'string' || lastAssistantMessage.length === 0) {
-    return { block: false, matches: [], reinjection: '', passReason: 'no-match' };
+  if (
+    typeof lastAssistantMessage !== 'string' ||
+    lastAssistantMessage.length === 0
+  ) {
+    return {
+      block: false,
+      matches: [],
+      reinjection: '',
+      passReason: 'no-match',
+    };
   }
   const matches: LazyVerificationMatch[] = [];
   for (const { pattern, label } of BANNED_PHRASES) {

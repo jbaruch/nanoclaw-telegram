@@ -20,8 +20,9 @@ describe('detectComposioFidelity', () => {
   });
 
   it('flags 18 sequential email_NN ids — the heartbeat 2026-04-26 case', () => {
-    const ids = Array.from({ length: 18 }, (_, i) =>
-      `email_${String(i + 1).padStart(2, '0')}`,
+    const ids = Array.from(
+      { length: 18 },
+      (_, i) => `email_${String(i + 1).padStart(2, '0')}`,
     );
     const result = ids.map((id) => ({ id, subject: 'fake' }));
     const decision = detectComposioFidelity(result);
@@ -69,9 +70,14 @@ describe('detectComposioFidelity', () => {
 
   it('does NOT flag 6 NON-sequential numeric ids', () => {
     const result = JSON.stringify(
-      ['email_47', 'email_192', 'email_3', 'email_801', 'email_55', 'email_999'].map(
-        (id) => ({ id }),
-      ),
+      [
+        'email_47',
+        'email_192',
+        'email_3',
+        'email_801',
+        'email_55',
+        'email_999',
+      ].map((id) => ({ id })),
     );
     expect(detectComposioFidelity(result).fabricated).toBe(false);
   });
@@ -86,14 +92,18 @@ describe('detectComposioFidelity', () => {
     });
     const decision = detectComposioFidelity(result);
     expect(decision.fabricated).toBe(true);
-    expect(decision.findings.find((f) => f.rule === 'pr-notif-style')).toBeDefined();
+    expect(
+      decision.findings.find((f) => f.rule === 'pr-notif-style'),
+    ).toBeDefined();
   });
 
   it('flags promo_NNN fabrication shape', () => {
     const result = 'promo_001 promo_002 promo_003';
     const decision = detectComposioFidelity(result);
     expect(decision.fabricated).toBe(true);
-    expect(decision.findings.find((f) => f.rule === 'promo-numbered')).toBeDefined();
+    expect(
+      decision.findings.find((f) => f.rule === 'promo-numbered'),
+    ).toBeDefined();
   });
 
   it('reports multiple findings independently', () => {
@@ -102,15 +112,18 @@ describe('detectComposioFidelity', () => {
         Array.from({ length: 10 }, (_, i) => ({
           id: `email_${String(i + 1).padStart(2, '0')}`,
         })),
-      ) + ' ' + 'pr1_notif pr2_notif pr3_notif';
+      ) +
+      ' ' +
+      'pr1_notif pr2_notif pr3_notif';
     const decision = detectComposioFidelity(text);
     expect(decision.fabricated).toBe(true);
     expect(decision.findings.length).toBeGreaterThanOrEqual(2);
   });
 
   it('reinjection text mentions each rule + sample', () => {
-    const ids = Array.from({ length: 6 }, (_, i) =>
-      `event_${String(i + 1).padStart(2, '0')}`,
+    const ids = Array.from(
+      { length: 6 },
+      (_, i) => `event_${String(i + 1).padStart(2, '0')}`,
     );
     const decision = detectComposioFidelity(ids.join(' '));
     expect(decision.reinjection).toContain('sequential-prefix-ids');

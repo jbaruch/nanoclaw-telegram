@@ -13,8 +13,20 @@ jobs:
         with:
           node-version: 24
           cache: npm
+          # Key the npm cache on both lockfiles — the job runs a second
+          # `npm ci` in container/agent-runner (its own package), which the
+          # default root-only key would leave uncached.
+          cache-dependency-path: |
+            package-lock.json
+            container/agent-runner/package-lock.json
       - run: npm ci
 
+      # The root format:check glob now also covers container/agent-runner/src
+      # (#701) — the agent-runner is its own npm package, so it had been
+      # outside the gate and half its files had drifted from root prettier.
+      # Folding the glob into the root script keeps a single format gate that
+      # resolves the repo's one pinned prettier, before the slower
+      # typecheck/tests (`coding-policy: code-formatting`).
       - name: Format check
         run: npm run format:check
 
@@ -23,6 +35,18 @@ jobs:
 
       - name: Tests
         run: npx vitest run
+
+      # The agent-runner has its own tsconfig and deps (claude-agent-sdk et
+      # al. resolve only from its own node_modules), so root tsc never
+      # typechecked it. Its *tests* already run via the root vitest config;
+      # this adds the missing typecheck. Install its deps, then run its tsc.
+      - name: Install agent-runner deps
+        working-directory: container/agent-runner
+        run: npm ci
+
+      - name: Typecheck (agent-runner)
+        working-directory: container/agent-runner
+        run: npx tsc --noEmit
 
       # Python tests live alongside scripts that need them. Stdlib
       # unittest only — no pytest dependency to install. Wired here

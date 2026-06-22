@@ -71,7 +71,15 @@ export interface SilentTurnAuditInput {
 }
 
 export type SilentTurnAuditDecision =
-  | { kind: 'pass'; reason: 'subagent' | 'maintenance' | 'scheduled-task' | 'no-triggering-inbound' | 'addressed' }
+  | {
+      kind: 'pass';
+      reason:
+        | 'subagent'
+        | 'maintenance'
+        | 'scheduled-task'
+        | 'no-triggering-inbound'
+        | 'addressed';
+    }
   | {
       kind: 'log';
       record: {
@@ -83,7 +91,9 @@ export type SilentTurnAuditDecision =
       };
     };
 
-export function createSilentTurnState(turnStartedAtMs: number): SilentTurnState {
+export function createSilentTurnState(
+  turnStartedAtMs: number,
+): SilentTurnState {
   return {
     triggeringInboundId: null,
     turnStartedAtMs,

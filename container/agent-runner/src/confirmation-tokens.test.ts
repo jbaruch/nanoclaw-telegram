@@ -47,14 +47,11 @@ describe('classifyDestructiveOp', () => {
     expect(
       classifyDestructiveOp('mcp__nanoclaw__push_staged_to_branch', {}),
     ).toEqual({ scope: 'push_staged_to_branch', label: expect.any(String) });
+    expect(classifyDestructiveOp('mcp__nanoclaw__set_agent_model', {})).toEqual(
+      { scope: 'set_agent_model', label: expect.any(String) },
+    );
     expect(
-      classifyDestructiveOp('mcp__nanoclaw__set_agent_model', {}),
-    ).toEqual({ scope: 'set_agent_model', label: expect.any(String) });
-    expect(
-      classifyDestructiveOp(
-        'mcp__nanoclaw__set_maintenance_agent_model',
-        {},
-      ),
+      classifyDestructiveOp('mcp__nanoclaw__set_maintenance_agent_model', {}),
     ).toEqual({
       scope: 'set_maintenance_agent_model',
       label: expect.any(String),
@@ -108,7 +105,9 @@ describe('classifyDestructiveOp', () => {
 
   it('returns null for empty / non-string tool names', () => {
     expect(classifyDestructiveOp('', {})).toBeNull();
-    expect(classifyDestructiveOp(undefined as unknown as string, {})).toBeNull();
+    expect(
+      classifyDestructiveOp(undefined as unknown as string, {}),
+    ).toBeNull();
   });
 });
 
@@ -129,11 +128,7 @@ describe('findValidToken', () => {
   });
 
   it('skips used tokens', () => {
-    const result = findValidToken(
-      [token({ used: true })],
-      'nuke_session',
-      NOW,
-    );
+    const result = findValidToken([token({ used: true })], 'nuke_session', NOW);
     expect(result.token).toBeNull();
     expect(result.reason).toBe('all_tokens_used');
   });

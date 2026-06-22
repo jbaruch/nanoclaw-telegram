@@ -108,7 +108,11 @@ async function runHostOperation(
     ...extra,
   });
 
-  const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
+  const resultPath = path.join(
+    IPC_DIR,
+    'input',
+    `_script_result_${requestId}.json`,
+  );
   const pollMs = 500;
   const start = Date.now();
 
@@ -149,12 +153,19 @@ async function runHostOperation(
           isError: true,
         };
       }
-      return { content: [{ type: 'text' as const, text: result.stdout || '(no output)' }] };
+      return {
+        content: [
+          { type: 'text' as const, text: result.stdout || '(no output)' },
+        ],
+      };
     }
-    await new Promise(r => setTimeout(r, pollMs));
+    await new Promise((r) => setTimeout(r, pollMs));
   }
 
-  return { content: [{ type: 'text' as const, text: `Operation ${type} timed out` }], isError: true };
+  return {
+    content: [{ type: 'text' as const, text: `Operation ${type} timed out` }],
+    isError: true,
+  };
 }
 
 const server = new McpServer({
@@ -195,8 +206,18 @@ server.tool(
       .describe(
         'Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.',
       ),
-    reply_to: z.string().optional().describe('Message ID to reply to (quote). Get this from the [id=...] tag in the message prompt. If omitted, the message is sent without quote-threading. For cross-chat sends (chat_jid set), only pass this if it refers to a message in the TARGET chat — Telegram message IDs are per-chat.'),
-    pin: z.boolean().optional().describe('Pin this message in the chat after sending. Use for important messages like daily briefs.'),
+    reply_to: z
+      .string()
+      .optional()
+      .describe(
+        'Message ID to reply to (quote). Get this from the [id=...] tag in the message prompt. If omitted, the message is sent without quote-threading. For cross-chat sends (chat_jid set), only pass this if it refers to a message in the TARGET chat — Telegram message IDs are per-chat.',
+      ),
+    pin: z
+      .boolean()
+      .optional()
+      .describe(
+        'Pin this message in the chat after sending. Use for important messages like daily briefs.',
+      ),
     chat_jid: z
       .string()
       .optional()
@@ -229,7 +250,14 @@ server.tool(
 
     writeIpcFile(MESSAGES_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: args.pin ? 'Message sent and pinned.' : 'Message sent.' }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: args.pin ? 'Message sent and pinned.' : 'Message sent.',
+        },
+      ],
+    };
   },
 );
 
@@ -237,8 +265,15 @@ server.tool(
   'send_file',
   'Send a file from the workspace to the user via Telegram. The file must exist on the container filesystem. Use for generated reports, exports, or any file the user asked you to create. Trusted containers only.',
   {
-    filePath: z.string().describe('Absolute path to the file in the container (e.g., /workspace/group/report.csv)'),
-    caption: z.string().optional().describe('Optional caption to send with the file'),
+    filePath: z
+      .string()
+      .describe(
+        'Absolute path to the file in the container (e.g., /workspace/group/report.csv)',
+      ),
+    caption: z
+      .string()
+      .optional()
+      .describe('Optional caption to send with the file'),
     reply_to: z.string().optional().describe('Message ID to reply to'),
   },
   async (args) => {
@@ -271,7 +306,9 @@ server.tool(
 
     if (!fs.existsSync(args.filePath)) {
       return {
-        content: [{ type: 'text' as const, text: `File not found: ${args.filePath}` }],
+        content: [
+          { type: 'text' as const, text: `File not found: ${args.filePath}` },
+        ],
         isError: true,
       };
     }
@@ -288,7 +325,14 @@ server.tool(
 
     writeIpcFile(MESSAGES_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: `File queued for sending: ${path.basename(args.filePath)}` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `File queued for sending: ${path.basename(args.filePath)}`,
+        },
+      ],
+    };
   },
 );
 
@@ -296,7 +340,9 @@ server.tool(
   'send_voice',
   'Send a voice (audio) reply to the user via Telegram. Synthesizes the text using OpenAI TTS and uploads as a Telegram voice note. Use when the user sent a voice message and would prefer voice back, or when explicitly asked to reply by voice. Keep text under ~500 chars — TTS is cheap but very long messages feel awkward as audio. Use plain prose without HTML tags or markdown.',
   {
-    text: z.string().describe('The text to speak (plain prose, no HTML/markdown).'),
+    text: z
+      .string()
+      .describe('The text to speak (plain prose, no HTML/markdown).'),
     voice: z
       .enum(['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'])
       .optional()
@@ -326,8 +372,17 @@ server.tool(
   'react_to_message',
   'React to a message with an emoji. Use to acknowledge, approve, or express sentiment without sending a full text reply. Invalid emoji falls back to 👍.',
   {
-    messageId: z.string().optional().describe('Message ID to react to. If omitted, reacts to the most recent message.'),
-    emoji: z.string().describe('Telegram reaction emoji. 73 supported: 👍👎❤🔥🥰👏😁🤔🤯😱🤬😢🎉🤩🤮💩🙏👌🕊🤡🥱🥴😍🐳❤‍🔥🌚🌭💯🤣⚡🍌🏆💔🤨😐🍓🍾💋🖕😈😴😭🤓👻👨‍💻👀🎃🙈😇😨🤝✍🤗🫡🎅🎄☃💅🤪🗿🆒💘🙉🦄😘💊🙊😎👾🤷‍♂🤷🤷‍♀😡. Invalid falls back to 👍.'),
+    messageId: z
+      .string()
+      .optional()
+      .describe(
+        'Message ID to react to. If omitted, reacts to the most recent message.',
+      ),
+    emoji: z
+      .string()
+      .describe(
+        'Telegram reaction emoji. 73 supported: 👍👎❤🔥🥰👏😁🤔🤯😱🤬😢🎉🤩🤮💩🙏👌🕊🤡🥱🥴😍🐳❤‍🔥🌚🌭💯🤣⚡🍌🏆💔🤨😐🍓🍾💋🖕😈😴😭🤓👻👨‍💻👀🎃🙈😇😨🤝✍🤗🫡🎅🎄☃💅🤪🗿🆒💘🙉🦄😘💊🙊😎👾🤷‍♂🤷🤷‍♀😡. Invalid falls back to 👍.',
+      ),
   },
   async (args) => {
     const data: Record<string, string | undefined> = {
@@ -339,7 +394,9 @@ server.tool(
       timestamp: new Date().toISOString(),
     };
     writeIpcFile(MESSAGES_DIR, data);
-    return { content: [{ type: 'text' as const, text: `Reacted with ${args.emoji}` }] };
+    return {
+      content: [{ type: 'text' as const, text: `Reacted with ${args.emoji}` }],
+    };
   },
 );
 
@@ -823,313 +880,363 @@ server.tool(
 );
 
 if (isMain) {
-server.tool(
-  'register_group',
-  `Register a new chat/group so the agent can respond to messages there. Main group only.
+  server.tool(
+    'register_group',
+    `Register a new chat/group so the agent can respond to messages there. Main group only.
 
 Use available_groups.json to find the JID for a group. The folder name must be channel-prefixed: "{channel}_{group-name}" (e.g., "whatsapp_family-chat", "telegram_dev-team", "discord_general"). Use lowercase with hyphens for the group name part.`,
-  {
-    jid: z
-      .string()
-      .trim()
-      .min(1)
-      .describe(
-        'The chat JID (e.g., "120363336345536173@g.us", "tg:-1001234567890", "dc:1234567890123456"). Whitespace-only rejected.',
-      ),
-    name: z.string().trim().min(1).describe('Display name for the group'),
-    folder: z
-      .string()
-      .trim()
-      .min(1)
-      .describe(
-        'Channel-prefixed folder name (e.g., "whatsapp_family-chat", "telegram_dev-team")',
-      ),
-    trigger: z
-      .string()
-      .trim()
-      .min(1)
-      .describe('Trigger word (e.g., "@Andy"). Whitespace-only rejected.'),
-    requiresTrigger: z
-      .boolean()
-      .optional()
-      .describe(
-        'Whether messages must start with the trigger word. Default: false (respond to all messages). Set to true for busy groups with many participants where you only want the agent to respond when explicitly mentioned.',
-      ),
-    trusted: z.boolean().optional().describe('Whether the group gets a trusted container (read-write filesystem, admin tiles, longer timeout). Default: false. Set true for personal/friends groups.'),
-    enableHeartbeat: z.boolean().optional().describe('Opt this non-main group into the 15-min unanswered-message heartbeat. Default: false. Pre-#158 this was implicit on requiresTrigger; now explicit.'),
-    additionalMounts: z.array(z.object({
-      hostPath: z.string().describe('Path on the host (supports "~" expansion; does not need to be absolute).'),
-      containerPath: z.string().optional().describe('Optional mount name inside /workspace/extra/. When omitted, the host derives it from basename(hostPath).'),
-      readonly: z.boolean().optional().describe('Mount as read-only (default). Set to false to request read-write access.'),
-    })).optional().describe('Extra volume mounts for the container, passed through to the host.'),
-    additionalTiles: z.array(z.string().trim().min(1)).optional().describe("Per-chat additive tile overlay (#305): tile names from the local Tessl registry that load IN ADDITION to the trust-tier baseline (`nanoclaw-core`, `nanoclaw-trusted`/`nanoclaw-untrusted`, plus `nanoclaw-admin` for main). Use `list_installed_tiles` first to see what overlay tiles are available. The host validates every entry against the registry — registration is rejected if any tile name is not installed. Empty / omitted = baseline tiles only."),
-  },
-  async (args) => {
-    if (!isMain) {
+    {
+      jid: z
+        .string()
+        .trim()
+        .min(1)
+        .describe(
+          'The chat JID (e.g., "120363336345536173@g.us", "tg:-1001234567890", "dc:1234567890123456"). Whitespace-only rejected.',
+        ),
+      name: z.string().trim().min(1).describe('Display name for the group'),
+      folder: z
+        .string()
+        .trim()
+        .min(1)
+        .describe(
+          'Channel-prefixed folder name (e.g., "whatsapp_family-chat", "telegram_dev-team")',
+        ),
+      trigger: z
+        .string()
+        .trim()
+        .min(1)
+        .describe('Trigger word (e.g., "@Andy"). Whitespace-only rejected.'),
+      requiresTrigger: z
+        .boolean()
+        .optional()
+        .describe(
+          'Whether messages must start with the trigger word. Default: false (respond to all messages). Set to true for busy groups with many participants where you only want the agent to respond when explicitly mentioned.',
+        ),
+      trusted: z
+        .boolean()
+        .optional()
+        .describe(
+          'Whether the group gets a trusted container (read-write filesystem, admin tiles, longer timeout). Default: false. Set true for personal/friends groups.',
+        ),
+      enableHeartbeat: z
+        .boolean()
+        .optional()
+        .describe(
+          'Opt this non-main group into the 15-min unanswered-message heartbeat. Default: false. Pre-#158 this was implicit on requiresTrigger; now explicit.',
+        ),
+      additionalMounts: z
+        .array(
+          z.object({
+            hostPath: z
+              .string()
+              .describe(
+                'Path on the host (supports "~" expansion; does not need to be absolute).',
+              ),
+            containerPath: z
+              .string()
+              .optional()
+              .describe(
+                'Optional mount name inside /workspace/extra/. When omitted, the host derives it from basename(hostPath).',
+              ),
+            readonly: z
+              .boolean()
+              .optional()
+              .describe(
+                'Mount as read-only (default). Set to false to request read-write access.',
+              ),
+          }),
+        )
+        .optional()
+        .describe(
+          'Extra volume mounts for the container, passed through to the host.',
+        ),
+      additionalTiles: z
+        .array(z.string().trim().min(1))
+        .optional()
+        .describe(
+          'Per-chat additive tile overlay (#305): tile names from the local Tessl registry that load IN ADDITION to the trust-tier baseline (`nanoclaw-core`, `nanoclaw-trusted`/`nanoclaw-untrusted`, plus `nanoclaw-admin` for main). Use `list_installed_tiles` first to see what overlay tiles are available. The host validates every entry against the registry — registration is rejected if any tile name is not installed. Empty / omitted = baseline tiles only.',
+        ),
+    },
+    async (args) => {
+      if (!isMain) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'Only the main group can register new groups.',
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const containerConfig = buildRegisterGroupContainerConfig(args);
+
+      const data = {
+        type: 'register_group',
+        jid: args.jid,
+        name: args.name,
+        folder: args.folder,
+        trigger: args.trigger,
+        requiresTrigger: args.requiresTrigger ?? false,
+        containerConfig,
+        timestamp: new Date().toISOString(),
+      };
+
+      writeIpcFile(TASKS_DIR, data);
+
       return {
         content: [
           {
             type: 'text' as const,
-            text: 'Only the main group can register new groups.',
+            text: `Group "${args.name}" registered. It will start receiving messages immediately.`,
           },
         ],
-        isError: true,
       };
-    }
-
-    const containerConfig = buildRegisterGroupContainerConfig(args);
-
-    const data = {
-      type: 'register_group',
-      jid: args.jid,
-      name: args.name,
-      folder: args.folder,
-      trigger: args.trigger,
-      requiresTrigger: args.requiresTrigger ?? false,
-      containerConfig,
-      timestamp: new Date().toISOString(),
-    };
-
-    writeIpcFile(TASKS_DIR, data);
-
-    return {
-      content: [
-        {
-          type: 'text' as const,
-          text: `Group "${args.name}" registered. It will start receiving messages immediately.`,
-        },
-      ],
-    };
-  },
-);
+    },
+  );
 }
 
 if (isMain) {
-server.tool(
-  'unregister_group',
-  `Remove a chat/group from the registry so the agent stops responding there. Main group only.
+  server.tool(
+    'unregister_group',
+    `Remove a chat/group from the registry so the agent stops responding there. Main group only.
 
 Inverse of \`register_group\` (#159). Removes both the SQLite \`registered_groups\` row AND the JID's authoritative entry in \`available_groups.json\` in one call. The on-disk \`groups/<folder>/\` directory (CLAUDE.md, MEMORY.md, scheduled-task workspace) is left intact — operators delete that manually if/when they want a clean slate.
 
 Refuses to unregister the main group itself (losing the main registration mid-runtime would leave the orchestrator without an IPC path to recreate it). No-op when the JID isn't registered.`,
-  {
-    jid: z
-      .string()
-      .trim()
-      .min(1)
-      .describe(
-        'The chat JID of the registered group to remove (e.g., "tg:1698969", "120363336345536173@g.us"). Whitespace-only rejected.',
-      ),
-  },
-  async (args) => {
-    if (!isMain) {
+    {
+      jid: z
+        .string()
+        .trim()
+        .min(1)
+        .describe(
+          'The chat JID of the registered group to remove (e.g., "tg:1698969", "120363336345536173@g.us"). Whitespace-only rejected.',
+        ),
+    },
+    async (args) => {
+      if (!isMain) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'Only the main group can unregister groups.',
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const data = {
+        type: 'unregister_group',
+        jid: args.jid,
+        timestamp: new Date().toISOString(),
+      };
+
+      writeIpcFile(TASKS_DIR, data);
+
       return {
         content: [
           {
             type: 'text' as const,
-            text: 'Only the main group can unregister groups.',
+            text: `Unregister requested for ${args.jid}. (No-op if the JID wasn't registered. The on-disk groups/<folder>/ directory is preserved — delete manually if no longer needed.)`,
           },
         ],
-        isError: true,
       };
-    }
-
-    const data = {
-      type: 'unregister_group',
-      jid: args.jid,
-      timestamp: new Date().toISOString(),
-    };
-
-    writeIpcFile(TASKS_DIR, data);
-
-    return {
-      content: [
-        {
-          type: 'text' as const,
-          text: `Unregister requested for ${args.jid}. (No-op if the JID wasn't registered. The on-disk groups/<folder>/ directory is preserved — delete manually if no longer needed.)`,
-        },
-      ],
-    };
-  },
-);
+    },
+  );
 }
 
 if (isMain) {
-server.tool(
-  'set_trusted',
-  `Flip a registered group's \`trusted\` flag without re-stating its other parameters. Main group only.
+  server.tool(
+    'set_trusted',
+    `Flip a registered group's \`trusted\` flag without re-stating its other parameters. Main group only.
 
 Use this when promoting a chat to trusted (read-write filesystem, admin tiles, longer timeout) or demoting it back. Does NOT register a new group — call \`register_group\` first if the JID isn't already registered. The trigger word, folder, and additionalMounts are preserved.`,
-  {
-    jid: z
-      .string()
-      .trim()
-      .min(1)
-      .describe(
-        'The chat JID of an already-registered group (e.g., "tg:-1001234567890"). Whitespace-only rejected.',
-      ),
-    trusted: z
-      .boolean()
-      .describe(
-        'true = trusted container (RW filesystem, admin tiles); false = untrusted container',
-      ),
-  },
-  async (args) => {
-    if (!isMain) {
+    {
+      jid: z
+        .string()
+        .trim()
+        .min(1)
+        .describe(
+          'The chat JID of an already-registered group (e.g., "tg:-1001234567890"). Whitespace-only rejected.',
+        ),
+      trusted: z
+        .boolean()
+        .describe(
+          'true = trusted container (RW filesystem, admin tiles); false = untrusted container',
+        ),
+    },
+    async (args) => {
+      if (!isMain) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'Only the main group can change trust state.',
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const data = {
+        type: 'set_trusted',
+        // `args.jid` is already trimmed by the Zod schema's `.trim()`
+        // transform — pass through verbatim.
+        jid: args.jid,
+        trusted: args.trusted,
+        timestamp: new Date().toISOString(),
+      };
+
+      writeIpcFile(TASKS_DIR, data);
+
       return {
         content: [
           {
             type: 'text' as const,
-            text: 'Only the main group can change trust state.',
+            // "requested" rather than "set": the host receives the IPC
+            // file and applies it asynchronously, and may no-op if the
+            // JID isn't registered. We can't confirm the actual write
+            // from this side without a synchronous round-trip.
+            text: `Trust update requested for ${args.jid} → ${args.trusted}. (No-op if the JID isn't registered — call register_group first.)`,
           },
         ],
-        isError: true,
       };
-    }
-
-    const data = {
-      type: 'set_trusted',
-      // `args.jid` is already trimmed by the Zod schema's `.trim()`
-      // transform — pass through verbatim.
-      jid: args.jid,
-      trusted: args.trusted,
-      timestamp: new Date().toISOString(),
-    };
-
-    writeIpcFile(TASKS_DIR, data);
-
-    return {
-      content: [
-        {
-          type: 'text' as const,
-          // "requested" rather than "set": the host receives the IPC
-          // file and applies it asynchronously, and may no-op if the
-          // JID isn't registered. We can't confirm the actual write
-          // from this side without a synchronous round-trip.
-          text: `Trust update requested for ${args.jid} → ${args.trusted}. (No-op if the JID isn't registered — call register_group first.)`,
-        },
-      ],
-    };
-  },
-);
+    },
+  );
 }
 
 if (isMain) {
-server.tool(
-  'set_trigger',
-  `Change a registered group's trigger word (and optionally requiresTrigger) without re-stating its other parameters. Main group only.
+  server.tool(
+    'set_trigger',
+    `Change a registered group's trigger word (and optionally requiresTrigger) without re-stating its other parameters. Main group only.
 
 Use this when renaming the assistant in a chat or switching between always-respond and trigger-only modes. Does NOT register a new group — call \`register_group\` first if the JID isn't already registered.`,
-  {
-    jid: z
-      .string()
-      .trim()
-      .min(1)
-      .describe(
-        'The chat JID of an already-registered group. Whitespace-only rejected.',
-      ),
-    // `.trim()` + `.min(1)` rejects empty/whitespace-only triggers.
-    // Why: `getTriggerPattern('')` trims and falls back to
-    // `DEFAULT_TRIGGER`, so a caller setting a custom trigger to an
-    // empty string would silently get the assistant's default trigger
-    // word back — not what they asked for. Trim also normalizes
-    // surrounding whitespace so `' @Andy '` doesn't store as such.
-    trigger: z
-      .string()
-      .trim()
-      .min(1)
-      .describe(
-        'New non-empty trigger word (e.g., "@Andy"). Replaces the existing trigger. Surrounding whitespace is trimmed.',
-      ),
-    requiresTrigger: z
-      .boolean()
-      .optional()
-      .describe(
-        'Whether messages must start with the trigger word. Omit to leave unchanged.',
-      ),
-  },
-  async (args) => {
-    if (!isMain) {
+    {
+      jid: z
+        .string()
+        .trim()
+        .min(1)
+        .describe(
+          'The chat JID of an already-registered group. Whitespace-only rejected.',
+        ),
+      // `.trim()` + `.min(1)` rejects empty/whitespace-only triggers.
+      // Why: `getTriggerPattern('')` trims and falls back to
+      // `DEFAULT_TRIGGER`, so a caller setting a custom trigger to an
+      // empty string would silently get the assistant's default trigger
+      // word back — not what they asked for. Trim also normalizes
+      // surrounding whitespace so `' @Andy '` doesn't store as such.
+      trigger: z
+        .string()
+        .trim()
+        .min(1)
+        .describe(
+          'New non-empty trigger word (e.g., "@Andy"). Replaces the existing trigger. Surrounding whitespace is trimmed.',
+        ),
+      requiresTrigger: z
+        .boolean()
+        .optional()
+        .describe(
+          'Whether messages must start with the trigger word. Omit to leave unchanged.',
+        ),
+    },
+    async (args) => {
+      if (!isMain) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'Only the main group can change trigger config.',
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const data: Record<string, unknown> = {
+        type: 'set_trigger',
+        jid: args.jid,
+        trigger: args.trigger,
+        timestamp: new Date().toISOString(),
+      };
+      if (args.requiresTrigger !== undefined) {
+        data.requiresTrigger = args.requiresTrigger;
+      }
+
+      writeIpcFile(TASKS_DIR, data);
+
       return {
         content: [
           {
             type: 'text' as const,
-            text: 'Only the main group can change trigger config.',
+            // "requested" rather than "set": host applies asynchronously and
+            // may no-op if the JID isn't registered.
+            text:
+              args.requiresTrigger === undefined
+                ? `Trigger update requested for ${args.jid} → "${args.trigger}". (No-op if the JID isn't registered — call register_group first.)`
+                : `Trigger update requested for ${args.jid} → "${args.trigger}" (requiresTrigger=${args.requiresTrigger}). (No-op if the JID isn't registered — call register_group first.)`,
           },
         ],
-        isError: true,
       };
-    }
-
-    const data: Record<string, unknown> = {
-      type: 'set_trigger',
-      jid: args.jid,
-      trigger: args.trigger,
-      timestamp: new Date().toISOString(),
-    };
-    if (args.requiresTrigger !== undefined) {
-      data.requiresTrigger = args.requiresTrigger;
-    }
-
-    writeIpcFile(TASKS_DIR, data);
-
-    return {
-      content: [
-        {
-          type: 'text' as const,
-          // "requested" rather than "set": host applies asynchronously and
-          // may no-op if the JID isn't registered.
-          text:
-            args.requiresTrigger === undefined
-              ? `Trigger update requested for ${args.jid} → "${args.trigger}". (No-op if the JID isn't registered — call register_group first.)`
-              : `Trigger update requested for ${args.jid} → "${args.trigger}" (requiresTrigger=${args.requiresTrigger}). (No-op if the JID isn't registered — call register_group first.)`,
-        },
-      ],
-    };
-  },
-);
+    },
+  );
 }
 
 if (isMain) {
-server.tool(
-  'set_additional_tiles',
-  `Set the per-chat additive tile overlay (#305) on a registered group — tile names that load IN ADDITION TO the trust-tier baseline (\`nanoclaw-core\`, \`nanoclaw-trusted\`/\`nanoclaw-untrusted\`, plus \`nanoclaw-admin\` for main). Main group only.
+  server.tool(
+    'set_additional_tiles',
+    `Set the per-chat additive tile overlay (#305) on a registered group — tile names that load IN ADDITION TO the trust-tier baseline (\`nanoclaw-core\`, \`nanoclaw-trusted\`/\`nanoclaw-untrusted\`, plus \`nanoclaw-admin\` for main). Main group only.
 
 Use this to give a chat extra capabilities (e.g. a coding chat with \`nanoclaw-coding\`) without changing its trust tier. Call \`list_installed_tiles\` first to see what overlay tiles are available — the host rejects the whole write if any entry isn't installed in the registry, so a typo blocks the change at write time rather than silently dropping a capability at next spawn. Pass \`additionalTiles: []\` (or null) to clear the overlay back to baseline tiles only. Other \`containerConfig\` fields (trusted, agentModel, enableHeartbeat, additionalMounts, gates) are preserved verbatim.`,
-  {
-    groupFolder: z.string().trim().min(1).describe('The folder name of an already-registered group (e.g., "telegram_family-chat", "whatsapp_main"). Whitespace-only rejected.'),
-    additionalTiles: z.array(z.string().trim().min(1)).nullable().describe('Tile names to overlay on top of the trust-tier baseline. `null` or `[]` clears the overlay. Every entry must resolve to an installed tile in the local registry — call `list_installed_tiles` to enumerate. Reserved baseline names (`nanoclaw-core`, `nanoclaw-trusted`, `nanoclaw-untrusted`, `nanoclaw-admin`) are deduped against the baseline at spawn time and have no effect when listed here.'),
-  },
-  async (args) => {
-    if (!isMain) {
+    {
+      groupFolder: z
+        .string()
+        .trim()
+        .min(1)
+        .describe(
+          'The folder name of an already-registered group (e.g., "telegram_family-chat", "whatsapp_main"). Whitespace-only rejected.',
+        ),
+      additionalTiles: z
+        .array(z.string().trim().min(1))
+        .nullable()
+        .describe(
+          'Tile names to overlay on top of the trust-tier baseline. `null` or `[]` clears the overlay. Every entry must resolve to an installed tile in the local registry — call `list_installed_tiles` to enumerate. Reserved baseline names (`nanoclaw-core`, `nanoclaw-trusted`, `nanoclaw-untrusted`, `nanoclaw-admin`) are deduped against the baseline at spawn time and have no effect when listed here.',
+        ),
+    },
+    async (args) => {
+      if (!isMain) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'Only the main group can change tile overlays.',
+            },
+          ],
+          isError: true,
+        };
+      }
+      const data = {
+        type: 'set_additional_tiles',
+        groupFolder: args.groupFolder,
+        additionalTiles: args.additionalTiles,
+        timestamp: new Date().toISOString(),
+      };
+      writeIpcFile(TASKS_DIR, data);
+      const desc = describeOverlayUpdate(args.additionalTiles);
       return {
         content: [
-          { type: 'text' as const, text: 'Only the main group can change tile overlays.' },
+          {
+            type: 'text' as const,
+            // "requested" rather than "applied" — host applies the IPC asynchronously and may
+            // reject the whole write if any tile isn't installed. Agent should follow up with
+            // chat_status (or read available_groups.json) to confirm the new overlay landed.
+            text: `Tile overlay update requested for ${args.groupFolder} → ${desc}. (No-op if the groupFolder isn't registered, or if any tile isn't installed in the registry — call list_installed_tiles to verify names first.)`,
+          },
         ],
-        isError: true,
       };
-    }
-    const data = {
-      type: 'set_additional_tiles',
-      groupFolder: args.groupFolder,
-      additionalTiles: args.additionalTiles,
-      timestamp: new Date().toISOString(),
-    };
-    writeIpcFile(TASKS_DIR, data);
-    const desc = describeOverlayUpdate(args.additionalTiles);
-    return {
-      content: [
-        {
-          type: 'text' as const,
-          // "requested" rather than "applied" — host applies the IPC asynchronously and may
-          // reject the whole write if any tile isn't installed. Agent should follow up with
-          // chat_status (or read available_groups.json) to confirm the new overlay landed.
-          text: `Tile overlay update requested for ${args.groupFolder} → ${desc}. (No-op if the groupFolder isn't registered, or if any tile isn't installed in the registry — call list_installed_tiles to verify names first.)`,
-        },
-      ],
-    };
-  },
-);
+    },
+  );
 }
 
 // `set_agent_model` / `set_maintenance_agent_model` /
@@ -1334,7 +1441,7 @@ server.tool(
       .boolean()
       .optional()
       .describe(
-        "When true, also delete the per-group checkpoint files (`.checkpoints/default.md` and `previous.md`) so the reentry skill has no Facts to load on the next spawn. Use when the checkpoint itself is the problem (poisoned plan, stale do-not-re-execute list). Default false — checkpoint files are preserved so reentry continues to work after the nuke.",
+        'When true, also delete the per-group checkpoint files (`.checkpoints/default.md` and `previous.md`) so the reentry skill has no Facts to load on the next spawn. Use when the checkpoint itself is the problem (poisoned plan, stale do-not-re-execute list). Default false — checkpoint files are preserved so reentry continues to work after the nuke.',
       ),
   },
   async (args) => {
@@ -1414,7 +1521,8 @@ Returns markdown prefixed with a 3-line header (title, source URL, char count, o
       .string()
       .url()
       .refine((u) => /^https?:\/\//i.test(u), {
-        message: 'url must use http(s); other schemes (ftp, file, javascript, ...) are not supported',
+        message:
+          'url must use http(s); other schemes (ftp, file, javascript, ...) are not supported',
       })
       .describe('Absolute http(s) URL to fetch.'),
     wait: z
@@ -1423,48 +1531,68 @@ Returns markdown prefixed with a 3-line header (title, source URL, char count, o
       .min(0)
       .max(60)
       .optional()
-      .describe('Extra seconds to wait after page load (default: 0). Use for pages that hydrate content asynchronously after the initial render.'),
+      .describe(
+        'Extra seconds to wait after page load (default: 0). Use for pages that hydrate content asynchronously after the initial render.',
+      ),
     wait_until: z
       .enum(['commit', 'domcontentloaded', 'load', 'networkidle'])
       .optional()
-      .describe('Playwright goto wait condition (default: domcontentloaded). Use "networkidle" for SPAs with multiple async fetches; "load" for image-heavy pages.'),
+      .describe(
+        'Playwright goto wait condition (default: domcontentloaded). Use "networkidle" for SPAs with multiple async fetches; "load" for image-heavy pages.',
+      ),
     wait_for_selector: z
       .string()
       .optional()
-      .describe('CSS selector to wait for before extraction (e.g. "main .article-body", "[data-loaded=true]"). Use when you know the specific element that signals the content is ready.'),
+      .describe(
+        'CSS selector to wait for before extraction (e.g. "main .article-body", "[data-loaded=true]"). Use when you know the specific element that signals the content is ready.',
+      ),
     favor_precision: z
       .boolean()
       .optional()
-      .describe('Strip more aggressively — prefer less boilerplate even if some content is lost. Mutually exclusive with favor_recall.'),
+      .describe(
+        'Strip more aggressively — prefer less boilerplate even if some content is lost. Mutually exclusive with favor_recall.',
+      ),
     favor_recall: z
       .boolean()
       .optional()
-      .describe('Keep more content — accept some boilerplate to avoid dropping legit body text. Mutually exclusive with favor_precision.'),
+      .describe(
+        'Keep more content — accept some boilerplate to avoid dropping legit body text. Mutually exclusive with favor_precision.',
+      ),
     include_links: z
       .boolean()
       .optional()
-      .describe('Preserve hyperlinks in the extracted markdown (default: false — links are stripped).'),
+      .describe(
+        'Preserve hyperlinks in the extracted markdown (default: false — links are stripped).',
+      ),
     include_images: z
       .boolean()
       .optional()
-      .describe('Preserve image references in the extracted markdown (default: false — images are stripped).'),
+      .describe(
+        'Preserve image references in the extracted markdown (default: false — images are stripped).',
+      ),
     max_chars: z
       .number()
       .int()
       .positive()
       .optional()
-      .describe('Truncate markdown output at this character count. Default: no limit. Set to ~80000 if you want a hard cap on context tokens.'),
+      .describe(
+        'Truncate markdown output at this character count. Default: no limit. Set to ~80000 if you want a hard cap on context tokens.',
+      ),
     no_cache: z
       .boolean()
       .optional()
-      .describe('Bypass the on-disk cache and force a fresh fetch. Default: false. Use when the page content is known to have changed and the cached version is stale.'),
+      .describe(
+        'Bypass the on-disk cache and force a fresh fetch. Default: false. Use when the page content is known to have changed and the cached version is stale.',
+      ),
     timeout: z
       .number()
       .int()
       .positive()
       .max(180)
       .optional()
-      .describe('Page-load timeout in seconds (default: 45). Increase for slow-loading pages; the IPC envelope adds another minute on top.'),
+      .describe(
+        'Page-load timeout in seconds (default: 45). Increase for slow-loading pages; the IPC envelope adds another minute on top.',
+      ),
   },
   async (args) => {
     // Mutex check at the MCP boundary: snitchmd will bail with exit
@@ -1509,103 +1637,149 @@ Returns markdown prefixed with a 3-line header (title, source URL, char count, o
 );
 
 if (isMain) {
-server.tool(
-  'audible_backup',
-  'Back up Audible audiobooks. Checks for new purchases not in the existing library, downloads and decrypts them to M4B. The host handles authentication and file storage. Use --dry-run to preview without downloading.',
-  {
-    dryRun: z.boolean().optional().describe('Preview new books without downloading (default: false)'),
-  },
-  async (args) => {
-    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const data = {
-      type: 'audible_backup',
-      dryRun: args.dryRun ?? false,
-      requestId,
-      timestamp: new Date().toISOString(),
-    };
+  server.tool(
+    'audible_backup',
+    'Back up Audible audiobooks. Checks for new purchases not in the existing library, downloads and decrypts them to M4B. The host handles authentication and file storage. Use --dry-run to preview without downloading.',
+    {
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe('Preview new books without downloading (default: false)'),
+    },
+    async (args) => {
+      const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const data = {
+        type: 'audible_backup',
+        dryRun: args.dryRun ?? false,
+        requestId,
+        timestamp: new Date().toISOString(),
+      };
 
-    writeIpcFile(TASKS_DIR, data);
+      writeIpcFile(TASKS_DIR, data);
 
-    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
-    const timeoutMs = 600_000;
-    const pollMs = 2000;
-    const start = Date.now();
+      const resultPath = path.join(
+        IPC_DIR,
+        'input',
+        `_script_result_${requestId}.json`,
+      );
+      const timeoutMs = 600_000;
+      const pollMs = 2000;
+      const start = Date.now();
 
-    while (Date.now() - start < timeoutMs) {
-      if (fs.existsSync(resultPath)) {
-        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
-        fs.unlinkSync(resultPath);
-        if (result.error) {
+      while (Date.now() - start < timeoutMs) {
+        if (fs.existsSync(resultPath)) {
+          const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+          fs.unlinkSync(resultPath);
+          if (result.error) {
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: `Audible backup failed: ${result.error}\n${result.stderr || ''}`,
+                },
+              ],
+              isError: true,
+            };
+          }
           return {
-            content: [{ type: 'text' as const, text: `Audible backup failed: ${result.error}\n${result.stderr || ''}` }],
-            isError: true,
+            content: [
+              { type: 'text' as const, text: JSON.stringify(result, null, 2) },
+            ],
           };
         }
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-        };
+        await new Promise((r) => setTimeout(r, pollMs));
       }
-      await new Promise(r => setTimeout(r, pollMs));
-    }
 
-    return {
-      content: [{ type: 'text' as const, text: 'Audible backup timed out after 10 minutes' }],
-      isError: true,
-    };
-  },
-);
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Audible backup timed out after 10 minutes',
+          },
+        ],
+        isError: true,
+      };
+    },
+  );
 }
 
 if (isMain) {
-server.tool(
-  'dominos_pizza',
-  "Order Domino's Pizza. Commands: find-stores (by address), menu (by storeId), build-order (validate+price, dry-run), place-order (requires confirm=true). For build-order and place-order, pass orderJson with storeId, customer (address, firstName, lastName, phone, email), items (array of {code, qty}), and payment (for place-order only: number, expiration, securityCode, postalCode, tipAmount).",
-  {
-    command: z.enum(['find-stores', 'menu', 'build-order', 'place-order']).describe('Command to run'),
-    payload: z.string().describe('Address for find-stores, storeId for menu, or order JSON for build/place-order'),
-    confirm: z.boolean().optional().describe('Required for place-order. Safety gate to prevent accidental orders.'),
-  },
-  async (args) => {
-    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const data = {
-      type: 'dominos_pizza',
-      command: args.command,
-      payload: args.payload,
-      confirm: args.confirm ?? false,
-      requestId,
-      timestamp: new Date().toISOString(),
-    };
+  server.tool(
+    'dominos_pizza',
+    "Order Domino's Pizza. Commands: find-stores (by address), menu (by storeId), build-order (validate+price, dry-run), place-order (requires confirm=true). For build-order and place-order, pass orderJson with storeId, customer (address, firstName, lastName, phone, email), items (array of {code, qty}), and payment (for place-order only: number, expiration, securityCode, postalCode, tipAmount).",
+    {
+      command: z
+        .enum(['find-stores', 'menu', 'build-order', 'place-order'])
+        .describe('Command to run'),
+      payload: z
+        .string()
+        .describe(
+          'Address for find-stores, storeId for menu, or order JSON for build/place-order',
+        ),
+      confirm: z
+        .boolean()
+        .optional()
+        .describe(
+          'Required for place-order. Safety gate to prevent accidental orders.',
+        ),
+    },
+    async (args) => {
+      const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const data = {
+        type: 'dominos_pizza',
+        command: args.command,
+        payload: args.payload,
+        confirm: args.confirm ?? false,
+        requestId,
+        timestamp: new Date().toISOString(),
+      };
 
-    writeIpcFile(TASKS_DIR, data);
+      writeIpcFile(TASKS_DIR, data);
 
-    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
-    const timeoutMs = 120_000;
-    const pollMs = 2000;
-    const start = Date.now();
+      const resultPath = path.join(
+        IPC_DIR,
+        'input',
+        `_script_result_${requestId}.json`,
+      );
+      const timeoutMs = 120_000;
+      const pollMs = 2000;
+      const start = Date.now();
 
-    while (Date.now() - start < timeoutMs) {
-      if (fs.existsSync(resultPath)) {
-        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
-        fs.unlinkSync(resultPath);
-        if (result.error) {
+      while (Date.now() - start < timeoutMs) {
+        if (fs.existsSync(resultPath)) {
+          const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+          fs.unlinkSync(resultPath);
+          if (result.error) {
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: `Dominos order failed: ${result.error}\n${result.stderr || ''}`,
+                },
+              ],
+              isError: true,
+            };
+          }
           return {
-            content: [{ type: 'text' as const, text: `Dominos order failed: ${result.error}\n${result.stderr || ''}` }],
-            isError: true,
+            content: [
+              { type: 'text' as const, text: JSON.stringify(result, null, 2) },
+            ],
           };
         }
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-        };
+        await new Promise((r) => setTimeout(r, pollMs));
       }
-      await new Promise(r => setTimeout(r, pollMs));
-    }
 
-    return {
-      content: [{ type: 'text' as const, text: "Domino's order timed out after 2 minutes" }],
-      isError: true,
-    };
-  },
-);
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: "Domino's order timed out after 2 minutes",
+          },
+        ],
+        isError: true,
+      };
+    },
+  );
 }
 
 // --- Smart Home ---
@@ -1613,25 +1787,46 @@ server.tool(
 server.tool(
   'smarthome_status',
   'Query smart home event data from the Hubitat EventSocket database. ' +
-  'Use for real-time house status, room activity, device states, battery levels, anomalies. ' +
-  '366 devices across 32 rooms. DB at /workspace/store/messages.db.',
+    'Use for real-time house status, room activity, device states, battery levels, anomalies. ' +
+    '366 devices across 32 rooms. DB at /workspace/store/messages.db.',
   {
-    query: z.enum([
-      'current_activity',
-      'room_status',
-      'battery_report',
-      'device_history',
-      'hub_health',
-      'custom_sql',
-    ]).describe('Query type'),
-    room: z.string().optional().describe('Room name for room_status (e.g., "Kitchen", "Master Bedroom")'),
-    device: z.string().optional().describe('Device name pattern for device_history (e.g., "Front Door Lock")'),
-    minutes: z.number().optional().describe('Lookback window in minutes (default: 5 for current_activity, 60 for history)'),
-    sql: z.string().optional().describe('Raw SQL for custom_sql query. Read-only — SELECT only.'),
+    query: z
+      .enum([
+        'current_activity',
+        'room_status',
+        'battery_report',
+        'device_history',
+        'hub_health',
+        'custom_sql',
+      ])
+      .describe('Query type'),
+    room: z
+      .string()
+      .optional()
+      .describe(
+        'Room name for room_status (e.g., "Kitchen", "Master Bedroom")',
+      ),
+    device: z
+      .string()
+      .optional()
+      .describe(
+        'Device name pattern for device_history (e.g., "Front Door Lock")',
+      ),
+    minutes: z
+      .number()
+      .optional()
+      .describe(
+        'Lookback window in minutes (default: 5 for current_activity, 60 for history)',
+      ),
+    sql: z
+      .string()
+      .optional()
+      .describe('Raw SQL for custom_sql query. Read-only — SELECT only.'),
   },
   async (args) => {
     const DB_PATH = '/workspace/store/messages.db';
-    const minutes = args.minutes || (args.query === 'current_activity' ? 5 : 60);
+    const minutes =
+      args.minutes || (args.query === 'current_activity' ? 5 : 60);
 
     let pythonCode: string;
 
@@ -1795,14 +1990,24 @@ print(json.dumps({
       case 'custom_sql':
         if (!args.sql) {
           return {
-            content: [{ type: 'text' as const, text: 'Error: sql parameter required for custom_sql query' }],
+            content: [
+              {
+                type: 'text' as const,
+                text: 'Error: sql parameter required for custom_sql query',
+              },
+            ],
             isError: true,
           };
         }
         const sql = args.sql.trim();
         if (!sql.toUpperCase().startsWith('SELECT')) {
           return {
-            content: [{ type: 'text' as const, text: 'Error: only SELECT queries allowed (read-only)' }],
+            content: [
+              {
+                type: 'text' as const,
+                text: 'Error: only SELECT queries allowed (read-only)',
+              },
+            ],
             isError: true,
           };
         }
@@ -1820,7 +2025,12 @@ print(json.dumps({"results": result, "count": len(result)}, indent=2))
 
       default:
         return {
-          content: [{ type: 'text' as const, text: `Unknown query type: ${args.query}` }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `Unknown query type: ${args.query}`,
+            },
+          ],
           isError: true,
         };
     }
@@ -1838,132 +2048,190 @@ print(json.dumps({"results": result, "count": len(result)}, indent=2))
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return {
-        content: [{ type: 'text' as const, text: `Smart home query failed: ${msg}` }],
+        content: [
+          { type: 'text' as const, text: `Smart home query failed: ${msg}` },
+        ],
         isError: true,
       };
     } finally {
-      try { fs.unlinkSync(tmpScript); } catch { /* ignore */ }
+      try {
+        fs.unlinkSync(tmpScript);
+      } catch {
+        /* ignore */
+      }
     }
   },
 );
 
 if (isMain) {
-server.tool(
-  'github_backup',
-  'Commit and push the group backup repo to GitHub. Use for nightly backups or when important state changes. The host handles git credentials — the container just triggers it.',
-  {
-    message: z.string().optional().describe('Commit message. Default: "backup: <ISO date>"'),
-  },
-  async (args) => {
-    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const data = {
-      type: 'github_backup',
-      groupFolder,
-      chatJid,
-      message: args.message,
-      requestId,
-      timestamp: new Date().toISOString(),
-    };
+  server.tool(
+    'github_backup',
+    'Commit and push the group backup repo to GitHub. Use for nightly backups or when important state changes. The host handles git credentials — the container just triggers it.',
+    {
+      message: z
+        .string()
+        .optional()
+        .describe('Commit message. Default: "backup: <ISO date>"'),
+    },
+    async (args) => {
+      const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const data = {
+        type: 'github_backup',
+        groupFolder,
+        chatJid,
+        message: args.message,
+        requestId,
+        timestamp: new Date().toISOString(),
+      };
 
-    writeIpcFile(TASKS_DIR, data);
+      writeIpcFile(TASKS_DIR, data);
 
-    // Poll for result file
-    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
-    const timeoutMs = 60_000;
-    const pollMs = 500;
-    const start = Date.now();
+      // Poll for result file
+      const resultPath = path.join(
+        IPC_DIR,
+        'input',
+        `_script_result_${requestId}.json`,
+      );
+      const timeoutMs = 60_000;
+      const pollMs = 500;
+      const start = Date.now();
 
-    while (Date.now() - start < timeoutMs) {
-      if (fs.existsSync(resultPath)) {
-        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
-        fs.unlinkSync(resultPath);
-        if (result.error) {
+      while (Date.now() - start < timeoutMs) {
+        if (fs.existsSync(resultPath)) {
+          const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+          fs.unlinkSync(resultPath);
+          if (result.error) {
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: `Backup failed: ${result.error}`,
+                },
+              ],
+              isError: true,
+            };
+          }
           return {
-            content: [{ type: 'text' as const, text: `Backup failed: ${result.error}` }],
-            isError: true,
+            content: [
+              {
+                type: 'text' as const,
+                text: result.stdout || 'Backup pushed.',
+              },
+            ],
           };
         }
-        return {
-          content: [{ type: 'text' as const, text: result.stdout || 'Backup pushed.' }],
-        };
+        await new Promise((r) => setTimeout(r, pollMs));
       }
-      await new Promise(r => setTimeout(r, pollMs));
-    }
 
-    return {
-      content: [{ type: 'text' as const, text: 'Backup timed out after 60s' }],
-      isError: true,
-    };
-  },
-);
+      return {
+        content: [
+          { type: 'text' as const, text: 'Backup timed out after 60s' },
+        ],
+        isError: true,
+      };
+    },
+  );
 
-server.tool(
-  'persist_global_file',
-  'Durably persist approved edits to the global persona files (SOUL.md / SOUL-untrusted.md). The container edits /workspace/global/<file> for immediate runtime effect; this commits that change to the deploy source and pushes it, so the next deploy keeps the edit instead of discarding it. Use after applying approved soul-searching changes. The host handles git credentials.',
-  {
-    files: z
-      .array(z.enum(['SOUL.md', 'SOUL-untrusted.md']))
-      .nonempty()
-      .optional()
-      .describe('Which global files to persist. Default: both SOUL.md and SOUL-untrusted.md.'),
-    message: z.string().optional().describe('Commit message. Default: "soul: persist approved updates <ISO date>"'),
-  },
-  async (args) => {
-    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const data = {
-      type: 'persist_global_file',
-      groupFolder,
-      chatJid,
-      files: args.files,
-      message: args.message,
-      requestId,
-      timestamp: new Date().toISOString(),
-    };
+  server.tool(
+    'persist_global_file',
+    'Durably persist approved edits to the global persona files (SOUL.md / SOUL-untrusted.md). The container edits /workspace/global/<file> for immediate runtime effect; this commits that change to the deploy source and pushes it, so the next deploy keeps the edit instead of discarding it. Use after applying approved soul-searching changes. The host handles git credentials.',
+    {
+      files: z
+        .array(z.enum(['SOUL.md', 'SOUL-untrusted.md']))
+        .nonempty()
+        .optional()
+        .describe(
+          'Which global files to persist. Default: both SOUL.md and SOUL-untrusted.md.',
+        ),
+      message: z
+        .string()
+        .optional()
+        .describe(
+          'Commit message. Default: "soul: persist approved updates <ISO date>"',
+        ),
+    },
+    async (args) => {
+      const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const data = {
+        type: 'persist_global_file',
+        groupFolder,
+        chatJid,
+        files: args.files,
+        message: args.message,
+        requestId,
+        timestamp: new Date().toISOString(),
+      };
 
-    writeIpcFile(TASKS_DIR, data);
+      writeIpcFile(TASKS_DIR, data);
 
-    // Poll for result file
-    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
-    const timeoutMs = 60_000;
-    const pollMs = 500;
-    const start = Date.now();
+      // Poll for result file
+      const resultPath = path.join(
+        IPC_DIR,
+        'input',
+        `_script_result_${requestId}.json`,
+      );
+      const timeoutMs = 60_000;
+      const pollMs = 500;
+      const start = Date.now();
 
-    while (Date.now() - start < timeoutMs) {
-      if (fs.existsSync(resultPath)) {
-        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
-        fs.unlinkSync(resultPath);
-        if (result.error) {
+      while (Date.now() - start < timeoutMs) {
+        if (fs.existsSync(resultPath)) {
+          const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+          fs.unlinkSync(resultPath);
+          if (result.error) {
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: `Persist failed (${result.stage ?? 'unknown'}): ${result.error}`,
+                },
+              ],
+              isError: true,
+            };
+          }
+          // committed:false is a benign no-op (the working tree already matches
+          // the deploy source) — report it without isError so the skill can
+          // tell "nothing to persist" apart from a real failure.
           return {
-            content: [{ type: 'text' as const, text: `Persist failed (${result.stage ?? 'unknown'}): ${result.error}` }],
-            isError: true,
+            content: [
+              {
+                type: 'text' as const,
+                text:
+                  result.stdout ||
+                  (result.committed === false
+                    ? 'No changes to persist.'
+                    : 'Persisted and pushed.'),
+              },
+            ],
           };
         }
-        // committed:false is a benign no-op (the working tree already matches
-        // the deploy source) — report it without isError so the skill can
-        // tell "nothing to persist" apart from a real failure.
-        return {
-          content: [{ type: 'text' as const, text: result.stdout || (result.committed === false ? 'No changes to persist.' : 'Persisted and pushed.') }],
-        };
+        await new Promise((r) => setTimeout(r, pollMs));
       }
-      await new Promise(r => setTimeout(r, pollMs));
-    }
 
-    return {
-      content: [{ type: 'text' as const, text: 'Persist timed out after 60s' }],
-      isError: true,
-    };
-  },
-);
+      return {
+        content: [
+          { type: 'text' as const, text: 'Persist timed out after 60s' },
+        ],
+        isError: true,
+      };
+    },
+  );
 }
 
 server.tool(
   'sessionize_get_event',
   'Fetch CFP and conference details from Sessionize by event slug. Returns normalized event data including CFP dates, conference dates, location, and website. Host handles the API key.',
   {
-    slug: z.string().describe('Sessionize event slug (e.g., "devoxx-be-2026") or full URL (the slug is extracted automatically)'),
+    slug: z
+      .string()
+      .describe(
+        'Sessionize event slug (e.g., "devoxx-be-2026") or full URL (the slug is extracted automatically)',
+      ),
   },
   async (args) => {
-    const slug = args.slug.replace(/^https?:\/\/sessionize\.com\//, '').replace(/\/$/, '');
+    const slug = args.slug
+      .replace(/^https?:\/\/sessionize\.com\//, '')
+      .replace(/\/$/, '');
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const data = {
       type: 'sessionize_get_event',
@@ -1974,7 +2242,11 @@ server.tool(
 
     writeIpcFile(TASKS_DIR, data);
 
-    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
+    const resultPath = path.join(
+      IPC_DIR,
+      'input',
+      `_script_result_${requestId}.json`,
+    );
     const timeoutMs = 30_000;
     const pollMs = 500;
     const start = Date.now();
@@ -1985,19 +2257,34 @@ server.tool(
         fs.unlinkSync(resultPath);
         if (result.error) {
           return {
-            content: [{ type: 'text' as const, text: `Sessionize error: ${result.error}` }],
+            content: [
+              {
+                type: 'text' as const,
+                text: `Sessionize error: ${result.error}`,
+              },
+            ],
             isError: true,
           };
         }
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify(result.data, null, 2) }],
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(result.data, null, 2),
+            },
+          ],
         };
       }
-      await new Promise(r => setTimeout(r, pollMs));
+      await new Promise((r) => setTimeout(r, pollMs));
     }
 
     return {
-      content: [{ type: 'text' as const, text: 'Sessionize request timed out after 30s' }],
+      content: [
+        {
+          type: 'text' as const,
+          text: 'Sessionize request timed out after 30s',
+        },
+      ],
       isError: true,
     };
   },
@@ -2027,7 +2314,11 @@ server.tool(
 
     writeIpcFile(TASKS_DIR, data);
 
-    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
+    const resultPath = path.join(
+      IPC_DIR,
+      'input',
+      `_script_result_${requestId}.json`,
+    );
     const timeoutMs = 120_000;
     const pollMs = 500;
     const start = Date.now();
@@ -2038,19 +2329,31 @@ server.tool(
         fs.unlinkSync(resultPath);
         if (result.error) {
           return {
-            content: [{ type: 'text' as const, text: `Sessionize error: ${result.error}` }],
+            content: [
+              {
+                type: 'text' as const,
+                text: `Sessionize error: ${result.error}`,
+              },
+            ],
             isError: true,
           };
         }
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify(result.data) }],
+          content: [
+            { type: 'text' as const, text: JSON.stringify(result.data) },
+          ],
         };
       }
       await new Promise((r) => setTimeout(r, pollMs));
     }
 
     return {
-      content: [{ type: 'text' as const, text: 'Sessionize batch request timed out after 120s' }],
+      content: [
+        {
+          type: 'text' as const,
+          text: 'Sessionize batch request timed out after 120s',
+        },
+      ],
       isError: true,
     };
   },
@@ -2065,7 +2368,9 @@ server.tool(
         isOnline: z
           .boolean()
           .optional()
-          .describe('If true, include online events. Default: false (in-person only)'),
+          .describe(
+            'If true, include online events. Default: false (in-person only)',
+          ),
         isUserGroup: z
           .boolean()
           .optional()
@@ -2085,7 +2390,11 @@ server.tool(
 
     writeIpcFile(TASKS_DIR, data);
 
-    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
+    const resultPath = path.join(
+      IPC_DIR,
+      'input',
+      `_script_result_${requestId}.json`,
+    );
     const timeoutMs = 30_000;
     const pollMs = 500;
     const start = Date.now();
@@ -2096,12 +2405,19 @@ server.tool(
         fs.unlinkSync(resultPath);
         if (result.error) {
           return {
-            content: [{ type: 'text' as const, text: `Sessionize error: ${result.error}` }],
+            content: [
+              {
+                type: 'text' as const,
+                text: `Sessionize error: ${result.error}`,
+              },
+            ],
             isError: true,
           };
         }
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify(result.data) }],
+          content: [
+            { type: 'text' as const, text: JSON.stringify(result.data) },
+          ],
         };
       }
       await new Promise((r) => setTimeout(r, pollMs));
@@ -2128,394 +2444,414 @@ const TILE_NAMES = [
 ] as const;
 
 if (isMain) {
-server.tool(
-  'promote_staging',
-  'Promote staged skills and rules to a tile repo. Copies staging into a fresh clone, runs a read-only `tessl skill review` pass on each promoted skill when `tessl` is on PATH (reports score; never mutates content; skipped with a warning when unavailable — Copilot + the post-merge GHA review still gate the PR), pushes a timestamped `promote/<utc>-<tile>-<rand>` branch, opens a PR on the tile repo, and summons Copilot review via GraphQL. Does NOT merge, push to main, or publish to the registry — merge is manual (or via Composio), publish fires in GHA at merge time, and the agent calls `tessl_update` afterwards to pull the new version. Main group only.',
-  {
-    tileName: z.enum(TILE_NAMES).describe('Target tile repo.'),
-    skillName: z.string().optional().describe('Specific skill to promote. Omit for all staging items. Use "--rules-only" to promote only rules.'),
-  },
-  async (args) => {
-    if (!isMain) {
-      return {
-        content: [{ type: 'text' as const, text: 'Only the main group can promote tiles.' }],
-        isError: true,
-      };
-    }
+  server.tool(
+    'promote_staging',
+    'Promote staged skills and rules to a tile repo. Copies staging into a fresh clone, runs a read-only `tessl skill review` pass on each promoted skill when `tessl` is on PATH (reports score; never mutates content; skipped with a warning when unavailable — Copilot + the post-merge GHA review still gate the PR), pushes a timestamped `promote/<utc>-<tile>-<rand>` branch, opens a PR on the tile repo, and summons Copilot review via GraphQL. Does NOT merge, push to main, or publish to the registry — merge is manual (or via Composio), publish fires in GHA at merge time, and the agent calls `tessl_update` afterwards to pull the new version. Main group only.',
+    {
+      tileName: z.enum(TILE_NAMES).describe('Target tile repo.'),
+      skillName: z
+        .string()
+        .optional()
+        .describe(
+          'Specific skill to promote. Omit for all staging items. Use "--rules-only" to promote only rules.',
+        ),
+    },
+    async (args) => {
+      if (!isMain) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'Only the main group can promote tiles.',
+            },
+          ],
+          isError: true,
+        };
+      }
 
-    // 15 minutes matches the host-side execFile cap in src/ipc.ts. The
-    // previous hand-rolled 5-minute poll would time out and report
-    // failure while the host script was still running (observed on
-    // bulk promotes with 10+ skills hitting the tessl review loop at
-    // ~1 min/skill). Delegate poll plumbing to runHostOperation so
-    // this tool inherits future tweaks to result-file handling etc.
-    return runHostOperation(
-      'promote_staging',
-      {
-        tileName: args.tileName,
-        skillName: args.skillName || 'all',
-      },
-      900_000,
-    );
-  },
-);
+      // 15 minutes matches the host-side execFile cap in src/ipc.ts. The
+      // previous hand-rolled 5-minute poll would time out and report
+      // failure while the host script was still running (observed on
+      // bulk promotes with 10+ skills hitting the tessl review loop at
+      // ~1 min/skill). Delegate poll plumbing to runHostOperation so
+      // this tool inherits future tweaks to result-file handling etc.
+      return runHostOperation(
+        'promote_staging',
+        {
+          tileName: args.tileName,
+          skillName: args.skillName || 'all',
+        },
+        900_000,
+      );
+    },
+  );
 }
 
 if (isMain) {
-server.tool(
-  'push_staged_to_branch',
-  `Push fixups from this group's staging directory to an existing tile-repo PR branch. Use after a promote PR gets review comments: fix the skill back in staging, then call this with the branch name that promote_staging printed ("Branch: promote/...-<tile>"). No new PR is opened — the existing PR auto-updates. Main group only.
+  server.tool(
+    'push_staged_to_branch',
+    `Push fixups from this group's staging directory to an existing tile-repo PR branch. Use after a promote PR gets review comments: fix the skill back in staging, then call this with the branch name that promote_staging printed ("Branch: promote/...-<tile>"). No new PR is opened — the existing PR auto-updates. Main group only.
 
 skillName options:
 - omit → push everything currently in staging
 - specific skill (e.g. "tessl__heartbeat") → push only that skill
 - "--rules-only" → push only rules`,
-  {
-    tileName: z
-      .enum(TILE_NAMES)
-      .describe('Target tile repo (same one the PR is against).'),
-    branch: z
-      .string()
-      .min(1)
-      .describe(
-        'Existing PR branch, e.g. "promote/20260418T224156Z-nanoclaw-core-a3b2". Parse it from the `Branch: ...` line in promote_staging output.',
-      ),
-    commitMessage: z
-      .string()
-      .min(1)
-      .describe(
-        'Short commit message describing the fixup (e.g. "fix: address Copilot comment on heartbeat-precheck.py").',
-      ),
-    skillName: z
-      .string()
-      .optional()
-      .describe(
-        'Specific skill to push. Omit for all staging items. Use "--rules-only" to push only rules.',
-      ),
-  },
-  async (args) => {
-    if (!isMain) {
-      return {
-        content: [
-          { type: 'text' as const, text: 'Only the main group can push to tile branches.' },
-        ],
-        isError: true,
-      };
-    }
+    {
+      tileName: z
+        .enum(TILE_NAMES)
+        .describe('Target tile repo (same one the PR is against).'),
+      branch: z
+        .string()
+        .min(1)
+        .describe(
+          'Existing PR branch, e.g. "promote/20260418T224156Z-nanoclaw-core-a3b2". Parse it from the `Branch: ...` line in promote_staging output.',
+        ),
+      commitMessage: z
+        .string()
+        .min(1)
+        .describe(
+          'Short commit message describing the fixup (e.g. "fix: address Copilot comment on heartbeat-precheck.py").',
+        ),
+      skillName: z
+        .string()
+        .optional()
+        .describe(
+          'Specific skill to push. Omit for all staging items. Use "--rules-only" to push only rules.',
+        ),
+    },
+    async (args) => {
+      if (!isMain) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'Only the main group can push to tile branches.',
+            },
+          ],
+          isError: true,
+        };
+      }
 
-    // Reuse runHostOperation for the write-IPC + poll-for-result
-    // plumbing. Keeps timeout/poll cadence/result-file cleanup
-    // consistent across all host-operation MCP tools (sync_tripit,
-    // tessl_update, push_staged_to_branch, etc.), so a future change
-    // to (say) how result files are formatted doesn't require
-    // updating each tool's poll loop.
-    return runHostOperation(
-      'push_staged_to_branch',
-      {
-        tileName: args.tileName,
-        branch: args.branch,
-        commitMessage: args.commitMessage,
-        skillName: args.skillName || 'all',
-      },
-      300_000,
-    );
-  },
-);
+      // Reuse runHostOperation for the write-IPC + poll-for-result
+      // plumbing. Keeps timeout/poll cadence/result-file cleanup
+      // consistent across all host-operation MCP tools (sync_tripit,
+      // tessl_update, push_staged_to_branch, etc.), so a future change
+      // to (say) how result files are formatted doesn't require
+      // updating each tool's poll loop.
+      return runHostOperation(
+        'push_staged_to_branch',
+        {
+          tileName: args.tileName,
+          branch: args.branch,
+          commitMessage: args.commitMessage,
+          skillName: args.skillName || 'all',
+        },
+        300_000,
+      );
+    },
+  );
 }
 
 if (isMain) {
-server.tool(
-  'chat_status',
-  'Report host-side state for one or all registered chats: which tile owns each chat (admin/trusted/untrusted), trigger config, container status (running/idle/cooling-down/crashed/not-spawned) per session slot (default + maintenance), the effective AGENT_MODEL the group will run on at next spawn (per-group override resolved against the orchestrator default — useful for cost attribution / model-rollout audits without grepping spawn logs), and the latest is_from_me=1 message recorded for the chat. Use this to diagnose silent containers — when a chat went quiet you can see whether the container is running, cooling down after an error, or never spawned. Provide chat_id (JID) OR chat_name (display name) to filter to one chat; omit both for all chats. Main group only.',
-  {
-    chat_id: z
-      .string()
-      .optional()
-      .describe(
-        'Specific chat JID, e.g. tg:-1003869886477. Mutually exclusive with chat_name.',
-      ),
-    chat_name: z
-      .string()
-      .optional()
-      .describe(
-        'Chat display name (looked up against the registered groups list). Errors if ambiguous; pass chat_id instead in that case.',
-      ),
-  },
-  async (args) => {
-    if (!isMain) {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: 'chat_status is admin-tile only.',
-          },
-        ],
-        isError: true,
-      };
-    }
-    // chat_id and chat_name are mutually exclusive — passing both
-    // means two identifiers that might disagree, and silently
-    // prioritizing one over the other is unsafe targeting. Reject
-    // here so the agent gets a clear schema error rather than a
-    // surprise from the host handler. The host enforces the same
-    // rule as defense in depth (in case a future client bypasses
-    // the MCP layer).
-    if (args.chat_id && args.chat_name) {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: 'Provide chat_id OR chat_name, not both.',
-          },
-        ],
-        isError: true,
-      };
-    }
-    return runHostOperation('chat_status', {
-      chat_id: args.chat_id,
-      chat_name: args.chat_name,
-    });
-  },
-);
+  server.tool(
+    'chat_status',
+    'Report host-side state for one or all registered chats: which tile owns each chat (admin/trusted/untrusted), trigger config, container status (running/idle/cooling-down/crashed/not-spawned) per session slot (default + maintenance), the effective AGENT_MODEL the group will run on at next spawn (per-group override resolved against the orchestrator default — useful for cost attribution / model-rollout audits without grepping spawn logs), and the latest is_from_me=1 message recorded for the chat. Use this to diagnose silent containers — when a chat went quiet you can see whether the container is running, cooling down after an error, or never spawned. Provide chat_id (JID) OR chat_name (display name) to filter to one chat; omit both for all chats. Main group only.',
+    {
+      chat_id: z
+        .string()
+        .optional()
+        .describe(
+          'Specific chat JID, e.g. tg:-1003869886477. Mutually exclusive with chat_name.',
+        ),
+      chat_name: z
+        .string()
+        .optional()
+        .describe(
+          'Chat display name (looked up against the registered groups list). Errors if ambiguous; pass chat_id instead in that case.',
+        ),
+    },
+    async (args) => {
+      if (!isMain) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'chat_status is admin-tile only.',
+            },
+          ],
+          isError: true,
+        };
+      }
+      // chat_id and chat_name are mutually exclusive — passing both
+      // means two identifiers that might disagree, and silently
+      // prioritizing one over the other is unsafe targeting. Reject
+      // here so the agent gets a clear schema error rather than a
+      // surprise from the host handler. The host enforces the same
+      // rule as defense in depth (in case a future client bypasses
+      // the MCP layer).
+      if (args.chat_id && args.chat_name) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'Provide chat_id OR chat_name, not both.',
+            },
+          ],
+          isError: true,
+        };
+      }
+      return runHostOperation('chat_status', {
+        chat_id: args.chat_id,
+        chat_name: args.chat_name,
+      });
+    },
+  );
 }
 
 if (isMain) {
-server.tool(
-  'inspect_gate_decisions',
-  "Look up the host-side gate-chain verdicts for recent messages in a chat — the same Stage 1 (trigger) + Stage 2 (Haiku classifier) decisions that determined whether the agent was woken up. Use this to answer 'why didn't AyeAye respond to message X' or 'what did the gate think about the last 10 messages'. Returns most-recent first. Backed by a tail-and-parse over the orchestrator's host log; stale records age out via log rotation rather than DB pruning. Main group only.",
-  {
-    chat_id: z
-      .string()
-      .min(1)
-      .describe(
-        'Required. Chat JID to inspect, e.g. tg:-1003869886477. Cross-chat scans are not supported by this tool (one chat at a time keeps responses bounded and avoids leaking other chats\' traffic into a single reply).',
-      ),
-    message_id: z
-      .string()
-      .optional()
-      .describe(
-        'Optional. Narrow to a single message id (e.g. the channel-native id from a reply or quote). When omitted, the tool returns the most-recent N decisions in the chat.',
-      ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(100)
-      .optional()
-      .describe(
-        'Optional. Max records to return, most-recent first. Default 10. Capped at 100 so a typo can\'t request a multi-megabyte response.',
-      ),
-  },
-  async (args) => {
-    if (!isMain) {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: 'inspect_gate_decisions is admin-tile only.',
-          },
-        ],
-        isError: true,
-      };
-    }
-    return runHostOperation('inspect_gate_decisions', {
-      chat_id: args.chat_id,
-      message_id: args.message_id,
-      limit: args.limit,
-    });
-  },
-);
+  server.tool(
+    'inspect_gate_decisions',
+    "Look up the host-side gate-chain verdicts for recent messages in a chat — the same Stage 1 (trigger) + Stage 2 (Haiku classifier) decisions that determined whether the agent was woken up. Use this to answer 'why didn't AyeAye respond to message X' or 'what did the gate think about the last 10 messages'. Returns most-recent first. Backed by a tail-and-parse over the orchestrator's host log; stale records age out via log rotation rather than DB pruning. Main group only.",
+    {
+      chat_id: z
+        .string()
+        .min(1)
+        .describe(
+          "Required. Chat JID to inspect, e.g. tg:-1003869886477. Cross-chat scans are not supported by this tool (one chat at a time keeps responses bounded and avoids leaking other chats' traffic into a single reply).",
+        ),
+      message_id: z
+        .string()
+        .optional()
+        .describe(
+          'Optional. Narrow to a single message id (e.g. the channel-native id from a reply or quote). When omitted, the tool returns the most-recent N decisions in the chat.',
+        ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe(
+          "Optional. Max records to return, most-recent first. Default 10. Capped at 100 so a typo can't request a multi-megabyte response.",
+        ),
+    },
+    async (args) => {
+      if (!isMain) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'inspect_gate_decisions is admin-tile only.',
+            },
+          ],
+          isError: true,
+        };
+      }
+      return runHostOperation('inspect_gate_decisions', {
+        chat_id: args.chat_id,
+        message_id: args.message_id,
+        limit: args.limit,
+      });
+    },
+  );
 }
 
 if (isMain) {
-server.tool(
-  'list_installed_tiles',
-  `List every tile installed in the local Tessl registry — the same set \`set_additional_tiles\` and \`register_group\`'s \`additionalTiles\` validate against. Use this BEFORE proposing a per-chat overlay change so the operator picks from valid names; a typo would otherwise fail at the host with no good way to recover from inside the conversation. Returns a JSON object with \`tiles\` (sorted name list) and \`registryAbsent\` (true on cold-start when \`tessl install\` has never run — operator should run \`tessl_update\` first). Includes the trust-tier baseline names too (\`nanoclaw-core\`, \`nanoclaw-trusted\`, \`nanoclaw-untrusted\`, \`nanoclaw-admin\`); those are valid tile names but configuring one as an overlay is a no-op (the tile is already loaded by the trust-tier baseline). Read-only; never mutates the registry. Main group only.`,
-  {},
-  async () => {
-    if (!isMain) {
-      return {
-        content: [
-          { type: 'text' as const, text: 'list_installed_tiles is admin-tile only.' },
-        ],
-        isError: true,
-      };
-    }
-    return runHostOperation('list_installed_tiles');
-  },
-);
+  server.tool(
+    'list_installed_tiles',
+    `List every tile installed in the local Tessl registry — the same set \`set_additional_tiles\` and \`register_group\`'s \`additionalTiles\` validate against. Use this BEFORE proposing a per-chat overlay change so the operator picks from valid names; a typo would otherwise fail at the host with no good way to recover from inside the conversation. Returns a JSON object with \`tiles\` (sorted name list) and \`registryAbsent\` (true on cold-start when \`tessl install\` has never run — operator should run \`tessl_update\` first). Includes the trust-tier baseline names too (\`nanoclaw-core\`, \`nanoclaw-trusted\`, \`nanoclaw-untrusted\`, \`nanoclaw-admin\`); those are valid tile names but configuring one as an overlay is a no-op (the tile is already loaded by the trust-tier baseline). Read-only; never mutates the registry. Main group only.`,
+    {},
+    async () => {
+      if (!isMain) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'list_installed_tiles is admin-tile only.',
+            },
+          ],
+          isError: true,
+        };
+      }
+      return runHostOperation('list_installed_tiles');
+    },
+  );
 }
 
 if (isMain) {
-server.tool(
-  'nuke_chat',
-  "Forcibly nuke another chat's session(s) cross-chat — wipes JSONL transcripts, kills the container, and clears DB session rows. Use when a foreign chat's container is hung, in a corrupted state, or stuck on a poisoned plan and the only way back is a clean restart. Requires chat_id OR chat_name (admin always operates cross-chat — to nuke your own chat use nuke_session). Main group only.",
-  {
-    chat_id: z
-      .string()
-      .optional()
-      .describe('Specific chat JID, e.g. tg:-1003869886477.'),
-    chat_name: z
-      .string()
-      .optional()
-      .describe(
-        'Chat display name. Errors if ambiguous; pass chat_id instead in that case.',
-      ),
-    session: z
-      .enum(['default', 'maintenance', 'all'])
-      .optional()
-      .describe(
-        "Which session slot(s) to wipe. 'default' is the user-facing container, 'maintenance' is the scheduled-task container, 'all' (the default) does both.",
-      ),
-  },
-  async (args) => {
-    if (!isMain) {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: 'nuke_chat is admin-tile only.',
-          },
-        ],
-        isError: true,
-      };
-    }
-    if (!args.chat_id && !args.chat_name) {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: 'nuke_chat requires chat_id or chat_name — admin always operates cross-chat. Use nuke_session to wipe the current chat.',
-          },
-        ],
-        isError: true,
-      };
-    }
-    // Two identifiers are an unsafe-targeting smell — see the same
-    // rule on chat_status above. Reject before the IPC round-trip.
-    if (args.chat_id && args.chat_name) {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: 'Provide chat_id OR chat_name, not both.',
-          },
-        ],
-        isError: true,
-      };
-    }
-    return runHostOperation('nuke_chat', {
-      chat_id: args.chat_id,
-      chat_name: args.chat_name,
-      session: args.session,
-    });
-  },
-);
+  server.tool(
+    'nuke_chat',
+    "Forcibly nuke another chat's session(s) cross-chat — wipes JSONL transcripts, kills the container, and clears DB session rows. Use when a foreign chat's container is hung, in a corrupted state, or stuck on a poisoned plan and the only way back is a clean restart. Requires chat_id OR chat_name (admin always operates cross-chat — to nuke your own chat use nuke_session). Main group only.",
+    {
+      chat_id: z
+        .string()
+        .optional()
+        .describe('Specific chat JID, e.g. tg:-1003869886477.'),
+      chat_name: z
+        .string()
+        .optional()
+        .describe(
+          'Chat display name. Errors if ambiguous; pass chat_id instead in that case.',
+        ),
+      session: z
+        .enum(['default', 'maintenance', 'all'])
+        .optional()
+        .describe(
+          "Which session slot(s) to wipe. 'default' is the user-facing container, 'maintenance' is the scheduled-task container, 'all' (the default) does both.",
+        ),
+    },
+    async (args) => {
+      if (!isMain) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'nuke_chat is admin-tile only.',
+            },
+          ],
+          isError: true,
+        };
+      }
+      if (!args.chat_id && !args.chat_name) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'nuke_chat requires chat_id or chat_name — admin always operates cross-chat. Use nuke_session to wipe the current chat.',
+            },
+          ],
+          isError: true,
+        };
+      }
+      // Two identifiers are an unsafe-targeting smell — see the same
+      // rule on chat_status above. Reject before the IPC round-trip.
+      if (args.chat_id && args.chat_name) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'Provide chat_id OR chat_name, not both.',
+            },
+          ],
+          isError: true,
+        };
+      }
+      return runHostOperation('nuke_chat', {
+        chat_id: args.chat_id,
+        chat_name: args.chat_name,
+        session: args.session,
+      });
+    },
+  );
 }
 
 if (isMain) {
-server.tool(
-  'send_message_to_chat',
-  "Post a plain text message into another registered chat without spawning a container there. Use this when the user asks you (from the main group) to broadcast or relay a message into a different chat — e.g. \"post X to #family-chat\". Replaces the schedule_task + once: now+5s kludge. Provide chat_id (JID like \"tg:-1003869886477\") OR chat_name (display name from the registered groups list); ambiguous names error with candidate JIDs. Set sender to post as a named bot identity (Telegram only; routes through the bot pool). Set pin to pin the sent message — silently ignored on the bot-pool path because the pool send hook can't pin, so don't combine sender + pin. No reply_to: foreign chat message IDs aren't reachable from main, and Telegram message IDs are per-chat so guessing collides. Failures (unknown JID, blocked, rate-limit) return a clear error and do NOT write a phantom bot row into the target chat's DB. Main group only.",
-  {
-    chat_id: z
-      .string()
-      .optional()
-      .describe('Target chat JID, e.g. "tg:-1003869886477". Mutually exclusive with chat_name.'),
-    chat_name: z
-      .string()
-      .optional()
-      .describe(
-        'Target chat display name (looked up against the registered groups list). Errors with candidate JIDs if ambiguous.',
-      ),
-    text: z.string().describe('The message body to post in the target chat.'),
-    pin: z
-      .boolean()
-      .optional()
-      .describe(
-        'Pin the message in the target chat after sending. Ignored on the sender (bot-pool) path — pool sends do not expose a pin hook. The response will report what actually happened.',
-      ),
-    sender: z
-      .string()
-      .optional()
-      .describe(
-        'Bot identity to post as in the target Telegram chat (e.g. "Researcher"). Routes through the bot pool. Without sender, the message goes from the default channel identity.',
-      ),
-  },
-  async (args) => {
-    if (!isMain) {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: 'send_message_to_chat is admin-tile only.',
-          },
-        ],
-        isError: true,
-      };
-    }
-    if (!args.chat_id && !args.chat_name) {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text:
-              'send_message_to_chat requires chat_id or chat_name — admin always operates cross-chat. Use the regular send_message tool to reply in the current chat.',
-          },
-        ],
-        isError: true,
-      };
-    }
-    // Two identifiers are an unsafe-targeting smell — see the same
-    // rule on chat_status / nuke_chat above. Reject before the IPC
-    // round-trip so the agent gets a clean schema-style error
-    // instead of waiting on the host to surface it.
-    if (args.chat_id && args.chat_name) {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: 'Provide chat_id OR chat_name, not both.',
-          },
-        ],
-        isError: true,
-      };
-    }
-    // Trim sender at the boundary: a payload of `'   '` would
-    // otherwise reach the host and route through the bot pool
-    // (a non-empty string), binding a pool bot to a whitespace
-    // identity. Defense-in-depth — the host re-trims, but rejecting
-    // here also keeps the IPC payload accurate for log correlation.
-    const trimmedSender =
-      typeof args.sender === 'string' ? args.sender.trim() : '';
-    return runHostOperation('send_message_to_chat', {
-      chat_id: args.chat_id,
-      chat_name: args.chat_name,
-      text: args.text,
-      pin: args.pin,
-      sender: trimmedSender.length > 0 ? trimmedSender : undefined,
-    });
-  },
-);
+  server.tool(
+    'send_message_to_chat',
+    'Post a plain text message into another registered chat without spawning a container there. Use this when the user asks you (from the main group) to broadcast or relay a message into a different chat — e.g. "post X to #family-chat". Replaces the schedule_task + once: now+5s kludge. Provide chat_id (JID like "tg:-1003869886477") OR chat_name (display name from the registered groups list); ambiguous names error with candidate JIDs. Set sender to post as a named bot identity (Telegram only; routes through the bot pool). Set pin to pin the sent message — silently ignored on the bot-pool path because the pool send hook can\'t pin, so don\'t combine sender + pin. No reply_to: foreign chat message IDs aren\'t reachable from main, and Telegram message IDs are per-chat so guessing collides. Failures (unknown JID, blocked, rate-limit) return a clear error and do NOT write a phantom bot row into the target chat\'s DB. Main group only.',
+    {
+      chat_id: z
+        .string()
+        .optional()
+        .describe(
+          'Target chat JID, e.g. "tg:-1003869886477". Mutually exclusive with chat_name.',
+        ),
+      chat_name: z
+        .string()
+        .optional()
+        .describe(
+          'Target chat display name (looked up against the registered groups list). Errors with candidate JIDs if ambiguous.',
+        ),
+      text: z.string().describe('The message body to post in the target chat.'),
+      pin: z
+        .boolean()
+        .optional()
+        .describe(
+          'Pin the message in the target chat after sending. Ignored on the sender (bot-pool) path — pool sends do not expose a pin hook. The response will report what actually happened.',
+        ),
+      sender: z
+        .string()
+        .optional()
+        .describe(
+          'Bot identity to post as in the target Telegram chat (e.g. "Researcher"). Routes through the bot pool. Without sender, the message goes from the default channel identity.',
+        ),
+    },
+    async (args) => {
+      if (!isMain) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'send_message_to_chat is admin-tile only.',
+            },
+          ],
+          isError: true,
+        };
+      }
+      if (!args.chat_id && !args.chat_name) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'send_message_to_chat requires chat_id or chat_name — admin always operates cross-chat. Use the regular send_message tool to reply in the current chat.',
+            },
+          ],
+          isError: true,
+        };
+      }
+      // Two identifiers are an unsafe-targeting smell — see the same
+      // rule on chat_status / nuke_chat above. Reject before the IPC
+      // round-trip so the agent gets a clean schema-style error
+      // instead of waiting on the host to surface it.
+      if (args.chat_id && args.chat_name) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'Provide chat_id OR chat_name, not both.',
+            },
+          ],
+          isError: true,
+        };
+      }
+      // Trim sender at the boundary: a payload of `'   '` would
+      // otherwise reach the host and route through the bot pool
+      // (a non-empty string), binding a pool bot to a whitespace
+      // identity. Defense-in-depth — the host re-trims, but rejecting
+      // here also keeps the IPC payload accurate for log correlation.
+      const trimmedSender =
+        typeof args.sender === 'string' ? args.sender.trim() : '';
+      return runHostOperation('send_message_to_chat', {
+        chat_id: args.chat_id,
+        chat_name: args.chat_name,
+        text: args.text,
+        pin: args.pin,
+        sender: trimmedSender.length > 0 ? trimmedSender : undefined,
+      });
+    },
+  );
 }
 
 if (isMain) {
-server.tool(
-  'tessl_update',
-  'Run `tessl update` on the host to pull the latest tile versions from the registry. Call this after a promote PR merges (GHA publishes on merge, then the agent triggers this to get the new version). If new tiles land, sessions are cleared automatically so the next message picks them up. A periodic 15-min catch-up runs in the orchestrator as a safety net. Main group only.',
-  {},
-  async () => {
-    if (!isMain) {
-      return {
-        content: [
-          { type: 'text' as const, text: 'Only the main group can trigger tessl_update.' },
-        ],
-        isError: true,
-      };
-    }
-    return runHostOperation('tessl_update');
-  },
-);
+  server.tool(
+    'tessl_update',
+    'Run `tessl update` on the host to pull the latest tile versions from the registry. Call this after a promote PR merges (GHA publishes on merge, then the agent triggers this to get the new version). If new tiles land, sessions are cleared automatically so the next message picks them up. A periodic 15-min catch-up runs in the orchestrator as a safety net. Main group only.',
+    {},
+    async () => {
+      if (!isMain) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'Only the main group can trigger tessl_update.',
+            },
+          ],
+          isError: true,
+        };
+      }
+      return runHostOperation('tessl_update');
+    },
+  );
 }
 
 // #585 — Operator-approved trusted-memory write. Bypasses the #325

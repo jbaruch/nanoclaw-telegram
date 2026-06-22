@@ -96,7 +96,8 @@ describe('rewriteMarkdownToHtml', () => {
 
   describe('code-block protection', () => {
     it('passes ``` fences through bytewise', () => {
-      const input = 'before\n```\n**not bold** and `code` and - bullet\n```\nafter **yes bold**';
+      const input =
+        'before\n```\n**not bold** and `code` and - bullet\n```\nafter **yes bold**';
       const r = rewriteMarkdownToHtml(input);
       expect(r.out).toBe(
         'before\n```\n**not bold** and `code` and - bullet\n```\nafter <b>yes bold</b>',

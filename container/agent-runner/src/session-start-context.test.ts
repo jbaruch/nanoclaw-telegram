@@ -34,7 +34,9 @@ describe('composeAutoContext', () => {
     expect(result.composed).toContain('section="MEMORY"');
     expect(result.composed).toContain('engineer');
     expect(result.sections.find((s) => s.label === 'MEMORY')!.found).toBe(true);
-    expect(result.sections.find((s) => s.label === 'RUNBOOK')!.found).toBe(false);
+    expect(result.sections.find((s) => s.label === 'RUNBOOK')!.found).toBe(
+      false,
+    );
   });
 
   it('composes all three sections when present', () => {
@@ -80,10 +82,14 @@ describe('composeAutoContext', () => {
       dailyLogDir,
       perFileMaxBytes: 200,
     });
-    expect(result.composed).toContain('truncated by session-start-auto-context');
+    expect(result.composed).toContain(
+      'truncated by session-start-auto-context',
+    );
     // Body inside the auto-context tags must respect the cap.
     const memSection = result.sections.find((s) => s.label === 'MEMORY')!;
-    expect(Buffer.byteLength(memSection.body, 'utf-8')).toBeLessThanOrEqual(200);
+    expect(Buffer.byteLength(memSection.body, 'utf-8')).toBeLessThanOrEqual(
+      200,
+    );
   });
 
   it('respects a tiny cap that is smaller than the truncation marker', () => {
@@ -98,7 +104,9 @@ describe('composeAutoContext', () => {
     const memSection = result.sections.find((s) => s.label === 'MEMORY')!;
     // Strict cap honoured — was previously violated when headroom <= 0
     // because the function returned the full TRUNCATE_MARKER unconditionally.
-    expect(Buffer.byteLength(memSection.body, 'utf-8')).toBeLessThanOrEqual(cap);
+    expect(Buffer.byteLength(memSection.body, 'utf-8')).toBeLessThanOrEqual(
+      cap,
+    );
   });
 
   it('handles empty daily log directory gracefully', () => {
@@ -123,8 +131,14 @@ describe('composeAutoContext', () => {
   describe('CHECKPOINT section (kill-auto-compaction reentry)', () => {
     it('skipped when checkpointFile is undefined', () => {
       fs.writeFileSync(memoryFile, 'M');
-      const result = composeAutoContext({ memoryFile, runbookFile, dailyLogDir });
-      expect(result.sections.find((s) => s.label === 'CHECKPOINT')).toBeUndefined();
+      const result = composeAutoContext({
+        memoryFile,
+        runbookFile,
+        dailyLogDir,
+      });
+      expect(
+        result.sections.find((s) => s.label === 'CHECKPOINT'),
+      ).toBeUndefined();
     });
 
     it('found:false when checkpointFile is set but missing', () => {
@@ -144,7 +158,10 @@ describe('composeAutoContext', () => {
 
     it('injects CHECKPOINT contents when the file exists', () => {
       const checkpointFile = path.join(tmpRoot, 'default.md');
-      fs.writeFileSync(checkpointFile, '# Session Checkpoint\n\n## Facts\n- x\n');
+      fs.writeFileSync(
+        checkpointFile,
+        '# Session Checkpoint\n\n## Facts\n- x\n',
+      );
       const result = composeAutoContext({
         memoryFile,
         runbookFile,

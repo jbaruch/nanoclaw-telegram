@@ -42,9 +42,9 @@ describe('targetsTrustedMemory', () => {
   });
 
   it('rejects traversal escapes — /workspace/trusted/../../etc/passwd is NOT under trusted/', () => {
-    expect(
-      targetsTrustedMemory('/workspace/trusted/../../etc/passwd'),
-    ).toBe(false);
+    expect(targetsTrustedMemory('/workspace/trusted/../../etc/passwd')).toBe(
+      false,
+    );
   });
 
   it('matches the bare trusted root with trailing slash; rejects without', () => {
@@ -72,9 +72,7 @@ describe('resolveTargetPath', () => {
   it('resolves relative paths against /workspace/group', () => {
     expect(resolveTargetPath('notes.md')).toBe('/workspace/group/notes.md');
     expect(resolveTargetPath('./notes.md')).toBe('/workspace/group/notes.md');
-    expect(resolveTargetPath('sub/foo.md')).toBe(
-      '/workspace/group/sub/foo.md',
-    );
+    expect(resolveTargetPath('sub/foo.md')).toBe('/workspace/group/sub/foo.md');
   });
 });
 
@@ -97,15 +95,15 @@ describe('quarantinePathFor', () => {
     expect(
       quarantinePathFor('/workspace/trusted/MEMORY.md', '../sneaky/sid'),
     ).toBe('/workspace/trusted/quarantine/___sneaky_sid/MEMORY.md');
-    expect(
-      quarantinePathFor('/workspace/trusted/MEMORY.md', 'a/b'),
-    ).toBe('/workspace/trusted/quarantine/a_b/MEMORY.md');
+    expect(quarantinePathFor('/workspace/trusted/MEMORY.md', 'a/b')).toBe(
+      '/workspace/trusted/quarantine/a_b/MEMORY.md',
+    );
   });
 
   it('keeps alphanumerics, hyphens, underscores in sessionId', () => {
-    expect(
-      quarantinePathFor('/workspace/trusted/x.md', 'sid-123_abcDEF'),
-    ).toBe('/workspace/trusted/quarantine/sid-123_abcDEF/x.md');
+    expect(quarantinePathFor('/workspace/trusted/x.md', 'sid-123_abcDEF')).toBe(
+      '/workspace/trusted/quarantine/sid-123_abcDEF/x.md',
+    );
   });
 });
 
@@ -179,7 +177,9 @@ describe('decideMemoryWrite — flag set + trusted target', () => {
     if (decision.kind === 'deny') {
       expect(decision.reason).toContain('memory_quarantine');
       expect(decision.reason).toContain('Edit');
-      expect(decision.reason).toContain('/workspace/trusted/quarantine/sid_abc/MEMORY.md');
+      expect(decision.reason).toContain(
+        '/workspace/trusted/quarantine/sid_abc/MEMORY.md',
+      );
     }
   });
 });

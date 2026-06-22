@@ -195,7 +195,8 @@ const READ_TOOL_PATTERNS: ReadonlyArray<{
     summariseBody: GMAIL_SUMMARY,
   },
   {
-    pattern: /^mcp__composio__googlecalendar_(list|get|find|search|read|fetch)\w*$/i,
+    pattern:
+      /^mcp__composio__googlecalendar_(list|get|find|search|read|fetch)\w*$/i,
     prefix: 'calendar',
     summariseBody: CALENDAR_SUMMARY,
   },
@@ -511,10 +512,7 @@ function asSummarySourceKind(prefix: SourcePrefix): SummarySourceKind {
 
 const FAILED_REASON_MAX_DETAIL_CHARS = 200;
 
-function buildFailedBodyMarker(
-  reason: SummaryOutcome,
-  detail: string,
-): string {
+function buildFailedBodyMarker(reason: SummaryOutcome, detail: string): string {
   // Detail can come from sub-agent text or SDK error messages.
   // Length-cap first so an oversize detail doesn't pay for the
   // attribute escapes, then route through the shared `escapeAttr`

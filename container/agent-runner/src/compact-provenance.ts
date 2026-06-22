@@ -164,7 +164,9 @@ export const MAX_SOURCE_BYTES = 2048;
  * format-agnostic — adding a new content-block type with a `text`-like
  * field requires no change here.
  */
-export function extractCompactProvenance(transcriptContent: string): Set<string> {
+export function extractCompactProvenance(
+  transcriptContent: string,
+): Set<string> {
   const out = new Set<string>();
   if (typeof transcriptContent !== 'string' || transcriptContent.length === 0) {
     return out;
@@ -350,8 +352,10 @@ export function parseSidecar(raw: unknown): CompactProvenanceSidecar | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   if (r.schema_version !== 1) return null;
-  if (typeof r.session_id !== 'string' || r.session_id.length === 0) return null;
-  if (typeof r.created_at !== 'number' || !Number.isFinite(r.created_at)) return null;
+  if (typeof r.session_id !== 'string' || r.session_id.length === 0)
+    return null;
+  if (typeof r.created_at !== 'number' || !Number.isFinite(r.created_at))
+    return null;
   if (!Array.isArray(r.sources)) return null;
   // Cap the array length BEFORE validating entries — an attacker-crafted
   // sidecar with a million well-formed sources would otherwise pin a CPU
@@ -510,7 +514,9 @@ function safeUnlink(filePath: string, log?: (msg: string) => void): void {
  * by the time they reach this function they are guaranteed to be safe
  * to interpolate.
  */
-export function buildPostCompactReminder(sources: ReadonlySet<string>): string | null {
+export function buildPostCompactReminder(
+  sources: ReadonlySet<string>,
+): string | null {
   if (sources.size === 0) return null;
   const lines: string[] = [];
   lines.push(
@@ -562,7 +568,9 @@ export function persistCompactProvenance(
   }
   const sources = extractCompactProvenance(content);
   if (sources.size === 0) {
-    log?.(`compact_provenance: no untrusted sources in transcript; sidecar skipped`);
+    log?.(
+      `compact_provenance: no untrusted sources in transcript; sidecar skipped`,
+    );
     return 0;
   }
   writeCompactProvenanceSidecar(stateDir, sessionId, sources, log);

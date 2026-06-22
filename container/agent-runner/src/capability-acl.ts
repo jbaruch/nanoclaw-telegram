@@ -58,7 +58,8 @@ import { SourcePrefix } from './untrusted-input-sources.js';
  * for WHICH tool results to wrap; this one is for WHICH sinks
  * untrusted-provenance can REACH. Different concerns, different lists.
  */
-const READ_ONLY_COMPOSIO = /^mcp__composio__\w+?_(fetch|get|list|search|find|read|history)\w*$/i;
+const READ_ONLY_COMPOSIO =
+  /^mcp__composio__\w+?_(fetch|get|list|search|find|read|history)\w*$/i;
 
 /**
  * Outbound sinks that #320's egress allowlist gates at destination
@@ -126,7 +127,7 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
   // Web content via WebFetch or agent-browser. The injection vector
   // most likely to carry "now go email/post/exfil X" instructions —
   // restrict outbound to read-only Composio + own-chat reply.
-  'web': [
+  web: [
     ...COMMON_INERT_SINKS,
     'mcp__nanoclaw__send_message',
     'Write',
@@ -145,7 +146,7 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
 
   // Email/calendar/Slack/GitHub/Tessl read content. Same posture as
   // `web:*` — these are external bytes that could carry instructions.
-  'gmail': [
+  gmail: [
     ...COMMON_INERT_SINKS,
     'mcp__nanoclaw__send_message',
     'Write',
@@ -153,7 +154,7 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
     READ_ONLY_COMPOSIO,
     ...EGRESS_SINKS,
   ],
-  'calendar': [
+  calendar: [
     ...COMMON_INERT_SINKS,
     'mcp__nanoclaw__send_message',
     'Write',
@@ -161,7 +162,7 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
     READ_ONLY_COMPOSIO,
     ...EGRESS_SINKS,
   ],
-  'slack': [
+  slack: [
     ...COMMON_INERT_SINKS,
     'mcp__nanoclaw__send_message',
     'Write',
@@ -169,7 +170,7 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
     READ_ONLY_COMPOSIO,
     ...EGRESS_SINKS,
   ],
-  'github': [
+  github: [
     ...COMMON_INERT_SINKS,
     'mcp__nanoclaw__send_message',
     'Write',
@@ -177,7 +178,7 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
     READ_ONLY_COMPOSIO,
     ...EGRESS_SINKS,
   ],
-  'tessl': [
+  tessl: [
     ...COMMON_INERT_SINKS,
     'mcp__nanoclaw__send_message',
     READ_ONLY_COMPOSIO,
@@ -192,11 +193,7 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
 
   // External file `Read` — bytes from outside the workspace mounts.
   // No outbound — these can leak secrets if echoed.
-  'file': [
-    ...COMMON_INERT_SINKS,
-    'Write',
-    'Edit',
-  ],
+  file: [...COMMON_INERT_SINKS, 'Write', 'Edit'],
 };
 
 /**
@@ -271,7 +268,8 @@ function classifySourcePrefix(sourceAttr: string): AclPrefix {
  * we don't understand is still a marker; the chain is untrusted-
  * provenance and the gate fires.
  */
-const UNKNOWN_PREFIX_ALLOWLIST: ReadonlyArray<RegExp | string> = COMMON_INERT_SINKS;
+const UNKNOWN_PREFIX_ALLOWLIST: ReadonlyArray<RegExp | string> =
+  COMMON_INERT_SINKS;
 
 function getAllowlistForPrefix(
   prefix: AclPrefix,
@@ -371,10 +369,7 @@ export function intersectAllowedSinks(
   );
 }
 
-function sinkPatternsEqual(
-  a: RegExp | string,
-  b: RegExp | string,
-): boolean {
+function sinkPatternsEqual(a: RegExp | string, b: RegExp | string): boolean {
   if (typeof a === 'string' && typeof b === 'string') return a === b;
   if (a instanceof RegExp && b instanceof RegExp) {
     return a.source === b.source && a.flags === b.flags;
@@ -420,10 +415,7 @@ export function decideCapabilityAcl(
   toolName: string,
   messages: ReadonlyArray<WalkBackMessage>,
 ): AclDecision {
-  return decideCapabilityAclIterable(
-    toolName,
-    reverseIterable(messages),
-  );
+  return decideCapabilityAclIterable(toolName, reverseIterable(messages));
 }
 
 /**

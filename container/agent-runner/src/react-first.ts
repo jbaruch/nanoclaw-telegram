@@ -95,7 +95,9 @@ export const SCHEDULED_TASK_PROMPT_PREFIX = '[SCHEDULED TASK]';
  * `subagent` is more useful for triage than the same submission also
  * matching `no-assistant-name` if the sub-agent ran in a no-name slot.
  */
-export function decideReactFirst(input: ReactFirstGateInput): ReactFirstDecision {
+export function decideReactFirst(
+  input: ReactFirstGateInput,
+): ReactFirstDecision {
   if (input.isSubagent) {
     return { react: false, skippedBy: 'subagent' };
   }

@@ -110,7 +110,8 @@ export function loadConfirmationTokens(
 ): ConfirmationToken[] {
   if (!fs.existsSync(path)) return [];
   const rawValue = fs.readFileSync(path, 'utf-8');
-  const raw = typeof rawValue === 'string' ? rawValue : rawValue.toString('utf-8');
+  const raw =
+    typeof rawValue === 'string' ? rawValue : rawValue.toString('utf-8');
   if (raw.trim().length === 0) return [];
   const parsed = JSON.parse(raw);
   if (!parsed || typeof parsed !== 'object') {
@@ -182,7 +183,11 @@ function validateTokenRecord(
   return r as unknown as ConfirmationToken;
 }
 
-function requireString(r: Record<string, unknown>, key: string, where: string): void {
+function requireString(
+  r: Record<string, unknown>,
+  key: string,
+  where: string,
+): void {
   if (typeof r[key] !== 'string' || (r[key] as string).length === 0) {
     throw new TokenFileValidationError(
       `${where}.${key} is not a non-empty string`,
@@ -254,7 +259,8 @@ export function findValidToken(
   nowIso: string,
 ): TokenLookupResult {
   const scoped = tokens.filter((t) => t.scope === scope);
-  if (scoped.length === 0) return { token: null, reason: 'no_tokens_for_scope' };
+  if (scoped.length === 0)
+    return { token: null, reason: 'no_tokens_for_scope' };
   const unspent = scoped.filter((t) => !t.used);
   if (unspent.length === 0) return { token: null, reason: 'all_tokens_used' };
   const valid = unspent.filter((t) => t.expires_at > nowIso);
@@ -271,7 +277,9 @@ export function markTokenUsed(
   tokens: ReadonlyArray<ConfirmationToken>,
   token: ConfirmationToken,
 ): ConfirmationToken[] {
-  return tokens.map((t) => (t.token === token.token ? { ...t, used: true } : t));
+  return tokens.map((t) =>
+    t.token === token.token ? { ...t, used: true } : t,
+  );
 }
 
 /**
@@ -289,68 +297,69 @@ export function classifyDestructiveOp(
   if (typeof toolName !== 'string') return null;
 
   // NanoClaw MCP tools — explicit name → scope mapping.
-  const directMap: Record<string, { scope: DestructiveScope; label: string }> = {
-    'mcp__nanoclaw__nuke_session': {
-      scope: 'nuke_session',
-      label: 'kill the running container session',
-    },
-    'mcp__nanoclaw__nuke_chat': {
-      scope: 'nuke_chat',
-      label: 'drop a chat registration + history',
-    },
-    'mcp__nanoclaw__github_backup': {
-      scope: 'github_backup',
-      label: 'push host content to a GitHub backup repo',
-    },
-    'mcp__nanoclaw__persist_global_file': {
-      scope: 'persist_global_file',
-      label: 'commit + push a global persona file to the deploy source',
-    },
-    'mcp__nanoclaw__set_trusted': {
-      scope: 'set_trusted',
-      label: 'change a group\'s trust tier',
-    },
-    'mcp__nanoclaw__set_trigger': {
-      scope: 'set_trigger',
-      label: 'change how the agent activates in a chat',
-    },
-    'mcp__nanoclaw__set_agent_model': {
-      scope: 'set_agent_model',
-      label: "pin a group's Claude model (cost impact)",
-    },
-    'mcp__nanoclaw__set_maintenance_agent_model': {
-      scope: 'set_maintenance_agent_model',
-      label: "pin the maintenance-session Claude model (cost impact)",
-    },
-    'mcp__nanoclaw__set_task_agent_model': {
-      scope: 'set_task_agent_model',
-      label: "pin a scheduled task's Claude model (cost impact)",
-    },
-    'mcp__nanoclaw__set_session_caps': {
-      scope: 'set_session_caps',
-      label: "change a group's session-length reset caps",
-    },
-    'mcp__nanoclaw__register_group': {
-      scope: 'register_group',
-      label: 'register a new chat as a group',
-    },
-    'mcp__nanoclaw__unregister_group': {
-      scope: 'unregister_group',
-      label: 'remove a group registration',
-    },
-    'mcp__nanoclaw__promote_staging': {
-      scope: 'promote_staging',
-      label: 'promote staged content to a tile repo',
-    },
-    'mcp__nanoclaw__push_staged_to_branch': {
-      scope: 'push_staged_to_branch',
-      label: 'push staged content to a tile-repo branch',
-    },
-    'mcp__nanoclaw__tessl_update': {
-      scope: 'tessl_update',
-      label: 'update tessl tile registry',
-    },
-  };
+  const directMap: Record<string, { scope: DestructiveScope; label: string }> =
+    {
+      mcp__nanoclaw__nuke_session: {
+        scope: 'nuke_session',
+        label: 'kill the running container session',
+      },
+      mcp__nanoclaw__nuke_chat: {
+        scope: 'nuke_chat',
+        label: 'drop a chat registration + history',
+      },
+      mcp__nanoclaw__github_backup: {
+        scope: 'github_backup',
+        label: 'push host content to a GitHub backup repo',
+      },
+      mcp__nanoclaw__persist_global_file: {
+        scope: 'persist_global_file',
+        label: 'commit + push a global persona file to the deploy source',
+      },
+      mcp__nanoclaw__set_trusted: {
+        scope: 'set_trusted',
+        label: "change a group's trust tier",
+      },
+      mcp__nanoclaw__set_trigger: {
+        scope: 'set_trigger',
+        label: 'change how the agent activates in a chat',
+      },
+      mcp__nanoclaw__set_agent_model: {
+        scope: 'set_agent_model',
+        label: "pin a group's Claude model (cost impact)",
+      },
+      mcp__nanoclaw__set_maintenance_agent_model: {
+        scope: 'set_maintenance_agent_model',
+        label: 'pin the maintenance-session Claude model (cost impact)',
+      },
+      mcp__nanoclaw__set_task_agent_model: {
+        scope: 'set_task_agent_model',
+        label: "pin a scheduled task's Claude model (cost impact)",
+      },
+      mcp__nanoclaw__set_session_caps: {
+        scope: 'set_session_caps',
+        label: "change a group's session-length reset caps",
+      },
+      mcp__nanoclaw__register_group: {
+        scope: 'register_group',
+        label: 'register a new chat as a group',
+      },
+      mcp__nanoclaw__unregister_group: {
+        scope: 'unregister_group',
+        label: 'remove a group registration',
+      },
+      mcp__nanoclaw__promote_staging: {
+        scope: 'promote_staging',
+        label: 'promote staged content to a tile repo',
+      },
+      mcp__nanoclaw__push_staged_to_branch: {
+        scope: 'push_staged_to_branch',
+        label: 'push staged content to a tile-repo branch',
+      },
+      mcp__nanoclaw__tessl_update: {
+        scope: 'tessl_update',
+        label: 'update tessl tile registry',
+      },
+    };
   if (Object.prototype.hasOwnProperty.call(directMap, toolName)) {
     return directMap[toolName];
   }
@@ -361,7 +370,11 @@ export function classifyDestructiveOp(
 export type ConfirmationDecision =
   | { kind: 'pass'; reason: string }
   | { kind: 'allow'; reason: string }
-  | { kind: 'allow_with_token'; token: ConfirmationToken; updatedTokens: ConfirmationToken[] }
+  | {
+      kind: 'allow_with_token';
+      token: ConfirmationToken;
+      updatedTokens: ConfirmationToken[];
+    }
   | { kind: 'deny'; reason: string; scope: DestructiveScope; label: string };
 
 /**
@@ -444,9 +457,14 @@ export function parseDuration(input: string): number {
   const n = parseInt(m[1], 10);
   const unit = m[2].toLowerCase();
   const factor =
-    unit === 's' ? 1000 :
-    unit === 'm' ? 60_000 :
-    unit === 'h' ? 3_600_000 :
-    unit === 'd' ? 86_400_000 : 0;
+    unit === 's'
+      ? 1000
+      : unit === 'm'
+        ? 60_000
+        : unit === 'h'
+          ? 3_600_000
+          : unit === 'd'
+            ? 86_400_000
+            : 0;
   return n * factor;
 }

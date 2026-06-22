@@ -370,9 +370,13 @@ describe('validateComposioArgs — well-formed pass-through', () => {
 
 describe('validateComposioArgs — out-of-scope tools pass through', () => {
   it('allows non-Composio tools', () => {
-    expect(validateComposioArgs('Read', { file_path: '/tmp' }).kind).toBe('allow');
+    expect(validateComposioArgs('Read', { file_path: '/tmp' }).kind).toBe(
+      'allow',
+    );
     expect(validateComposioArgs('Bash', { command: 'ls' }).kind).toBe('allow');
-    expect(validateComposioArgs('mcp__nanoclaw__send_message', { text: 'hi' }).kind).toBe('allow');
+    expect(
+      validateComposioArgs('mcp__nanoclaw__send_message', { text: 'hi' }).kind,
+    ).toBe('allow');
   });
 
   it('allows Composio read tools (no header / body surface)', () => {
@@ -403,13 +407,22 @@ describe('validateComposioArgs — out-of-scope tools pass through', () => {
 
   it('allows when toolInput is empty / non-object', () => {
     expect(
-      validateComposioArgs('mcp__composio__gmail_send_email', null as unknown as object).kind,
+      validateComposioArgs(
+        'mcp__composio__gmail_send_email',
+        null as unknown as object,
+      ).kind,
     ).toBe('allow');
     expect(
-      validateComposioArgs('mcp__composio__gmail_send_email', undefined as unknown as object).kind,
+      validateComposioArgs(
+        'mcp__composio__gmail_send_email',
+        undefined as unknown as object,
+      ).kind,
     ).toBe('allow');
     expect(
-      validateComposioArgs('mcp__composio__gmail_send_email', 'not-an-object' as unknown as object).kind,
+      validateComposioArgs(
+        'mcp__composio__gmail_send_email',
+        'not-an-object' as unknown as object,
+      ).kind,
     ).toBe('allow');
   });
 
