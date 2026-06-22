@@ -1,6 +1,0 @@
-# macOS AppleDouble sidecar files (._foo.ts) are gitignored junk that the
-# src/**/*.ts glob would otherwise match and fail to parse. CI checks out a
-# clean tree and never sees them; this keeps local macOS checks green too.
-._*
-.DS_Store
-dist/
