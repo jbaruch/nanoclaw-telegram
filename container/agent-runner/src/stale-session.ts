@@ -30,3 +30,39 @@ export function isStaleSessionError(errorMsg: string | undefined): boolean {
   if (!errorMsg) return false;
   return STALE_SESSION_RE.test(errorMsg);
 }
+
+/**
+ * Decide whether an SDK result-message error should defer to a
+ * fresh-session retry (#697).
+ *
+ * The thrown-error branch in `index.ts` already retries a stale session
+ * that throws out of `runQuery`. The same failure also arrives as a
+ * *result message* — `subtype: 'error_during_execution'`,
+ * `num_turns: 0`, `errors: ["No conversation found with session ID …"]`
+ * — when an infrequent cadence task resumes a `session_id` whose
+ * transcript JSONL was cleaned up between fires (#114 retention). That
+ * path was not self-healing: it wrote the error and re-persisted the
+ * dead id, wedging the task permanently.
+ *
+ * Conditions (all required):
+ *   - `hadResumeSession` — a resume was actually attempted; on a fresh
+ *     session there is nothing to retry, and gating on it prevents the
+ *     fresh-session retry from re-triggering itself.
+ *   - `numTurns === 0` — the run did zero work. A run that turned before
+ *     erroring may have side effects; silently re-running it could
+ *     duplicate them.
+ *   - the SDK `errors` array matches `isStaleSessionError`. The haystack
+ *     is the errors array ONLY — not the generic `error_during_execution`
+ *     subtype, which `isStaleSessionError` also matches and would
+ *     over-broaden the retry to unrelated num_turns=0 failures
+ *     (prompt_too_long, model_error).
+ */
+export function shouldRetryStaleResume(
+  hadResumeSession: boolean,
+  numTurns: number | undefined,
+  errors: string[] | undefined,
+): boolean {
+  if (!hadResumeSession) return false;
+  if (numTurns !== 0) return false;
+  return isStaleSessionError((errors ?? []).join(' '));
+}
