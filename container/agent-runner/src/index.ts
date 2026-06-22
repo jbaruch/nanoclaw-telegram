@@ -90,7 +90,10 @@ import {
   shouldStampNoDelivery,
 } from './delivery-requirement.js';
 import { shouldSuppressEchoedResult } from './empty-turn-echo-suppression.js';
-import { isStaleSessionError } from './stale-session.js';
+import {
+  isStaleSessionError,
+  shouldRetryStaleResume,
+} from './stale-session.js';
 import {
   DEFAULT_HYGIENE_WINDOW_MS,
   decideHygieneCadence,
@@ -2893,10 +2896,20 @@ async function runQuery(
   // resolves the run `killed` even when the silent-stop synthesis
   // didn't fire (a result event landed but carried no delivery).
   noDelivery: boolean;
+  // #697 — a stale-session resume error surfaced via the result-message
+  // path; `main()` retries once with a fresh session.
+  staleResumeError: boolean;
 }> {
   const stream = new MessageStream();
   stream.push(prompt);
   let sawErrorResult = false;
+  // #697 — set when a resume against `sessionId` came back as a
+  // `num_turns=0` "No conversation found" result (its transcript JSONL
+  // was cleaned up between infrequent fires). `main()` reads it to retry
+  // once with a fresh session, the same recovery the thrown-error branch
+  // (#152) already does — instead of writing the error and re-persisting
+  // the dead id, which wedges infrequent cadence tasks permanently.
+  let staleResumeError = false;
 
   // #137 — single-turn reply-threading state shared by the
   // UserPromptSubmit hook (which seeds the latest inbound id) and the
@@ -4239,6 +4252,23 @@ async function runQuery(
             `num_turns=${errMsg.num_turns ?? 'n/a'} ` +
             `cost=$${errMsg.total_cost_usd ?? 'n/a'}`,
         );
+        // #697 — a resume against `sessionId` that did zero work and
+        // reports "No conversation found" means the pinned session's
+        // transcript JSONL was cleaned up between infrequent fires (#114
+        // retention). Defer to the fresh-session retry in `main()`
+        // instead of writing this error and re-persisting the dead id.
+        // Decision logic + scoping rationale live in
+        // `shouldRetryStaleResume`.
+        if (
+          shouldRetryStaleResume(!!sessionId, errMsg.num_turns, errMsg.errors)
+        ) {
+          log(
+            'Stale-session resume error (num_turns=0); deferring to ' +
+              'fresh-session retry in main()',
+          );
+          staleResumeError = true;
+          break;
+        }
         // #582 — the structured error string preserves every SDK
         // classification field (subtype, is_error, terminal_reason,
         // stop_reason, plus a derived summary) so the DB error column
@@ -4405,6 +4435,7 @@ async function runQuery(
       requiresDelivery,
       deliveredUserFacingContent,
     ),
+    staleResumeError,
   };
 }
 
@@ -4782,6 +4813,27 @@ async function main(): Promise<void> {
           // effectively error-level instead of debug-level.
           throw resumeErr;
         }
+      }
+      // #697 — a stale-session resume error surfaced via the SDK
+      // result-message path (not a thrown exception, so the catch above
+      // missed it). Retry once with a fresh session — the same recovery
+      // the throw branch does. Runs BEFORE adopting
+      // `queryResult.newSessionId` so the dead id the SDK echoed back is
+      // never persisted. The retry passes `undefined`, so runQuery makes
+      // no resume attempt and the flag cannot re-trigger.
+      if (queryResult.staleResumeError && sessionId) {
+        log(
+          `Stale-session result error, retrying with fresh session ` +
+            `(was ${sessionId})`,
+        );
+        sessionId = undefined;
+        queryResult = await runQuery(
+          prompt,
+          undefined,
+          mcpServerPath,
+          containerInput,
+          sdkEnv,
+        );
       }
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;

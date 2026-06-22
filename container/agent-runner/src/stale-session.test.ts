@@ -14,7 +14,10 @@
 
 import { describe, it, expect } from 'vitest';
 
-import { isStaleSessionError } from './stale-session.js';
+import {
+  isStaleSessionError,
+  shouldRetryStaleResume,
+} from './stale-session.js';
 
 describe('isStaleSessionError (agent-runner)', () => {
   it('matches the historical "no conversation found" thrown error', () => {
@@ -80,6 +83,82 @@ describe('isStaleSessionError (agent-runner)', () => {
         '[2026-04-26T18:50:00] container exited with code 1: ' +
           'error_during_execution: model produced empty response',
       ),
+    ).toBe(true);
+  });
+});
+
+describe('shouldRetryStaleResume (#697)', () => {
+  // The canonical #697 result-message error: a resumed infrequent
+  // cadence task whose transcript JSONL was cleaned up between fires.
+  const NO_CONVERSATION = [
+    'No conversation found with session ID: 4f95b786-0000-0000-0000-000000000000',
+  ];
+
+  it('retries the canonical num_turns=0 "No conversation found" resume error', () => {
+    expect(shouldRetryStaleResume(true, 0, NO_CONVERSATION)).toBe(true);
+  });
+
+  it('does not retry when no resume was attempted (fresh session)', () => {
+    // Gating on the resume attempt is what stops the fresh-session
+    // retry from re-triggering itself into an infinite loop.
+    expect(shouldRetryStaleResume(false, 0, NO_CONVERSATION)).toBe(false);
+  });
+
+  it('does not retry once the run turned (num_turns > 0)', () => {
+    // A run that did work before erroring may carry side effects;
+    // silently re-running it could duplicate them.
+    expect(shouldRetryStaleResume(true, 1, NO_CONVERSATION)).toBe(false);
+  });
+
+  it('does not retry when num_turns is missing', () => {
+    expect(shouldRetryStaleResume(true, undefined, NO_CONVERSATION)).toBe(
+      false,
+    );
+  });
+
+  it('does not retry an unrelated num_turns=0 failure', () => {
+    // The generic `error_during_execution` subtype is NOT in the
+    // haystack, so a prompt_too_long / model_error that happens to
+    // report zero turns must not be mistaken for a stale session.
+    expect(
+      shouldRetryStaleResume(true, 0, ['model_error: prompt too long']),
+    ).toBe(false);
+    expect(shouldRetryStaleResume(true, 0, [])).toBe(false);
+    expect(shouldRetryStaleResume(true, 0, undefined)).toBe(false);
+  });
+
+  it('does not retry when errors[] literally contains error_during_execution', () => {
+    // Regression for the over-broadening Copilot flagged on #699: the
+    // result-message path uses STALE_RESUME_ERRORS_RE, which omits the
+    // `error_during_execution` token that `isStaleSessionError` carries
+    // for the throw path. A bare subtype string in `errors[]` (an
+    // unrelated zero-turn failure) must NOT trigger a retry.
+    expect(shouldRetryStaleResume(true, 0, ['error_during_execution'])).toBe(
+      false,
+    );
+    expect(
+      shouldRetryStaleResume(true, 0, [
+        'error_during_execution: model produced empty response',
+      ]),
+    ).toBe(false);
+  });
+
+  it('still retries when a real stale phrasing rides alongside the subtype', () => {
+    // The subtype token being present is fine as long as a genuine
+    // stale-session phrasing is too — the narrow regex matches that.
+    expect(
+      shouldRetryStaleResume(true, 0, [
+        'error_during_execution: No conversation found with session ID: abc',
+      ]),
+    ).toBe(true);
+  });
+
+  it('matches the JSONL-ENOENT resume shape too', () => {
+    expect(
+      shouldRetryStaleResume(true, 0, [
+        'ENOENT: no such file or directory, open ' +
+          '/workspace/.claude/projects/-workspace-group/4f95b786.jsonl',
+      ]),
     ).toBe(true);
   });
 });
