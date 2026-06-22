@@ -32,6 +32,23 @@ export function isStaleSessionError(errorMsg: string | undefined): boolean {
 }
 
 /**
+ * Narrow stale-session phrasings for the result-message path (#697).
+ *
+ * Deliberately OMITS the `error_during_execution` token that
+ * `STALE_SESSION_RE` carries. That token exists for the THROWN-error
+ * path, where the exception message can be the bare SDK subtype string.
+ * On the result-message path the subtype lives in its own `errMsg.subtype`
+ * field and the `errors[]` array carries the genuine failure phrasing —
+ * so matching `error_during_execution` *inside* `errors[]` would broaden
+ * the retry to unrelated `num_turns=0` failures (prompt_too_long,
+ * model_error) whose errors happen to mention the subtype. This regex
+ * matches only the real stale-session shapes: a missing conversation, a
+ * missing transcript JSONL, or an explicit "session … not found".
+ */
+const STALE_RESUME_ERRORS_RE =
+  /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
+
+/**
  * Decide whether an SDK result-message error should defer to a
  * fresh-session retry (#697).
  *
@@ -51,11 +68,12 @@ export function isStaleSessionError(errorMsg: string | undefined): boolean {
  *   - `numTurns === 0` — the run did zero work. A run that turned before
  *     erroring may have side effects; silently re-running it could
  *     duplicate them.
- *   - the SDK `errors` array matches `isStaleSessionError`. The haystack
- *     is the errors array ONLY — not the generic `error_during_execution`
- *     subtype, which `isStaleSessionError` also matches and would
- *     over-broaden the retry to unrelated num_turns=0 failures
- *     (prompt_too_long, model_error).
+ *   - the joined SDK `errors` array matches `STALE_RESUME_ERRORS_RE` —
+ *     the narrow phrasings only, NOT the generic `error_during_execution`
+ *     subtype. Matching the subtype (as `isStaleSessionError` does for
+ *     the throw path) would over-broaden the retry to unrelated
+ *     num_turns=0 failures (prompt_too_long, model_error) whose `errors[]`
+ *     happen to mention it.
  */
 export function shouldRetryStaleResume(
   hadResumeSession: boolean,
@@ -64,5 +82,5 @@ export function shouldRetryStaleResume(
 ): boolean {
   if (!hadResumeSession) return false;
   if (numTurns !== 0) return false;
-  return isStaleSessionError((errors ?? []).join(' '));
+  return STALE_RESUME_ERRORS_RE.test((errors ?? []).join(' '));
 }

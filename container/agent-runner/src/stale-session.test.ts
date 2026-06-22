@@ -127,6 +127,32 @@ describe('shouldRetryStaleResume (#697)', () => {
     expect(shouldRetryStaleResume(true, 0, undefined)).toBe(false);
   });
 
+  it('does not retry when errors[] literally contains error_during_execution', () => {
+    // Regression for the over-broadening Copilot flagged on #699: the
+    // result-message path uses STALE_RESUME_ERRORS_RE, which omits the
+    // `error_during_execution` token that `isStaleSessionError` carries
+    // for the throw path. A bare subtype string in `errors[]` (an
+    // unrelated zero-turn failure) must NOT trigger a retry.
+    expect(shouldRetryStaleResume(true, 0, ['error_during_execution'])).toBe(
+      false,
+    );
+    expect(
+      shouldRetryStaleResume(true, 0, [
+        'error_during_execution: model produced empty response',
+      ]),
+    ).toBe(false);
+  });
+
+  it('still retries when a real stale phrasing rides alongside the subtype', () => {
+    // The subtype token being present is fine as long as a genuine
+    // stale-session phrasing is too — the narrow regex matches that.
+    expect(
+      shouldRetryStaleResume(true, 0, [
+        'error_during_execution: No conversation found with session ID: abc',
+      ]),
+    ).toBe(true);
+  });
+
   it('matches the JSONL-ENOENT resume shape too', () => {
     expect(
       shouldRetryStaleResume(true, 0, [
