@@ -1896,6 +1896,64 @@ server.tool(
     };
   },
 );
+
+server.tool(
+  'persist_global_file',
+  'Durably persist approved edits to the global persona files (SOUL.md / SOUL-untrusted.md). The container edits /workspace/global/<file> for immediate runtime effect; this commits that change to the deploy source and pushes it, so the next deploy keeps the edit instead of discarding it. Use after applying approved soul-searching changes. The host handles git credentials.',
+  {
+    files: z
+      .array(z.enum(['SOUL.md', 'SOUL-untrusted.md']))
+      .nonempty()
+      .optional()
+      .describe('Which global files to persist. Default: both SOUL.md and SOUL-untrusted.md.'),
+    message: z.string().optional().describe('Commit message. Default: "soul: persist approved updates <ISO date>"'),
+  },
+  async (args) => {
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const data = {
+      type: 'persist_global_file',
+      groupFolder,
+      chatJid,
+      files: args.files,
+      message: args.message,
+      requestId,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    // Poll for result file
+    const resultPath = path.join(IPC_DIR, 'input', `_script_result_${requestId}.json`);
+    const timeoutMs = 60_000;
+    const pollMs = 500;
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+      if (fs.existsSync(resultPath)) {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        fs.unlinkSync(resultPath);
+        if (result.error) {
+          return {
+            content: [{ type: 'text' as const, text: `Persist failed (${result.stage ?? 'unknown'}): ${result.error}` }],
+            isError: true,
+          };
+        }
+        // committed:false is a benign no-op (the working tree already matches
+        // the deploy source) — report it without isError so the skill can
+        // tell "nothing to persist" apart from a real failure.
+        return {
+          content: [{ type: 'text' as const, text: result.stdout || (result.committed === false ? 'No changes to persist.' : 'Persisted and pushed.') }],
+        };
+      }
+      await new Promise(r => setTimeout(r, pollMs));
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'Persist timed out after 60s' }],
+      isError: true,
+    };
+  },
+);
 }
 
 server.tool(

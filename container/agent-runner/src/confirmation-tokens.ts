@@ -40,6 +40,7 @@ export type DestructiveScope =
   | 'nuke_session'
   | 'nuke_chat'
   | 'github_backup'
+  | 'persist_global_file'
   | 'set_trusted'
   | 'set_trigger'
   | 'set_agent_model'
@@ -300,6 +301,10 @@ export function classifyDestructiveOp(
     'mcp__nanoclaw__github_backup': {
       scope: 'github_backup',
       label: 'push host content to a GitHub backup repo',
+    },
+    'mcp__nanoclaw__persist_global_file': {
+      scope: 'persist_global_file',
+      label: 'commit + push a global persona file to the deploy source',
     },
     'mcp__nanoclaw__set_trusted': {
       scope: 'set_trusted',

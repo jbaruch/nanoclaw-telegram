@@ -37,6 +37,9 @@ describe('classifyDestructiveOp', () => {
       scope: 'github_backup',
       label: expect.any(String),
     });
+    expect(
+      classifyDestructiveOp('mcp__nanoclaw__persist_global_file', {}),
+    ).toEqual({ scope: 'persist_global_file', label: expect.any(String) });
     expect(classifyDestructiveOp('mcp__nanoclaw__set_trusted', {})).toEqual({
       scope: 'set_trusted',
       label: expect.any(String),

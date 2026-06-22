@@ -430,6 +430,242 @@ export function applyMaintenancePrefix(
   return MAINTENANCE_MESSAGE_PREFIX + text;
 }
 
+// The git-tracked, deploy-seeded global persona files `persist_global_file`
+// (#393) is allowed to commit. A caller may only name these exact basenames
+// — never a path component — so a compromised container can't commit an
+// arbitrary tracked file (traversal, secrets, workflow YAML) to the deploy
+// source. Keep in lock-step with the `.gitignore` `!groups/global/*`
+// allowlist and the zod enum in `ipc-mcp-stdio.ts`'s tool registration.
+export const PERSISTABLE_GLOBAL_FILES = [
+  'SOUL.md',
+  'SOUL-untrusted.md',
+] as const;
+
+/**
+ * Validate a `persist_global_file` `files` payload against
+ * `PERSISTABLE_GLOBAL_FILES` and map it to repo-relative paths under
+ * `groups/global/`. An empty or absent payload defaults to every allowlisted
+ * file. Returns the offending entry on rejection so the handler can write an
+ * actionable error envelope. Defense-in-depth behind the MCP tool's zod enum:
+ * a container can write an IPC task file directly, bypassing the tool schema.
+ */
+export function validateGlobalFilesToPersist(
+  files: unknown,
+): { ok: true; relPaths: string[] } | { ok: false; invalid: string } {
+  const requested: unknown[] =
+    Array.isArray(files) && files.length > 0
+      ? files
+      : [...PERSISTABLE_GLOBAL_FILES];
+  const invalid = requested.find(
+    (f): boolean =>
+      typeof f !== 'string' ||
+      !(PERSISTABLE_GLOBAL_FILES as readonly string[]).includes(f),
+  );
+  if (invalid !== undefined) {
+    return {
+      ok: false,
+      invalid: typeof invalid === 'string' ? invalid : String(invalid),
+    };
+  }
+  // Dedupe while preserving first-seen order so `git add` names each path once.
+  const relPaths = [...new Set(requested as string[])].map((f) =>
+    path.posix.join('groups', 'global', f),
+  );
+  return { ok: true, relPaths };
+}
+
+/**
+ * Redact a GitHub token from text before it reaches a result envelope or a
+ * log. git stderr can echo the push URL, which after the `insteadOf` rewrite
+ * embeds `x-access-token:<TOKEN>@github.com` — so a raw failure envelope would
+ * leak the credential (`coding-policy: no-secrets`). Strips both the exact
+ * token (when known) and any `x-access-token:...@` URL credential.
+ */
+export function redactGitToken(text: string, token?: string): string {
+  let out = text;
+  if (token) out = out.split(token).join('***');
+  return out.replace(/x-access-token:[^@\s]+@/g, 'x-access-token:***@');
+}
+
+export interface PersistGitResult {
+  committed?: boolean;
+  stdout?: string;
+  error?: string;
+  stderr?: string;
+  stage?: 'git';
+}
+
+// The token-bearing env that lets `git push` authenticate to github.com via
+// the `insteadOf` URL rewrite. Only the push step needs it. Empty without a
+// token (local-remote pushes and all read-only steps need no auth).
+function gitAuthEnv(token?: string): NodeJS.ProcessEnv {
+  if (!token) return {};
+  return {
+    GIT_ASKPASS: 'echo',
+    GIT_TERMINAL_PROMPT: '0',
+    GITHUB_TOKEN: token,
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0:
+      'url.https://x-access-token:' + token + '@github.com/.insteadOf',
+    GIT_CONFIG_VALUE_0: 'https://github.com/',
+  };
+}
+
+// Run one git invocation in `repoRoot`, resolving with its exit code and
+// captured output — never rejecting, so the caller drives control flow off
+// `code`. Args are passed directly (no shell), so a caller-supplied commit
+// message can't inject anything. `authEnv` adds push-auth for the push step.
+function runGit(
+  repoRoot: string,
+  args: string[],
+  authEnv: NodeJS.ProcessEnv = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile(
+      'git',
+      ['-C', repoRoot, ...args],
+      {
+        timeout: 60_000,
+        maxBuffer: 1024 * 1024,
+        env: { ...process.env, ...authEnv },
+      },
+      (error, stdout, stderr) => {
+        // On a non-zero EXIT, execFile sets error.code to the numeric exit
+        // code; on a spawn failure (e.g. ENOENT) it's a string — treat that
+        // as a generic failure (1).
+        const rawCode = (error as { code?: unknown } | null)?.code;
+        const code = error ? (typeof rawCode === 'number' ? rawCode : 1) : 0;
+        resolve({ code, stdout, stderr });
+      },
+    );
+  });
+}
+
+/**
+ * Commit the allowlisted persona files in `repoRoot` and push `HEAD:main`,
+ * resolving with the result envelope (never rejects — the caller always has
+ * an envelope to write). Stages ONLY `relPaths` (already allowlist-validated
+ * by `validateGlobalFilesToPersist`) so unrelated working-tree changes never
+ * ride along. Behavior:
+ * - staged change present → commit, then push.
+ * - no staged change but `HEAD` is ahead of `origin/main` → a prior run
+ *   committed but failed to push; push that pending commit (recovery).
+ * - no staged change and nothing pending → `{ committed: false }` no-op.
+ * On a push failure AFTER our own commit, the commit is rolled back
+ * (`reset --soft`, keeping the edit staged) so a later run can retry — the
+ * operation never strands a committed-but-unpushed change, which would be a
+ * silent non-retryable state (`coding-policy: error-handling`). Any git
+ * failure resolves to a `stage: 'git'` envelope with token-redacted stderr.
+ */
+export async function persistGlobalFilesToGit(opts: {
+  repoRoot: string;
+  relPaths: string[];
+  message: string;
+  token?: string;
+}): Promise<PersistGitResult> {
+  const { repoRoot, relPaths, message, token } = opts;
+
+  const fail = (
+    label: string,
+    r: { stdout: string; stderr: string },
+  ): PersistGitResult => ({
+    error: redactGitToken(
+      `${label}: ${(r.stderr || r.stdout || 'failed').trim()}`,
+      token,
+    ),
+    stderr: redactGitToken(r.stderr, token).slice(-500),
+    stage: 'git',
+  });
+
+  // Stage ONLY the allowlisted paths.
+  const add = await runGit(repoRoot, ['add', '--', ...relPaths]);
+  if (add.code !== 0) return fail('git add', add);
+
+  // `diff --cached --quiet` exits 1 when those paths have a staged change, 0
+  // when they don't, >1 on a real diff error.
+  const staged = await runGit(repoRoot, [
+    'diff',
+    '--cached',
+    '--quiet',
+    '--',
+    ...relPaths,
+  ]);
+  let committedHere = false;
+  if (staged.code === 1) {
+    const commit = await runGit(repoRoot, [
+      'commit',
+      '-m',
+      message,
+      '--',
+      ...relPaths,
+    ]);
+    if (commit.code !== 0) return fail('git commit', commit);
+    committedHere = true;
+  } else if (staged.code === 0) {
+    // Nothing staged. Recover a commit a prior run made but failed to push
+    // (HEAD ahead of origin/main); otherwise it's a genuine no-op.
+    const ahead = await runGit(repoRoot, [
+      'rev-list',
+      '--count',
+      'origin/main..HEAD',
+    ]);
+    const aheadCount = ahead.code === 0 ? parseInt(ahead.stdout.trim(), 10) : 0;
+    if (!Number.isFinite(aheadCount) || aheadCount <= 0) {
+      return { committed: false, stdout: 'No changes to persist.' };
+    }
+    // fall through to push the unpushed commit(s)
+  } else {
+    return fail('git diff', staged);
+  }
+
+  // Deterministic push-time allowlist gate for the protected-branch
+  // direct-push carve-out (`jbaruch/nanoclaw-host: persona-persist-direct-push`):
+  // enumerate every path this push would change on `main` and refuse unless
+  // ALL of them are declared persona files. A normal apply commits only
+  // allowlisted paths by construction, but the recovery branch pushes a
+  // pre-existing HEAD whose contents we didn't author — so verify before
+  // touching `main`. An out-of-scope path is refused outright (not branch-PR
+  // fallback): nothing but persona files ever direct-pushes.
+  const allowedRel = new Set(
+    PERSISTABLE_GLOBAL_FILES.map((f) => path.posix.join('groups', 'global', f)),
+  );
+  const pending = await runGit(repoRoot, [
+    'diff',
+    '--name-only',
+    'origin/main..HEAD',
+  ]);
+  if (pending.code !== 0) {
+    if (committedHere) await runGit(repoRoot, ['reset', '--soft', 'HEAD~1']);
+    return fail('git diff (push gate)', pending);
+  }
+  const offending = pending.stdout
+    .split('\n')
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0 && !allowedRel.has(p));
+  if (offending.length > 0) {
+    if (committedHere) await runGit(repoRoot, ['reset', '--soft', 'HEAD~1']);
+    return {
+      error: `refusing to push: ${offending.length} path(s) outside the persona allowlist would change on main (${offending.slice(0, 5).join(', ')})`,
+      stage: 'git',
+    };
+  }
+
+  const push = await runGit(
+    repoRoot,
+    ['push', 'origin', 'HEAD:main'],
+    gitAuthEnv(token),
+  );
+  if (push.code !== 0) {
+    // Roll back the commit WE just made so the edit returns to the working
+    // tree (staged) and a later run can retry — never strand it.
+    if (committedHere) {
+      await runGit(repoRoot, ['reset', '--soft', 'HEAD~1']);
+    }
+    return fail('git push', push);
+  }
+  return { committed: true, stdout: 'Committed and pushed.' };
+}
+
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
     logger.debug('IPC watcher already running, skipping duplicate start');
@@ -1009,6 +1245,10 @@ export async function processTaskIpc(
     // For host operations / github_backup / promote_staging / sessionize
     requestId?: string;
     message?: string;
+    // persist_global_file (#393): allowlisted global persona filenames to
+    // commit + push. Validated by `validateGlobalFilesToPersist` at the
+    // handler against `PERSISTABLE_GLOBAL_FILES`.
+    files?: unknown;
     tileName?: string;
     skillName?: string;
     // push_staged_to_branch
@@ -4130,6 +4370,97 @@ export async function processTaskIpc(
             }
           },
         );
+      }
+      break;
+
+    case 'persist_global_file':
+      if (data.requestId) {
+        // Authorization: persist_global_file commits + pushes the
+        // orchestrator repo's `main` using GITHUB_TOKEN — same privilege
+        // class as `github_backup` / `promote_staging`, gated on `isMain`.
+        // A non-main container can't reach the persona source even by
+        // writing an IPC task file directly.
+        if (!isMain) {
+          logger.warn(
+            { sourceGroup },
+            'Unauthorized persist_global_file attempt',
+          );
+          break;
+        }
+
+        const persistResultPath = scriptResultPath(sourceGroup, data);
+
+        // The container edits `/workspace/global/<file>`, an RW bind onto the
+        // host's `groups/global/<file>` (the git-tracked, deploy-seeded
+        // source). That edit lands in the working tree but is never
+        // committed, so `deploy.sh`'s `git stash; git pull` discards it on
+        // the next deploy (jbaruch/nanoclaw-admin#393). This handler commits
+        // the working-tree change and pushes `main` so the next `git pull`
+        // keeps it. The allowlist gate (`validateGlobalFilesToPersist`)
+        // rejects anything but the exact persona basenames, so a compromised
+        // container can't commit arbitrary tracked files (path traversal,
+        // secrets, workflow YAML).
+        const persistValidation = validateGlobalFilesToPersist(data.files);
+        if (!persistValidation.ok) {
+          logger.warn(
+            { sourceGroup, invalidFile: persistValidation.invalid },
+            'persist_global_file rejected non-allowlisted file',
+          );
+          fs.writeFileSync(
+            persistResultPath,
+            JSON.stringify({
+              error: `persist_global_file: ${JSON.stringify(persistValidation.invalid)} is not an allowed global file (allowed: ${PERSISTABLE_GLOBAL_FILES.join(', ')})`,
+              stage: 'validate',
+            }),
+          );
+          break;
+        }
+        const persistRelPaths = persistValidation.relPaths;
+
+        const persistCommitMsg =
+          data.message ||
+          `soul: persist approved updates ${new Date().toISOString().split('T')[0]}`;
+
+        logger.info(
+          {
+            sourceGroup,
+            relPaths: persistRelPaths,
+            commitMsg: persistCommitMsg,
+          },
+          'Running persist_global_file',
+        );
+
+        // Read GitHub token for push auth (same wiring as github_backup).
+        const { readEnvFile: readPersistEnv } = await import('./env.js');
+        const persistGhToken = readPersistEnv(['GITHUB_TOKEN']).GITHUB_TOKEN;
+
+        // Run the commit+push off the IPC loop (like github_backup): the
+        // promise resolves with the result envelope; the loop never blocks
+        // on git. `persistGlobalFilesToGit` is the testable git boundary
+        // (commit/no-op/push, token-redacted failure envelope).
+        persistGlobalFilesToGit({
+          repoRoot: process.cwd(),
+          relPaths: persistRelPaths,
+          message: persistCommitMsg,
+          token: persistGhToken,
+        }).then((persistResult) => {
+          fs.writeFileSync(persistResultPath, JSON.stringify(persistResult));
+          if (persistResult.error) {
+            logger.error(
+              {
+                sourceGroup,
+                stage: persistResult.stage,
+                error: persistResult.error,
+              },
+              'persist_global_file failed',
+            );
+          } else {
+            logger.info(
+              { sourceGroup, committed: persistResult.committed },
+              'persist_global_file completed',
+            );
+          }
+        });
       }
       break;
 

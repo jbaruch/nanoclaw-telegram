@@ -1,3 +1,8 @@
+import { execFileSync } from 'child_process';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
 import { describe, it, expect } from 'vitest';
 
 import {
@@ -8,9 +13,13 @@ import {
 import { shouldStoreBotMessage } from './db.js';
 import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
 import {
+  PERSISTABLE_GLOBAL_FILES,
   applyMaintenancePrefix,
   fetchSessionizeEventsBatch,
   normalizeSessionizeEvent,
+  persistGlobalFilesToGit,
+  redactGitToken,
+  validateGlobalFilesToPersist,
 } from './ipc.js';
 
 describe('applyMaintenancePrefix', () => {
@@ -282,5 +291,335 @@ describe('fetchSessionizeEventsBatch', () => {
       0,
     );
     expect(out.map((r) => r.slug)).toEqual(['a', 'b', 'c']);
+  });
+});
+
+describe('validateGlobalFilesToPersist', () => {
+  it('defaults an empty/absent payload to every allowlisted persona file', () => {
+    const expected = {
+      ok: true,
+      relPaths: PERSISTABLE_GLOBAL_FILES.map((f) => `groups/global/${f}`),
+    };
+    expect(validateGlobalFilesToPersist(undefined)).toEqual(expected);
+    expect(validateGlobalFilesToPersist([])).toEqual(expected);
+  });
+
+  it('maps an explicit allowlisted subset to repo-relative paths', () => {
+    expect(validateGlobalFilesToPersist(['SOUL.md'])).toEqual({
+      ok: true,
+      relPaths: ['groups/global/SOUL.md'],
+    });
+    expect(
+      validateGlobalFilesToPersist(['SOUL-untrusted.md', 'SOUL.md']),
+    ).toEqual({
+      ok: true,
+      relPaths: ['groups/global/SOUL-untrusted.md', 'groups/global/SOUL.md'],
+    });
+  });
+
+  it('dedupes repeated entries so git add names each path once', () => {
+    expect(validateGlobalFilesToPersist(['SOUL.md', 'SOUL.md'])).toEqual({
+      ok: true,
+      relPaths: ['groups/global/SOUL.md'],
+    });
+  });
+
+  it('rejects a path-traversal attempt without committing it', () => {
+    expect(validateGlobalFilesToPersist(['../../.env'])).toEqual({
+      ok: false,
+      invalid: '../../.env',
+    });
+  });
+
+  it('rejects a tracked-but-not-allowlisted global file', () => {
+    // CLAUDE.md is git-tracked under groups/global but is NOT persona content
+    // the apply flow may rewrite — the allowlist must keep it out.
+    expect(validateGlobalFilesToPersist(['CLAUDE.md'])).toEqual({
+      ok: false,
+      invalid: 'CLAUDE.md',
+    });
+  });
+
+  it('rejects a subdirectory escape even under groups/global', () => {
+    expect(validateGlobalFilesToPersist(['prompts/main.md'])).toEqual({
+      ok: false,
+      invalid: 'prompts/main.md',
+    });
+  });
+
+  it('rejects a non-string entry, surfacing it stringified', () => {
+    expect(validateGlobalFilesToPersist([42])).toEqual({
+      ok: false,
+      invalid: '42',
+    });
+    expect(validateGlobalFilesToPersist([null])).toEqual({
+      ok: false,
+      invalid: 'null',
+    });
+  });
+
+  it('rejects a non-array payload by falling back to the allowlist scan', () => {
+    // A scalar payload is not Array.isArray → defaults to the full allowlist,
+    // which is valid. A string that looks like a path must NOT slip through as
+    // a single char-array; Array.isArray('SOUL.md') is false, so it defaults.
+    expect(validateGlobalFilesToPersist('SOUL.md')).toEqual({
+      ok: true,
+      relPaths: PERSISTABLE_GLOBAL_FILES.map((f) => `groups/global/${f}`),
+    });
+  });
+});
+
+describe('redactGitToken', () => {
+  it('replaces every occurrence of a known token with ***', () => {
+    const token = 'ghp_secretTOKEN123';
+    const text = `fatal: unable to access using ${token}; retried with ${token}`;
+    const out = redactGitToken(text, token);
+    expect(out).not.toContain(token);
+    expect(out).toBe('fatal: unable to access using ***; retried with ***');
+  });
+
+  it('redacts an x-access-token URL credential even without a known token', () => {
+    const text =
+      "remote: Invalid username or password for 'https://x-access-token:ghs_abc123XYZ@github.com/jbaruch/nanoclaw.git/'";
+    const out = redactGitToken(text);
+    expect(out).not.toContain('ghs_abc123XYZ');
+    expect(out).toContain('x-access-token:***@github.com');
+  });
+
+  it('leaves token-free text unchanged', () => {
+    const text = 'nothing secret here';
+    expect(redactGitToken(text, 'ghp_x')).toBe(text);
+  });
+});
+
+describe('persistGlobalFilesToGit', () => {
+  // Real git in a throwaway repo + bare remote — same real-fs/git pattern as
+  // backup-sync.test.ts. Deterministic: no network, fixed content.
+  function git(cwd: string, args: string[]): string {
+    return execFileSync('git', args, {
+      cwd,
+      encoding: 'utf-8',
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+  }
+
+  function setupRepo(): { root: string; remote: string; cleanup: () => void } {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'persist-git-work-'));
+    const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'persist-git-bare-'));
+    git(remote, ['init', '--bare', '--initial-branch=main']);
+    git(root, ['init', '--initial-branch=main']);
+    git(root, ['config', 'user.email', 'test@example.com']);
+    git(root, ['config', 'user.name', 'Test']);
+    git(root, ['remote', 'add', 'origin', remote]);
+    fs.mkdirSync(path.join(root, 'groups', 'global'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, 'groups', 'global', 'SOUL.md'),
+      'baseline\n',
+    );
+    git(root, ['add', '-A']);
+    git(root, ['commit', '-m', 'baseline']);
+    git(root, ['push', 'origin', 'HEAD:main']);
+    // Establish the origin/main remote-tracking ref the recovery path reads.
+    git(root, ['fetch', 'origin']);
+    return {
+      root,
+      remote,
+      cleanup: () => {
+        fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(remote, { recursive: true, force: true });
+      },
+    };
+  }
+
+  it('commits the edited file and pushes it to the remote main', async () => {
+    const { root, remote, cleanup } = setupRepo();
+    try {
+      // The skill's Step-3-equivalent working-tree edit.
+      fs.writeFileSync(
+        path.join(root, 'groups', 'global', 'SOUL.md'),
+        'baseline\nan approved change\n',
+      );
+      const result = await persistGlobalFilesToGit({
+        repoRoot: root,
+        relPaths: ['groups/global/SOUL.md'],
+        message: 'soul: persist approved updates 2026-06-21',
+      });
+      expect(result).toMatchObject({ committed: true });
+      // The bare remote received the commit with our message.
+      const remoteLog = git(remote, ['log', '--oneline', '-1', 'main']);
+      expect(remoteLog).toContain('soul: persist approved updates 2026-06-21');
+      // The pushed content carries the approved change.
+      const pushedBlob = git(remote, ['show', 'main:groups/global/SOUL.md']);
+      expect(pushedBlob).toContain('an approved change');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('reports committed:false when the working tree already matches', async () => {
+    const { root, cleanup } = setupRepo();
+    try {
+      // No working-tree edit — the allowlisted path is unchanged.
+      const result = await persistGlobalFilesToGit({
+        repoRoot: root,
+        relPaths: ['groups/global/SOUL.md'],
+        message: 'soul: noop',
+      });
+      expect(result.committed).toBe(false);
+      expect(result.error).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('stages only the named paths, never unrelated working-tree changes', async () => {
+    const { root, remote, cleanup } = setupRepo();
+    try {
+      fs.writeFileSync(
+        path.join(root, 'groups', 'global', 'SOUL.md'),
+        'baseline\npersona edit\n',
+      );
+      // An unrelated dirty file that must NOT ride along in the commit.
+      fs.writeFileSync(path.join(root, 'unrelated.txt'), 'do not commit me\n');
+      const result = await persistGlobalFilesToGit({
+        repoRoot: root,
+        relPaths: ['groups/global/SOUL.md'],
+        message: 'soul: only persona',
+      });
+      expect(result).toMatchObject({ committed: true });
+      const files = git(remote, [
+        'show',
+        '--name-only',
+        '--format=',
+        'main',
+      ]).trim();
+      expect(files).toBe('groups/global/SOUL.md');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('rolls back the local commit on push failure so the change stays retryable', async () => {
+    const { root, remote, cleanup } = setupRepo();
+    try {
+      const headBefore = git(root, ['rev-parse', 'HEAD']).trim();
+      // Break the remote so the push fails after the commit lands locally.
+      fs.rmSync(remote, { recursive: true, force: true });
+      fs.writeFileSync(
+        path.join(root, 'groups', 'global', 'SOUL.md'),
+        'baseline\nwill fail to push\n',
+      );
+      const token = 'ghs_supersecretTOKEN';
+      const result = await persistGlobalFilesToGit({
+        repoRoot: root,
+        relPaths: ['groups/global/SOUL.md'],
+        message: 'soul: push fails',
+        token,
+      });
+      expect(result.stage).toBe('git');
+      expect(result.error).toBeTruthy();
+      // The token must never survive into the envelope (no-secrets).
+      expect(JSON.stringify(result)).not.toContain(token);
+      // The commit was rolled back — HEAD is back to baseline, no stranded
+      // committed-but-unpushed change.
+      expect(git(root, ['rev-parse', 'HEAD']).trim()).toBe(headBefore);
+      // The approved edit is still in the working tree, so a retry can land it.
+      expect(
+        fs.readFileSync(
+          path.join(root, 'groups', 'global', 'SOUL.md'),
+          'utf-8',
+        ),
+      ).toContain('will fail to push');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('a retry after a push failure lands the change once the remote is back', async () => {
+    const { root, remote, cleanup } = setupRepo();
+    try {
+      fs.writeFileSync(
+        path.join(root, 'groups', 'global', 'SOUL.md'),
+        'baseline\nflaky push\n',
+      );
+      // First attempt: remote unreachable → rolled-back failure.
+      const remoteBackup = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'persist-bak-'),
+      );
+      fs.cpSync(remote, remoteBackup, { recursive: true });
+      fs.rmSync(remote, { recursive: true, force: true });
+      const first = await persistGlobalFilesToGit({
+        repoRoot: root,
+        relPaths: ['groups/global/SOUL.md'],
+        message: 'soul: attempt 1',
+      });
+      expect(first.stage).toBe('git');
+      // Remote recovers; retry must succeed and push the change.
+      fs.cpSync(remoteBackup, remote, { recursive: true });
+      const second = await persistGlobalFilesToGit({
+        repoRoot: root,
+        relPaths: ['groups/global/SOUL.md'],
+        message: 'soul: attempt 2',
+      });
+      expect(second).toMatchObject({ committed: true });
+      expect(git(remote, ['show', 'main:groups/global/SOUL.md'])).toContain(
+        'flaky push',
+      );
+      fs.rmSync(remoteBackup, { recursive: true, force: true });
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('recovers a previously-stranded unpushed commit on a no-edit run', async () => {
+    const { root, remote, cleanup } = setupRepo();
+    try {
+      // Simulate the pre-fix stranded state: a commit that landed locally but
+      // never reached origin/main, with a clean working tree.
+      fs.writeFileSync(
+        path.join(root, 'groups', 'global', 'SOUL.md'),
+        'baseline\nstranded commit\n',
+      );
+      git(root, ['add', '--', 'groups/global/SOUL.md']);
+      git(root, ['commit', '-m', 'soul: stranded']);
+      // No working-tree change now; the commit is ahead of origin/main.
+      const result = await persistGlobalFilesToGit({
+        repoRoot: root,
+        relPaths: ['groups/global/SOUL.md'],
+        message: 'soul: recover',
+      });
+      expect(result).toMatchObject({ committed: true });
+      expect(git(remote, ['show', 'main:groups/global/SOUL.md'])).toContain(
+        'stranded commit',
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('refuses to push a pending commit that touches a non-allowlisted path', async () => {
+    const { root, remote, cleanup } = setupRepo();
+    try {
+      // A stranded local commit that touches an out-of-allowlist file — the
+      // push-gate must refuse it rather than land a non-persona change on main.
+      fs.writeFileSync(
+        path.join(root, 'unrelated.txt'),
+        'not persona content\n',
+      );
+      git(root, ['add', '--', 'unrelated.txt']);
+      git(root, ['commit', '-m', 'stray: unrelated change']);
+      const result = await persistGlobalFilesToGit({
+        repoRoot: root,
+        relPaths: ['groups/global/SOUL.md'],
+        message: 'soul: should not push the stray',
+      });
+      expect(result.stage).toBe('git');
+      expect(result.error).toContain('outside the persona allowlist');
+      // main on the remote never received the stray file.
+      const remoteFiles = git(remote, ['ls-tree', '--name-only', 'main']);
+      expect(remoteFiles).not.toContain('unrelated.txt');
+    } finally {
+      cleanup();
+    }
   });
 });
