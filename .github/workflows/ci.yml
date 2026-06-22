@@ -22,13 +22,16 @@ jobs:
       # so the root format:check glob (src/**) and root tsc never covered
       # it (#701). Its *tests* are picked up by the root vitest config, but
       # format and typecheck were unenforced — half the package's files had
-      # drifted from root prettier. Its format:check needs only prettier
-      # (resolved from the root install via npm's PATH), so it runs here
-      # alongside the root format gate — before the slower typecheck/tests,
-      # to fail fast on cheap style issues (`coding-policy: code-formatting`).
+      # drifted from root prettier. Prettier is the repo's single canonical
+      # formatter (declared at root); invoke it inline against the
+      # agent-runner tree — no second prettier to declare/version in the
+      # subpackage. `working-directory` makes prettier read the subpackage's
+      # .prettierignore (the macOS AppleDouble exclude). Runs alongside the
+      # root format gate, before the slower typecheck/tests, to fail fast on
+      # cheap style issues (`coding-policy: code-formatting`).
       - name: Format check (agent-runner)
         working-directory: container/agent-runner
-        run: npm run format:check
+        run: npx prettier --check "src/**/*.ts"
 
       - name: Typecheck
         run: npx tsc --noEmit
@@ -45,7 +48,7 @@ jobs:
 
       - name: Typecheck (agent-runner)
         working-directory: container/agent-runner
-        run: npm run typecheck
+        run: npx tsc --noEmit
 
       # Python tests live alongside scripts that need them. Stdlib
       # unittest only — no pytest dependency to install. Wired here
