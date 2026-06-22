@@ -13,6 +13,12 @@ jobs:
         with:
           node-version: 24
           cache: npm
+          # Key the npm cache on both lockfiles — the job runs a second
+          # `npm ci` in container/agent-runner (its own package), which the
+          # default root-only key would leave uncached.
+          cache-dependency-path: |
+            package-lock.json
+            container/agent-runner/package-lock.json
       - run: npm ci
 
       # The root format:check glob now also covers container/agent-runner/src
