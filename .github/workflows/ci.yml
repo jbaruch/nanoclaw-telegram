@@ -18,27 +18,30 @@ jobs:
       - name: Format check
         run: npm run format:check
 
+      # The agent-runner is its own npm package (own tsconfig, own deps),
+      # so the root format:check glob (src/**) and root tsc never covered
+      # it (#701). Its *tests* are picked up by the root vitest config, but
+      # format and typecheck were unenforced — half the package's files had
+      # drifted from root prettier. Its format:check needs only prettier
+      # (resolved from the root install via npm's PATH), so it runs here
+      # alongside the root format gate — before the slower typecheck/tests,
+      # to fail fast on cheap style issues (`coding-policy: code-formatting`).
+      - name: Format check (agent-runner)
+        working-directory: container/agent-runner
+        run: npm run format:check
+
       - name: Typecheck
         run: npx tsc --noEmit
 
       - name: Tests
         run: npx vitest run
 
-      # The agent-runner is its own npm package with its own tsconfig and
-      # deps, so the root format:check glob (src/**) and root tsc never
-      # covered it (#701). Its *tests* are picked up by the root vitest
-      # config, but format and typecheck were unenforced — half the
-      # package's files had drifted from root prettier. Install its deps
-      # (claude-agent-sdk et al. resolve only from its own node_modules),
-      # then run its named scripts: prettier resolves from the root
-      # install, tsc from the agent-runner install.
+      # The agent-runner typecheck needs its own deps (claude-agent-sdk et
+      # al. resolve only from its own node_modules) and its own tsc, so it
+      # installs and runs after the root suite rather than gating fail-fast.
       - name: Install agent-runner deps
         working-directory: container/agent-runner
         run: npm ci
-
-      - name: Format check (agent-runner)
-        working-directory: container/agent-runner
-        run: npm run format:check
 
       - name: Typecheck (agent-runner)
         working-directory: container/agent-runner
