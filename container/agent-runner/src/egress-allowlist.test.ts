@@ -20,7 +20,9 @@ describe('classifySink', () => {
   });
 
   it('matches Composio Slack send/post variants', () => {
-    expect(classifySink('mcp__composio__slack_post_message')).toBe('slack_post');
+    expect(classifySink('mcp__composio__slack_post_message')).toBe(
+      'slack_post',
+    );
     expect(classifySink('mcp__composio__slack_send_dm')).toBe('slack_post');
   });
 
@@ -75,9 +77,9 @@ describe('splitRecipientList', () => {
 
 describe('extractDestinations', () => {
   it('extracts gmail recipient from common fields', () => {
-    expect(
-      extractDestinations('gmail_send', { recipient: 'a@x.io' }),
-    ).toEqual(['a@x.io']);
+    expect(extractDestinations('gmail_send', { recipient: 'a@x.io' })).toEqual([
+      'a@x.io',
+    ]);
     expect(extractDestinations('gmail_send', { to: 'b@x.io' })).toEqual([
       'b@x.io',
     ]);
@@ -570,17 +572,11 @@ describe('pathTargetsAllowlist', () => {
 
 describe('bashTargetsAllowlist', () => {
   it('matches the absolute path appearing literally in the command', () => {
+    expect(bashTargetsAllowlist(`cat ${ALLOWLIST_PATH}`, ALLOWLIST_PATH)).toBe(
+      true,
+    );
     expect(
-      bashTargetsAllowlist(
-        `cat ${ALLOWLIST_PATH}`,
-        ALLOWLIST_PATH,
-      ),
-    ).toBe(true);
-    expect(
-      bashTargetsAllowlist(
-        `echo '...' > ${ALLOWLIST_PATH}`,
-        ALLOWLIST_PATH,
-      ),
+      bashTargetsAllowlist(`echo '...' > ${ALLOWLIST_PATH}`, ALLOWLIST_PATH),
     ).toBe(true);
   });
 
@@ -606,12 +602,10 @@ describe('bashTargetsAllowlist', () => {
   });
 
   it('returns false for unrelated commands', () => {
-    expect(
-      bashTargetsAllowlist('ls /workspace/group', ALLOWLIST_PATH),
-    ).toBe(false);
-    expect(
-      bashTargetsAllowlist('npm install', ALLOWLIST_PATH),
-    ).toBe(false);
+    expect(bashTargetsAllowlist('ls /workspace/group', ALLOWLIST_PATH)).toBe(
+      false,
+    );
+    expect(bashTargetsAllowlist('npm install', ALLOWLIST_PATH)).toBe(false);
   });
 
   it('returns false for empty / non-string', () => {

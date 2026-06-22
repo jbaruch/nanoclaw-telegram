@@ -192,10 +192,7 @@ describe('resolveIdentityPreamble', () => {
   // orchestrator parses into multiple aliases.
   describe('multi-handle (#464)', () => {
     it('parses comma-separated ASSISTANT_USERNAME into aliases', () => {
-      const out = resolveIdentityPreamble(
-        'TestBot',
-        'testbot,testbotsurebot',
-      );
+      const out = resolveIdentityPreamble('TestBot', 'testbot,testbotsurebot');
       expect(out).toBeDefined();
       expect(out).toContain('**@testbot**');
       expect(out).toContain('**@testbotsurebot**');
@@ -212,7 +209,10 @@ describe('resolveIdentityPreamble', () => {
     });
 
     it('drops empty entries (trailing comma, blank between commas)', () => {
-      const out = resolveIdentityPreamble('TestBot', 'testbot,,testbotsurebot,');
+      const out = resolveIdentityPreamble(
+        'TestBot',
+        'testbot,,testbotsurebot,',
+      );
       expect(out).toBeDefined();
       expect(out).toContain('**@testbot**');
       expect(out).toContain('**@testbotsurebot**');

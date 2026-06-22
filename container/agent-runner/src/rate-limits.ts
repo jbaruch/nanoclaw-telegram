@@ -97,7 +97,7 @@ export const DEFAULT_CAP_MATRIX: Record<ProvenanceClass, CapMatrix> = {
     scheduleTaskPerHour: 1,
     auditOnly: false,
   },
-  'mixed': {
+  mixed: {
     agentSpawnsPerHour: 2,
     scheduleTaskPerHour: 1,
     auditOnly: false,
@@ -205,7 +205,10 @@ const ONE_HOUR_SECONDS = 3600;
  * Drop entries older than `cutoff` (exclusive). Returns a NEW array
  * — the input is not mutated.
  */
-export function pruneTimestamps(timestamps: ReadonlyArray<number>, cutoff: number): number[] {
+export function pruneTimestamps(
+  timestamps: ReadonlyArray<number>,
+  cutoff: number,
+): number[] {
   return timestamps.filter((t) => t >= cutoff);
 }
 
@@ -314,9 +317,7 @@ export function parseOverrides(raw: unknown): RateLimitOverrides | null {
       ...(typeof r2.scheduleTaskPerHour === 'number'
         ? { scheduleTaskPerHour: r2.scheduleTaskPerHour }
         : {}),
-      ...(typeof r2.auditOnly === 'boolean'
-        ? { auditOnly: r2.auditOnly }
-        : {}),
+      ...(typeof r2.auditOnly === 'boolean' ? { auditOnly: r2.auditOnly } : {}),
     };
   }
   return { schema_version: 1, rows: out };

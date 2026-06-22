@@ -7,18 +7,22 @@ import {
 
 const NOW = 1_750_000_000_000;
 
-function baseInput(overrides: Partial<{
-  isSubagent: boolean;
-  isMaintenanceSession: boolean;
-  isScheduledTask: boolean;
-  triggeringInboundId: string | null;
-  reactedToInbound: boolean;
-  repliedToInbound: boolean;
-  anySendMessage: boolean;
-}> = {}) {
+function baseInput(
+  overrides: Partial<{
+    isSubagent: boolean;
+    isMaintenanceSession: boolean;
+    isScheduledTask: boolean;
+    triggeringInboundId: string | null;
+    reactedToInbound: boolean;
+    repliedToInbound: boolean;
+    anySendMessage: boolean;
+  }> = {},
+) {
   const state = createSilentTurnState(NOW);
   state.triggeringInboundId =
-    'triggeringInboundId' in overrides ? (overrides.triggeringInboundId ?? null) : 'msg_77';
+    'triggeringInboundId' in overrides
+      ? (overrides.triggeringInboundId ?? null)
+      : 'msg_77';
   state.reactedToInbound = overrides.reactedToInbound ?? false;
   state.repliedToInbound = overrides.repliedToInbound ?? false;
   state.anySendMessage = overrides.anySendMessage ?? false;
@@ -106,9 +110,7 @@ describe('decideSilentTurnAudit', () => {
   });
 
   it('records anySendMessage in the audit log', () => {
-    const decision = decideSilentTurnAudit(
-      baseInput({ anySendMessage: true }),
-    );
+    const decision = decideSilentTurnAudit(baseInput({ anySendMessage: true }));
     expect(decision.kind).toBe('log');
     if (decision.kind !== 'log') throw new Error('unreachable');
     expect(decision.record.anySendMessage).toBe(true);

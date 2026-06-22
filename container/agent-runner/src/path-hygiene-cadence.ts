@@ -85,7 +85,8 @@ const KEYWORD_PATTERNS: { keyword: string; pattern: RegExp }[] = [
  * trimmed by the caller via `.replace(/[.,;:!?]+$/, '')` so a
  * sentence-final period doesn't get glued onto the path.
  */
-const PATH_RE = /(?<=^|[\s(:'"\[])(?:\/[A-Za-z0-9_.@\-/]+|[A-Za-z0-9_.@\-]+\/[A-Za-z0-9_.@\-/]+)/g;
+const PATH_RE =
+  /(?<=^|[\s(:'"\[])(?:\/[A-Za-z0-9_.@\-/]+|[A-Za-z0-9_.@\-]+\/[A-Za-z0-9_.@\-/]+)/g;
 const TRAILING_PUNCT_RE = /[.,;:!?]+$/;
 
 /**
@@ -103,9 +104,7 @@ const TRAILING_PUNCT_RE = /[.,;:!?]+$/;
  * No keywords or no paths → returns []. Caller treats empty as
  * "not hygiene content; pass".
  */
-export function extractHygieneSignatures(
-  text: unknown,
-): HygieneSignature[] {
+export function extractHygieneSignatures(text: unknown): HygieneSignature[] {
   if (typeof text !== 'string' || text.length === 0) {
     return [];
   }
@@ -170,9 +169,7 @@ export function decideHygieneCadence(
   // a stale set with one new entry mixed in, which is exactly the
   // pattern the rule wanted to throttle. The agent can re-emit a
   // tighter message containing only the new entry.
-  const summary = suppressed
-    .map((s) => `${s.keyword} ${s.path}`)
-    .join(', ');
+  const summary = suppressed.map((s) => `${s.keyword} ${s.path}`).join(', ');
   const windowLabel = formatWindowLabel(window);
   return {
     kind: 'deny',

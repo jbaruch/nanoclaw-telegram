@@ -179,9 +179,11 @@ function extractAgentBrowserUrl(command: string): string | null {
  * annotates — without it, two interleaved tool calls of the same kind
  * would produce indistinguishable markers.
  */
-export function formatSentinel(source: SentinelSource, toolUseId: string): string {
+export function formatSentinel(
+  source: SentinelSource,
+  toolUseId: string,
+): string {
   const sourceStr = escapeAttr(formatSource(source.prefix, source.value));
   const idStr = escapeAttr(toolUseId);
   return `${SENTINEL_PREFIX} source="${sourceStr}" tool_use_id="${idStr}"`;
 }
-

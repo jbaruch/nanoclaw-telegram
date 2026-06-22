@@ -20,10 +20,12 @@ describe('classifyTrustedRead — paths under /workspace/trusted/', () => {
 
   it('matches typed memory files', () => {
     expect(
-      classifyTrustedRead('/workspace/trusted/highlights.md').isTrustedMemoryRead,
+      classifyTrustedRead('/workspace/trusted/highlights.md')
+        .isTrustedMemoryRead,
     ).toBe(true);
     expect(
-      classifyTrustedRead('/workspace/trusted/feedback_no_secrets.md').isTrustedMemoryRead,
+      classifyTrustedRead('/workspace/trusted/feedback_no_secrets.md')
+        .isTrustedMemoryRead,
     ).toBe(true);
   });
 });
@@ -83,12 +85,10 @@ describe('classifyTrustedRead — non-trusted paths', () => {
   });
 
   it('does NOT match paths outside /workspace', () => {
-    expect(
-      classifyTrustedRead('/etc/passwd').isTrustedMemoryRead,
-    ).toBe(false);
-    expect(
-      classifyTrustedRead('/tmp/scratch.md').isTrustedMemoryRead,
-    ).toBe(false);
+    expect(classifyTrustedRead('/etc/passwd').isTrustedMemoryRead).toBe(false);
+    expect(classifyTrustedRead('/tmp/scratch.md').isTrustedMemoryRead).toBe(
+      false,
+    );
   });
 
   it('does NOT match /workspace/trusted-evil/ (prefix-strip safety)', () => {
@@ -151,15 +151,15 @@ describe('sanitizePathForDisplay', () => {
   });
 
   it('replaces newlines with spaces', () => {
-    expect(
-      sanitizePathForDisplay('/workspace/trusted/foo\n/bar.md'),
-    ).toBe('/workspace/trusted/foo /bar.md');
+    expect(sanitizePathForDisplay('/workspace/trusted/foo\n/bar.md')).toBe(
+      '/workspace/trusted/foo /bar.md',
+    );
   });
 
   it('replaces \\r and \\t and other control chars with spaces', () => {
-    expect(
-      sanitizePathForDisplay('/workspace/\rtrusted/\tfoo\x00bar'),
-    ).toBe('/workspace/ trusted/ foo bar');
+    expect(sanitizePathForDisplay('/workspace/\rtrusted/\tfoo\x00bar')).toBe(
+      '/workspace/ trusted/ foo bar',
+    );
   });
 
   it('collapses runs of control chars into a single space', () => {
@@ -203,9 +203,7 @@ describe('buildStalenessReminder', () => {
   });
 
   it('keeps the reminder a single paragraph (no real newlines anywhere)', () => {
-    const reminder = buildStalenessReminder(
-      '/workspace/trusted/foo\nbar.md',
-    );
+    const reminder = buildStalenessReminder('/workspace/trusted/foo\nbar.md');
     expect(reminder.includes('\n')).toBe(false);
   });
 

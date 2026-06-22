@@ -113,7 +113,10 @@ function mockClient(handler: MockMessagesCreate): Pick<Anthropic, 'messages'> {
   } as unknown as Pick<Anthropic, 'messages'>;
 }
 
-function withTempFile(content: string, fn: (filePath: string) => Promise<void>): Promise<void> {
+function withTempFile(
+  content: string,
+  fn: (filePath: string) => Promise<void>,
+): Promise<void> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-392-'));
   const filePath = path.join(dir, 'fixture.txt');
   fs.writeFileSync(filePath, content);
@@ -142,7 +145,12 @@ describe('runExternalFileSummary — success', () => {
       async (filePath) => {
         const create = vi.fn().mockResolvedValue({
           content: [
-            { type: 'tool_use', id: 'tu_1', name: 'emit_summary', input: FAKE_DIGEST },
+            {
+              type: 'tool_use',
+              id: 'tu_1',
+              name: 'emit_summary',
+              input: FAKE_DIGEST,
+            },
           ],
         });
         const result = await runExternalFileSummary({
@@ -160,7 +168,9 @@ describe('runExternalFileSummary — success', () => {
         // Structured digest is present.
         expect(result.denyReason).toContain('"content_kind": "text"');
         expect(result.denyReason).toContain('"summary":');
-        expect(result.denyReason).toContain('A short paraphrase of the file contents.');
+        expect(result.denyReason).toContain(
+          'A short paraphrase of the file contents.',
+        );
         // Latency telemetry surfaces (>= 0).
         expect(result.latencyMs).toBeGreaterThanOrEqual(0);
         expect(result.truncated).toBe(false);
@@ -209,7 +219,12 @@ describe('runExternalFileSummary — success', () => {
     await withTempFile(big, async (filePath) => {
       const create = vi.fn().mockResolvedValue({
         content: [
-          { type: 'tool_use', id: 'tu_1', name: 'emit_summary', input: FAKE_DIGEST },
+          {
+            type: 'tool_use',
+            id: 'tu_1',
+            name: 'emit_summary',
+            input: FAKE_DIGEST,
+          },
         ],
       });
       const result = await runExternalFileSummary({
@@ -221,7 +236,9 @@ describe('runExternalFileSummary — success', () => {
       expect(result.kind).toBe('ok');
       if (result.kind !== 'ok') return;
       expect(result.truncated).toBe(true);
-      expect(result.denyReason).toContain('only the first chunk was summarised');
+      expect(result.denyReason).toContain(
+        'only the first chunk was summarised',
+      );
     });
   });
 });
@@ -240,7 +257,9 @@ describe('runExternalFileSummary — security hardening (#392 review feedback)',
         isFile: () => false,
       }),
       readFileSync: vi.fn().mockImplementation(() => {
-        throw new Error('readFileSync should not be called on non-regular file');
+        throw new Error(
+          'readFileSync should not be called on non-regular file',
+        );
       }),
       openSync: vi.fn().mockImplementation(() => {
         throw new Error('openSync should not be called on non-regular file');
@@ -250,7 +269,8 @@ describe('runExternalFileSummary — security hardening (#392 review feedback)',
     };
     const result = await runExternalFileSummary({
       resolved: '/dev/zero',
-      sourceMarker: 'PROVENANCE_MARKER: source="file:/dev/zero" tool_use_id="tu_1"',
+      sourceMarker:
+        'PROVENANCE_MARKER: source="file:/dev/zero" tool_use_id="tu_1"',
       client: mockClient(async () => {
         throw new Error('summariser invoked despite non-regular file');
       }),
@@ -279,22 +299,30 @@ describe('runExternalFileSummary — security hardening (#392 review feedback)',
         throw new Error('readFileSync should not be called on oversize file');
       }),
       openSync: vi.fn().mockReturnValue(42),
-      readSync: vi.fn().mockImplementation(
-        (_fd: number, buf: Buffer, _offset: number, length: number) => {
-          buf.fill('a'.charCodeAt(0), 0, length);
-          return length;
-        },
-      ),
+      readSync: vi
+        .fn()
+        .mockImplementation(
+          (_fd: number, buf: Buffer, _offset: number, length: number) => {
+            buf.fill('a'.charCodeAt(0), 0, length);
+            return length;
+          },
+        ),
       closeSync: vi.fn(),
     };
     const create = vi.fn().mockResolvedValue({
       content: [
-        { type: 'tool_use', id: 'tu_1', name: 'emit_summary', input: FAKE_DIGEST },
+        {
+          type: 'tool_use',
+          id: 'tu_1',
+          name: 'emit_summary',
+          input: FAKE_DIGEST,
+        },
       ],
     });
     const result = await runExternalFileSummary({
       resolved: '/tmp/big.log',
-      sourceMarker: 'PROVENANCE_MARKER: source="file:/tmp/big.log" tool_use_id="tu_1"',
+      sourceMarker:
+        'PROVENANCE_MARKER: source="file:/tmp/big.log" tool_use_id="tu_1"',
       client: mockClient(create),
       fsModule: fakeFs as never,
       maxInputBytes: 1_000,
@@ -316,7 +344,12 @@ describe('runExternalFileSummary — security hardening (#392 review feedback)',
     // escapeAttr helper collapses CR/LF.
     const create = vi.fn().mockResolvedValue({
       content: [
-        { type: 'tool_use', id: 'tu_1', name: 'emit_summary', input: FAKE_DIGEST },
+        {
+          type: 'tool_use',
+          id: 'tu_1',
+          name: 'emit_summary',
+          input: FAKE_DIGEST,
+        },
       ],
     });
     const fakeFs = {
@@ -361,7 +394,8 @@ describe('runExternalFileSummary — pass-through', () => {
   it('passes through with reason=file_read_error when the file does not exist', async () => {
     const result = await runExternalFileSummary({
       resolved: '/tmp/nanoclaw-392-does-not-exist',
-      sourceMarker: 'PROVENANCE_MARKER: source="file:/tmp/nope" tool_use_id="tu_1"',
+      sourceMarker:
+        'PROVENANCE_MARKER: source="file:/tmp/nope" tool_use_id="tu_1"',
       // The summariser must never be invoked on a missing file —
       // throwing in the mock would surface that as a test failure.
       client: mockClient(async () => {

@@ -14,7 +14,7 @@ describe('formatSource', () => {
     );
   });
 
-  it('returns the raw value untouched (escaping is the wrapper\'s job)', () => {
+  it("returns the raw value untouched (escaping is the wrapper's job)", () => {
     expect(formatSource('web', 'a"b')).toBe('web:a"b');
   });
 });
@@ -33,9 +33,7 @@ describe('wrapUntrustedInput', () => {
   });
 
   it('escapes ampersands in URL query strings (web:)', () => {
-    expect(
-      wrapUntrustedInput('x', 'web', 'https://example.com/?a=1&b=2'),
-    ).toBe(
+    expect(wrapUntrustedInput('x', 'web', 'https://example.com/?a=1&b=2')).toBe(
       '<untrusted-input source="web:https://example.com/?a=1&amp;b=2">\nx\n</untrusted-input>',
     );
   });
@@ -70,7 +68,9 @@ describe('wrapUntrustedInput', () => {
   });
 
   it('matches the existing #29 prompt-wrap shape after retrofit', () => {
-    expect(wrapUntrustedInput('the prompt', 'untrusted-container', 'news-group')).toBe(
+    expect(
+      wrapUntrustedInput('the prompt', 'untrusted-container', 'news-group'),
+    ).toBe(
       '<untrusted-input source="untrusted-container:news-group">\nthe prompt\n</untrusted-input>',
     );
   });

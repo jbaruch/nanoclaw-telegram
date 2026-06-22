@@ -93,7 +93,8 @@ const RULES: BashRule[] = [
     id: 'dd-to-disk',
     // dd with of=/dev/sd*, /dev/nvme*, /dev/disk*. Catches `dd if=foo
     // of=/dev/sda`. Doesn't gate dd to regular files.
-    pattern: /\bdd\b[^\n;]*\bof=\/dev\/(?:sd[a-z]\d*|nvme\d+n\d+|disk\d+|hd[a-z]\d*)/,
+    pattern:
+      /\bdd\b[^\n;]*\bof=\/dev\/(?:sd[a-z]\d*|nvme\d+n\d+|disk\d+|hd[a-z]\d*)/,
     reason:
       'dd of=/dev/sd* (raw disk write) is denied. Use a path under /tmp or /workspace if you need to stage a file.',
   },
@@ -109,7 +110,8 @@ const RULES: BashRule[] = [
     // chmod -R 777 anywhere — the textbook permission-loosening
     // mistake on shared mounts. Same command-start anchoring as
     // `mkfs` so `echo "chmod -R 777"` in prose isn't flagged.
-    pattern: /(?:^|[;&|]+\s*|`\s*|\$\(\s*)chmod\s+(?:-R\s+|--recursive\s+|-[a-zA-Z]*R[a-zA-Z]*\s+)0?777\b/,
+    pattern:
+      /(?:^|[;&|]+\s*|`\s*|\$\(\s*)chmod\s+(?:-R\s+|--recursive\s+|-[a-zA-Z]*R[a-zA-Z]*\s+)0?777\b/,
     reason:
       'chmod -R 777 is denied — opens shared mounts to every uid in the container. Scope permissions per file/dir.',
   },

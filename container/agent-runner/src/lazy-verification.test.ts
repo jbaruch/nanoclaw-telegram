@@ -54,8 +54,7 @@ describe('detectLazyVerification', () => {
   });
 
   it('still blocks when only one Tried statement is present', () => {
-    const message =
-      'Tried WebFetch — got an empty body. Site is JS-rendered.';
+    const message = 'Tried WebFetch — got an empty body. Site is JS-rendered.';
     const decision = detectLazyVerification(message);
     expect(decision.block).toBe(true);
   });

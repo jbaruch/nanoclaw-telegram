@@ -62,7 +62,9 @@ const EMPTY_STATS: MarkdownRewriteStats = {
  * mixes bare HTML and Markdown in the same message; we don't try to
  * untangle.
  */
-function splitCodeRegions(text: string): { content: string; protect: boolean }[] {
+function splitCodeRegions(
+  text: string,
+): { content: string; protect: boolean }[] {
   const segments: { content: string; protect: boolean }[] = [];
   // Match the smallest opening of any protected region, then find its
   // close. The order of `|` arms is significant: triple backticks must
@@ -78,7 +80,10 @@ function splitCodeRegions(text: string): { content: string; protect: boolean }[]
       break;
     }
     if (match.index > cursor) {
-      segments.push({ content: text.slice(cursor, match.index), protect: false });
+      segments.push({
+        content: text.slice(cursor, match.index),
+        protect: false,
+      });
     }
     const opener = match[0];
     const closeRe: RegExp =
@@ -115,9 +120,10 @@ function splitCodeRegions(text: string): { content: string; protect: boolean }[]
  *  4. Code spans `` `...` `` → `<code>...</code>` (inner content
  *     entity-escaped so embedded `<`/`&` render literally).
  */
-function rewriteSegment(
-  text: string,
-): { out: string; stats: MarkdownRewriteStats } {
+function rewriteSegment(text: string): {
+  out: string;
+  stats: MarkdownRewriteStats;
+} {
   const stats: MarkdownRewriteStats = { ...EMPTY_STATS };
   let out = text;
 

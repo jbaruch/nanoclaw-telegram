@@ -49,13 +49,18 @@ describe('extractCompactProvenance', () => {
 
   it('returns empty for non-string input', () => {
     // Defensive null-guard — JSON.parse can hand us anything.
-    expect([...extractCompactProvenance(null as unknown as string)]).toEqual([]);
+    expect([...extractCompactProvenance(null as unknown as string)]).toEqual(
+      [],
+    );
   });
 
   it('returns empty when transcript carries no markers', () => {
     const jsonl = jsonlOf([
       { type: 'user', message: { content: 'hello world' } },
-      { type: 'assistant', message: { content: [{ type: 'text', text: 'hi back' }] } },
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'hi back' }] },
+      },
     ]);
     expect([...extractCompactProvenance(jsonl)]).toEqual([]);
   });
@@ -64,7 +69,9 @@ describe('extractCompactProvenance', () => {
     const jsonl = jsonlOf([
       {
         type: 'user',
-        message: { content: wrap('web', 'https://example.com/post', 'page text') },
+        message: {
+          content: wrap('web', 'https://example.com/post', 'page text'),
+        },
       },
     ]);
     expect([...extractCompactProvenance(jsonl)]).toEqual([
@@ -95,7 +102,9 @@ describe('extractCompactProvenance', () => {
       {
         type: 'user',
         message: {
-          content: [{ type: 'tool_result', content: sentinel('calendar', 'evt=xyz') }],
+          content: [
+            { type: 'tool_result', content: sentinel('calendar', 'evt=xyz') },
+          ],
         },
       },
     ]);
@@ -112,7 +121,9 @@ describe('extractCompactProvenance', () => {
       {
         type: 'user',
         message: {
-          content: [{ type: 'tool_result', content: sentinel('web', 'https://x.io') }],
+          content: [
+            { type: 'tool_result', content: sentinel('web', 'https://x.io') },
+          ],
         },
       },
     ]);
@@ -134,9 +145,15 @@ describe('extractCompactProvenance', () => {
     // Live transcripts can have partial trailing writes during a hot
     // read; the regex sweep is line-agnostic and just keeps going.
     const lines = [
-      JSON.stringify({ type: 'user', message: { content: wrap('web', 'a', 'x') } }),
+      JSON.stringify({
+        type: 'user',
+        message: { content: wrap('web', 'a', 'x') },
+      }),
       '{"type":"user", malformed garbage',
-      JSON.stringify({ type: 'user', message: { content: wrap('gmail', 'b', 'y') } }),
+      JSON.stringify({
+        type: 'user',
+        message: { content: wrap('gmail', 'b', 'y') },
+      }),
     ].join('\n');
     expect([...extractCompactProvenance(lines)].sort()).toEqual([
       'gmail:b',
@@ -151,7 +168,9 @@ describe('extractCompactProvenance', () => {
     const jsonl = jsonlOf([
       {
         type: 'user',
-        message: { content: '<untrusted-input source="bare">x</untrusted-input>' },
+        message: {
+          content: '<untrusted-input source="bare">x</untrusted-input>',
+        },
       },
     ]);
     expect([...extractCompactProvenance(jsonl)]).toEqual([]);
@@ -159,8 +178,18 @@ describe('extractCompactProvenance', () => {
 
   it('rejects sources with empty prefix or empty value', () => {
     const jsonl = jsonlOf([
-      { type: 'user', message: { content: '<untrusted-input source=":foo">x</untrusted-input>' } },
-      { type: 'user', message: { content: '<untrusted-input source="bar:">y</untrusted-input>' } },
+      {
+        type: 'user',
+        message: {
+          content: '<untrusted-input source=":foo">x</untrusted-input>',
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: '<untrusted-input source="bar:">y</untrusted-input>',
+        },
+      },
     ]);
     expect([...extractCompactProvenance(jsonl)]).toEqual([]);
   });
@@ -170,7 +199,9 @@ describe('extractCompactProvenance', () => {
     const jsonl = jsonlOf([
       {
         type: 'user',
-        message: { content: `<untrusted-input source="web:${huge}">y</untrusted-input>` },
+        message: {
+          content: `<untrusted-input source="web:${huge}">y</untrusted-input>`,
+        },
       },
     ]);
     expect([...extractCompactProvenance(jsonl)]).toEqual([]);
@@ -187,7 +218,8 @@ describe('extractCompactProvenance', () => {
       {
         type: 'user',
         message: {
-          content: '<untrusted-input source="web:line1\nline2">x</untrusted-input>',
+          content:
+            '<untrusted-input source="web:line1\nline2">x</untrusted-input>',
         },
       },
     ]);
@@ -221,8 +253,7 @@ describe('extractCompactProvenance', () => {
       {
         type: 'user',
         message: {
-          content:
-            '<untrusted-input source="web:safe">x</untrusted-input>',
+          content: '<untrusted-input source="web:safe">x</untrusted-input>',
         },
       },
     ]);
@@ -313,26 +344,70 @@ describe('parseSidecar', () => {
   });
 
   it('rejects missing or wrong schema_version', () => {
-    expect(parseSidecar({ schema_version: 0, session_id: 'a', created_at: 0, sources: [] })).toBeNull();
-    expect(parseSidecar({ schema_version: 2, session_id: 'a', created_at: 0, sources: [] })).toBeNull();
-    expect(parseSidecar({ session_id: 'a', created_at: 0, sources: [] })).toBeNull();
+    expect(
+      parseSidecar({
+        schema_version: 0,
+        session_id: 'a',
+        created_at: 0,
+        sources: [],
+      }),
+    ).toBeNull();
+    expect(
+      parseSidecar({
+        schema_version: 2,
+        session_id: 'a',
+        created_at: 0,
+        sources: [],
+      }),
+    ).toBeNull();
+    expect(
+      parseSidecar({ session_id: 'a', created_at: 0, sources: [] }),
+    ).toBeNull();
   });
 
   it('rejects empty session_id', () => {
-    expect(parseSidecar({ schema_version: 1, session_id: '', created_at: 0, sources: [] })).toBeNull();
+    expect(
+      parseSidecar({
+        schema_version: 1,
+        session_id: '',
+        created_at: 0,
+        sources: [],
+      }),
+    ).toBeNull();
   });
 
   it('rejects non-array sources', () => {
-    expect(parseSidecar({ schema_version: 1, session_id: 'a', created_at: 0, sources: 'web:x' })).toBeNull();
+    expect(
+      parseSidecar({
+        schema_version: 1,
+        session_id: 'a',
+        created_at: 0,
+        sources: 'web:x',
+      }),
+    ).toBeNull();
   });
 
   it('rejects sources containing non-string entries', () => {
-    expect(parseSidecar({ schema_version: 1, session_id: 'a', created_at: 0, sources: [42] })).toBeNull();
+    expect(
+      parseSidecar({
+        schema_version: 1,
+        session_id: 'a',
+        created_at: 0,
+        sources: [42],
+      }),
+    ).toBeNull();
   });
 
   it('rejects sources entries exceeding the byte cap', () => {
     const huge = 'x'.repeat(3000);
-    expect(parseSidecar({ schema_version: 1, session_id: 'a', created_at: 0, sources: [huge] })).toBeNull();
+    expect(
+      parseSidecar({
+        schema_version: 1,
+        session_id: 'a',
+        created_at: 0,
+        sources: [huge],
+      }),
+    ).toBeNull();
   });
 
   it('rejects malformed prefix:value entries (sidecar tampering)', () => {
@@ -436,13 +511,21 @@ describe('parseSidecar', () => {
 
 describe('sidecar persistence', () => {
   it('writes a sidecar that read-and-clear returns', () => {
-    writeCompactProvenanceSidecar(tmpRoot, 'sess-A', new Set(['web:https://a.io']));
+    writeCompactProvenanceSidecar(
+      tmpRoot,
+      'sess-A',
+      new Set(['web:https://a.io']),
+    );
     const result = readAndClearSidecar(tmpRoot, 'sess-A');
     expect([...result]).toEqual(['web:https://a.io']);
   });
 
   it('deletes the sidecar after successful read', () => {
-    writeCompactProvenanceSidecar(tmpRoot, 'sess-A', new Set(['web:https://a.io']));
+    writeCompactProvenanceSidecar(
+      tmpRoot,
+      'sess-A',
+      new Set(['web:https://a.io']),
+    );
     const filePath = sidecarPathFor(tmpRoot, 'sess-A');
     expect(fs.existsSync(filePath)).toBe(true);
     readAndClearSidecar(tmpRoot, 'sess-A');
@@ -495,13 +578,19 @@ describe('sidecar persistence', () => {
   });
 
   it('write returns null on empty source set', () => {
-    const filePath = writeCompactProvenanceSidecar(tmpRoot, 'sess-A', new Set());
+    const filePath = writeCompactProvenanceSidecar(
+      tmpRoot,
+      'sess-A',
+      new Set(),
+    );
     expect(filePath).toBeNull();
     expect(fs.existsSync(sidecarPathFor(tmpRoot, 'sess-A'))).toBe(false);
   });
 
   it('write returns null on empty session id', () => {
-    expect(writeCompactProvenanceSidecar(tmpRoot, '', new Set(['web:https://a.io']))).toBeNull();
+    expect(
+      writeCompactProvenanceSidecar(tmpRoot, '', new Set(['web:https://a.io'])),
+    ).toBeNull();
   });
 
   it('sidecar path uses basename to defend against traversal', () => {
@@ -514,7 +603,11 @@ describe('sidecar persistence', () => {
 
   it('write creates the state dir if missing', () => {
     const nested = path.join(tmpRoot, 'nested', 'deeper');
-    writeCompactProvenanceSidecar(nested, 'sess-A', new Set(['web:https://a.io']));
+    writeCompactProvenanceSidecar(
+      nested,
+      'sess-A',
+      new Set(['web:https://a.io']),
+    );
     expect(fs.existsSync(sidecarPathFor(nested, 'sess-A'))).toBe(true);
   });
 });
@@ -527,7 +620,10 @@ describe('persistCompactProvenance', () => {
     fs.writeFileSync(
       transcriptPath,
       jsonlOf([
-        { type: 'user', message: { content: wrap('web', 'https://a.io', 'x') } },
+        {
+          type: 'user',
+          message: { content: wrap('web', 'https://a.io', 'x') },
+        },
         { type: 'user', message: { content: wrap('gmail', 'msg=1', 'y') } },
       ]),
     );
@@ -545,7 +641,9 @@ describe('persistCompactProvenance', () => {
       jsonlOf([{ type: 'user', message: { content: 'plain owner prompt' } }]),
     );
     const stateDir = path.join(tmpRoot, 'state');
-    expect(persistCompactProvenance(transcriptPath, stateDir, 'sess-A')).toBe(0);
+    expect(persistCompactProvenance(transcriptPath, stateDir, 'sess-A')).toBe(
+      0,
+    );
     expect(fs.existsSync(sidecarPathFor(stateDir, 'sess-A'))).toBe(false);
   });
 
@@ -558,7 +656,9 @@ describe('persistCompactProvenance', () => {
       (m) => messages.push(m),
     );
     expect(count).toBe(0);
-    expect(messages.some((m) => m.includes('transcript read failed'))).toBe(true);
+    expect(messages.some((m) => m.includes('transcript read failed'))).toBe(
+      true,
+    );
   });
 });
 
@@ -576,11 +676,16 @@ describe('end-to-end roundtrip', () => {
     fs.writeFileSync(
       transcriptPath,
       jsonlOf([
-        { type: 'user', message: { content: wrap('web', 'https://a.io', 'x') } },
+        {
+          type: 'user',
+          message: { content: wrap('web', 'https://a.io', 'x') },
+        },
         {
           type: 'user',
           message: {
-            content: [{ type: 'tool_result', content: sentinel('gmail', 'msg=1') }],
+            content: [
+              { type: 'tool_result', content: sentinel('gmail', 'msg=1') },
+            ],
           },
         },
         { type: 'user', message: { content: wrap('calendar', 'evt=q', 'y') } },

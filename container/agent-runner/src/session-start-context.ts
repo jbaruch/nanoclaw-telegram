@@ -141,8 +141,7 @@ const EXPECTED_READ_ERROR_CODES = new Set([
 function isExpectedReadError(err: unknown): boolean {
   const errno = err as NodeJS.ErrnoException | null | undefined;
   return (
-    typeof errno?.code === 'string' &&
-    EXPECTED_READ_ERROR_CODES.has(errno.code)
+    typeof errno?.code === 'string' && EXPECTED_READ_ERROR_CODES.has(errno.code)
   );
 }
 

@@ -52,9 +52,9 @@ describe('classifyProvenance', () => {
   });
 
   it('cross-group AND multiple untrusted-source → mixed', () => {
-    expect(
-      classifyProvenance(p(['cross-group', 'web', 'gmail']), false),
-    ).toBe('mixed');
+    expect(classifyProvenance(p(['cross-group', 'web', 'gmail']), false)).toBe(
+      'mixed',
+    );
   });
 
   it('unknown prefix sentinel → untrusted-source (fail closed)', () => {
@@ -65,10 +65,7 @@ describe('classifyProvenance', () => {
 
   it('cross-group + unknown sentinel → mixed', () => {
     expect(
-      classifyProvenance(
-        p(['cross-group', '__unknown__' as AclPrefix]),
-        true,
-      ),
+      classifyProvenance(p(['cross-group', '__unknown__' as AclPrefix]), true),
     ).toBe('mixed');
   });
 });
@@ -168,10 +165,7 @@ describe('decideRate — operator-trusted (audit only)', () => {
     // Cap is 50 agent spawns/hr for operator-trusted. Saturate it.
     const counters = {
       schema_version: 1 as const,
-      agent_spawns: Array.from(
-        { length: 60 },
-        (_, i) => FIXED_NOW - 1000 + i,
-      ),
+      agent_spawns: Array.from({ length: 60 }, (_, i) => FIXED_NOW - 1000 + i),
       schedule_task_calls: [],
     };
     const decision = decideRate(
@@ -194,10 +188,7 @@ describe('decideRate — operator-untrusted (gated)', () => {
   it('allows the 5th agent spawn within budget', () => {
     const counters = {
       schema_version: 1 as const,
-      agent_spawns: Array.from(
-        { length: 4 },
-        (_, i) => FIXED_NOW - 100 + i,
-      ),
+      agent_spawns: Array.from({ length: 4 }, (_, i) => FIXED_NOW - 100 + i),
       schedule_task_calls: [],
     };
     const decision = decideRate(
@@ -214,10 +205,7 @@ describe('decideRate — operator-untrusted (gated)', () => {
   it('denies the 6th agent spawn (cap is 5/hr)', () => {
     const counters = {
       schema_version: 1 as const,
-      agent_spawns: Array.from(
-        { length: 5 },
-        (_, i) => FIXED_NOW - 100 + i,
-      ),
+      agent_spawns: Array.from({ length: 5 }, (_, i) => FIXED_NOW - 100 + i),
       schedule_task_calls: [],
     };
     const decision = decideRate(
@@ -347,10 +335,7 @@ describe('decideRate — rolling window pruning', () => {
     const counters = {
       schema_version: 1 as const,
       // Five spawns more than 1 hour old + zero recent.
-      agent_spawns: Array.from(
-        { length: 5 },
-        (_, i) => FIXED_NOW - 7200 + i,
-      ),
+      agent_spawns: Array.from({ length: 5 }, (_, i) => FIXED_NOW - 7200 + i),
       schedule_task_calls: [],
     };
     const decision = decideRate(
@@ -369,10 +354,7 @@ describe('decideRate — rolling window pruning', () => {
   it('boundary: a timestamp exactly 3600s old is still in window', () => {
     const counters = {
       schema_version: 1 as const,
-      agent_spawns: Array.from(
-        { length: 5 },
-        () => FIXED_NOW - 3600,
-      ),
+      agent_spawns: Array.from({ length: 5 }, () => FIXED_NOW - 3600),
       schedule_task_calls: [],
     };
     const decision = decideRate(
@@ -426,9 +408,7 @@ describe('parseCounters', () => {
 
   it('returns null when arrays missing', () => {
     expect(parseCounters({ schema_version: 1 })).toBeNull();
-    expect(
-      parseCounters({ schema_version: 1, agent_spawns: [] }),
-    ).toBeNull();
+    expect(parseCounters({ schema_version: 1, agent_spawns: [] })).toBeNull();
   });
 
   it('returns null when array contains non-number entries', () => {

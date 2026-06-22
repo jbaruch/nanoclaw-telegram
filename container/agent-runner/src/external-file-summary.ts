@@ -32,10 +32,7 @@
  */
 
 import * as fs from 'fs';
-import {
-  classifyReadPath,
-  formatSentinel,
-} from './provenance-sentinel.js';
+import { classifyReadPath, formatSentinel } from './provenance-sentinel.js';
 import { escapeAttr } from './untrusted-input-sources.js';
 import {
   extractStructuredSummary,

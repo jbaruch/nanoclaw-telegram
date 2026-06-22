@@ -101,13 +101,12 @@ export function loadEgressAllowlist(
 ): EgressAllowlist | null {
   if (!fs.existsSync(path)) return null;
   const rawValue = fs.readFileSync(path, 'utf-8');
-  const raw = typeof rawValue === 'string' ? rawValue : rawValue.toString('utf-8');
+  const raw =
+    typeof rawValue === 'string' ? rawValue : rawValue.toString('utf-8');
   if (raw.trim().length === 0) return null;
   const parsed = JSON.parse(raw);
   if (!parsed || typeof parsed !== 'object') {
-    throw new Error(
-      `egress allowlist at ${path} did not parse to an object`,
-    );
+    throw new Error(`egress allowlist at ${path} did not parse to an object`);
   }
   return validateAllowlist(parsed as Record<string, unknown>, path);
 }
@@ -180,7 +179,9 @@ function pickStringArray(
     );
     return undefined;
   }
-  const valid = v.filter((x): x is string => typeof x === 'string' && x.length > 0);
+  const valid = v.filter(
+    (x): x is string => typeof x === 'string' && x.length > 0,
+  );
   if (valid.length !== v.length) {
     console.warn(
       `egress allowlist: ${context}.${key} contained ${v.length - valid.length} non-string entries — using ${valid.length} valid`,
@@ -223,7 +224,8 @@ export function decideEgress(args: {
   if (!hasUntrustedProvenance && !enforceForOperator) {
     return {
       kind: 'allow',
-      reason: 'operator-originated trusted chain — allowlist bypassed by default',
+      reason:
+        'operator-originated trusted chain — allowlist bypassed by default',
     };
   }
 
@@ -263,10 +265,7 @@ export function decideEgress(args: {
   };
 }
 
-export type GatedSink =
-  | 'gmail_send'
-  | 'slack_post'
-  | 'send_message_to_chat';
+export type GatedSink = 'gmail_send' | 'slack_post' | 'send_message_to_chat';
 
 export function classifySink(toolName: string): GatedSink | null {
   if (typeof toolName !== 'string') return null;
@@ -353,7 +352,12 @@ export function pathTargetsAllowlist(
   candidate: string,
   allowlistPath: string,
   fsRealpath: (p: string) => string | null = () => null,
-  pathLib: { basename: (p: string) => string; isAbsolute: (p: string) => boolean; normalize: (p: string) => string; resolve: (...parts: string[]) => string } = defaultPathLib(),
+  pathLib: {
+    basename: (p: string) => string;
+    isAbsolute: (p: string) => boolean;
+    normalize: (p: string) => string;
+    resolve: (...parts: string[]) => string;
+  } = defaultPathLib(),
 ): boolean {
   if (typeof candidate !== 'string' || candidate.length === 0) return false;
   if (candidate === allowlistPath) return true;

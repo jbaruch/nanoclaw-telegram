@@ -44,7 +44,9 @@ export function buildRegisterGroupContainerConfig(
   const hasTrusted = args.trusted !== undefined;
   const hasHeartbeat = args.enableHeartbeat !== undefined;
   const hasMounts = !!args.additionalMounts;
-  const hasOverlay = !!(args.additionalTiles && args.additionalTiles.length > 0);
+  const hasOverlay = !!(
+    args.additionalTiles && args.additionalTiles.length > 0
+  );
 
   if (!hasTrusted && !hasHeartbeat && !hasMounts && !hasOverlay) {
     return undefined;

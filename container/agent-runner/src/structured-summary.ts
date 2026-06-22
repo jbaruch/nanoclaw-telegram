@@ -206,7 +206,8 @@ export async function extractStructuredSummary<T>(
               'Emit the structured summary. Call this exactly once with ' +
               'the extracted fields. Do NOT call any other tool — there are ' +
               'none available, and any other action means refusing the request.',
-            input_schema: schema as unknown as Anthropic.Messages.Tool.InputSchema,
+            input_schema:
+              schema as unknown as Anthropic.Messages.Tool.InputSchema,
           },
         ],
         tool_choice: { type: 'tool', name: 'emit_summary' },
@@ -228,9 +229,7 @@ export async function extractStructuredSummary<T>(
       );
       return {
         kind: 'error',
-        reason: refusal
-          ? 'sub_agent_refused'
-          : 'sub_agent_returned_nothing',
+        reason: refusal ? 'sub_agent_refused' : 'sub_agent_returned_nothing',
         detail: refusal?.text ?? 'no tool_use block in response',
       };
     }

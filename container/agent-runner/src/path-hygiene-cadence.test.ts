@@ -15,14 +15,16 @@ describe('extractHygieneSignatures', () => {
 
   it('returns [] for prose without hygiene keywords', () => {
     expect(
-      extractHygieneSignatures('All quiet — no issues to report. /workspace/group/RUNBOOK.md last touched 2h ago.'),
+      extractHygieneSignatures(
+        'All quiet — no issues to report. /workspace/group/RUNBOOK.md last touched 2h ago.',
+      ),
     ).toEqual([]);
   });
 
   it('returns [] when keywords are present but no paths', () => {
-    expect(
-      extractHygieneSignatures('Path hygiene check ran — clean.'),
-    ).toEqual([]);
+    expect(extractHygieneSignatures('Path hygiene check ran — clean.')).toEqual(
+      [],
+    );
   });
 
   it('extracts a single signature for one keyword + one path', () => {
@@ -63,9 +65,7 @@ describe('extractHygieneSignatures', () => {
   });
 
   it('lowercases the path inside the signature for stable matching', () => {
-    const sigs = extractHygieneSignatures(
-      'Orphaned /Workspace/Group/Foo.md',
-    );
+    const sigs = extractHygieneSignatures('Orphaned /Workspace/Group/Foo.md');
     expect(sigs[0].signature).toBe('orphaned:/workspace/group/foo.md');
     expect(sigs[0].path).toBe('/Workspace/Group/Foo.md');
   });
@@ -125,8 +125,7 @@ describe('decideHygieneCadence', () => {
 
   it('denies even when only ONE of several signatures is stale', () => {
     const decision = decideHygieneCadence({
-      text:
-        'Orphaned /a/b. Orphaned /c/d.',
+      text: 'Orphaned /a/b. Orphaned /c/d.',
       lookupLastReportedAtMs: (s) =>
         s === 'orphaned:/a/b' ? NOW - 30 * 60 * 1000 : undefined,
       nowMs: NOW,

@@ -25,7 +25,8 @@ describe('sanitizeText', () => {
     const { out, stats } = sanitizeText(input, 1024);
     expect(out).toBe('helloworld!');
     expect(stats.strippedBytes).toBe(
-      Buffer.byteLength(input, 'utf-8') - Buffer.byteLength('helloworld!', 'utf-8'),
+      Buffer.byteLength(input, 'utf-8') -
+        Buffer.byteLength('helloworld!', 'utf-8'),
     );
     expect(stats.truncatedBytes).toBe(0);
   });
@@ -145,9 +146,10 @@ describe('sanitizeToolResponse', () => {
       content: [{ type: 'text', text: 'hi', annotations: ['note'] }],
     };
     const { sanitized } = sanitizeToolResponse(response, 1024);
-    expect((sanitized as { content: { annotations: string[] }[] }).content[0].annotations).toEqual(
-      ['note'],
-    );
+    expect(
+      (sanitized as { content: { annotations: string[] }[] }).content[0]
+        .annotations,
+    ).toEqual(['note']);
   });
 
   it('walks bare-array responses and sanitizes each text block', () => {
@@ -194,16 +196,24 @@ describe('shouldDenyTaskOutputBlock', () => {
   });
 
   it('denies when block is true', () => {
-    expect(shouldDenyTaskOutputBlock({ task_id: 'abc', block: true }).deny).toBe(true);
+    expect(
+      shouldDenyTaskOutputBlock({ task_id: 'abc', block: true }).deny,
+    ).toBe(true);
   });
 
   it('denies non-boolean truthy values (defensive)', () => {
-    expect(shouldDenyTaskOutputBlock({ task_id: 'abc', block: 'true' }).deny).toBe(true);
-    expect(shouldDenyTaskOutputBlock({ task_id: 'abc', block: 1 }).deny).toBe(true);
+    expect(
+      shouldDenyTaskOutputBlock({ task_id: 'abc', block: 'true' }).deny,
+    ).toBe(true);
+    expect(shouldDenyTaskOutputBlock({ task_id: 'abc', block: 1 }).deny).toBe(
+      true,
+    );
   });
 
   it('allows when block is the literal boolean false', () => {
-    expect(shouldDenyTaskOutputBlock({ task_id: 'abc', block: false }).deny).toBe(false);
+    expect(
+      shouldDenyTaskOutputBlock({ task_id: 'abc', block: false }).deny,
+    ).toBe(false);
   });
 
   it('allows malformed input through to SDK validation', () => {

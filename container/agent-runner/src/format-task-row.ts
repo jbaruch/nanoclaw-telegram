@@ -70,8 +70,11 @@ export function formatTaskRow(t: RawTaskRow): string {
     typeof t.schedule_value === 'string'
       ? t.schedule_value
       : String(t.schedule_value ?? '');
-  const status = typeof t.status === 'string' ? t.status : String(t.status ?? '');
+  const status =
+    typeof t.status === 'string' ? t.status : String(t.status ?? '');
   const nextRun =
-    typeof t.next_run === 'string' && t.next_run.length > 0 ? t.next_run : 'N/A';
+    typeof t.next_run === 'string' && t.next_run.length > 0
+      ? t.next_run
+      : 'N/A';
   return `- [${id}] ${promptStr.slice(0, 50)}... (${scheduleType}: ${scheduleValue}) - ${status}, next: ${nextRun}`;
 }

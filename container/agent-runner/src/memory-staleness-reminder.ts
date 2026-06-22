@@ -68,7 +68,9 @@ export interface TrustedReadClassification {
   isTrustedMemoryRead: boolean;
 }
 
-export function classifyTrustedRead(filePath: string): TrustedReadClassification {
+export function classifyTrustedRead(
+  filePath: string,
+): TrustedReadClassification {
   // Reuse #325's `resolveTargetPath` so the resolve/normalize rules
   // for the two modules can't drift — the staleness reminder gate
   // and the quarantine-write redirect must agree on what counts as
