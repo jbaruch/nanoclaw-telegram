@@ -103,9 +103,18 @@ describe('buildSubagentRulesDirective (#696)', () => {
 
   it('embeds a runnable enumeration command for the exact dir', () => {
     // The subagent must be able to find the files itself — the directive
-    // carries the literal find command against the same dir.
+    // carries the literal find command against the same dir. The dir is
+    // single-quoted and `-type f` is present so a path with spaces or an
+    // oddly named directory can't break or widen the match.
     expect(buildSubagentRulesDirective(TILES)).toContain(
-      `find ${TILES} -path '*/rules/*.md'`,
+      `find '${TILES}' -type f -path '*/rules/*.md'`,
+    );
+  });
+
+  it('single-quotes a dir containing spaces', () => {
+    const spaced = '/home/node/.claude/.tessl/my tiles';
+    expect(buildSubagentRulesDirective(spaced)).toContain(
+      `find '${spaced}' -type f -path '*/rules/*.md'`,
     );
   });
 
