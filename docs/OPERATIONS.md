@@ -169,7 +169,16 @@ sqlite3 ~/nanoclaw/store/messages.db "UPDATE scheduled_tasks SET prompt='new pro
 | `GOOGLE_CLIENT_SECRET` | GCP console | Host scripts only (Calendar OOO blocks) |
 | `GOOGLE_REFRESH_TOKEN` | OAuth flow | Host scripts only (Calendar OOO blocks) |
 
-Forwarded-into-container credentials live in `src/container-runner.ts` (`CONTAINER_VARS`). Currently the container-forwarded values are `COMPOSIO_API_KEY` (the actual credential — `x-api-key` for both Composio REST and the headless custom MCP server), `COMPOSIO_MCP_URL` (the custom MCP server's account-specific `/v3/mcp/<id>/mcp` URL — replaced the retired `ck_*` `COMPOSIO_MCP_KEY` when the consumer "Connect" gateway moved to interactive OAuth), and `COMPOSIO_USER_ID` (account-identifying — selects which user's connected accounts to act against; not strictly a credential but treated with the same env-file 0600 handling so it doesn't appear on `docker ps`). All three forward to main/trusted tiers only. Everything else stays host-side and is reached through host scripts invoked via IPC. `docs/SECURITY.md` §4 is the authoritative per-tier view.
+Forwarded-into-container credentials live in `src/container-runner.ts` (`CONTAINER_VARS` is the full forwarded list; `SECRET_CONTAINER_VARS` is the subset routed through a mode-0600 env-file rather than `-e` so it stays off `docker ps`). The current forwarded set is:
+
+- The three Composio values — `COMPOSIO_API_KEY` (`x-api-key` for both Composio REST and the headless custom MCP server), `COMPOSIO_MCP_URL` (the account-specific `/v3/mcp/<id>/mcp` URL — replaced the retired `ck_*` `COMPOSIO_MCP_KEY` when the consumer "Connect" gateway moved to interactive OAuth), and `COMPOSIO_USER_ID` (account-identifying — selects which user's connected accounts to act against).
+- `GITHUB_TOKEN` — the `gh` CLI inside main/trusted containers (cost-monitor dashboard skills run `gh issue edit/comment` directly).
+- `BYAIR_MCP_URL` — byAir flight-status polling (`jbaruch/nanoclaw-travel` flight-assist precheck; API key inline in the URL).
+- `GOOGLE_MAPS_API_KEY` — Distance Matrix traffic-aware time-to-leave (same tile).
+- `TOMTOM_API_KEY` — TomTom geocode + `calculateRoute` (`api.tomtom.com`), the routing backup behind Google Maps and the `drive-planner` skill (same tile).
+- `YOUTUBE_API_KEY` — native YouTube Data API for the admin tile's `youtube-comment-check` skill.
+
+All forward to main/trusted tiers only. Everything else stays host-side and is reached through host scripts invoked via IPC. `docs/SECURITY.md` §4 is the authoritative per-tier view. The OneCLI-proxy migration (#564) is eliminating this in-container forwarding.
 
 ## Agent Container Capabilities
 
