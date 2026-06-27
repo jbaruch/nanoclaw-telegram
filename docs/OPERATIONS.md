@@ -162,7 +162,11 @@ sqlite3 ~/nanoclaw/store/messages.db "UPDATE scheduled_tasks SET prompt='new pro
 | `COMPOSIO_API_KEY` | app.composio.dev | Agent containers, main/trusted only. Project-scoped `ak_*` key; sent as `x-api-key` to BOTH Composio surfaces — REST (`composio-fetch` precheck) and the headless custom MCP server (`mcp__composio__*`: Gmail, Calendar, Tasks). |
 | `COMPOSIO_MCP_URL` | app.composio.dev (custom MCP server) | Agent containers, main/trusted only. URL of the headless custom MCP server (`backend.composio.dev/v3/mcp/<id>/mcp`); the agent runner appends `?user_id=$COMPOSIO_USER_ID` and authenticates with `x-api-key`. Replaced the retired `COMPOSIO_MCP_KEY` after Composio's consumer "Connect" gateway moved to interactive OAuth. Account-identifying server id → env-file 0600 like the key. |
 | `COMPOSIO_USER_ID` | app.composio.dev (connected-accounts list) | Agent containers, main/trusted only (binds Composio REST + MCP calls to the user's connected accounts; account-identifying, treated like the API key) |
-| `GITHUB_TOKEN` | github.com/settings/tokens | Host scripts only (git push via IPC) |
+| `GITHUB_TOKEN` | github.com/settings/tokens | Host scripts (git push via IPC) **and** forwarded into main/trusted containers for the `gh` CLI (cost-monitor dashboard skills run `gh issue edit/comment`) |
+| `BYAIR_MCP_URL` | byairapp.com/mcp (Pro) | Agent containers, main/trusted only. byAir flight-status polling (`jbaruch/nanoclaw-travel` flight-assist precheck); API key inline in the URL → env-file 0600 |
+| `GOOGLE_MAPS_API_KEY` | console.cloud.google.com | Agent containers, main/trusted only. Distance Matrix traffic-aware time-to-leave (same tile) |
+| `TOMTOM_API_KEY` | developer.tomtom.com | Agent containers, main/trusted only. TomTom geocode + `calculateRoute` (`api.tomtom.com`) — routing backup behind Google Maps + the `drive-planner` skill (same tile) |
+| `YOUTUBE_API_KEY` | console.cloud.google.com | Agent containers, main/trusted only. Native YouTube Data API for the admin tile's `youtube-comment-check` skill |
 | `TRIPIT_ICAL_URL` | TripIt settings | Host scripts only (tripit-reclaim sync) |
 | `RECLAIM_API_TOKEN` | reclaim.ai settings | Host scripts only (tripit-reclaim sync) |
 | `GOOGLE_CLIENT_ID` | GCP console | Host scripts only (Calendar OOO blocks) |
