@@ -67,6 +67,10 @@ describe('SECRET_CONTAINER_VARS', () => {
     expect(SECRET_CONTAINER_VARS.has('GOOGLE_MAPS_API_KEY')).toBe(true);
   });
 
+  it('lists TOMTOM_API_KEY (TomTom Routing/Search key — read by jbaruch/nanoclaw-travel maps_client + drive-planner, calls api.tomtom.com)', () => {
+    expect(SECRET_CONTAINER_VARS.has('TOMTOM_API_KEY')).toBe(true);
+  });
+
   it('lists YOUTUBE_API_KEY (YouTube Data API v3 key — read by the admin tile youtube-comment-check skill, native API per jbaruch/nanoclaw-admin#339)', () => {
     expect(SECRET_CONTAINER_VARS.has('YOUTUBE_API_KEY')).toBe(true);
   });

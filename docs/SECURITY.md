@@ -49,13 +49,13 @@ IPC directories are per-group (isolated namespaces). For untrusted containers, I
 
 ### 4. Credential Isolation
 
-The design goal is that **containers never see real API keys**: the Anthropic key is brokered by the host credential proxy (containers receive only a placeholder), and most other credentials stay host-side, used by host scripts via IPC. There is **one tracked exception** — Composio — whose credentials are still forwarded into main/trusted containers as environment variables (via a mode-0600 env-file so they don't appear on `docker ps`, per `SECRET_CONTAINER_VARS` in `src/container-runner.ts`). Both Composio surfaces (REST and the headless custom MCP server) use the one project-scoped `ak_*` key via `x-api-key`; the consumer "Connect" MCP gateway moved to interactive OAuth and is not used. Eliminating this last in-container exposure so the goal holds universally is the OneCLI-proxy migration (#564).
+The design goal is that **containers never see real API keys**: the Anthropic key is brokered by the host credential proxy (containers receive only a placeholder), and most credentials stay host-side, used by host scripts via IPC. A set of **tile-consumed credentials is still forwarded into main/trusted containers** as environment variables (secrets via a mode-0600 env-file so they don't appear on `docker ps`). The authoritative lists live in `src/container-runner.ts`: `CONTAINER_VARS` is everything forwarded; `SECRET_CONTAINER_VARS` is the subset routed through the env-file rather than `-e`. As of this writing the forwarded set is the three Composio values (`COMPOSIO_API_KEY`/`COMPOSIO_MCP_URL`/`COMPOSIO_USER_ID`), `GITHUB_TOKEN` (container-side `gh`), `BYAIR_MCP_URL`, `GOOGLE_MAPS_API_KEY`, `TOMTOM_API_KEY`, and `YOUTUBE_API_KEY` — main/trusted only, **never** untrusted. Eliminating this in-container exposure so the goal holds universally is the OneCLI-proxy migration (#564); Composio is the largest single piece of it (both REST and the headless custom MCP server use the one project-scoped `ak_*` key via `x-api-key`).
 
 | Credential | Main | Trusted | Untrusted |
 |------------|------|---------|-----------|
 | Anthropic API | Via proxy (placeholder key) | Via proxy | Via proxy |
-| Composio (the tracked exception) — `COMPOSIO_API_KEY` (`ak_*`; `x-api-key` for REST + the headless custom MCP server), `COMPOSIO_MCP_URL` (custom MCP server URL), `COMPOSIO_USER_ID` | Env-file (0600) | Env-file (0600) | **None** |
-| Other (GitHub, etc.) | Via host scripts | Via host scripts | **None** |
+| Forwarded tile credentials — `CONTAINER_VARS` in `src/container-runner.ts` (Composio `ak_*` + `MCP_URL` + `USER_ID`, `GITHUB_TOKEN`, `BYAIR_MCP_URL`, `GOOGLE_MAPS_API_KEY`, `TOMTOM_API_KEY`, `YOUTUBE_API_KEY`) | Env-file (0600) | Env-file (0600) | **None** |
+| Everything else (Trakt, Sessionize, channel tokens, …) | Via host scripts (IPC) | Via host scripts (IPC) | **None** |
 
 ### 5. Tile-Based Rule Enforcement
 
