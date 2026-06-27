@@ -507,6 +507,11 @@ export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
   // Google Maps Distance Matrix API key — read by the same tile.
   // Standard `AIzaSy...` shape, ~$10/1000 requests at our usage.
   'GOOGLE_MAPS_API_KEY',
+  // TomTom Routing/Search API key — read by the `jbaruch/nanoclaw-travel`
+  // tile's `maps_client.py` (TomTom geocode + calculateRoute backup behind
+  // Google Maps) and the `drive-planner` skill. Calls `api.tomtom.com`.
+  // Secret so the key stays off `ps`/`docker ps`, same as the Maps key.
+  'TOMTOM_API_KEY',
   // YouTube Data API v3 key — read by the admin tile's
   // `youtube-comment-check` skill (Composio's YouTube toolkit has no
   // comment-threads tool, so it calls the native API directly per
@@ -2847,6 +2852,11 @@ function buildContainerArgs(
     // Distance Matrix API enabled on a billing-attached project. Marked
     // SECRET below.
     'GOOGLE_MAPS_API_KEY',
+    // `jbaruch/nanoclaw-travel` tile: `maps_client.py` uses TomTom
+    // (geocode + calculateRoute on `api.tomtom.com`) as the backup behind
+    // Google Maps, and the `drive-planner` skill routes through it.
+    // Generated at https://developer.tomtom.com. Marked SECRET below.
+    'TOMTOM_API_KEY',
     // YouTube Data API v3 key — read by the admin tile's
     // `youtube-comment-check` skill, which calls the native API
     // (commentThreads.list + videos.list) directly because Composio's
