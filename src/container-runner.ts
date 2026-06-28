@@ -500,7 +500,7 @@ export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
   'GITHUB_TOKEN',
   // byAir personal MCP link with API key inline (URL form, but the
   // query string is the credential) — read by
-  // `jbaruch/nanoclaw-flight-assist`'s precheck. Treated as secret so
+  // `jbaruch/nanoclaw-travel`'s precheck. Treated as secret so
   // the URL with embedded key doesn't appear on `ps`/`docker ps`. See
   // CONTAINER_VARS for the consumer-side context.
   'BYAIR_MCP_URL',
@@ -2838,7 +2838,7 @@ function buildContainerArgs(
     // OneCLI migration target — see jbaruch/nanoclaw#564 for the path
     // off the "secret-in-container-environ-for-spawn-lifetime" exposure.
     'GITHUB_TOKEN',
-    // Forwarded for the `jbaruch/nanoclaw-flight-assist` per-chat overlay
+    // Forwarded for the `jbaruch/nanoclaw-travel` per-chat overlay
     // tile (added via `containerConfig.additionalTiles`). The precheck
     // reads `BYAIR_MCP_URL` (personal MCP link from
     // https://byairapp.com/mcp/, includes the API key inline) to poll

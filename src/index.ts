@@ -2787,9 +2787,9 @@ async function main(): Promise<void> {
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     onLocation: (record: LocationRecord) => {
       storeLocation(record);
-      // Sidecar write for `jbaruch/nanoclaw-flight-assist`'s
+      // Sidecar write for `jbaruch/nanoclaw-travel`'s
       // `precheck.py` origin-resolution ladder (issue
-      // `nanoclaw-flight-assist#18`). The DB row drives the host-side
+      // `nanoclaw-travel#18`). The DB row drives the host-side
       // TZ resolver; this file drives the per-group container's
       // time-to-leave origin. Filters to owner-only inside.
       writeFlightAssistLocation(record, {
