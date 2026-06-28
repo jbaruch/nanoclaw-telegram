@@ -31,6 +31,9 @@
     },
     "jbaruch/nanoclaw-media": {
       "version": "latest"
+    },
+    "jbaruch/nanoclaw-travel": {
+      "version": "latest"
     }
   }
 }
