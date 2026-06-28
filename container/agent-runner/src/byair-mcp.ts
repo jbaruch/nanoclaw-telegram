@@ -3,7 +3,7 @@
  *
  * byAir is a personal MCP endpoint (`api.byairapp.com/mcp`) whose API
  * key is carried inline in the URL query string (`BYAIR_MCP_URL`). The
- * precheck loop in the `jbaruch/nanoclaw-flight-assist` tile reaches it
+ * precheck loop in the `jbaruch/nanoclaw-travel` tile reaches it
  * via the Python `ByAirClient` HTTP wrapper and filters the ~13KB raw
  * response down to a ~1KB operational slice before any state write — so
  * the polling path never put byAir in front of the agent. This helper
