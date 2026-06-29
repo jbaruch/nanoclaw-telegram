@@ -415,7 +415,7 @@ PY
 )
 if [[ -n "$MANIFEST_OFFENDERS" ]]; then
     echo "ERROR: named carve-out manifest(s) violate 'mode: managed' + 'version: latest':" >&2
-    echo "$MANIFEST_OFFENDERS" | sed 's/^/  - /' >&2
+    echo "  - ${MANIFEST_OFFENDERS//$'\n'/$'\n'  - }" >&2
     echo "Fix: edit each manifest to {\"mode\": \"managed\", \"dependencies\": {\"<tile>\": {\"version\": \"latest\"}}} and re-run deploy." >&2
     echo "Why: nanoclaw-host: tessl-version-floating (approved exception to coding-policy: dependency-management)." >&2
     exit 1
@@ -501,7 +501,7 @@ PY
 )
 if [[ -n "$TILE_VERSION_OFFENDERS" ]]; then
     echo "ERROR: 'tessl update' reported success, but these tiles did NOT land at the registry's latest version:" >&2
-    echo "$TILE_VERSION_OFFENDERS" | sed 's/^/  - /' >&2
+    echo "  - ${TILE_VERSION_OFFENDERS//$'\n'/$'\n'  - }" >&2
     echo "The orchestrator would mount stale or missing tile content into agent containers while this deploy reported success." >&2
     echo "Aborting before restart. Investigate why the install was skipped for the tile(s) above, resolve it, then re-run deploy." >&2
     exit 1
