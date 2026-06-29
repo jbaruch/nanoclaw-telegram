@@ -269,6 +269,41 @@ fi
 # verdicts (e.g. a `.env.example` flagged W008), so those do NOT fail the
 # deploy — only a non-zero `tessl update` exit does.
 echo "3. Updating tiles from registry..."
+# Window marker for the heartbeat skill's registry-missing spawn-refusal
+# suppression (jbaruch/nanoclaw-admin#405). During this step `tessl
+# update` re-fetches every tile, so a tile is briefly absent from the
+# local registry mid-update; an inbound message that triggers a
+# container spawn needing that tile hits the `additionalTiles missing
+# from registry` guard in container-runner.ts and lands an `error` row
+# in `task_run_logs`. Those are deploy-induced, not genuine
+# misconfiguration. Bracket the whole step (start before the first
+# attempt, end after success) and append one TSV window pair to
+# data/host-logs/tessl-update-window.log:
+#     <start_iso>\t<end_iso>
+# heartbeat-checks.py reads it from `/workspace/host-logs/` — the same
+# main-container-only directory mount as deploy-kills.log (see step 5) —
+# and suppresses registry-missing failures whose run_at falls inside any
+# window. Same best-effort, fail-open contract as the 137 marker: a
+# write/timestamp failure warns and degrades to surfacing the transient
+# (strictly worse than suppression, but observable), never aborts the
+# deploy. The end is appended only on `tessl update` success — a
+# hard-failed update (the `exit 1` below) is a real, persistent registry
+# problem that SHOULD surface, so no window is written for it.
+TESSL_UPDATE_WINDOW_LOG="data/host-logs/tessl-update-window.log"
+TESSL_UPDATE_WINDOW_DIR="$(dirname "$TESSL_UPDATE_WINDOW_LOG")"
+if ! mkdir -p "$TESSL_UPDATE_WINDOW_DIR"; then
+    echo "WARNING: cannot create $TESSL_UPDATE_WINDOW_DIR — heartbeat registry-missing suppression will fail open" >&2
+    TESSL_UPDATE_WINDOW_LOG=""
+fi
+# Fail-open timestamp capture, matching the DEPLOY_KILL_START idiom in
+# step 5: under `set -euo pipefail` a missing/broken python3 would
+# otherwise abort the deploy, but the marker is auxiliary suppression
+# plumbing. Clearing both vars makes the end-append block below skip.
+if ! TESSL_UPDATE_START=$(python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))"); then
+    echo "WARNING: python3 timestamp capture failed — heartbeat registry-missing suppression will fail open for this deploy" >&2
+    TESSL_UPDATE_START=""
+    TESSL_UPDATE_WINDOW_LOG=""
+fi
 tessl_update_attempt=0
 while :; do
     tessl_update_attempt=$((tessl_update_attempt + 1))
@@ -287,6 +322,20 @@ while :; do
     echo "  auto-updates its binary in the background and can race this step; retrying in 15s..." >&2
     sleep 15
 done
+# Close the tessl-update window (see the marker block above). Only
+# reached on a successful update — the failure path `exit 1`s out.
+# printf emits a literal tab via `\t` (busybox/ash `echo` would
+# reinterpret the escape if anyone ports the deploy off the Synology
+# NAS bash); the heartbeat parser splits on tab.
+if [[ -n "$TESSL_UPDATE_WINDOW_LOG" && -n "$TESSL_UPDATE_START" ]]; then
+    if TESSL_UPDATE_END=$(python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))"); then
+        if ! printf '%s\t%s\n' "$TESSL_UPDATE_START" "$TESSL_UPDATE_END" >> "$TESSL_UPDATE_WINDOW_LOG"; then
+            echo "WARNING: failed to append window pair to $TESSL_UPDATE_WINDOW_LOG — heartbeat registry-missing suppression will fail open for this deploy" >&2
+        fi
+    else
+        echo "WARNING: python3 timestamp capture failed for window end — skipping marker write for this deploy" >&2
+    fi
+fi
 echo ""
 
 # 3b. Verify every tessl.json in the repo declares mode: managed and
