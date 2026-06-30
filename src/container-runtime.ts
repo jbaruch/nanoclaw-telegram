@@ -107,6 +107,34 @@ export function ensureContainerRuntimeRunning(): void {
 }
 
 /**
+ * Persistent infrastructure containers that share the `nanoclaw-` prefix
+ * but are NOT per-agent orphans — `cleanupOrphans` must never kill them.
+ *
+ * The #609 LiteLLM gateway runs as a separate UGOS Pro compose project
+ * `nanoclaw-litellm` with a single service `nanoclaw-litellm`, so docker
+ * names its container `nanoclaw-litellm-nanoclaw-litellm-<idx>`
+ * (project + service + replica index). It bakes `ANTHROPIC_API_KEY` via
+ * compose `${VAR}` interpolation at create time and does NOT auto-heal
+ * from a `docker kill` (`docker kill` bypasses `restart: always`), so
+ * killing it on an orchestrator boot silently degrades the credential
+ * path until a manual `docker compose up -d`.
+ *
+ * Match the full project+service+index shape (index left flexible for a
+ * recreate/scale bump): a bare `^nanoclaw-litellm$` anchor misses the
+ * compose-suffixed name, and a loose `^nanoclaw-litellm` prefix would
+ * wrongly exempt a per-group agent whose slug starts with `litellm`
+ * (e.g. `nanoclaw-litellm-fans-<ts>`). Lock-step with the deploy-side
+ * predicate in `scripts/exclude-infra-containers.sh` (the awk
+ * `^nanoclaw-litellm-nanoclaw-litellm-[0-9]+$` negation) — if a second
+ * service is ever added to the gateway's compose project, extend both.
+ */
+const INFRA_CONTAINER_RE = /^nanoclaw-litellm-nanoclaw-litellm-[0-9]+$/;
+
+function isInfraContainer(name: string): boolean {
+  return INFRA_CONTAINER_RE.test(name);
+}
+
+/**
  * Kill orphaned NanoClaw containers from previous runs.
  *
  * `skipNames` (#213): names the caller has identified as intentional
@@ -116,6 +144,10 @@ export function ensureContainerRuntimeRunning(): void {
  * stopped as before. An empty / undefined skip set means "no
  * handoff, kill everything" — the pre-#213 behavior, which is the
  * right safety default when no graceful-shutdown marker was found.
+ *
+ * Persistent infrastructure containers (see `INFRA_CONTAINER_RE`) are
+ * excluded unconditionally — they are not agent orphans and must
+ * survive every orchestrator restart.
  */
 export function cleanupOrphans(skipNames?: ReadonlySet<string>): void {
   try {
@@ -127,7 +159,7 @@ export function cleanupOrphans(skipNames?: ReadonlySet<string>): void {
     const allNanoclaw = (result.stdout || '')
       .split('\n')
       .map((n) => n.trim())
-      .filter((n) => n.startsWith('nanoclaw-'));
+      .filter((n) => n.startsWith('nanoclaw-') && !isInfraContainer(n));
     const adopted = skipNames
       ? allNanoclaw.filter((n) => skipNames.has(n))
       : [];
