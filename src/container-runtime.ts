@@ -107,21 +107,31 @@ export function ensureContainerRuntimeRunning(): void {
 }
 
 /**
- * Persistent infrastructure sidecars that share the `nanoclaw-` name
- * prefix but are NOT per-agent containers. `cleanupOrphans` must never
- * kill these: the litellm gateway bakes `ANTHROPIC_API_KEY` via compose
- * `${VAR}` interpolation at create time and does NOT auto-heal from a
- * `docker kill` (`docker kill` bypasses `restart: always`), so killing
- * it on every orchestrator boot silently breaks the credential path
- * until a manual `docker compose up -d`. The UGOS compose project
- * doubles the name to `nanoclaw-litellm-nanoclaw-litellm-1`, so this is
- * a prefix match. Mirrors deploy.sh's `^nanoclaw(-litellm)?$` exclusion;
- * append future sidecars here in lock-step with that predicate.
+ * Persistent infrastructure containers that share the `nanoclaw-` prefix
+ * but are NOT per-agent orphans — `cleanupOrphans` must never kill them.
+ *
+ * The #609 LiteLLM gateway runs as a separate UGOS Pro compose project
+ * `nanoclaw-litellm` with a single service `nanoclaw-litellm`, so docker
+ * names its container `nanoclaw-litellm-nanoclaw-litellm-<idx>`
+ * (project + service + replica index). It bakes `ANTHROPIC_API_KEY` via
+ * compose `${VAR}` interpolation at create time and does NOT auto-heal
+ * from a `docker kill` (`docker kill` bypasses `restart: always`), so
+ * killing it on an orchestrator boot silently degrades the credential
+ * path until a manual `docker compose up -d`.
+ *
+ * Match the full project+service+index shape (index left flexible for a
+ * recreate/scale bump): a bare `^nanoclaw-litellm$` anchor misses the
+ * compose-suffixed name, and a loose `^nanoclaw-litellm` prefix would
+ * wrongly exempt a per-group agent whose slug starts with `litellm`
+ * (e.g. `nanoclaw-litellm-fans-<ts>`). Lock-step with the deploy-side
+ * predicate in `scripts/exclude-infra-containers.sh` (the awk
+ * `^nanoclaw-litellm-nanoclaw-litellm-[0-9]+$` negation) — if a second
+ * service is ever added to the gateway's compose project, extend both.
  */
-const SIDECAR_NAME_PREFIXES = ['nanoclaw-litellm'] as const;
+const INFRA_CONTAINER_RE = /^nanoclaw-litellm-nanoclaw-litellm-[0-9]+$/;
 
-function isSidecarContainer(name: string): boolean {
-  return SIDECAR_NAME_PREFIXES.some((prefix) => name.startsWith(prefix));
+function isInfraContainer(name: string): boolean {
+  return INFRA_CONTAINER_RE.test(name);
 }
 
 /**
@@ -135,7 +145,7 @@ function isSidecarContainer(name: string): boolean {
  * handoff, kill everything" — the pre-#213 behavior, which is the
  * right safety default when no graceful-shutdown marker was found.
  *
- * Persistent infrastructure sidecars (see `SIDECAR_NAME_PREFIXES`) are
+ * Persistent infrastructure containers (see `INFRA_CONTAINER_RE`) are
  * excluded unconditionally — they are not agent orphans and must
  * survive every orchestrator restart.
  */
@@ -149,7 +159,7 @@ export function cleanupOrphans(skipNames?: ReadonlySet<string>): void {
     const allNanoclaw = (result.stdout || '')
       .split('\n')
       .map((n) => n.trim())
-      .filter((n) => n.startsWith('nanoclaw-') && !isSidecarContainer(n));
+      .filter((n) => n.startsWith('nanoclaw-') && !isInfraContainer(n));
     const adopted = skipNames
       ? allNanoclaw.filter((n) => skipNames.has(n))
       : [];
