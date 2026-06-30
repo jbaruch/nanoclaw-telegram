@@ -107,6 +107,24 @@ export function ensureContainerRuntimeRunning(): void {
 }
 
 /**
+ * Persistent infrastructure sidecars that share the `nanoclaw-` name
+ * prefix but are NOT per-agent containers. `cleanupOrphans` must never
+ * kill these: the litellm gateway bakes `ANTHROPIC_API_KEY` via compose
+ * `${VAR}` interpolation at create time and does NOT auto-heal from a
+ * `docker kill` (`docker kill` bypasses `restart: always`), so killing
+ * it on every orchestrator boot silently breaks the credential path
+ * until a manual `docker compose up -d`. The UGOS compose project
+ * doubles the name to `nanoclaw-litellm-nanoclaw-litellm-1`, so this is
+ * a prefix match. Mirrors deploy.sh's `^nanoclaw(-litellm)?$` exclusion;
+ * append future sidecars here in lock-step with that predicate.
+ */
+const SIDECAR_NAME_PREFIXES = ['nanoclaw-litellm'] as const;
+
+function isSidecarContainer(name: string): boolean {
+  return SIDECAR_NAME_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
+/**
  * Kill orphaned NanoClaw containers from previous runs.
  *
  * `skipNames` (#213): names the caller has identified as intentional
@@ -116,6 +134,10 @@ export function ensureContainerRuntimeRunning(): void {
  * stopped as before. An empty / undefined skip set means "no
  * handoff, kill everything" — the pre-#213 behavior, which is the
  * right safety default when no graceful-shutdown marker was found.
+ *
+ * Persistent infrastructure sidecars (see `SIDECAR_NAME_PREFIXES`) are
+ * excluded unconditionally — they are not agent orphans and must
+ * survive every orchestrator restart.
  */
 export function cleanupOrphans(skipNames?: ReadonlySet<string>): void {
   try {
@@ -127,7 +149,7 @@ export function cleanupOrphans(skipNames?: ReadonlySet<string>): void {
     const allNanoclaw = (result.stdout || '')
       .split('\n')
       .map((n) => n.trim())
-      .filter((n) => n.startsWith('nanoclaw-'));
+      .filter((n) => n.startsWith('nanoclaw-') && !isSidecarContainer(n));
     const adopted = skipNames
       ? allNanoclaw.filter((n) => skipNames.has(n))
       : [];

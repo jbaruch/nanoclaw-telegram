@@ -171,6 +171,45 @@ describe('cleanupOrphans', () => {
     expect(logger.info).not.toHaveBeenCalled();
   });
 
+  it('never kills the litellm sidecar despite the nanoclaw- prefix', () => {
+    // The UGOS compose project doubles the name; it shares the
+    // `nanoclaw-` prefix but is persistent infra, not an agent orphan.
+    mockSpawnSync.mockReturnValueOnce({
+      stdout: 'nanoclaw-group1-111\nnanoclaw-litellm-nanoclaw-litellm-1\n',
+      stderr: '',
+      status: 0,
+    });
+
+    cleanupOrphans();
+
+    // ps + exactly one stop (the agent container only).
+    expect(mockSpawnSync).toHaveBeenCalledTimes(2);
+    expect(mockSpawnSync).toHaveBeenNthCalledWith(
+      2,
+      CONTAINER_RUNTIME_BIN,
+      ['stop', '-t', '1', 'nanoclaw-group1-111'],
+      { stdio: 'pipe', timeout: 10_000 },
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      { count: 1, names: ['nanoclaw-group1-111'] },
+      'Stopped orphaned containers',
+    );
+  });
+
+  it('excludes the litellm sidecar even when it is the only running container', () => {
+    mockSpawnSync.mockReturnValueOnce({
+      stdout: 'nanoclaw-litellm-nanoclaw-litellm-1\n',
+      stderr: '',
+      status: 0,
+    });
+
+    cleanupOrphans();
+
+    // ps only — no stop call, nothing logged as orphaned.
+    expect(mockSpawnSync).toHaveBeenCalledTimes(1);
+    expect(logger.info).not.toHaveBeenCalled();
+  });
+
   it('warns and continues when ps fails', () => {
     mockSpawnSync.mockImplementationOnce(() => {
       throw new Error('docker not available');
