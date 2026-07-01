@@ -442,6 +442,17 @@ export interface ScheduledTask {
    */
   session_id?: string | null;
   /**
+   * Plugin-registry content hash paired with `session_id` (#710).
+   * Written by `setTaskSessionId` in the same UPDATE, cleared by every
+   * `session_id` clear path. At fire time the scheduler compares it
+   * against the current registry hash and rotates to a fresh SDK
+   * session on mismatch — a resumed session never re-reads skill/rule
+   * content, so this is the only surface that lets a plugin fix reach
+   * a pinned cadence session. NULL = hash unknown (registry absent at
+   * persist time, or the id predates #710).
+   */
+  session_plugins_hash?: string | null;
+  /**
    * Per-task AGENT_MODEL override for #509 Phase 3. NULL/undefined =
    * no override; fall through to the Phase 2 ladder
    * (`maintenanceAgentModel` → group `agentModel` → `AGENT_MODEL` env →

@@ -627,6 +627,87 @@ describe('database migrations', () => {
     }
   });
 
+  it('adds session_plugins_hash column to a pre-existing scheduled_tasks table (#710)', async () => {
+    const repoRoot = process.cwd();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-db-test-'));
+
+    try {
+      process.chdir(tempDir);
+      fs.mkdirSync(path.join(tempDir, 'store'), { recursive: true });
+
+      const dbPath = path.join(tempDir, 'store', 'messages.db');
+      const legacyDb = new Database(dbPath);
+      // Legacy shape: scheduled_tasks WITH session_id (#336) but
+      // WITHOUT session_plugins_hash — a pre-#710 install with a live
+      // pinned cadence session.
+      legacyDb.exec(`
+        CREATE TABLE scheduled_tasks (
+          id TEXT PRIMARY KEY,
+          group_folder TEXT NOT NULL,
+          chat_jid TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          schedule_type TEXT NOT NULL,
+          schedule_value TEXT NOT NULL,
+          next_run TEXT,
+          last_run TEXT,
+          last_result TEXT,
+          status TEXT DEFAULT 'active',
+          created_at TEXT NOT NULL,
+          created_by_role TEXT NOT NULL DEFAULT 'owner',
+          continuation_cycle_id TEXT,
+          session_id TEXT,
+          source TEXT NOT NULL DEFAULT 'schedule-task'
+        );
+      `);
+      legacyDb
+        .prepare(
+          `INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, status, created_at, created_by_role, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'pre-710-task',
+          'main',
+          'main@g.us',
+          'Skill(skill: "tessl__heartbeat")',
+          'interval',
+          '1800000',
+          'active',
+          '2026-06-24T00:00:00.000Z',
+          'owner',
+          'pinned-before-710',
+        );
+      legacyDb.close();
+
+      vi.resetModules();
+      const { initDatabase, getTaskById, _closeDatabase } =
+        await import('./db.js');
+
+      initDatabase();
+
+      const upgradedDb = new Database(dbPath);
+      const cols = upgradedDb
+        .prepare('PRAGMA table_info(scheduled_tasks)')
+        .all() as Array<{ name: string; dflt_value: unknown }>;
+      const hashCol = cols.find((c) => c.name === 'session_plugins_hash');
+      expect(hashCol).toBeDefined();
+      // No backfill DEFAULT — NULL on a pinned legacy row is load-
+      // bearing: it mismatches the live registry hash on the first
+      // post-deploy fire, which rotates exactly the stale sessions
+      // #710 describes.
+      expect(hashCol!.dflt_value).toBeNull();
+      upgradedDb.close();
+
+      const legacyTask = getTaskById('pre-710-task');
+      expect(legacyTask).toBeDefined();
+      expect(legacyTask!.session_id).toBe('pinned-before-710');
+      expect(legacyTask!.session_plugins_hash).toBeNull();
+
+      _closeDatabase();
+    } finally {
+      process.chdir(repoRoot);
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('drops the dormant tg:1698969 / telegram_main row on initDatabase (#159)', async () => {
     const repoRoot = process.cwd();
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-db-test-'));

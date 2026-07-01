@@ -239,6 +239,15 @@ function createSchema(database: Database.Database): void {
       -- here is keyed on task_id, so different tasks have different rows
       -- hence different sessions hence no bleed.
       session_id TEXT,
+      -- Content hash of the tessl plugin registry at the moment
+      -- session_id was persisted (#710). The scheduler compares it
+      -- against the current registry hash at fire time and rotates to
+      -- a fresh SDK session on mismatch — a resumed session never
+      -- re-reads skill/rule content, so without this gate a pinned
+      -- session outlives every plugin update. NULL means "hash unknown
+      -- at persist time" (registry absent, or the id predates #710);
+      -- paired with session_id, cleared whenever session_id clears.
+      session_plugins_hash TEXT,
       -- Row-creation provenance for #305 Phase 2 cadence-registry. See
       -- the ALTER block below for the value set and ownership semantics.
       -- 'schedule-task' is the default so unmigrated callers (the
@@ -389,6 +398,22 @@ function createSchema(database: Database.Database): void {
     .all() as Array<{ name: string }>;
   if (!sessionIdCols.some((c) => c.name === 'session_id')) {
     database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN session_id TEXT`);
+  }
+
+  // Add session_plugins_hash column for #710 — plugin-content hash
+  // paired with session_id so the scheduler can detect that the
+  // registry changed since the pinned session was created and rotate
+  // to a fresh one. NULL on existing rows: any pre-#710 pinned
+  // session_id compares NULL vs current hash on its first post-deploy
+  // fire, mismatches, and rotates — which is the fix taking effect
+  // for exactly the stale sessions the issue describes.
+  const pluginsHashCols = database
+    .prepare('PRAGMA table_info(scheduled_tasks)')
+    .all() as Array<{ name: string }>;
+  if (!pluginsHashCols.some((c) => c.name === 'session_plugins_hash')) {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN session_plugins_hash TEXT`,
+    );
   }
 
   // Add source column for #305 Phase 2 — provenance of a scheduled_tasks
@@ -1781,12 +1806,22 @@ export function deleteTask(id: string): void {
  *
  * No status guard: the caller decides eligibility (recurring vs
  * once-task, paused vs active). This helper only writes.
+ *
+ * `pluginsHash` (#710) records the plugin-registry content hash the
+ * session was created against, written in the same UPDATE so id and
+ * hash can never drift apart. NULL means the hash was unknowable at
+ * persist time (registry absent) — the fire-time comparison treats
+ * NULL-vs-NULL as a match, so registry-less installs keep resuming.
  */
-export function setTaskSessionId(id: string, sessionId: string): void {
-  db.prepare('UPDATE scheduled_tasks SET session_id = ? WHERE id = ?').run(
-    sessionId,
-    id,
-  );
+export function setTaskSessionId(
+  id: string,
+  sessionId: string,
+  pluginsHash: string | null = null,
+): void {
+  db.prepare(
+    `UPDATE scheduled_tasks SET session_id = ?, session_plugins_hash = ?
+     WHERE id = ?`,
+  ).run(sessionId, pluginsHash, id);
 }
 
 /**
@@ -1797,9 +1832,10 @@ export function setTaskSessionId(id: string, sessionId: string): void {
  * slot.
  */
 export function clearTaskSessionId(id: string): void {
-  db.prepare('UPDATE scheduled_tasks SET session_id = NULL WHERE id = ?').run(
-    id,
-  );
+  db.prepare(
+    `UPDATE scheduled_tasks
+     SET session_id = NULL, session_plugins_hash = NULL WHERE id = ?`,
+  ).run(id);
 }
 
 /**
@@ -1814,7 +1850,8 @@ export function clearTaskSessionId(id: string): void {
 export function clearTaskSessionIdsForGroup(groupFolder: string): number {
   const result = db
     .prepare(
-      `UPDATE scheduled_tasks SET session_id = NULL
+      `UPDATE scheduled_tasks
+       SET session_id = NULL, session_plugins_hash = NULL
        WHERE group_folder = ? AND session_id IS NOT NULL`,
     )
     .run(groupFolder);

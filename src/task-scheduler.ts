@@ -19,6 +19,7 @@ import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
 import { computeThresholds } from './threshold.js';
 import { emitSessionTokens } from './usage-telemetry.js';
 import {
+  clearTaskSessionId,
   getActiveLocalScheduledTasks,
   getAllTasks,
   getCurrentTz,
@@ -39,6 +40,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
+import { getPluginRegistryHash } from './plugin-content-hash.js';
 import {
   pruneSessionArtifacts,
   resolveSessionArtifactRetentionConfig,
@@ -946,11 +948,62 @@ async function runTask(
   // For once-tasks (not reusable) every observed id is wiped exactly
   // as #193 always did.
   const isReusable = task.schedule_type !== 'once';
-  const startingSessionId: string | undefined = isReusable
+  let startingSessionId: string | undefined = isReusable
     ? (task.session_id ?? undefined)
     : undefined;
-  let persistedSessionId: string | undefined = startingSessionId;
   const observedSessionIds = new Set<string>();
+
+  // Plugin-hash session invalidation (#710). Skill/rule content is
+  // injected into the SDK session only at creation; a resumed session
+  // never re-reads the per-spawn snapshot, so a pinned session_id
+  // silently outlives every plugin update — the agent keeps following
+  // stale instructions plus its own in-context precedent. Compare the
+  // registry hash stored when the session was persisted against the
+  // current one and rotate to a fresh session on mismatch. NULL-vs-NULL
+  // (registry absent both then and now) is a match, so registry-less
+  // installs keep resuming; a NULL stored hash under a live registry
+  // covers pre-#710 rows and rotates them once.
+  const currentPluginsHash: string | null = isReusable
+    ? getPluginRegistryHash()
+    : null;
+  if (
+    startingSessionId &&
+    (task.session_plugins_hash ?? null) !== currentPluginsHash
+  ) {
+    logger.info(
+      {
+        taskId: task.id,
+        staleSessionId: startingSessionId,
+        storedPluginsHash: task.session_plugins_hash ?? null,
+        currentPluginsHash,
+      },
+      '[task-scheduler] plugin registry changed since session was pinned — rotating to a fresh SDK session (#710)',
+    );
+    // Queue the stale transcript for the post-run wipe (it can never
+    // be re-resumed) and clear the DB pointer so a crash before the
+    // new id persists can't leave a dangling resume target. The clear
+    // uses the same narrow SqliteError tolerance as the persist paths
+    // below: on a transient DB hiccup the in-memory rotation still
+    // holds for this fire, and the next fire re-detects the mismatch
+    // and retries.
+    observedSessionIds.add(startingSessionId);
+    try {
+      clearTaskSessionId(task.id);
+    } catch (dbErr) {
+      if (!(dbErr instanceof SqliteError)) throw dbErr;
+      logger.error(
+        {
+          taskId: task.id,
+          staleSessionId: startingSessionId,
+          sqliteCode: dbErr.code,
+          err: dbErr,
+        },
+        '[task-scheduler] clearTaskSessionId failed during #710 rotation — continuing with a fresh session this fire; next fire re-detects the mismatch',
+      );
+    }
+    startingSessionId = undefined;
+  }
+  let persistedSessionId: string | undefined = startingSessionId;
 
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
@@ -1089,7 +1142,7 @@ async function runTask(
             // logic can't preserve a transcript whose DB pointer
             // never landed.
             try {
-              setTaskSessionId(task.id, newId);
+              setTaskSessionId(task.id, newId, currentPluginsHash);
               persistedSessionId = newId;
             } catch (dbErr) {
               if (!(dbErr instanceof SqliteError)) throw dbErr;
@@ -1332,7 +1385,7 @@ async function runTask(
         // and gets surfaced as `Task failed`; only recoverable DB
         // hiccups are swallowed.
         try {
-          setTaskSessionId(task.id, newId);
+          setTaskSessionId(task.id, newId, currentPluginsHash);
           persistedSessionId = newId;
         } catch (dbErr) {
           if (!(dbErr instanceof SqliteError)) throw dbErr;
