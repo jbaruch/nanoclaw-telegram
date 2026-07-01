@@ -21,8 +21,8 @@ description: |
   published policy files — to the review model (Anthropic here; OpenAI in
   the paired workflow), the same provider whose model renders the verdict.
   Repository secrets, tokens, and credentials are never included in that
-  payload. The `tessl install jbaruch/coding-policy` pre-step fetches a
-  public, version-pinned plugin from the official Tessl registry — a known
+  payload. The `tessl install jbaruch/coding-policy` pre-step fetches the
+  latest published plugin from the official Tessl registry — a known
   published ruleset, not arbitrary remote code.
 
   Required repository secrets (set at
@@ -78,11 +78,18 @@ jobs:
     outputs:
       should_skip: ${{ steps.decide.outputs.should_skip }}
     steps:
+      # continue-on-error keeps a Tessl setup/registry outage from FAILING
+      # the gate job — a failed gate job cascade-skips the agent (needs:
+      # gate) and silently drops the review. On failure the plugin is
+      # simply absent, so `decide` below can't find the gate script and
+      # defaults should_skip=false (agent runs). Fail-open end-to-end.
       - name: Install Tessl CLI
         uses: tesslio/setup-tessl@v2
+        continue-on-error: true
         with:
           token: ${{ secrets.TESSL_TOKEN }}
       - name: Install jbaruch/coding-policy (latest published)
+        continue-on-error: true
         run: |
           mkdir -p /tmp/gh-aw/coding-policy
           cd /tmp/gh-aw/coding-policy
@@ -94,8 +101,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         # Fails OPEN: a failed gate job would cascade-skip the agent and
         # silently drop the review, so any trouble here defaults
-        # should_skip=false and lets the agent run. Explicit `if` checks
-        # (never silent suppression) keep the step's own exit at 0.
+        # should_skip=false and lets the agent run. The setup/install steps
+        # above are continue-on-error, so a Tessl outage lands here as a
+        # missing gate script → the `if` below fails → should_skip=false.
+        # Explicit `if` checks (never silent suppression) keep exit at 0.
         run: |
           set -uo pipefail
           GATE=/tmp/gh-aw/coding-policy/.tessl/plugins/jbaruch/coding-policy/skills/install-reviewer/author-family-gate.sh
