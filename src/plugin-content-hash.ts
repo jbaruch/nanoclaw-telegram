@@ -27,8 +27,10 @@ import { getRegistryTilesDir } from './container-runner.js';
 
 /**
  * Deterministic sha256 over a directory tree: every regular file's
- * registry-relative path and content, visited in byte-order-sorted
- * name order so the digest is stable across platforms and locales.
+ * registry-relative path and content, visited in UTF-16 code-unit
+ * name order (plain JS string comparison — locale-independent and
+ * identical on every platform, though not literal byte order for
+ * non-ASCII names) so the digest is stable across runs and hosts.
  * Entries that are neither files nor directories (sockets, FIFOs,
  * symlinks — the tessl registry install writes none of these) are
  * excluded from the digest.

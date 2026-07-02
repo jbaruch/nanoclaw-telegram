@@ -448,8 +448,9 @@ export interface ScheduledTask {
    * against the current registry hash and rotates to a fresh SDK
    * session on mismatch — a resumed session never re-reads skill/rule
    * content, so this is the only surface that lets a plugin fix reach
-   * a pinned cadence session. NULL = hash unknown (registry absent at
-   * persist time, or the id predates #710).
+   * a pinned cadence session. NULL = hash unknown (registry absent or
+   * vanished mid-walk during a registry swap at persist time, or the
+   * id predates #710).
    */
   session_plugins_hash?: string | null;
   /**

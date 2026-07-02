@@ -1810,8 +1810,11 @@ export function deleteTask(id: string): void {
  * `pluginsHash` (#710) records the plugin-registry content hash the
  * session was created against, written in the same UPDATE so id and
  * hash can never drift apart. NULL means the hash was unknowable at
- * persist time (registry absent) — the fire-time comparison treats
- * NULL-vs-NULL as a match, so registry-less installs keep resuming.
+ * persist time — registry absent, or it vanished mid-walk during a
+ * registry swap (see `hashDirectoryTree`). At fire time a NULL stored
+ * here mismatches any KNOWN registry hash and rotates (the pre-#710
+ * row path); when the CURRENT hash is null the scheduler skips
+ * rotation entirely, so registry-less installs keep resuming.
  */
 export function setTaskSessionId(
   id: string,
