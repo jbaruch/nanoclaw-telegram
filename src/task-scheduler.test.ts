@@ -18,6 +18,19 @@ vi.mock('./container-runner.js', () => ({
   MAINTENANCE_SESSION_NAME: 'maintenance',
 }));
 
+// Mock the plugin-registry hash (#710) so session-reuse tests are
+// deterministic regardless of whether the checkout has a
+// tessl-workspace under cwd. Default `null` (registry absent) matches
+// the stored-NULL hash that `setTaskSessionId` writes when tests omit
+// the hash argument, so pre-#710 test scenarios keep resuming; the
+// '#710' describe block below overrides the return value per test.
+const { mockGetPluginRegistryHash } = vi.hoisted(() => ({
+  mockGetPluginRegistryHash: vi.fn((): string | null => null),
+}));
+vi.mock('./plugin-content-hash.js', () => ({
+  getPluginRegistryHash: mockGetPluginRegistryHash,
+}));
+
 import {
   _execRawForTests,
   _initTestDatabase,
@@ -2731,6 +2744,230 @@ describe('per-task session_id reuse (#336)', () => {
     // Second call: nothing to clear, returns 0 (the WHERE filters
     // already-NULL rows).
     expect(clearTaskSessionIdsForGroup('main')).toBe(0);
+  });
+});
+
+describe('plugin-hash session rotation (#710)', () => {
+  // #336 pins a session_id across recurring fires, but skill/rule
+  // content is injected only at session creation — a pinned session
+  // silently outlives every plugin update (reference incident: the
+  // drive-planner notification fix shipped in nanoclaw-travel 0.2.4
+  // never loaded because the cadence session predated it). The
+  // scheduler now stores the registry content hash next to the pinned
+  // id and rotates to a fresh session when the hash at fire time
+  // differs.
+  const RECURRING_GROUP = {
+    name: 'Main',
+    folder: 'main',
+    trigger: 'always',
+    added_at: '2026-01-01T00:00:00.000Z',
+    isMain: true,
+  };
+
+  beforeEach(() => {
+    _initTestDatabase();
+    _resetSchedulerLoopForTests();
+    mockRunContainerAgent.mockClear();
+    mockGetPluginRegistryHash.mockClear();
+    // Pin the clock to a fixed instant (not just fake timers) so the
+    // Date.now()-derived next_run fixtures are identical on every run
+    // per `jbaruch/coding-policy: testing-standards` determinism.
+    vi.useFakeTimers({ now: new Date('2026-07-01T12:00:00.000Z') });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    // Restore the file-level default (registry absent) so the
+    // NULL-stored-hash rows other describes seed via the two-arg
+    // `setTaskSessionId` keep resuming instead of rotating.
+    mockGetPluginRegistryHash.mockImplementation(() => null);
+  });
+
+  function createRecurringTask(): void {
+    createTask({
+      id: 'heartbeat-task',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'Skill(skill: "tessl__heartbeat")',
+      schedule_type: 'interval',
+      schedule_value: '1800000',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+  }
+
+  /** Container fake: SDK issues `id` and the run succeeds. */
+  function mockAgentIssuing(id: string): void {
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result: 'ok',
+          newSessionId: id,
+        } as ContainerOutput);
+        return { status: 'success', result: 'ok', newSessionId: id };
+      },
+    );
+  }
+
+  async function fireOnce(): Promise<{
+    containerInput: { sessionId?: string; sessionName?: string };
+    wipeSpy: ReturnType<typeof vi.fn>;
+  }> {
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+    const wipeSpy = vi.fn(() => 1);
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': RECURRING_GROUP }),
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+      wipeSessionJsonl: wipeSpy,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    const containerInput = mockRunContainerAgent.mock.calls[0]?.[1];
+    return { containerInput, wipeSpy };
+  }
+
+  it('rotates to a fresh session when the registry hash changed since the pin', async () => {
+    createRecurringTask();
+    setTaskSessionId('heartbeat-task', 'stale-id', 'hash-v1');
+    mockGetPluginRegistryHash.mockReturnValue('hash-v2');
+    mockAgentIssuing('fresh-id');
+
+    const { containerInput, wipeSpy } = await fireOnce();
+
+    // No resume — the stale pin must not reach the container.
+    expect(containerInput.sessionId).toBeUndefined();
+    // New id persisted together with the hash it was created against.
+    const row = getTaskById('heartbeat-task');
+    expect(row?.session_id).toBe('fresh-id');
+    expect(row?.session_plugins_hash).toBe('hash-v2');
+    // The stale transcript is orphan and gets wiped; the fresh one
+    // survives for the next fire.
+    expect(wipeSpy).toHaveBeenCalledWith(
+      'main',
+      MAINTENANCE_SESSION_NAME,
+      'stale-id',
+    );
+    expect(wipeSpy).not.toHaveBeenCalledWith(
+      'main',
+      MAINTENANCE_SESSION_NAME,
+      'fresh-id',
+    );
+  });
+
+  it('resumes the pinned session when the registry hash is unchanged', async () => {
+    createRecurringTask();
+    setTaskSessionId('heartbeat-task', 'live-id', 'hash-v1');
+    mockGetPluginRegistryHash.mockReturnValue('hash-v1');
+    mockAgentIssuing('live-id');
+
+    const { containerInput, wipeSpy } = await fireOnce();
+
+    expect(containerInput.sessionId).toBe('live-id');
+    const row = getTaskById('heartbeat-task');
+    expect(row?.session_id).toBe('live-id');
+    expect(row?.session_plugins_hash).toBe('hash-v1');
+    expect(wipeSpy).not.toHaveBeenCalled();
+  });
+
+  it('rotates a pre-#710 pin (NULL stored hash) once under a live registry', async () => {
+    createRecurringTask();
+    // Two-arg call — the shape every pre-#710 write produced.
+    setTaskSessionId('heartbeat-task', 'pre-710-id');
+    mockGetPluginRegistryHash.mockReturnValue('hash-v1');
+    mockAgentIssuing('fresh-id');
+
+    const { containerInput, wipeSpy } = await fireOnce();
+
+    // NULL stored vs live hash mismatches → the exact stale sessions
+    // #710 describes rotate on their first post-deploy fire.
+    expect(containerInput.sessionId).toBeUndefined();
+    const row = getTaskById('heartbeat-task');
+    expect(row?.session_id).toBe('fresh-id');
+    // Hash now stamped — the next fire under an unchanged registry
+    // resumes instead of rotating again.
+    expect(row?.session_plugins_hash).toBe('hash-v1');
+    expect(wipeSpy).toHaveBeenCalledWith(
+      'main',
+      MAINTENANCE_SESSION_NAME,
+      'pre-710-id',
+    );
+  });
+
+  it('does not rotate when the current hash is unknowable (null) mid-swap', async () => {
+    createRecurringTask();
+    setTaskSessionId('heartbeat-task', 'live-id', 'hash-v1');
+    // Registry vanished mid-walk (`tessl update` swap race) — content
+    // state is unknowable this fire, so the pin must survive; rotating
+    // here would burn the session spuriously and, with null persisted,
+    // burn it again next fire.
+    mockGetPluginRegistryHash.mockReturnValue(null);
+    mockAgentIssuing('live-id');
+
+    const { containerInput, wipeSpy } = await fireOnce();
+
+    expect(containerInput.sessionId).toBe('live-id');
+    const row = getTaskById('heartbeat-task');
+    expect(row?.session_id).toBe('live-id');
+    // The clean resume re-emits the same id, so the persist path is
+    // skipped and the stored hash survives the race — the next fire
+    // compares 'hash-v1' against a readable registry as usual.
+    expect(row?.session_plugins_hash).toBe('hash-v1');
+    expect(wipeSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps resuming when the registry is absent at pin and at fire', async () => {
+    createRecurringTask();
+    // NULL stored hash + null current hash (mock default) — a
+    // registry-less install must not rotate on every fire.
+    setTaskSessionId('heartbeat-task', 'live-id');
+    mockAgentIssuing('live-id');
+
+    const { containerInput, wipeSpy } = await fireOnce();
+
+    expect(containerInput.sessionId).toBe('live-id');
+    expect(getTaskById('heartbeat-task')?.session_id).toBe('live-id');
+    expect(wipeSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not compute the registry hash for once-tasks', async () => {
+    createTask({
+      id: 'one-shot',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'remind me',
+      schedule_type: 'once',
+      schedule_value: new Date(Date.now() - 1000).toISOString(),
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    mockAgentIssuing('ephemeral-id');
+
+    await fireOnce();
+
+    // Once-tasks never resume (#336 scope), so the hash walk is
+    // skipped entirely.
+    expect(mockGetPluginRegistryHash).not.toHaveBeenCalled();
   });
 });
 
