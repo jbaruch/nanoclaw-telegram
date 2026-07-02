@@ -959,15 +959,21 @@ async function runTask(
   // silently outlives every plugin update — the agent keeps following
   // stale instructions plus its own in-context precedent. Compare the
   // registry hash stored when the session was persisted against the
-  // current one and rotate to a fresh session on mismatch. NULL-vs-NULL
-  // (registry absent both then and now) is a match, so registry-less
-  // installs keep resuming; a NULL stored hash under a live registry
-  // covers pre-#710 rows and rotates them once.
+  // current one and rotate to a fresh session on mismatch. Rotation
+  // requires a KNOWN current hash: `null` means the registry is absent
+  // or vanished mid-walk (`tessl update` swap race), i.e. "content
+  // state unknowable this fire" — rotating on it would spuriously
+  // burn the session (and, once null is persisted alongside the new
+  // id, burn it again next fire), so unknowable resumes as-is and the
+  // next fire re-evaluates against a readable registry. A NULL stored
+  // hash under a live registry covers pre-#710 rows and rotates them
+  // once; registry-less installs stay NULL-vs-null and keep resuming.
   const currentPluginsHash: string | null = isReusable
     ? getPluginRegistryHash()
     : null;
   if (
     startingSessionId &&
+    currentPluginsHash !== null &&
     (task.session_plugins_hash ?? null) !== currentPluginsHash
   ) {
     logger.info(
