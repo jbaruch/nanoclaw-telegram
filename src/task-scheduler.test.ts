@@ -23,7 +23,7 @@ vi.mock('./container-runner.js', () => ({
 // tessl-workspace under cwd. Default `null` (registry absent) matches
 // the stored-NULL hash that `setTaskSessionId` writes when tests omit
 // the hash argument, so pre-#710 test scenarios keep resuming; the
-// #710 describe overrides the return value per test.
+// '#710' describe block below overrides the return value per test.
 const { mockGetPluginRegistryHash } = vi.hoisted(() => ({
   mockGetPluginRegistryHash: vi.fn((): string | null => null),
 }));
@@ -2769,7 +2769,10 @@ describe('plugin-hash session rotation (#710)', () => {
     _resetSchedulerLoopForTests();
     mockRunContainerAgent.mockClear();
     mockGetPluginRegistryHash.mockClear();
-    vi.useFakeTimers();
+    // Pin the clock to a fixed instant (not just fake timers) so the
+    // Date.now()-derived next_run fixtures are identical on every run
+    // per `jbaruch/coding-policy: testing-standards` determinism.
+    vi.useFakeTimers({ now: new Date('2026-07-01T12:00:00.000Z') });
   });
 
   afterEach(() => {
@@ -2906,6 +2909,28 @@ describe('plugin-hash session rotation (#710)', () => {
       MAINTENANCE_SESSION_NAME,
       'pre-710-id',
     );
+  });
+
+  it('does not rotate when the current hash is unknowable (null) mid-swap', async () => {
+    createRecurringTask();
+    setTaskSessionId('heartbeat-task', 'live-id', 'hash-v1');
+    // Registry vanished mid-walk (`tessl update` swap race) — content
+    // state is unknowable this fire, so the pin must survive; rotating
+    // here would burn the session spuriously and, with null persisted,
+    // burn it again next fire.
+    mockGetPluginRegistryHash.mockReturnValue(null);
+    mockAgentIssuing('live-id');
+
+    const { containerInput, wipeSpy } = await fireOnce();
+
+    expect(containerInput.sessionId).toBe('live-id');
+    const row = getTaskById('heartbeat-task');
+    expect(row?.session_id).toBe('live-id');
+    // The clean resume re-emits the same id, so the persist path is
+    // skipped and the stored hash survives the race — the next fire
+    // compares 'hash-v1' against a readable registry as usual.
+    expect(row?.session_plugins_hash).toBe('hash-v1');
+    expect(wipeSpy).not.toHaveBeenCalled();
   });
 
   it('keeps resuming when the registry is absent at pin and at fire', async () => {
