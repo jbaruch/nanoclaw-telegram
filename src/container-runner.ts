@@ -518,6 +518,19 @@ export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
   // jbaruch/nanoclaw-admin#339). Standard `AIzaSy...` key; goes through
   // the env-file rather than `-e` so it stays off `ps`/`docker ps`.
   'YOUTUBE_API_KEY',
+  // Sessionize speaker-profile API key — read by the conferences tile's
+  // `discover-open-cfps.py` (jbaruch/nanoclaw-conferences#9), which calls
+  // GET sessionize.com/api/universal/open-cfps directly from the container
+  // for deterministic open-CFP discovery. Generated at Sessionize →
+  // Speaker Profile → API / Integrations. Secret so the key stays off
+  // `ps`/`docker ps`, same as the other API keys.
+  'SESSIONIZE_SPEAKER_KEY',
+  // Sessionize event API key — read by the same tile's
+  // `verify-sessionize.py` for live per-slug CFP-deadline verification
+  // (the host-side `sessionize_get_events` IPC handler reads the same
+  // .env entry; forwarding it lets the deterministic driver do the
+  // round-trip in-container without IPC). Same env-file treatment.
+  'SESSIONIZE_EVENT_API_KEY',
 ]);
 
 /**
@@ -2863,6 +2876,14 @@ function buildContainerArgs(
     // YouTube toolkit has no comment-threads tool
     // (jbaruch/nanoclaw-admin#339). Marked SECRET below.
     'YOUTUBE_API_KEY',
+    // Sessionize keys for the `jbaruch/nanoclaw-conferences` tile's
+    // deterministic check-cfps pipeline: `discover-open-cfps.py` reads
+    // SESSIONIZE_SPEAKER_KEY (speaker-profile open-CFP discovery) and
+    // `verify-sessionize.py` reads SESSIONIZE_EVENT_API_KEY (per-slug
+    // deadline verification). Both marked SECRET above so they route
+    // through the env-file instead of `-e KEY=...`.
+    'SESSIONIZE_SPEAKER_KEY',
+    'SESSIONIZE_EVENT_API_KEY',
   ];
 
   const varsToForward = isMain || isTrusted ? CONTAINER_VARS : [];
