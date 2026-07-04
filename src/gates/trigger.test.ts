@@ -64,9 +64,8 @@ describe('triggerGate — empty patterns', () => {
 describe('triggerGate — synthetic identity patterns (auto-injected)', () => {
   // The gate auto-evaluates two synthetic patterns derived from
   // ASSISTANT_NAME / ASSISTANT_USERNAME on every call, before any
-  // operator-configured patterns. These are short-circuits for
-  // direct identity references at Stage 1 — zero API cost vs. Stage
-  // 2 Haiku.
+  // operator-configured patterns. These are deterministic zero-cost
+  // short-circuits for direct identity references.
   it('matches @<ASSISTANT_USERNAME> when no operator config', () => {
     const result = triggerGate(
       ctx(`@${ASSISTANT_USERNAME} hello`, {}, { version: 1, patterns: [] }),
@@ -342,7 +341,7 @@ describe('triggerGate — quote-prefix false-positive regression (#107)', () => 
   // describes the peer-bot reply target. Synthetic identity matchers
   // run on the clean body and find no assistant-name reference — so
   // the gate returns `pass` (or `deny` if operator patterns also
-  // miss), letting the chain fall through to Stage 2.
+  // miss), letting the chain fall through to its fail-open default.
   it('does not Stage-1-allow a "Yes do it" reply to a peer bot whose preview contains the assistant name', () => {
     const result = triggerGate(
       ctx(
@@ -362,8 +361,8 @@ describe('triggerGate — quote-prefix false-positive regression (#107)', () => 
       ),
     );
     // No synthetic match (clean body has no assistant-name / no @-handle).
-    // No operator patterns either, so we fall through to "pass" so
-    // Stage 2 (Haiku) gets to adjudicate. Critically: NOT `allow`.
+    // No operator patterns either, so we fall through to "pass" and the
+    // chain's fail-open default decides. Critically: NOT `allow`.
     expect(result.decision).toBe('pass');
   });
 

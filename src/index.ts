@@ -224,6 +224,15 @@ function isAddressedToUs(
  * Path B (one-shot DB migration to set `containerConfig.gates =
  * ['trigger']`) is a future cleanup — the column stays for now.
  */
+// Gate names removed from the registry entirely (the Stage-2 Haiku
+// classifier was retired after the subscription-OAuth cutover). A
+// persisted explicit `containerConfig.gates` row can still carry a
+// removed name — the column is hand-editable JSON and survives code
+// changes — and an unregistered name in the chain logs an error on
+// every message in `runGateChain`. Filter them out here so stale rows
+// keep working with the gates that still exist.
+const REMOVED_GATE_NAMES: ReadonlySet<string> = new Set(['haiku-classifier']);
+
 export function resolveGatesForGroup(group: RegisteredGroup): string[] {
   // `containerConfig` is JSON-parsed but not field-validated at the DB
   // layer (see db.ts), so a hand-edited row could carry
@@ -237,7 +246,7 @@ export function resolveGatesForGroup(group: RegisteredGroup): string[] {
     Array.isArray(explicitGates) &&
     explicitGates.every((g) => typeof g === 'string')
   ) {
-    chain = [...explicitGates];
+    chain = explicitGates.filter((g) => !REMOVED_GATE_NAMES.has(g));
   } else {
     const isMainGroup = group.isMain === true;
     if (isMainGroup) {
@@ -289,8 +298,8 @@ function stripReplyQuotePrefix(content: string): string {
  * quote prefix that the Telegram channel bakes into `content` is
  * stripped here so Stage 1 matchers (#107) see only the user's actual
  * message. Reply context, when present, is exposed structurally via
- * `replyTo` so Stage 2's Haiku classifier still gets the positive
- * signal it relies on for short reply-messages.
+ * `replyTo` so gates can inspect the reply target without re-parsing
+ * the inline prefix.
  */
 function buildGateContext(
   group: RegisteredGroup,

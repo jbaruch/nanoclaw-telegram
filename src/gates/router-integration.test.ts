@@ -104,6 +104,28 @@ describe('resolveGatesForGroup — migration path A', () => {
     expect(resolveGatesForGroup(g)).toEqual([]);
   });
 
+  // Regression: a persisted explicit chain can still name the removed
+  // Stage-2 gate (`haiku-classifier`) — the containerConfig column is
+  // hand-editable JSON that survives code changes. Sending the removed
+  // name into runGateChain would log an unregistered-gate error on
+  // every message, so resolveGatesForGroup must filter it out while
+  // preserving the gates that still exist.
+  it('explicit chain naming the removed haiku-classifier gate → filtered out', () => {
+    const g = group({
+      requiresTrigger: true,
+      containerConfig: { gates: ['trigger', 'haiku-classifier'] },
+    });
+    expect(resolveGatesForGroup(g)).toEqual(['trigger']);
+  });
+
+  it('explicit chain naming ONLY the removed gate → empty chain', () => {
+    const g = group({
+      requiresTrigger: true,
+      containerConfig: { gates: ['haiku-classifier'] },
+    });
+    expect(resolveGatesForGroup(g)).toEqual([]);
+  });
+
   // requiresTrigger=false — implicit-trigger runs only when the group
   // has patterns configured; no patterns → empty chain.
   it('requiresTrigger=false + no patterns → []', () => {

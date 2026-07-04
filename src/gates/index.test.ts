@@ -48,8 +48,8 @@ beforeEach(() => {
     'pass-gate',
     (): GateDecision => ({ decision: 'pass', reason: 'no opinion' }),
   );
-  // A gate that returns `pass` because it could NOT run — the shape the
-  // Haiku classifier emits on api-error/timeout (#671).
+  // A gate that returns `pass` because it could NOT run — the shape a
+  // paid/async gate emits on api-error/timeout (#671).
   registerGate(
     'failing-pass-gate',
     (): GateDecision => ({

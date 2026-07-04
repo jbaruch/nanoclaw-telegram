@@ -476,8 +476,8 @@ export function buildUsageRecord(
 /**
  * Resolve the JSONL log path. Defaults to `logs/usage.jsonl` under the
  * orchestrator's cwd; override with `USAGE_LOG_PATH` for tests or to
- * relocate. Both the credential proxy and the host-side Haiku classifier
- * use this so they agree on a single sink.
+ * relocate. The credential proxy resolves its sink through this single
+ * helper.
  */
 export function resolveUsageLogPath(): string {
   return process.env.USAGE_LOG_PATH || join('logs', 'usage.jsonl');

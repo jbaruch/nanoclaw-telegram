@@ -14,9 +14,8 @@
  * ============================================================
  *
  * 1. **External corrective signal only.** Truth comes from the
- *    union of: user reactions on bot messages, owner explicit
- *    corrections, and the Stage 2 Haiku verdict (treated as soft
- *    truth). The agent's own Stage 1 verdict is NEVER used as
+ *    union of: user reactions on bot messages and owner explicit
+ *    corrections. The agent's own Stage 1 verdict is NEVER used as
  *    truth — that closes a self-reinforcement loop where the gate
  *    learns to confirm whatever it already does.
  *

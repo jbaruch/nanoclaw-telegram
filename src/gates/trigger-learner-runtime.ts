@@ -67,10 +67,9 @@ const NEGATIVE_REACTIONS: ReadonlySet<string> = new Set(['👎', '❌', '😡'])
 
 /**
  * Resolve a sender's tier: owner > non-owner > anonymous. Owner is
- * detected via `ASSISTANT_OWNER_HANDLE` (the same env var the Stage 2
- * classifier uses, see `src/config.ts`). When the env is unset, no
- * sender qualifies as owner — the learner falls back to non-owner /
- * anonymous tiers.
+ * detected via `ASSISTANT_OWNER_HANDLE` (see `src/config.ts`). When
+ * the env is unset, no sender qualifies as owner — the learner falls
+ * back to non-owner / anonymous tiers.
  */
 export function classifySender(
   reactorJid: string,
@@ -97,9 +96,8 @@ export function classifySender(
 type MinedSample = LabeledSample;
 
 /**
- * Mine truth-labeled samples for ONE group, using:
- *  - Reactions on bot messages within the lookback window
- *  - Haiku verdicts emitted to the host log over the same window
+ * Mine truth-labeled samples for ONE group from reactions on bot
+ * messages within the lookback window.
  *
  * The function intentionally does NOT touch the `gate decision`
  * record's `finalDecision` field as a truth signal — that would
