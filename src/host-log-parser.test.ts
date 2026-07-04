@@ -19,7 +19,7 @@ import {
 describe('parseHostLog (#443)', () => {
   it('parses a single record with multiple JSON-stringified fields', () => {
     const raw = [
-      '[12:53:52.132] INFO (1): haiku classifier verdict',
+      '[12:53:52.132] INFO (1): multi-field record',
       '    groupFolder: "telegram_old-wtf"',
       '    intent: "no"',
       '    confidence: 0.85',
@@ -33,7 +33,7 @@ describe('parseHostLog (#443)', () => {
       timestamp: '12:53:52.132',
       level: 'INFO',
       pid: 1,
-      msg: 'haiku classifier verdict',
+      msg: 'multi-field record',
       fields: {
         groupFolder: 'telegram_old-wtf',
         intent: 'no',
@@ -194,11 +194,11 @@ describe('findGateDecisions (#443)', () => {
         messageId: 'msg-b',
         groupFolder: 'g1',
         finalDecision: 'deny',
-        reason: 'stage2-no',
+        reason: 'gate-b-no',
         chain: [
           { gate: 'trigger', decision: 'allow', reason: 'matched' },
           {
-            gate: 'stage2',
+            gate: 'gate-b',
             decision: 'deny',
             reason: 'human-to-human',
           },
@@ -282,9 +282,9 @@ describe('findGateDecisions (#443)', () => {
   });
 
   it('skips records that do not match the gate-decision shape', () => {
-    // Other INFO records in the log (e.g. `'haiku classifier
-    // verdict'`) must not be returned — only the canonical
-    // `'gate decision'` line is the contract for this tool.
+    // Other INFO records in the log (e.g. `'multi-field record'`)
+    // must not be returned — only the canonical `'gate decision'`
+    // line is the contract for this tool.
     const raw = [
       makeGateDecisionRaw({
         timestamp: '12:00:00.000',
@@ -296,7 +296,7 @@ describe('findGateDecisions (#443)', () => {
         chain: [{ gate: 'trigger', decision: 'allow', reason: 'r1' }],
       }),
       [
-        '[12:00:01.000] INFO (1): haiku classifier verdict',
+        '[12:00:01.000] INFO (1): multi-field record',
         '    chatJid: "tg:-1"',
         '    intent: "no"',
         '',

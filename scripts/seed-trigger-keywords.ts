@@ -68,15 +68,12 @@ const DEFAULT_REPLY_WINDOW_MS = 120_000;
 const HAIKU_MODEL_ID = 'claude-haiku-4-5-20251001';
 const HAIKU_MAX_TOKENS = 256;
 
-// Offline-batch FROZEN_PREFIX. INTENTIONALLY DIFFERENT from the
-// production prefix in src/gates/haiku-classifier.ts: this is a
-// shorter offline-labeling variant tuned for batch keyword extraction,
-// not for runtime gating. Cache reuse and per-call cost between this
-// script and production are NOT comparable; treat offline-labeled
-// outputs as relative-rank signal only, not absolute classifier
-// behaviour. Kept inline (not imported from the production module) so
-// the offline run has no implicit dependency on production prompt
-// stability.
+// Offline-batch FROZEN_PREFIX. This is a self-contained
+// offline-labeling prompt tuned for batch keyword extraction, not for
+// runtime gating. Treat offline-labeled outputs as a relative-rank
+// signal only, not absolute intent-classification behaviour. Kept
+// fully inline so the offline run has no dependency on any runtime
+// prompt.
 const FROZEN_PREFIX = `You are a strict binary classifier deciding whether a chat message is intended for an AI assistant in a group chat.
 
 Inputs you receive:
@@ -363,7 +360,7 @@ function classifySenderTier(senderName: string, isFromMe: boolean): SenderTier {
 }
 
 // ---------------------------------------------------------------------------
-// Anthropic client (lazy, mirrors haiku-classifier auth path)
+// Anthropic client (lazy) for the offline batch labeling run.
 // ---------------------------------------------------------------------------
 let cachedClient: Anthropic | null = null;
 function getAnthropicClient(): Anthropic | null {
@@ -377,9 +374,9 @@ function getAnthropicClient(): Anthropic | null {
   return cachedClient;
 }
 
-// Minimal volatile-suffix builder that mirrors the static-group-context
-// strategy *without* the DB call (we already have the row in scope).
-// Reads CLAUDE.md head for cache-key parity with production.
+// Minimal volatile-suffix builder for the offline batch prompt. Reads
+// the CLAUDE.md head to give each group a stable per-group context
+// block for this labeling run.
 const CLAUDE_MD_HEAD_LINES = 200;
 
 function buildVolatileSuffix(group: RegisteredGroupRow): string {

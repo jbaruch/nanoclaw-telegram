@@ -35,17 +35,16 @@ export const ASSISTANT_NAME =
 //
 // Comma-separated values declare aliases — useful when one bot is
 // reachable under more than one handle (e.g. an autocomplete-only
-// `@AyeAyeSureBot` and an internal/vocative `@AyeAye`). Both Stage 1
-// trigger auto-derivation and Stage 2 Haiku identity context iterate
-// `ASSISTANT_USERNAMES` (the full list) so the bot is recognized
-// regardless of which handle the user typed (#464).
+// `@AyeAyeSureBot` and an internal/vocative `@AyeAye`). The trigger
+// gate's auto-derivation iterates `ASSISTANT_USERNAMES` (the full
+// list) so the bot is recognized regardless of which handle the user
+// typed (#464).
 //
 // Two exports — pick the right one for your call site:
 //   - `ASSISTANT_USERNAMES` (string[]): the full alias list. Used by
-//     Stage 1 trigger, Stage 2 static-group-context strategy, and the
-//     container-runner spawn-arg builder (which joins it back into a
-//     comma-separated string for forwarding so the agent-runner sees
-//     every alias).
+//     the trigger gate and the container-runner spawn-arg builder
+//     (which joins it back into a comma-separated string for
+//     forwarding so the agent-runner sees every alias).
 //   - `ASSISTANT_USERNAME` (string): the canonical primary handle
 //     (first entry of `ASSISTANT_USERNAMES`). Used for display where
 //     one canonical token is needed.
@@ -96,14 +95,13 @@ export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER ||
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
 
-// Owner identity — used by the static-group-context strategy and the
-// trigger-pattern learner (`gates/trigger-learner-runtime.ts`) to
-// recognise the bot's owner. Both vars are OPTIONAL: when either is
-// unset the static-group-context strategy suppresses the owner line
-// entirely and the learner's owner-handle detection is a no-op (zero
-// behaviour change for installs that don't configure owner identity).
-// Owner handle is the Telegram username WITHOUT the leading `@`
-// (matches `ASSISTANT_USERNAME` convention).
+// Owner identity — read by the trigger-pattern learner
+// (`gates/trigger-learner-runtime.ts`) to recognise the bot's owner.
+// Both vars are OPTIONAL: when `ASSISTANT_OWNER_HANDLE` is unset the
+// learner's owner-handle detection is a no-op (zero behaviour change
+// for installs that don't configure owner identity). Owner handle is
+// the Telegram username WITHOUT the leading `@` (matches
+// `ASSISTANT_USERNAME` convention).
 export const ASSISTANT_OWNER_NAME =
   process.env.ASSISTANT_OWNER_NAME ||
   envConfig.ASSISTANT_OWNER_NAME ||

@@ -2573,9 +2573,8 @@ export async function processTaskIpc(
       // skips `enabled: false` rows so proposals are inert until the
       // operator promotes them. This handler flips `enabled: false →
       // true` on a specific learned proposal identified by its
-      // `{kind, pattern}` tuple. Demotion / re-enable, the per-group
-      // dashboard, and producer-side enrichment of the haiku
-      // classifier verdict are #451 items 2/3/4 — separate scopes.
+      // `{kind, pattern}` tuple. Demotion / re-enable and the
+      // per-group dashboard are #451 items 2/3 — separate scopes.
       // Authorization mirrors set_agent_model: owner-of-bill —
       // non-main can only promote in its own folder.
       const groupFolder =

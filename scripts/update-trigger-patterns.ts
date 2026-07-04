@@ -1,20 +1,12 @@
 #!/usr/bin/env tsx
 /**
- * One-off, idempotent helper for tweaking a registered group's
- * configuration in `messages.db`. Two modes (combinable in the same
- * run):
+ * One-off, idempotent helper for appending trigger keywords to a
+ * registered group's `trigger_pattern.patterns` in `messages.db` via
+ * `--add-keyword <pattern>` (repeatable). Existing (pattern, kind)
+ * entries are skipped with a log line.
  *
- * 1. Append trigger keywords to `trigger_pattern.patterns` via
- *    `--add-keyword <pattern>` (repeatable). Existing
- *    (pattern, kind) entries are skipped with a log line.
- *
- * 2. Set `containerConfig.stage2Enabled` via
- *    `--set-stage2-enabled true|false`. Idempotent: a no-op when the
- *    column already holds the requested value.
- *
- * Generic enough to be reused for any group. Immediate drivers:
+ * Generic enough to be reused for any group. Immediate driver:
  *   - wtf chat: `bots` / `боты` keywords from the #83 batch run.
- *   - wtf chat: turn the Haiku classifier on (#83 follow-up).
  *
  * READ-WRITE on `messages.db`'s `registered_groups` row. Calls
  * `initDatabase()` so column defaults / migrations are in place
@@ -23,30 +15,22 @@
  * Usage:
  *   tsx scripts/update-trigger-patterns.ts \
  *     --group <jid> \
- *     [--add-keyword <pattern> ...] \
+ *     --add-keyword <pattern> [--add-keyword <pattern> ...] \
  *     [--source <universal|learned|owner-set>] \
- *     [--set-stage2-enabled <true|false>] \
  *     [--dry-run]
  *
- * Examples:
+ * Example:
  *   # add keywords to wtf
  *   tsx scripts/update-trigger-patterns.ts \
  *     --group tg:-1003869886477 \
  *     --add-keyword bots --add-keyword боты --source owner-set
- *
- *   # turn on stage 2 for wtf
- *   tsx scripts/update-trigger-patterns.ts \
- *     --group tg:-1003869886477 \
- *     --set-stage2-enabled true
  */
 import path from 'path';
 import { pathToFileURL } from 'url';
 
 import {
   initDatabase,
-  getRegisteredGroup,
   getTriggerPatterns,
-  setRegisteredGroup,
   setTriggerPatterns,
 } from '../src/db.js';
 import type {
@@ -59,7 +43,6 @@ interface Args {
   group: string;
   addKeywords: string[];
   source: TriggerPatternSource;
-  setStage2Enabled?: boolean;
   dryRun: boolean;
 }
 
@@ -88,16 +71,6 @@ function parseArgs(argv: string[]): Args {
         out.source = v;
         break;
       }
-      case '--set-stage2-enabled': {
-        const v = argv[++i];
-        if (v !== 'true' && v !== 'false') {
-          throw new Error(
-            `--set-stage2-enabled must be "true" or "false" (got "${v}")`,
-          );
-        }
-        out.setStage2Enabled = v === 'true';
-        break;
-      }
       case '--dry-run':
         out.dryRun = true;
         break;
@@ -111,10 +84,8 @@ function parseArgs(argv: string[]): Args {
     }
   }
   if (!out.group) throw new Error('--group <jid> is required');
-  if (out.addKeywords.length === 0 && out.setStage2Enabled === undefined) {
-    throw new Error(
-      'must pass at least one of --add-keyword <pattern> or --set-stage2-enabled <true|false>',
-    );
+  if (out.addKeywords.length === 0) {
+    throw new Error('must pass at least one --add-keyword <pattern>');
   }
   return out as Args;
 }
@@ -126,11 +97,7 @@ function printHelp(): void {
       '',
       'Required:',
       '  --group <jid>             Group JID (e.g. tg:-1003869886477)',
-      '',
-      'At least one of:',
       '  --add-keyword <pattern>   Keyword pattern (repeatable)',
-      '  --set-stage2-enabled <true|false>',
-      '                            Toggle containerConfig.stage2Enabled.',
       '',
       'Optional:',
       '  --source <kind>           owner-set (default) | learned | universal',
@@ -167,161 +134,89 @@ function main(): void {
   const args = parseArgs(process.argv);
 
   // initDatabase opens the prod messages.db at STORE_DIR/messages.db
-  // and runs any pending migrations. Both setTriggerPatterns and
-  // setRegisteredGroup assume the group already exists.
+  // and runs any pending migrations. setTriggerPatterns assumes the
+  // group already exists.
   initDatabase();
 
-  // -------- Trigger-pattern updates --------
-
-  let added: TriggerPattern[] = [];
-  let next: TriggerPatternConfig | null = null;
-  let beforeCount = 0;
-  let triggerPlannedWrite = false;
-
-  if (args.addKeywords.length > 0) {
-    const before = getTriggerPatterns(args.group);
-    if (before === undefined) {
-      throw new Error(
-        `No registered_groups row for jid "${args.group}". ` +
-          `Register the group via the orchestrator before adding patterns.`,
-      );
-    }
-    if (before === null) {
-      throw new Error(
-        `trigger_pattern column for "${args.group}" is unreadable ` +
-          `(forward-version JSON or corrupt). Refusing to write.`,
-      );
-    }
-
-    beforeCount = before.patterns.length;
-    next = { version: 1, patterns: [...before.patterns] };
-    const skipped: Array<{ pattern: string; kind: 'keyword' }> = [];
-
-    for (const pattern of args.addKeywords) {
-      if (patternExists(next, pattern, 'keyword')) {
-        skipped.push({ pattern, kind: 'keyword' });
-        process.stderr.write(
-          `skip: keyword "${pattern}" already present for ${args.group}\n`,
-        );
-        continue;
-      }
-      const entry = makeKeywordPattern(pattern, args.source);
-      next.patterns.push(entry);
-      added.push(entry);
-      process.stderr.write(
-        `add: keyword "${pattern}" (source=${args.source}) → ${args.group}\n`,
-      );
-    }
-
-    process.stderr.write(
-      `\n--- trigger-pattern summary for ${args.group} ---\n` +
-        `patterns before: ${beforeCount}\n` +
-        `patterns after:  ${next.patterns.length}\n` +
-        `added:           ${added.length}\n` +
-        `skipped:         ${skipped.length}\n`,
+  const before = getTriggerPatterns(args.group);
+  if (before === undefined) {
+    throw new Error(
+      `No registered_groups row for jid "${args.group}". ` +
+        `Register the group via the orchestrator before adding patterns.`,
     );
-
-    if (added.length > 0) triggerPlannedWrite = true;
+  }
+  if (before === null) {
+    throw new Error(
+      `trigger_pattern column for "${args.group}" is unreadable ` +
+        `(forward-version JSON or corrupt). Refusing to write.`,
+    );
   }
 
-  // -------- containerConfig.stage2Enabled update --------
+  const beforeCount = before.patterns.length;
+  const next: TriggerPatternConfig = {
+    version: 1,
+    patterns: [...before.patterns],
+  };
+  const added: TriggerPattern[] = [];
+  const skipped: Array<{ pattern: string; kind: 'keyword' }> = [];
 
-  let stage2PlannedWrite = false;
-  let stage2Before: boolean | undefined;
-  let stage2After: boolean | undefined;
-  if (args.setStage2Enabled !== undefined) {
-    const row = getRegisteredGroup(args.group);
-    if (!row) {
-      throw new Error(
-        `No registered_groups row for jid "${args.group}". ` +
-          `Register the group via the orchestrator before toggling stage2Enabled.`,
-      );
-    }
-    stage2Before = row.containerConfig?.stage2Enabled;
-    stage2After = args.setStage2Enabled;
-    process.stderr.write(
-      `\n--- stage2Enabled for ${args.group} ---\n` +
-        `before: ${JSON.stringify(stage2Before)}\n` +
-        `after:  ${JSON.stringify(stage2After)}\n`,
-    );
-    if (stage2Before === stage2After) {
+  for (const pattern of args.addKeywords) {
+    if (patternExists(next, pattern, 'keyword')) {
+      skipped.push({ pattern, kind: 'keyword' });
       process.stderr.write(
-        `skip: stage2Enabled already at ${stage2After} for ${args.group}\n`,
+        `skip: keyword "${pattern}" already present for ${args.group}\n`,
       );
-    } else {
-      stage2PlannedWrite = true;
+      continue;
     }
+    const entry = makeKeywordPattern(pattern, args.source);
+    next.patterns.push(entry);
+    added.push(entry);
+    process.stderr.write(
+      `add: keyword "${pattern}" (source=${args.source}) → ${args.group}\n`,
+    );
   }
 
-  if (!triggerPlannedWrite && !stage2PlannedWrite) {
+  process.stderr.write(
+    `\n--- trigger-pattern summary for ${args.group} ---\n` +
+      `patterns before: ${beforeCount}\n` +
+      `patterns after:  ${next.patterns.length}\n` +
+      `added:           ${added.length}\n` +
+      `skipped:         ${skipped.length}\n`,
+  );
+
+  if (added.length === 0) {
     process.stderr.write('\nnothing to do — exiting without write.\n');
     return;
   }
 
   if (args.dryRun) {
-    process.stderr.write('\n--- dry run: proposed change(s) ---\n');
-    if (triggerPlannedWrite && next) {
-      process.stderr.write('trigger_pattern config:\n');
-      process.stdout.write(JSON.stringify(next, null, 2) + '\n');
-    }
-    if (stage2PlannedWrite) {
-      process.stderr.write(
-        `containerConfig.stage2Enabled: ${JSON.stringify(stage2Before)} → ${JSON.stringify(stage2After)}\n`,
-      );
-    }
+    process.stderr.write(
+      '\n--- dry run: proposed trigger_pattern config ---\n',
+    );
+    process.stdout.write(JSON.stringify(next, null, 2) + '\n');
     process.stderr.write('dry run — no write performed.\n');
     return;
   }
 
-  if (triggerPlannedWrite && next) {
-    setTriggerPatterns(args.group, next);
-    const verify = getTriggerPatterns(args.group);
-    if (!verify) {
-      throw new Error(
-        `verification readback failed for "${args.group}" after trigger write`,
-      );
-    }
-    process.stderr.write(
-      `wrote ${added.length} new pattern(s); verified count = ${verify.patterns.length}\n`,
+  setTriggerPatterns(args.group, next);
+  const verify = getTriggerPatterns(args.group);
+  if (!verify) {
+    throw new Error(
+      `verification readback failed for "${args.group}" after trigger write`,
     );
-    for (const a of added) {
-      const present = verify.patterns.some(
-        (p) => p.pattern === a.pattern && p.kind === a.kind,
-      );
-      if (!present) {
-        throw new Error(
-          `verification: pattern "${a.pattern}" (${a.kind}) not present after write`,
-        );
-      }
-    }
   }
-
-  if (stage2PlannedWrite) {
-    const row = getRegisteredGroup(args.group);
-    if (!row) {
-      throw new Error(
-        `pre-write readback for stage2Enabled lost the row for "${args.group}"`,
-      );
-    }
-    const nextConfig = {
-      ...(row.containerConfig ?? {}),
-      stage2Enabled: stage2After,
-    };
-    setRegisteredGroup(args.group, { ...row, containerConfig: nextConfig });
-    const verify = getRegisteredGroup(args.group);
-    if (!verify) {
-      throw new Error(
-        `verification readback failed for "${args.group}" after stage2 write`,
-      );
-    }
-    if (verify.containerConfig?.stage2Enabled !== stage2After) {
-      throw new Error(
-        `verification: stage2Enabled = ${JSON.stringify(verify.containerConfig?.stage2Enabled)} after write (expected ${JSON.stringify(stage2After)})`,
-      );
-    }
-    process.stderr.write(
-      `wrote stage2Enabled = ${stage2After}; verified.\n`,
+  process.stderr.write(
+    `wrote ${added.length} new pattern(s); verified count = ${verify.patterns.length}\n`,
+  );
+  for (const a of added) {
+    const present = verify.patterns.some(
+      (p) => p.pattern === a.pattern && p.kind === a.kind,
     );
+    if (!present) {
+      throw new Error(
+        `verification: pattern "${a.pattern}" (${a.kind}) not present after write`,
+      );
+    }
   }
 
   process.stderr.write('ok.\n');

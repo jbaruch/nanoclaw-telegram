@@ -11,7 +11,6 @@ import {
   DEFAULT_TRIGGER,
   ENABLE_THRESHOLD_NUKE,
   getTriggerPattern,
-  GROUPS_DIR,
   HOST_GID,
   HOST_UID,
   MAX_MESSAGES_PER_PROMPT,
@@ -1235,33 +1234,6 @@ export function wipeSessionJsonl(
 }
 
 /**
- * Apply registration-time defaults to a group's containerConfig. New
- * groups get `stage2Enabled: true` unless the caller explicitly pinned
- * a value — caller-pinned (including `false`) wins. Existing groups
- * pass through unchanged so we never auto-flip a stored config.
- *
- * `stage2Enabled` no longer selects any gate (the Stage 2 classifier
- * was removed); the field is retained for config-shape compatibility
- * with stored rows and is inert until a follow-up prunes it.
- *
- * Exported for unit testing; callers should use `registerGroup`.
- */
-export function applyNewGroupContainerConfigDefaults(
-  group: RegisteredGroup,
-  isNew: boolean,
-): RegisteredGroup {
-  if (!isNew) return group;
-  if (group.containerConfig?.stage2Enabled !== undefined) return group;
-  return {
-    ...group,
-    containerConfig: {
-      ...(group.containerConfig ?? {}),
-      stage2Enabled: true,
-    },
-  };
-}
-
-/**
  * Return a copy of `group` whose `triggerPatterns` reflects what is
  * actually persisted in the DB for `jid`.
  *
@@ -1295,11 +1267,6 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     );
     return;
   }
-
-  // Apply NEW-group containerConfig defaults (currently the inert
-  // `stage2Enabled` flag). Existing groups keep whatever they already
-  // have on disk.
-  group = applyNewGroupContainerConfigDefaults(group, !registeredGroups[jid]);
 
   setRegisteredGroup(jid, group);
   // Cache the group with its persisted trigger patterns, not the raw

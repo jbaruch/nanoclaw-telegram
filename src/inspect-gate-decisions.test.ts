@@ -266,11 +266,11 @@ describe('inspect_gate_decisions log search (#443)', () => {
         messageId: 'msg-b',
         groupFolder: 'whatsapp_main',
         finalDecision: 'deny',
-        reason: 'haiku-no: human-to-human',
+        reason: 'gate-b-no: human-to-human',
         chain: [
           { gate: 'trigger', decision: 'allow', reason: 'matched' },
           {
-            gate: 'stage2',
+            gate: 'gate-b',
             decision: 'deny',
             reason: 'human-to-human',
           },
@@ -309,12 +309,12 @@ describe('inspect_gate_decisions log search (#443)', () => {
     expect(payload.decisions[0]).toMatchObject({
       messageId: 'msg-b',
       finalDecision: 'deny',
-      reason: 'haiku-no: human-to-human',
+      reason: 'gate-b-no: human-to-human',
     });
     expect(payload.decisions[0].chain).toEqual([
       { gate: 'trigger', decision: 'allow', reason: 'matched' },
       {
-        gate: 'stage2',
+        gate: 'gate-b',
         decision: 'deny',
         reason: 'human-to-human',
       },
@@ -330,10 +330,10 @@ describe('inspect_gate_decisions log search (#443)', () => {
         messageId: 'msg-target',
         groupFolder: 'whatsapp_main',
         finalDecision: 'deny',
-        reason: 'haiku-no',
+        reason: 'gate-b-no',
         chain: [
           { gate: 'trigger', decision: 'allow', reason: 'matched' },
-          { gate: 'stage2', decision: 'deny', reason: 'no-intent' },
+          { gate: 'gate-b', decision: 'deny', reason: 'no-intent' },
         ],
       }),
       writeGateDecisionLogLine({
@@ -463,9 +463,8 @@ describe('evaluateGateChain producer log shape (#443 / #445 review)', () => {
       );
 
       // Filter the spy calls down to the canonical line. Other
-      // info-level lines (`'haiku classifier verdict'`, etc.) may
-      // also fire in this scope; we only assert about the producer
-      // contract.
+      // info-level lines may also fire in this scope; we only assert
+      // about the producer contract.
       const matching = infoSpy.mock.calls.filter((call) => {
         return call.length >= 2 && call[1] === 'gate decision';
       });

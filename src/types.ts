@@ -141,26 +141,6 @@ export interface ContainerConfig {
    */
   gates?: string[];
   /**
-   * Legacy Stage 2 classifier opt-in. The Stage 2 Haiku classifier was
-   * removed, so this flag no longer selects any gate — it is retained
-   * for config-shape compatibility with stored rows (new groups still
-   * default it to `true` via `applyNewGroupContainerConfigDefaults`) and
-   * is inert until a follow-up prunes it.
-   */
-  stage2Enabled?: boolean;
-  /**
-   * Legacy Stage 2 classifier model override. Inert since the Stage 2
-   * Haiku classifier was removed; retained for config-shape
-   * compatibility until a follow-up prunes it.
-   */
-  stage2ModelId?: string;
-  /**
-   * Legacy Stage 2 classifier context-strategy selector. Inert since
-   * the Stage 2 Haiku classifier was removed; retained for config-shape
-   * compatibility until a follow-up prunes it.
-   */
-  stage2ContextStrategy?: string;
-  /**
    * Per-chat additive tile overlay (#305). Tile names from the local
    * registry under `tessl-workspace/.tessl/tiles/<TILE_OWNER>/` that
    * load IN ADDITION TO the trust-tier baseline (`selectTiles`),

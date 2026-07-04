@@ -63,11 +63,9 @@ import { findGateDecisions } from '../host-log-parser.js';
 import {
   buildLearnerPersistence,
   classifySender,
-  mineHaikuSamples,
   mineSamplesForGroup,
   DEFAULT_LEARNER_ROLLBACK_WINDOW,
 } from './trigger-learner-runtime.js';
-import { readHostLog } from '../host-log-parser.js';
 
 const GROUP_JID = '120363000000000001@g.us';
 const OWNER_HANDLE = 'owner-handle';
@@ -230,142 +228,5 @@ describe('buildLearnerPersistence — rollbackWindow threading', () => {
     persistence.fetchDecisionHistories(GROUP_JID);
     const callArgs = vi.mocked(findGateDecisions).mock.calls[0];
     expect(callArgs[1].limit).toBe(DEFAULT_LEARNER_ROLLBACK_WINDOW * 10);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 3. mineHaikuSamples — #451 item 4 activated the join via messageId+inboundText
-// ---------------------------------------------------------------------------
-
-describe('mineHaikuSamples — post-#451-item-4 activated path', () => {
-  const GROUP_FOLDER = 'telegram_test';
-  const HOST_LOG_PATH = '/tmp/test-host.log';
-
-  beforeEach(() => {
-    vi.mocked(readHostLog).mockReset();
-  });
-
-  it('returns one sample per high-confidence verdict that carries inboundText', () => {
-    vi.mocked(readHostLog).mockReturnValue([
-      {
-        timestamp: '12:00:00.000',
-        level: 'INFO',
-        pid: 1,
-        msg: 'haiku classifier verdict',
-        fields: {
-          groupFolder: GROUP_FOLDER,
-          messageId: 'msg-1',
-          inboundText: 'can you help with X?',
-          intent: 'yes',
-          confidence: 0.9,
-        },
-      },
-      {
-        timestamp: '12:00:01.000',
-        level: 'INFO',
-        pid: 1,
-        msg: 'haiku classifier verdict',
-        fields: {
-          groupFolder: GROUP_FOLDER,
-          messageId: 'msg-2',
-          inboundText: 'lol',
-          intent: 'no',
-          confidence: 0.85,
-        },
-      },
-    ]);
-    const samples = mineHaikuSamples(GROUP_FOLDER, HOST_LOG_PATH);
-    expect(samples).toHaveLength(2);
-    expect(samples[0]).toMatchObject({
-      text: 'can you help with X?',
-      intent: 'yes',
-      source: 'haiku_verdict',
-      senderTier: 'anonymous',
-      gateResponded: false,
-    });
-    expect(samples[1].intent).toBe('no');
-    expect(samples[1].text).toBe('lol');
-  });
-
-  it('skips low-confidence verdicts (ambiguous = noise, not truth)', () => {
-    vi.mocked(readHostLog).mockReturnValue([
-      {
-        timestamp: '12:00:00.000',
-        level: 'INFO',
-        pid: 1,
-        msg: 'haiku classifier verdict',
-        fields: {
-          groupFolder: GROUP_FOLDER,
-          messageId: 'msg-1',
-          inboundText: 'maybe?',
-          intent: 'yes',
-          confidence: 0.55,
-        },
-      },
-    ]);
-    const samples = mineHaikuSamples(GROUP_FOLDER, HOST_LOG_PATH);
-    expect(samples).toHaveLength(0);
-  });
-
-  it('skips verdicts from other groups', () => {
-    vi.mocked(readHostLog).mockReturnValue([
-      {
-        timestamp: '12:00:00.000',
-        level: 'INFO',
-        pid: 1,
-        msg: 'haiku classifier verdict',
-        fields: {
-          groupFolder: 'telegram_other',
-          messageId: 'msg-1',
-          inboundText: 'help',
-          intent: 'yes',
-          confidence: 0.95,
-        },
-      },
-    ]);
-    const samples = mineHaikuSamples(GROUP_FOLDER, HOST_LOG_PATH);
-    expect(samples).toHaveLength(0);
-  });
-
-  it('skips legacy records that pre-date #451 item 4 (no inboundText field)', () => {
-    // Pre-#451-item-4 verdict log line had no inboundText. Reading
-    // these post-merge yields zero usable samples — the learner
-    // tolerates the empty result and falls back to reaction mining.
-    vi.mocked(readHostLog).mockReturnValue([
-      {
-        timestamp: '12:00:00.000',
-        level: 'INFO',
-        pid: 1,
-        msg: 'haiku classifier verdict',
-        fields: {
-          groupFolder: GROUP_FOLDER,
-          intent: 'yes',
-          confidence: 0.9,
-          // no messageId, no inboundText
-        },
-      },
-    ]);
-    const samples = mineHaikuSamples(GROUP_FOLDER, HOST_LOG_PATH);
-    expect(samples).toHaveLength(0);
-  });
-
-  it('honors a custom minConfidence', () => {
-    vi.mocked(readHostLog).mockReturnValue([
-      {
-        timestamp: '12:00:00.000',
-        level: 'INFO',
-        pid: 1,
-        msg: 'haiku classifier verdict',
-        fields: {
-          groupFolder: GROUP_FOLDER,
-          messageId: 'msg-1',
-          inboundText: 'borderline',
-          intent: 'yes',
-          confidence: 0.65,
-        },
-      },
-    ]);
-    expect(mineHaikuSamples(GROUP_FOLDER, HOST_LOG_PATH, 0.7)).toHaveLength(0);
-    expect(mineHaikuSamples(GROUP_FOLDER, HOST_LOG_PATH, 0.6)).toHaveLength(1);
   });
 });
