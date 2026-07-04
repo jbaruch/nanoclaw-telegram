@@ -1,22 +1,15 @@
 /**
- * Shared Anthropic LiteLLM→direct bypass decision logic (#610, #675).
+ * Anthropic LiteLLM→direct bypass decision logic (#610, #675).
  *
- * Both egress paths that leave the orchestrator host point their primary
- * attempt at `ANTHROPIC_BASE_URL` (the `nanoclaw-litellm` gateway) and
- * fall back to `ANTHROPIC_BYPASS_URL` (`https://api.anthropic.com`) on a
- * recoverable failure, so a gateway blip can't take Stage 2 down while
- * agent-container spawns sail through:
- *   - the credential proxy (`credential-proxy.ts`) at the raw-socket
- *     layer, for agent containers;
- *   - the Stage 2 Haiku classifier (`gates/haiku-classifier.ts`) at the
- *     SDK layer, for the host-side spawn gate.
- *
- * The transport differs (HTTP stream vs SDK), so the retry MECHANISM
- * can't be shared — but the DECISION logic is identical and lives here
- * so the two paths can't drift: which status codes / network errnos are
- * bypass-eligible, and whether bypass is even enabled for a given config.
- * The SDK-layer retry orchestration (`createMessageWithBypass`) is shared
- * by every SDK caller.
+ * The credential proxy (`credential-proxy.ts`) points its primary attempt
+ * at `ANTHROPIC_BASE_URL` (the `nanoclaw-litellm` gateway) at the
+ * raw-socket layer and falls back to `ANTHROPIC_BYPASS_URL`
+ * (`https://api.anthropic.com`) on a recoverable failure, so a gateway
+ * blip can't take agent-container spawns down. The DECISION logic lives
+ * here as the single source of truth for which status codes / network
+ * errnos are bypass-eligible and whether bypass is enabled for a given
+ * config. (This whole module is retired once the bypass path itself is
+ * removed post subscription-OAuth cutover.)
  */
 import Anthropic from '@anthropic-ai/sdk';
 
