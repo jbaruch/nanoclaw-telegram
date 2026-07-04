@@ -270,7 +270,7 @@ describe('inspect_gate_decisions log search (#443)', () => {
         chain: [
           { gate: 'trigger', decision: 'allow', reason: 'matched' },
           {
-            gate: 'haiku-classifier',
+            gate: 'stage2',
             decision: 'deny',
             reason: 'human-to-human',
           },
@@ -314,7 +314,7 @@ describe('inspect_gate_decisions log search (#443)', () => {
     expect(payload.decisions[0].chain).toEqual([
       { gate: 'trigger', decision: 'allow', reason: 'matched' },
       {
-        gate: 'haiku-classifier',
+        gate: 'stage2',
         decision: 'deny',
         reason: 'human-to-human',
       },
@@ -333,7 +333,7 @@ describe('inspect_gate_decisions log search (#443)', () => {
         reason: 'haiku-no',
         chain: [
           { gate: 'trigger', decision: 'allow', reason: 'matched' },
-          { gate: 'haiku-classifier', decision: 'deny', reason: 'no-intent' },
+          { gate: 'stage2', decision: 'deny', reason: 'no-intent' },
         ],
       }),
       writeGateDecisionLogLine({

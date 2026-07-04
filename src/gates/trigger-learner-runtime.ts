@@ -13,8 +13,10 @@
  *     verdict'` records).
  *  2. Mine truth-labeled samples from the union of:
  *       - User reactions on bot messages (`reactions` table)
- *       - Stage 2 Haiku verdicts emitted by `haiku-classifier.ts`
- *         (mined out of host-log records)
+ *       - Any `haiku classifier verdict` records still present in the
+ *         host log (mined out of host-log records; the Stage 2 gate
+ *         that produced them was removed, so this source is inert on
+ *         current logs and retained only for historical records)
  *     The `gate decision` log line carries the gate's own verdict —
  *     we DELIBERATELY do not feed that back as truth (self-
  *     reinforcement loop). It IS used to compute a per-pattern

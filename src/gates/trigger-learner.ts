@@ -269,8 +269,7 @@ export function weightForTier(tier: SenderTier, cfg: LearnerConfig): number {
 /**
  * Stop words that would generate noisy proposals if scored as
  * keyword candidates. Conservative list — covering the most common
- * function words across English/Russian (the two languages live in
- * the worked examples in `haiku-classifier.ts`'s system prompt).
+ * function words across English/Russian.
  *
  * Not exhaustive: the goal is to drop obvious non-candidates, not
  * to be linguistically precise. The min-score gate downstream is

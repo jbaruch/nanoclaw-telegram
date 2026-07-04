@@ -215,29 +215,15 @@ function isAddressedToUs(
  *
  * Even when `requiresTrigger === false`, the deterministic `'trigger'`
  * gate is included whenever the group has trigger patterns configured
- * — running it is free (microseconds, $0) and short-circuits expensive
- * Stage 2 LLM calls when a deterministic match exists. The
- * `requires_trigger=false` semantic ("respond to all messages") is
- * preserved because (a) when no patterns match the trigger gate
- * returns `pass` and the chain falls through to whatever's next
- * (Stage 2 if enabled, fail-open default otherwise), and (b) groups
- * with no patterns at all still get an empty implicit chain — UNLESS
- * Stage 2 is enabled (see Stage 2 paragraph below), in which case the
- * appended `haiku-classifier` is the entire chain. Main groups with
- * Stage 2 enabled also pick up `haiku-classifier`; if you don't want
- * the classifier on a main group, set `stage2Enabled: false`
- * explicitly.
+ * — running it is free (microseconds, $0) and short-circuits when a
+ * deterministic match exists. The `requires_trigger=false` semantic
+ * ("respond to all messages") is preserved because (a) when no patterns
+ * match the trigger gate returns `pass` and the chain falls through to
+ * the fail-open default, and (b) groups with no patterns at all get an
+ * empty implicit chain.
  *
  * Path B (one-shot DB migration to set `containerConfig.gates =
  * ['trigger']`) is a future cleanup — the column stays for now.
- *
- * Stage 2 (#83): when `containerConfig.stage2Enabled === true`
- * AND `requiresTrigger !== true` (#98), `'haiku-classifier'` is
- * APPENDED LAST so deterministic gates short-circuit before any API
- * call. New groups default `stage2Enabled` to `true` via
- * `applyNewGroupContainerConfigDefaults`; existing groups keep
- * whatever was previously persisted, and an explicit `false` always
- * disables.
  */
 export function resolveGatesForGroup(group: RegisteredGroup): string[] {
   // `containerConfig` is JSON-parsed but not field-validated at the DB
@@ -267,30 +253,6 @@ export function resolveGatesForGroup(group: RegisteredGroup): string[] {
       const hasPatterns = (group.triggerPatterns?.patterns?.length ?? 0) > 0;
       chain = hasPatterns ? ['trigger'] : [];
     }
-  }
-  // Stage 2 only adds value for permissive (non-strict) groups.
-  // requiresTrigger=true means "respond only to deterministic matches" —
-  // there's no grey zone for Haiku to adjudicate, and with the
-  // last-gate-wins combinator (in-flight), putting Haiku after a
-  // strict-trigger gate would cause a Stage 1 deny to fall through to
-  // Haiku, silently breaking the strict-gating contract.
-  //
-  // The check is `requiresTrigger !== true` so that explicit-`false` and
-  // unset-or-undefined both qualify as permissive. Existing groups with
-  // requiresTrigger left at its DB default get Stage 2 if stage2Enabled
-  // is true; only groups that have explicitly opted into strict-trigger
-  // gating skip Stage 2.
-  //
-  // Explicit `containerConfig.gates` bypasses this predicate by virtue
-  // of resolving the chain through the explicit branch above — an
-  // operator who pins `gates: ['trigger', 'haiku-classifier']` knows
-  // what they're asking for.
-  if (
-    group.containerConfig?.stage2Enabled === true &&
-    group.requiresTrigger !== true &&
-    !chain.includes('haiku-classifier')
-  ) {
-    chain.push('haiku-classifier');
   }
   return chain;
 }
@@ -1278,6 +1240,10 @@ export function wipeSessionJsonl(
  * a value — caller-pinned (including `false`) wins. Existing groups
  * pass through unchanged so we never auto-flip a stored config.
  *
+ * `stage2Enabled` no longer selects any gate (the Stage 2 classifier
+ * was removed); the field is retained for config-shape compatibility
+ * with stored rows and is inert until a follow-up prunes it.
+ *
  * Exported for unit testing; callers should use `registerGroup`.
  */
 export function applyNewGroupContainerConfigDefaults(
@@ -1330,9 +1296,9 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     return;
   }
 
-  // Stage 2 default for NEW groups only: opt them into the Haiku
-  // classifier unless the caller explicitly pinned `stage2Enabled`.
-  // Existing groups keep whatever they already have on disk.
+  // Apply NEW-group containerConfig defaults (currently the inert
+  // `stage2Enabled` flag). Existing groups keep whatever they already
+  // have on disk.
   group = applyNewGroupContainerConfigDefaults(group, !registeredGroups[jid]);
 
   setRegisteredGroup(jid, group);

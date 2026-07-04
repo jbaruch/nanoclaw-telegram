@@ -194,11 +194,11 @@ describe('findGateDecisions (#443)', () => {
         messageId: 'msg-b',
         groupFolder: 'g1',
         finalDecision: 'deny',
-        reason: 'haiku-no',
+        reason: 'stage2-no',
         chain: [
           { gate: 'trigger', decision: 'allow', reason: 'matched' },
           {
-            gate: 'haiku-classifier',
+            gate: 'stage2',
             decision: 'deny',
             reason: 'human-to-human',
           },

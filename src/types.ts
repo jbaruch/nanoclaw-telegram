@@ -141,29 +141,23 @@ export interface ContainerConfig {
    */
   gates?: string[];
   /**
-   * Stage 2 Haiku classifier (#83). Opt-out: when undefined, the
-   * orchestrator defaults new groups to `true` via
-   * `applyNewGroupContainerConfigDefaults` so #82-style grey-zone
-   * messages route through the classifier; existing groups keep
-   * whatever was previously persisted. Set explicitly to `false`
-   * to disable the classifier on a specific group. When effectively
-   * true, `haiku-classifier` is appended to the resolved gate chain
-   * so deterministic gates short-circuit before any API call. Skipped
-   * for `requires_trigger=true` groups (deterministic chain only —
-   * see #98).
+   * Legacy Stage 2 classifier opt-in. The Stage 2 Haiku classifier was
+   * removed, so this flag no longer selects any gate — it is retained
+   * for config-shape compatibility with stored rows (new groups still
+   * default it to `true` via `applyNewGroupContainerConfigDefaults`) and
+   * is inert until a follow-up prunes it.
    */
   stage2Enabled?: boolean;
   /**
-   * Override the Haiku classifier model. Defaults to
-   * `claude-haiku-4-5-20251001` when unset. Pin to a dated snapshot
-   * if you need cache-stability across model rolls.
+   * Legacy Stage 2 classifier model override. Inert since the Stage 2
+   * Haiku classifier was removed; retained for config-shape
+   * compatibility until a follow-up prunes it.
    */
   stage2ModelId?: string;
   /**
-   * Selects a registered `ContextStrategy` (see
-   * `src/gates/context-strategy.ts`) for building the volatile suffix
-   * of the classifier prompt. Defaults to `static-group-context` when
-   * unset. Unknown values fall back to the default with an ERROR log.
+   * Legacy Stage 2 classifier context-strategy selector. Inert since
+   * the Stage 2 Haiku classifier was removed; retained for config-shape
+   * compatibility until a follow-up prunes it.
    */
   stage2ContextStrategy?: string;
   /**

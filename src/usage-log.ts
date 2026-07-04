@@ -409,9 +409,8 @@ export function parseUsageFromBody(
  * When `cache_creation` is absent we credit the total to 5m (which is
  * the SDK's default TTL).
  *
- * Exported so non-proxy call sites (e.g. the orchestrator-side Haiku
- * classifier in `gates/haiku-classifier.ts`) can append the same shape
- * without going through the credential proxy.
+ * Exported so non-proxy call sites in the orchestrator can append the
+ * same shape without going through the credential proxy.
  */
 export function buildUsageRecord(
   usage: Record<string, number | Record<string, number>>,
