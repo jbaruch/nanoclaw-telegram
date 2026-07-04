@@ -141,32 +141,6 @@ export interface ContainerConfig {
    */
   gates?: string[];
   /**
-   * Stage 2 Haiku classifier (#83). Opt-out: when undefined, the
-   * orchestrator defaults new groups to `true` via
-   * `applyNewGroupContainerConfigDefaults` so #82-style grey-zone
-   * messages route through the classifier; existing groups keep
-   * whatever was previously persisted. Set explicitly to `false`
-   * to disable the classifier on a specific group. When effectively
-   * true, `haiku-classifier` is appended to the resolved gate chain
-   * so deterministic gates short-circuit before any API call. Skipped
-   * for `requires_trigger=true` groups (deterministic chain only —
-   * see #98).
-   */
-  stage2Enabled?: boolean;
-  /**
-   * Override the Haiku classifier model. Defaults to
-   * `claude-haiku-4-5-20251001` when unset. Pin to a dated snapshot
-   * if you need cache-stability across model rolls.
-   */
-  stage2ModelId?: string;
-  /**
-   * Selects a registered `ContextStrategy` (see
-   * `src/gates/context-strategy.ts`) for building the volatile suffix
-   * of the classifier prompt. Defaults to `static-group-context` when
-   * unset. Unknown values fall back to the default with an ERROR log.
-   */
-  stage2ContextStrategy?: string;
-  /**
    * Per-chat additive tile overlay (#305). Tile names from the local
    * registry under `tessl-workspace/.tessl/tiles/<TILE_OWNER>/` that
    * load IN ADDITION TO the trust-tier baseline (`selectTiles`),

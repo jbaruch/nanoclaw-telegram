@@ -48,8 +48,8 @@ beforeEach(() => {
     'pass-gate',
     (): GateDecision => ({ decision: 'pass', reason: 'no opinion' }),
   );
-  // A gate that returns `pass` because it could NOT run — the shape the
-  // Haiku classifier emits on api-error/timeout (#671).
+  // A gate that returns `pass` because it could NOT run — the shape a
+  // paid/async gate emits on api-error/timeout (#671).
   registerGate(
     'failing-pass-gate',
     (): GateDecision => ({
@@ -146,7 +146,7 @@ describe('runGateChain — combinator (last-gate-wins, #97)', () => {
     expect(result.chain.every((r) => r.decision === 'pass')).toBe(true);
   });
 
-  // The wtf-chat shape `[trigger, haiku-classifier]` — full truth table
+  // A two-gate chain `[gateA, gateB]` — full last-gate-wins truth table
   // expressed with the synthetic gates. Using gateA/gateB names so the
   // intent is the row, not the gate.
   describe('wtf-chat shape [gateA, gateB]', () => {
@@ -188,8 +188,8 @@ describe('runGateChain — combinator (last-gate-wins, #97)', () => {
     });
   });
 
-  // #671 — a FAILED downstream gate (classifier api-error/timeout) must
-  // not nullify an upstream advisory deny into allow-all. The failed
+  // #671 — a FAILED downstream gate (api-error/timeout) must not
+  // nullify an upstream advisory deny into allow-all. The failed
   // `pass` is distinguished from a healthy `pass` by `failed: true`.
   describe('deny-preservation on downstream gate failure (#671)', () => {
     it('[deny, failing-pass] → deny (advisory deny preserved, not fail-open)', async () => {

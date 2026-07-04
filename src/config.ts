@@ -11,7 +11,6 @@ const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_USERNAME',
   'ASSISTANT_HAS_OWN_NUMBER',
-  'ASSISTANT_OWNER_NAME',
   'ASSISTANT_OWNER_HANDLE',
   'ASSISTANT_OWNER_TG_USER_ID',
   'TZ',
@@ -35,17 +34,16 @@ export const ASSISTANT_NAME =
 //
 // Comma-separated values declare aliases — useful when one bot is
 // reachable under more than one handle (e.g. an autocomplete-only
-// `@AyeAyeSureBot` and an internal/vocative `@AyeAye`). Both Stage 1
-// trigger auto-derivation and Stage 2 Haiku identity context iterate
-// `ASSISTANT_USERNAMES` (the full list) so the bot is recognized
-// regardless of which handle the user typed (#464).
+// `@AyeAyeSureBot` and an internal/vocative `@AyeAye`). The trigger
+// gate's auto-derivation iterates `ASSISTANT_USERNAMES` (the full
+// list) so the bot is recognized regardless of which handle the user
+// typed (#464).
 //
 // Two exports — pick the right one for your call site:
 //   - `ASSISTANT_USERNAMES` (string[]): the full alias list. Used by
-//     Stage 1 trigger, Stage 2 static-group-context strategy, and the
-//     container-runner spawn-arg builder (which joins it back into a
-//     comma-separated string for forwarding so the agent-runner sees
-//     every alias).
+//     the trigger gate and the container-runner spawn-arg builder
+//     (which joins it back into a comma-separated string for
+//     forwarding so the agent-runner sees every alias).
 //   - `ASSISTANT_USERNAME` (string): the canonical primary handle
 //     (first entry of `ASSISTANT_USERNAMES`). Used for display where
 //     one canonical token is needed.
@@ -57,8 +55,8 @@ export const ASSISTANT_NAME =
  * Parse the raw `ASSISTANT_USERNAME` env value into one or more
  * sanitized handles. Operators reasonably type either form (`@AyeAye`
  * or `AyeAye`) into `.env`; without normalization a `@`-prefixed
- * value would render as `@@AyeAye` in the Stage 2 identity preamble
- * and the synthetic Stage 1 mention pattern would never match (real
+ * value would make the synthetic Stage 1 mention pattern render as
+ * `@@AyeAye` and never match (real
  * mentions don't have a double `@`). De-dupe the result so accidental
  * repeats (`AyeAye,AyeAye`) collapse to one synthetic pattern instead
  * of running the matcher twice.
@@ -89,25 +87,19 @@ export const ASSISTANT_USERNAMES: string[] =
 // Primary handle — first entry of ASSISTANT_USERNAMES. Kept as a
 // separate export so single-value consumers (container-runner spawn
 // args, the agent-runner identity preamble's "your @-handle is" line)
-// keep their existing shape. Multi-value consumers (Stage 1 trigger,
-// Stage 2 context strategy) read ASSISTANT_USERNAMES.
+// keep their existing shape. The multi-value consumer (the Stage 1
+// trigger gate) reads ASSISTANT_USERNAMES.
 export const ASSISTANT_USERNAME = ASSISTANT_USERNAMES[0];
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER ||
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
 
-// Owner identity — used by the Stage 2 classifier so it can recognise
-// the bot's owner when they write ambiguous-but-plausibly-bot-directed
-// messages ("my bot are you here?"). Both vars are OPTIONAL: when
-// either is unset the static-group-context strategy suppresses the
-// owner line entirely and the classifier prompt's owner-aware rule
-// is a no-op (zero behaviour change for installs that don't configure
-// owner identity). Owner handle is the Telegram username WITHOUT the
-// leading `@` (matches `ASSISTANT_USERNAME` convention).
-export const ASSISTANT_OWNER_NAME =
-  process.env.ASSISTANT_OWNER_NAME ||
-  envConfig.ASSISTANT_OWNER_NAME ||
-  undefined;
+// Owner handle — read by the trigger-pattern learner
+// (`gates/trigger-learner-runtime.ts`) to recognise the bot's owner.
+// OPTIONAL: when unset the learner's owner-handle detection is a no-op
+// (zero behaviour change for installs that don't configure owner
+// identity). Owner handle is the Telegram username WITHOUT the leading
+// `@` (matches `ASSISTANT_USERNAME` convention).
 export const ASSISTANT_OWNER_HANDLE =
   process.env.ASSISTANT_OWNER_HANDLE ||
   envConfig.ASSISTANT_OWNER_HANDLE ||
@@ -127,8 +119,8 @@ export const ASSISTANT_OWNER_HANDLE =
 // established pattern — stderr-only, never log the raw value. The
 // raw env content for ASSISTANT_OWNER_TG_USER_ID is operator-supplied
 // and could be a paste-mistake holding a credential / token (the
-// adjacent ASSISTANT_OWNER_HANDLE / ASSISTANT_OWNER_NAME / various
-// API keys live in the same .env), so logging it under any condition
+// adjacent ASSISTANT_OWNER_HANDLE / various API keys live in the
+// same .env), so logging it under any condition
 // — even a few bytes — risks leaking it to `coding-policy: no-secrets`.
 // `logger` is intentionally NOT imported in this file (config.ts is
 // below logger.ts in the import graph and a logger import would close

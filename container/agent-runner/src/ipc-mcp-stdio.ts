@@ -2611,7 +2611,7 @@ if (isMain) {
 if (isMain) {
   server.tool(
     'inspect_gate_decisions',
-    "Look up the host-side gate-chain verdicts for recent messages in a chat — the same Stage 1 (trigger) + Stage 2 (Haiku classifier) decisions that determined whether the agent was woken up. Use this to answer 'why didn't AyeAye respond to message X' or 'what did the gate think about the last 10 messages'. Returns most-recent first. Backed by a tail-and-parse over the orchestrator's host log; stale records age out via log rotation rather than DB pruning. Main group only.",
+    "Look up the host-side gate-chain verdicts for recent messages in a chat — the trigger-gate (and any other configured gate) decisions that determined whether the agent was woken up. Use this to answer 'why didn't AyeAye respond to message X' or 'what did the gate think about the last 10 messages'. Returns most-recent first. Backed by a tail-and-parse over the orchestrator's host log; stale records age out via log rotation rather than DB pruning. Main group only.",
     {
       chat_id: z
         .string()
