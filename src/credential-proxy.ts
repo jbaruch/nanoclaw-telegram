@@ -56,21 +56,19 @@ const TOKEN_PREFIX_RE = /^\/c\/([A-Za-z0-9_-]+)(\/.*)?$/;
 const USAGE_CAPTURE_BUFFER_CAP = 10 * 1024 * 1024;
 
 /**
- * Default upstream. There is no LiteLLM gateway and no bypass fallback
- * in the request path anymore — the proxy forwards to a single upstream:
- * `ANTHROPIC_BASE_URL` from `.env` when set (any Anthropic-compatible
- * endpoint — see the README's third-party-models section), otherwise
- * Anthropic direct.
+ * The one and only upstream. Post subscription-OAuth cutover the proxy
+ * forwards straight to Anthropic — there is no LiteLLM gateway, no
+ * bypass fallback, and no custom-endpoint override in the request path
+ * anymore (the third-party-endpoint option was retired with it).
  */
 const ANTHROPIC_DIRECT_URL = new URL('https://api.anthropic.com');
 
 export interface CredentialProxyOptions {
   /**
-   * Test-only override for the upstream target; takes precedence over
-   * the `ANTHROPIC_BASE_URL` env resolution. Production callers omit
-   * this. Tests inject a local mock server here to exercise header
-   * injection, usage capture, and streaming without reaching the real
-   * API.
+   * Test-only override for the upstream target. Production callers omit
+   * this — the proxy always forwards to `ANTHROPIC_DIRECT_URL`. Tests
+   * inject a local mock server here to exercise header injection, usage
+   * capture, and streaming without reaching the real API.
    */
   upstreamUrl?: URL;
 }
@@ -84,30 +82,13 @@ export function startCredentialProxy(
     'ANTHROPIC_API_KEY',
     'CLAUDE_CODE_OAUTH_TOKEN',
     'ANTHROPIC_AUTH_TOKEN',
-    'ANTHROPIC_BASE_URL',
   ]);
 
   const authMode: AuthMode = secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
   const oauthToken =
     secrets.CLAUDE_CODE_OAUTH_TOKEN || secrets.ANTHROPIC_AUTH_TOKEN;
 
-  // Optional custom Anthropic-compatible endpoint (README: third-party
-  // models). A malformed value must not crash the proxy at startup —
-  // degrade to anthropic-direct with a warn. The raw env value is
-  // deliberately NOT logged: an endpoint URL can embed a credential
-  // (`https://user:pass@host`, `?api_key=…`) and the logger only
-  // redacts a narrow Telegram-token pattern.
-  let envUpstream: URL | undefined;
-  if (secrets.ANTHROPIC_BASE_URL) {
-    try {
-      envUpstream = new URL(secrets.ANTHROPIC_BASE_URL);
-    } catch {
-      logger.warn(
-        'credential-proxy: ANTHROPIC_BASE_URL is not a valid URL (value omitted — may contain credentials) — falling back to anthropic-direct',
-      );
-    }
-  }
-  const upstreamUrl = opts.upstreamUrl ?? envUpstream ?? ANTHROPIC_DIRECT_URL;
+  const upstreamUrl = opts.upstreamUrl ?? ANTHROPIC_DIRECT_URL;
 
   const usageLogPath = resolveUsageLogPath();
 
