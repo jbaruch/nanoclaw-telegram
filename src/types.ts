@@ -450,6 +450,21 @@ export interface ScheduledTask {
    * (imperative — only valid for `source = 'schedule-task'` rows).
    */
   agent_model?: string | null;
+  /**
+   * Declared work-evidence contract `<relative-file>#<json-field>`
+   * (#720), e.g. `cfp-state.json#_last_checked`. Written by the
+   * cadence registry from `evidence:` frontmatter; checked post-run by
+   * the scheduler: after a run that would otherwise be `success`, the
+   * named top-level string field of `groups/<group_folder>/<file>` is
+   * parsed as a date and must be >= the run's start time, proving the
+   * skill actually freshened its evidence artifact rather than
+   * fabricating a success report from a pinned session's in-context
+   * precedent. Any failure records the run as `error` (message prefix
+   * `evidence-check:`) and clears the task's pinned session so the
+   * next fire starts fresh. NULL/undefined = no evidence contract;
+   * owner-scheduled tasks always leave this NULL.
+   */
+  evidence?: string | null;
 }
 
 export interface TaskRunLog {

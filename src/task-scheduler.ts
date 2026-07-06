@@ -2,6 +2,7 @@ import { ChildProcess } from 'child_process';
 import { SqliteError } from 'better-sqlite3';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
+import path from 'path';
 
 import {
   ASSISTANT_NAME,
@@ -816,6 +817,130 @@ export interface SchedulerDependencies {
   ) => number;
 }
 
+/**
+ * Work-evidence post-check for cadence tasks (#720). `evidenceSpec` is
+ * the declared contract `<relative-file>#<json-field>` (shape enforced
+ * at registration by `validateCadenceDeclaration`); the file is read
+ * relative to `groupDir`, parsed as JSON, and the named top-level
+ * string field must parse as a date >= `runStartMs` — proving the
+ * artifact was actually freshened during the run rather than the
+ * agent fabricating a success report. Pure w.r.t. the DB: the caller
+ * (`runTask`) maps `{ok: false}` onto `runStatus = 'error'` and clears
+ * the pinned session.
+ *
+ * Only *expected* filesystem failures (ENOENT / EACCES / EISDIR /
+ * ENOTDIR) and JSON syntax errors are folded into `{ok: false,
+ * reason}`; anything else propagates per `jbaruch/coding-policy:
+ * error-handling`. The spec shape is re-guarded here (not just at
+ * registration) because `scheduled_tasks.evidence` is a plain DB
+ * column a hand-edit can corrupt — a malformed spec fails CLOSED
+ * with a remediation hint rather than producing junk path lookups.
+ * Every reason carries the operator's next step, since the caller
+ * persists it into `task_run_logs.error`.
+ */
+export function checkTaskEvidence(
+  evidenceSpec: string,
+  groupDir: string,
+  runStartMs: number,
+): { ok: true } | { ok: false; reason: string } {
+  const hashIdx = evidenceSpec.indexOf('#');
+  const relFile = evidenceSpec.slice(0, hashIdx);
+  const field = evidenceSpec.slice(hashIdx + 1);
+  if (
+    hashIdx <= 0 ||
+    field === '' ||
+    field.includes('#') ||
+    relFile.startsWith('/') ||
+    relFile.split('/').includes('..')
+  ) {
+    return {
+      ok: false,
+      reason: `malformed evidence spec ${JSON.stringify(evidenceSpec)} — expected <relative-file>#<json-field> with a relative file path; fix the 'evidence:' frontmatter in the skill's SKILL.md (or the hand-edited scheduled_tasks.evidence value) and redeploy`,
+    };
+  }
+  const filePath = path.join(groupDir, relFile);
+  // Symlink containment (no-secrets): this reader runs HOST-side
+  // against a CONTAINER-writable group folder. Lexical validation of
+  // the spec can't stop an agent from planting a symlink at the
+  // evidence path that targets a host file outside the group tree
+  // (e.g. the .env), so resolve both ends through realpath and require
+  // the resolved evidence file to stay inside the resolved group
+  // folder. On escape, fail closed WITHOUT reading — the reason must
+  // never embed external file contents.
+  let raw: string;
+  try {
+    const groupRoot = fs.realpathSync(groupDir);
+    const resolved = fs.realpathSync(filePath);
+    if (resolved !== groupRoot && !resolved.startsWith(groupRoot + path.sep)) {
+      return {
+        ok: false,
+        reason: `evidence path resolves outside the group folder (symlink?): ${relFile} — the evidence file must live inside the group folder; inspect the group tree for a planted symlink`,
+      };
+    }
+    raw = fs.readFileSync(resolved, 'utf-8');
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (
+      err instanceof Error &&
+      (code === 'ENOENT' ||
+        code === 'EACCES' ||
+        code === 'EISDIR' ||
+        code === 'ENOTDIR' ||
+        code === 'ELOOP')
+    ) {
+      return {
+        ok: false,
+        reason: `evidence file missing/unreadable: ${relFile} (${code}) — verify the skill actually writes this file under the group folder, or correct the 'evidence:' frontmatter in the skill's SKILL.md`,
+      };
+    }
+    throw err;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err: unknown) {
+    if (!(err instanceof SyntaxError)) throw err;
+    return {
+      ok: false,
+      reason: `evidence file is not valid JSON: ${relFile} — ${err.message} — inspect the file in the group folder and fix the skill step that writes it`,
+    };
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return {
+      ok: false,
+      reason: `evidence file is not a JSON object: ${relFile} — inspect the file in the group folder and fix the skill step that writes it`,
+    };
+  }
+  const value = (parsed as Record<string, unknown>)[field];
+  if (typeof value !== 'string') {
+    return {
+      ok: false,
+      reason: `evidence field missing or not a string: ${field} in ${relFile} (got ${value === undefined ? 'undefined' : typeof value}) — align the 'evidence:' frontmatter field name with what the skill actually writes`,
+    };
+  }
+  // Cap the embedded value so a garbage field can't balloon the
+  // persisted task_run_logs.error / log line. Post-containment the
+  // value is group-folder data (agent-visible anyway), never external
+  // file contents.
+  const valuePreview = JSON.stringify(
+    value.length > 64 ? `${value.slice(0, 64)}…` : value,
+  );
+  const parsedMs = Date.parse(value);
+  if (Number.isNaN(parsedMs)) {
+    return {
+      ok: false,
+      reason: `evidence field is not a parseable date: ${field}=${valuePreview} in ${relFile} — align the 'evidence:' frontmatter field with a field the skill stamps as an ISO timestamp`,
+    };
+  }
+  if (parsedMs < runStartMs) {
+    return {
+      ok: false,
+      reason: `evidence stale: ${field}=${valuePreview} predates run start ${new Date(runStartMs).toISOString()} — the run did not freshen the artifact; the pinned session is cleared automatically so the next fire retries fresh — if this recurs, inspect the run's container log for skipped pipeline steps`,
+    };
+  }
+  return { ok: true };
+}
+
 async function runTask(
   task: ScheduledTask,
   deps: SchedulerDependencies,
@@ -1514,6 +1639,62 @@ async function runTask(
       { taskId: task.id, forcedCloseAt, startTime, durationMs },
       'Task run reclassified as killed — container was force-closed mid-flight by tessl_update; pending_run_at on follow_me_tasks may be left dangling and will be cleared by the stale-lock TTL on next startup or pre-update check',
     );
+  }
+
+  // #720 — work-evidence post-check for cadence tasks. A maintenance
+  // agent on a pinned SDK session fabricated an evidence-gated skill's
+  // success report (claimed `verification: "live"` without writing the
+  // state file), so a self-reported success is no longer sufficient
+  // when the task declares an evidence contract: the artifact named by
+  // `task.evidence` must have been freshened during the run. Only runs
+  // that would otherwise be 'success' are checked — 'error' / 'killed'
+  // already record a failure, and a 'precheck_skipped' run never woke
+  // the agent, so no evidence is expected.
+  if (task.evidence && runStatus === 'success') {
+    const evidenceResult = checkTaskEvidence(
+      task.evidence,
+      groupDir,
+      startTime,
+    );
+    if (!evidenceResult.ok) {
+      runStatus = 'error';
+      error = `evidence-check: ${evidenceResult.reason}`;
+      logger.warn(
+        {
+          taskId: task.id,
+          evidence: task.evidence,
+          reason: evidenceResult.reason,
+        },
+        'Task run reclassified as error — declared work evidence was not freshened during the run (#720)',
+      );
+      // Clear the pinned session so the next fire starts fresh —
+      // breaking the fabrication-precedent loop (#720): a resumed
+      // session carries the fabricated report as in-context precedent
+      // and keeps fabricating, while a fresh session was
+      // experimentally shown to run honestly. Same narrow SqliteError
+      // tolerance as the #710 rotation clear above: on a transient DB
+      // hiccup the run is still recorded as 'error' and the next
+      // fire's evidence check re-detects and retries the clear.
+      try {
+        clearTaskSessionId(task.id);
+        // The DB pointer is gone, so the persisted transcript can
+        // never be resumed — drop the in-memory pointer too so the
+        // post-run finally wipes it instead of stranding an orphan
+        // JSONL on disk (#193 hygiene).
+        persistedSessionId = undefined;
+      } catch (dbErr) {
+        if (!(dbErr instanceof SqliteError)) throw dbErr;
+        logger.error(
+          {
+            taskId: task.id,
+            sessionId: persistedSessionId,
+            sqliteCode: dbErr.code,
+            err: dbErr,
+          },
+          '[task-scheduler] clearTaskSessionId failed during #720 evidence-check — run still recorded as error; next fire re-detects stale evidence and retries the clear',
+        );
+      }
+    }
   }
 
   // Post-run bookkeeping is wrapped in try/finally so the disk-hygiene

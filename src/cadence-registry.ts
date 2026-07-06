@@ -88,6 +88,19 @@ export interface CadenceDeclaration {
    * frontmatter; the spawn falls through to the Phase 2 ladder.
    */
   agentModel: string | null;
+  /**
+   * Optional work-evidence contract `<relative-file>#<json-field>`
+   * (#720), e.g. `cfp-state.json#_last_checked`. The file half is
+   * relative to the task's group folder (absolute paths and `..`
+   * traversal rejected here); the field half names a top-level JSON
+   * string field. When present, the registry writes it into
+   * `scheduled_tasks.evidence` and the task-scheduler verifies
+   * post-run that the field parses as a date >= the run's start time
+   * — a run that claims success without freshening the artifact is
+   * recorded as `error` and its pinned session is cleared. When
+   * absent, the column stays NULL and runs are trusted as before.
+   */
+  evidence: string | null;
 }
 
 interface ParsedSkill {
@@ -356,6 +369,45 @@ export function validateCadenceDeclaration(
       agentModel = rawAgentModel.trim();
     }
   }
+  // #720: optional work-evidence contract. Shape is
+  // `<relative-file>#<json-field>` — exactly one `#`, both halves
+  // non-empty, file half relative to the group folder (no leading `/`,
+  // no `..` traversal). The field's existence/type/freshness are
+  // fire-time concerns (`checkTaskEvidence` in src/task-scheduler.ts);
+  // here we only pin the declaration shape so a malformed contract is
+  // caught at registration instead of failing every run.
+  let evidence: string | null = null;
+  const rawEvidence = frontmatter.evidence;
+  if (rawEvidence !== undefined) {
+    if (typeof rawEvidence !== 'string' || rawEvidence.trim() === '') {
+      errors.push(
+        `${skillName}: 'evidence:' must be a non-empty string, got ${JSON.stringify(rawEvidence)}`,
+      );
+    } else {
+      const trimmed = rawEvidence.trim();
+      const parts = trimmed.split('#');
+      // Normalize per-half whitespace (`file # field` survives
+      // quoting) so a registration-accepted spec never fails at fire
+      // time on a field-name lookup carrying a stray space.
+      const fileHalf = (parts[0] ?? '').trim();
+      const fieldHalf = (parts[1] ?? '').trim();
+      if (parts.length !== 2 || fileHalf === '' || fieldHalf === '') {
+        errors.push(
+          `${skillName}: 'evidence:' must have the shape <relative-file>#<json-field>, got ${JSON.stringify(rawEvidence)}`,
+        );
+      } else if (fileHalf.startsWith('/')) {
+        errors.push(
+          `${skillName}: 'evidence:' file must be a relative path under the group folder, got ${JSON.stringify(rawEvidence)}`,
+        );
+      } else if (fileHalf.split('/').includes('..')) {
+        errors.push(
+          `${skillName}: 'evidence:' file must not contain '..' segments, got ${JSON.stringify(rawEvidence)}`,
+        );
+      } else {
+        evidence = `${fileHalf}#${fieldHalf}`;
+      }
+    }
+  }
   if (errors.length > 0) {
     return { ok: false, errors };
   }
@@ -366,6 +418,7 @@ export function validateCadenceDeclaration(
       priority,
       script,
       agentModel,
+      evidence,
     },
   };
 }
@@ -486,6 +539,7 @@ export function rebuildCadenceRegistry(
     tz: string | null;
     nextRun: string;
     agentModel: string | null;
+    evidence: string | null;
   }
   const desired: DesiredRow[] = [];
   for (const { skillName, declaration } of valid) {
@@ -539,6 +593,7 @@ export function rebuildCadenceRegistry(
       tz,
       nextRun,
       agentModel: declaration.agentModel,
+      evidence: declaration.evidence,
     });
   }
 
@@ -559,11 +614,12 @@ export function rebuildCadenceRegistry(
       script: string | null;
       next_run: string | null;
       agent_model: string | null;
+      evidence: string | null;
     }
     const existing = new Map<string, ExistingRow>();
     const existingRows = deps.db
       .prepare(
-        `SELECT id, schedule_value, schedule_timezone, prompt, script, next_run, agent_model
+        `SELECT id, schedule_value, schedule_timezone, prompt, script, next_run, agent_model, evidence
          FROM scheduled_tasks
          WHERE source = 'cadence-registry' AND group_folder = ?`,
       )
@@ -575,8 +631,9 @@ export function rebuildCadenceRegistry(
         id, group_folder, chat_jid, prompt, script,
         schedule_type, schedule_value, schedule_timezone,
         context_mode, next_run, status, created_at,
-        created_by_role, continuation_cycle_id, source, agent_model
-      ) VALUES (?, ?, ?, ?, ?, 'cron', ?, ?, 'isolated', ?, 'active', ?, ?, NULL, 'cadence-registry', ?)
+        created_by_role, continuation_cycle_id, source, agent_model,
+        evidence
+      ) VALUES (?, ?, ?, ?, ?, 'cron', ?, ?, 'isolated', ?, 'active', ?, ?, NULL, 'cadence-registry', ?, ?)
     `);
     // Shape-change UPDATE: preserve session_id / last_run / last_result
     // (they're per-fire history, not declaration), recompute next_run
@@ -597,7 +654,7 @@ export function rebuildCadenceRegistry(
       UPDATE scheduled_tasks
          SET prompt = ?, script = ?, schedule_value = ?, schedule_timezone = ?,
              next_run = ?, chat_jid = ?, created_by_role = ?,
-             created_at = ?, agent_model = ?
+             created_at = ?, agent_model = ?, evidence = ?
        WHERE id = ?
     `);
     const createdAt = deps.now().toISOString();
@@ -620,6 +677,7 @@ export function rebuildCadenceRegistry(
           createdAt,
           deps.createdByRole,
           row.agentModel,
+          row.evidence,
         );
         inserted++;
         continue;
@@ -629,7 +687,8 @@ export function rebuildCadenceRegistry(
         prior.schedule_timezone !== row.tz ||
         prior.prompt !== row.prompt ||
         (prior.script ?? null) !== (row.script ?? null) ||
-        (prior.agent_model ?? null) !== (row.agentModel ?? null);
+        (prior.agent_model ?? null) !== (row.agentModel ?? null) ||
+        (prior.evidence ?? null) !== (row.evidence ?? null);
       if (shapeChanged) {
         // Cadence declaration moved — recompute next_run, refresh the
         // declarative columns, but leave session_id / last_run /
@@ -644,6 +703,7 @@ export function rebuildCadenceRegistry(
           deps.createdByRole,
           createdAt,
           row.agentModel,
+          row.evidence,
           row.taskId,
         );
         updated++;

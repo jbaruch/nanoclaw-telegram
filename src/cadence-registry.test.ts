@@ -48,7 +48,8 @@ function makeDb(): Database.Database {
       continuation_cycle_id TEXT,
       session_id TEXT,
       source TEXT NOT NULL DEFAULT 'schedule-task',
-      agent_model TEXT
+      agent_model TEXT,
+      evidence TEXT
     );
   `);
   return db;
@@ -204,6 +205,7 @@ describe('validateCadenceDeclaration', () => {
         priority: 0,
         script: null,
         agentModel: null,
+        evidence: null,
       });
   });
 
@@ -346,6 +348,103 @@ describe('validateCadenceDeclaration', () => {
     expect(r.ok).toBe(false);
     if (!r.ok)
       expect(r.errors[0]).toContain("'agentModel:' must be a non-empty string");
+  });
+
+  // #720: evidence: frontmatter parsed into declaration.evidence
+  it('accepts a valid evidence: contract', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', evidence: 'cfp-state.json#_last_checked' },
+      'tessl__check-cfps',
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok && r.declaration)
+      expect(r.declaration.evidence).toBe('cfp-state.json#_last_checked');
+  });
+
+  it('omits evidence → declaration.evidence === null', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *' },
+      'tessl__heartbeat',
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok && r.declaration) expect(r.declaration.evidence).toBeNull();
+  });
+
+  it('normalizes per-half whitespace so registration-accepted specs match at fire time', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', evidence: ' cfp-state.json # _last_checked ' },
+      'tessl__check-cfps',
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok && r.declaration)
+      expect(r.declaration.evidence).toBe('cfp-state.json#_last_checked');
+  });
+
+  it('rejects an empty evidence: value with a skill-tagged error', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', evidence: '' },
+      'tessl__check-cfps',
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.errors[0]).toContain('tessl__check-cfps');
+      expect(r.errors[0]).toContain("'evidence:' must be a non-empty string");
+    }
+  });
+
+  it('rejects evidence: without a # separator', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', evidence: 'cfp-state.json' },
+      'tessl__check-cfps',
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors[0]).toContain('<relative-file>#<json-field>');
+  });
+
+  it('rejects evidence: with multiple # separators', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', evidence: 'a#b#c' },
+      'tessl__check-cfps',
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors[0]).toContain('<relative-file>#<json-field>');
+  });
+
+  it('rejects evidence: with an empty file half', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', evidence: '#_last_checked' },
+      'tessl__check-cfps',
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors[0]).toContain('<relative-file>#<json-field>');
+  });
+
+  it('rejects evidence: with an empty field half', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', evidence: 'cfp-state.json#' },
+      'tessl__check-cfps',
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors[0]).toContain('<relative-file>#<json-field>');
+  });
+
+  it('rejects an absolute evidence: file path', () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', evidence: '/etc/passwd#field' },
+      'tessl__check-cfps',
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok)
+      expect(r.errors[0]).toContain('relative path under the group folder');
+  });
+
+  it("rejects evidence: with a '..' traversal segment", () => {
+    const r = validateCadenceDeclaration(
+      { cadence: '*/30 * * * *', evidence: '../other-group/state.json#field' },
+      'tessl__check-cfps',
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors[0]).toContain("'..' segments");
   });
 });
 
@@ -883,6 +982,108 @@ describe('rebuildCadenceRegistry', () => {
       skills,
       'tessl__composio-fetch',
       'cadence: "*/30 * * * *"\nagentModel: "haiku"',
+    );
+    const db = makeDb();
+    const deps = {
+      db,
+      groupFolder: 'g1',
+      chatJid: 'g1@chat',
+      createdByRole: 'owner' as const,
+      skillsDir: skills,
+      computeNextRun: () => PINNED_NEXT_RUN,
+      now: () => PINNED_NOW,
+    };
+    rebuildCadenceRegistry(deps);
+    const r2 = rebuildCadenceRegistry(deps);
+    expect(r2).toMatchObject({ inserted: 0, updated: 0, preserved: 1 });
+  });
+
+  // #720: evidence frontmatter flows to scheduled_tasks.evidence
+  it('populates scheduled_tasks.evidence when frontmatter declares evidence:', () => {
+    const skills = path.join(tmpRoot, 'skills');
+    // Quoted in the fixture frontmatter — the flat parser strips
+    // quotes; an unquoted value with ` #` would get clipped by the
+    // inline-comment rule.
+    writeSkill(
+      skills,
+      'tessl__check-cfps',
+      'cadence: "*/30 * * * *"\nevidence: "cfp-state.json#_last_checked"',
+    );
+    const db = makeDb();
+    const r = rebuildCadenceRegistry({
+      db,
+      groupFolder: 'g1',
+      chatJid: 'g1@chat',
+      createdByRole: 'owner',
+      skillsDir: skills,
+      computeNextRun: () => PINNED_NEXT_RUN,
+      now: () => PINNED_NOW,
+    });
+    expect(r.inserted).toBe(1);
+    expect(r.errors).toEqual([]);
+    const row = db
+      .prepare('SELECT evidence FROM scheduled_tasks WHERE id = ?')
+      .get('cadence-registry::g1::tessl__check-cfps');
+    expect(row).toEqual({ evidence: 'cfp-state.json#_last_checked' });
+  });
+
+  it('leaves evidence NULL when frontmatter omits evidence:', () => {
+    const skills = path.join(tmpRoot, 'skills');
+    writeSkill(skills, 'tessl__heartbeat', 'cadence: "*/30 * * * *"');
+    const db = makeDb();
+    rebuildCadenceRegistry({
+      db,
+      groupFolder: 'g1',
+      chatJid: 'g1@chat',
+      createdByRole: 'owner',
+      skillsDir: skills,
+      computeNextRun: () => PINNED_NEXT_RUN,
+      now: () => PINNED_NOW,
+    });
+    const row = db
+      .prepare('SELECT evidence FROM scheduled_tasks WHERE id = ?')
+      .get('cadence-registry::g1::tessl__heartbeat');
+    expect(row).toEqual({ evidence: null });
+  });
+
+  it('treats an evidence: change as a shape change and updates the column', () => {
+    const skills = path.join(tmpRoot, 'skills');
+    writeSkill(
+      skills,
+      'tessl__check-cfps',
+      'cadence: "*/30 * * * *"\nevidence: "cfp-state.json#_last_checked"',
+    );
+    const db = makeDb();
+    const deps = {
+      db,
+      groupFolder: 'g1',
+      chatJid: 'g1@chat',
+      createdByRole: 'owner' as const,
+      skillsDir: skills,
+      computeNextRun: () => PINNED_NEXT_RUN,
+      now: () => PINNED_NOW,
+    };
+    rebuildCadenceRegistry(deps);
+    // Author renames the evidence field between spawns.
+    writeSkill(
+      skills,
+      'tessl__check-cfps',
+      'cadence: "*/30 * * * *"\nevidence: "cfp-state.json#_verified_at"',
+    );
+    const r2 = rebuildCadenceRegistry(deps);
+    expect(r2).toMatchObject({ inserted: 0, updated: 1, preserved: 0 });
+    const row = db
+      .prepare('SELECT evidence FROM scheduled_tasks WHERE id = ?')
+      .get('cadence-registry::g1::tessl__check-cfps');
+    expect(row).toEqual({ evidence: 'cfp-state.json#_verified_at' });
+  });
+
+  it('preserves the row (no UPDATE) when evidence: is unchanged across rebuilds', () => {
+    const skills = path.join(tmpRoot, 'skills');
+    writeSkill(
+      skills,
+      'tessl__check-cfps',
+      'cadence: "*/30 * * * *"\nevidence: "cfp-state.json#_last_checked"',
     );
     const db = makeDb();
     const deps = {
