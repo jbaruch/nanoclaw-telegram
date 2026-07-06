@@ -21,12 +21,6 @@ import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 import { lookupContainer } from './proxy-registry.js';
 import {
-  BYPASS_TRIGGER_STATUS_CODES,
-  isReachabilityErrorCode,
-  parseAnthropicUrlOrDefault,
-  resolveBypassTarget,
-} from './anthropic-bypass.js';
-import {
   appendUsageRecord,
   noteCaptureWrite,
   noteMessagesRequest,
@@ -62,39 +56,21 @@ const TOKEN_PREFIX_RE = /^\/c\/([A-Za-z0-9_-]+)(\/.*)?$/;
 const USAGE_CAPTURE_BUFFER_CAP = 10 * 1024 * 1024;
 
 /**
- * Orchestrator-side bypass for the LiteLLM router (#610). When
- * `ANTHROPIC_BASE_URL` points at `nanoclaw-litellm` and the primary
- * attempt fails on a recoverable shape — the LiteLLM container is
- * unreachable (ECONNREFUSED / ENOTFOUND), the primary stalls without
- * a response for `BYPASS_IDLE_TIMEOUT_MS`, or LiteLLM itself returns
- * a 5xx — the proxy retries against `ANTHROPIC_BYPASS_URL` (default
- * `https://api.anthropic.com`) using the same `ANTHROPIC_API_KEY`.
- * Complementary to LiteLLM's router-level fallback in
- * `container/litellm/litellm.config.yaml`: that one fires when the
- * litellm.ai gateway responds with 5xx but nanoclaw-litellm itself
- * is up; this one fires when nanoclaw-litellm itself is down. Both
- * layers exist because either can fail independently.
- *
- * Bypass is automatically disabled when the primary and bypass URLs
- * resolve to the same origin — there's nothing to fall back TO if the
- * primary is already Anthropic-direct.
- *
- * The bypass-eligibility decision (status codes, reachability errnos,
- * same-origin/no-key disable) is shared with the SDK-layer classifier
- * bypass via `anthropic-bypass.ts` (#675) so the two paths can't drift.
+ * The one and only upstream. Post subscription-OAuth cutover the proxy
+ * forwards straight to Anthropic — there is no LiteLLM gateway, no
+ * bypass fallback, and no custom-endpoint override in the request path
+ * anymore (the third-party-endpoint option was retired with it).
  */
-const BYPASS_IDLE_TIMEOUT_MS = 3000;
+const ANTHROPIC_DIRECT_URL = new URL('https://api.anthropic.com');
 
 export interface CredentialProxyOptions {
   /**
-   * Override for the credential-proxy idle-timeout-driven bypass
-   * trigger (`BYPASS_IDLE_TIMEOUT_MS`, default 3000ms). Production
-   * callers should not set this — the 3s default tolerates Anthropic
-   * edge slow-paths and gives time for SDK retries before we tear
-   * the socket down. Tests use a tight value (50–100ms) so the
-   * "primary accepts and hangs" path runs sub-second.
+   * Test-only override for the upstream target. Production callers omit
+   * this — the proxy always forwards to `ANTHROPIC_DIRECT_URL`. Tests
+   * inject a local mock server here to exercise header injection, usage
+   * capture, and streaming without reaching the real API.
    */
-  idleTimeoutMs?: number;
+  upstreamUrl?: URL;
 }
 
 export function startCredentialProxy(
@@ -106,51 +82,13 @@ export function startCredentialProxy(
     'ANTHROPIC_API_KEY',
     'CLAUDE_CODE_OAUTH_TOKEN',
     'ANTHROPIC_AUTH_TOKEN',
-    'ANTHROPIC_BASE_URL',
-    'ANTHROPIC_BYPASS_URL',
-    'LITELLM_MASTER_KEY',
   ]);
 
   const authMode: AuthMode = secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
   const oauthToken =
     secrets.CLAUDE_CODE_OAUTH_TOKEN || secrets.ANTHROPIC_AUTH_TOKEN;
 
-  // A malformed ANTHROPIC_BASE_URL / ANTHROPIC_BYPASS_URL must not crash
-  // the proxy at startup — degrade to anthropic-direct (the safe default)
-  // with a warn, consistent with resolveBypassTarget's no-throw handling
-  // (#675). Shared `parseAnthropicUrlOrDefault` so the proxy and the
-  // classifier handle a bad endpoint env var the same way.
-  // The raw env value is deliberately NOT logged: an endpoint URL can
-  // embed a credential (`https://user:pass@host`, `?api_key=…`) and the
-  // logger only redacts a narrow Telegram-token pattern. The env-var name
-  // is enough for the operator to go inspect the value themselves.
-  const upstreamResolved = parseAnthropicUrlOrDefault(
-    secrets.ANTHROPIC_BASE_URL,
-  );
-  if (upstreamResolved.fellBackToDefault) {
-    logger.warn(
-      'credential-proxy: ANTHROPIC_BASE_URL is not a valid URL (value omitted — may contain credentials) — falling back to anthropic-direct',
-    );
-  }
-  const upstreamUrl = upstreamResolved.url;
-  const bypassResolved = parseAnthropicUrlOrDefault(
-    secrets.ANTHROPIC_BYPASS_URL,
-  );
-  if (bypassResolved.fellBackToDefault) {
-    logger.warn(
-      'credential-proxy: ANTHROPIC_BYPASS_URL is not a valid URL (value omitted — may contain credentials) — falling back to anthropic-direct',
-    );
-  }
-  const bypassUrl = bypassResolved.url;
-  // Same-origin bypass is a no-op — skip the second attempt entirely so
-  // we don't double-bill the same target on every error. Shared with the
-  // classifier bypass (#675) so the enable rule can't drift.
-  const { enabled: bypassEnabled } = resolveBypassTarget({
-    baseUrl: secrets.ANTHROPIC_BASE_URL,
-    bypassUrl: secrets.ANTHROPIC_BYPASS_URL,
-    hasApiKey: authMode === 'api-key',
-  });
-  const idleTimeoutMs = opts.idleTimeoutMs ?? BYPASS_IDLE_TIMEOUT_MS;
+  const upstreamUrl = opts.upstreamUrl ?? ANTHROPIC_DIRECT_URL;
 
   const usageLogPath = resolveUsageLogPath();
 
@@ -349,15 +287,9 @@ export function startCredentialProxy(
           }
         }
 
-        // Single-attempt sender. Called once with the primary upstream;
-        // re-called against `bypassUrl` if the primary trips one of
-        // the bypass triggers (ECONNREFUSED / ENOTFOUND / idle timeout
-        // / 5xx). `fromBypass=true` prevents infinite recursion — the
-        // bypass attempt's own failure surfaces as a normal 502.
-        const sendUpstreamRequest = (
-          targetUrl: URL,
-          fromBypass: boolean,
-        ): void => {
+        // Forward the request upstream to Anthropic. On any connection
+        // failure the client sees a 502.
+        const sendUpstreamRequest = (targetUrl: URL): void => {
           const isHttps = targetUrl.protocol === 'https:';
           const makeRequest = isHttps ? httpsRequest : httpRequest;
 
@@ -376,25 +308,9 @@ export function startCredentialProxy(
           delete headers['transfer-encoding'];
 
           if (authMode === 'api-key') {
-            // API key mode: inject x-api-key on every request. Pick
-            // the right key per target — `nanoclaw-litellm` gets its
-            // own master_key so a key rotation on the LiteLLM side
-            // doesn't couple to the Anthropic provider credential
-            // (and so a LiteLLM debug-log of the master_key can't
-            // leak the Anthropic key). Bypass traffic to
-            // `api.anthropic.com` always uses ANTHROPIC_API_KEY.
-            // When LITELLM_MASTER_KEY is unset (partial-config
-            // deploy / pre-Stage-0 default), fall back to
-            // ANTHROPIC_API_KEY so the proxy still flows traffic;
-            // this graceful path is for incident recovery, not
-            // steady state.
+            // API key mode: replace any placeholder with the real key.
             delete headers['x-api-key'];
-            const isBypassTarget = targetUrl.origin === bypassUrl.origin;
-            const upstreamKey =
-              !isBypassTarget && secrets.LITELLM_MASTER_KEY
-                ? secrets.LITELLM_MASTER_KEY
-                : secrets.ANTHROPIC_API_KEY;
-            headers['x-api-key'] = upstreamKey;
+            headers['x-api-key'] = secrets.ANTHROPIC_API_KEY;
           } else {
             // OAuth mode: replace placeholder Bearer token with the real
             // one only when the container actually sends an Authorization
@@ -418,33 +334,6 @@ export function startCredentialProxy(
               headers,
             } as RequestOptions,
             (upRes) => {
-              // Bypass on a 5xx from the primary. The LiteLLM container
-              // may be up but its own router-level fallback chain has
-              // been exhausted; a fresh attempt against api.anthropic.com
-              // is more likely to succeed than passing the 5xx through.
-              // The bypass attempt's own 5xx is a real upstream failure
-              // and gets surfaced normally to the client.
-              if (
-                !fromBypass &&
-                bypassEnabled &&
-                BYPASS_TRIGGER_STATUS_CODES.has(upRes.statusCode || 0)
-              ) {
-                logger.warn(
-                  {
-                    statusCode: upRes.statusCode,
-                    url: upstreamPath,
-                    primary: targetUrl.origin,
-                    bypass: bypassUrl.origin,
-                  },
-                  'credential-proxy: primary returned 5xx, bypassing to anthropic-direct',
-                );
-                // Drain the failed primary response so the socket can
-                // return to the pool / close cleanly before retry.
-                upRes.resume();
-                sendUpstreamRequest(bypassUrl, true);
-                return;
-              }
-
               res.writeHead(upRes.statusCode!, upRes.headers);
 
               if (!captureUsage || upRes.statusCode !== 200) {
@@ -624,52 +513,9 @@ export function startCredentialProxy(
             },
           );
 
-          // Idle-timeout-driven bypass. `setTimeout` fires when no
-          // socket activity has happened for `idleTimeoutMs` — covers
-          // the LiteLLM-reachable-but-not-responding case (TCP
-          // accepted, no HTTP response in 3s). Cleared the moment
-          // response headers arrive so a slow-streaming SDK response
-          // isn't torn down mid-flight.
-          //
-          // Gated to the PRIMARY attempt of a bypass-enabled
-          // deployment per `coding-policy: error-handling`'s Graceful
-          // Fallback clause. When bypass is disabled (same-origin
-          // primary+bypass, OAuth mode, no LITELLM_MASTER_KEY) there
-          // is nothing to fall back to and a 3s cap would regress
-          // slow-response handling that worked before #610. On the
-          // bypass attempt itself the timer is also skipped — if even
-          // the bypass is hung, surfacing the existing 502 path is
-          // more honest than tearing the socket down for no follow-up.
-          if (bypassEnabled && !fromBypass) {
-            upstream.setTimeout(idleTimeoutMs, () => {
-              upstream.destroy(new Error('credential-proxy idle timeout'));
-            });
-            upstream.once('response', () => upstream.setTimeout(0));
-          }
-
           upstream.on('error', (err) => {
-            const code = (err as NodeJS.ErrnoException).code;
-            // Shared errno set (#675) plus the proxy-specific idle-timeout
-            // sentinel, which has no errno of its own.
-            const isReachabilityError =
-              isReachabilityErrorCode(code) ||
-              err.message === 'credential-proxy idle timeout';
-            if (!fromBypass && bypassEnabled && isReachabilityError) {
-              logger.warn(
-                {
-                  err,
-                  code,
-                  url: upstreamPath,
-                  primary: targetUrl.origin,
-                  bypass: bypassUrl.origin,
-                },
-                'credential-proxy: primary unreachable, bypassing to anthropic-direct',
-              );
-              sendUpstreamRequest(bypassUrl, true);
-              return;
-            }
             logger.error(
-              { err, url: upstreamPath, fromBypass },
+              { err, url: upstreamPath },
               'Credential proxy upstream error',
             );
             if (!res.headersSent) {
@@ -682,7 +528,7 @@ export function startCredentialProxy(
           upstream.end();
         };
 
-        sendUpstreamRequest(upstreamUrl, false);
+        sendUpstreamRequest(upstreamUrl);
       });
     });
 

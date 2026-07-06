@@ -142,8 +142,8 @@ function matchPattern(p: TriggerPattern, ctx: GateContext): MatchResult {
  * operator-configured patterns. These are derived on every gate
  * invocation from `ASSISTANT_NAME` and `ASSISTANT_USERNAMES` and are
  * NOT stored in the DB — they exist purely to short-circuit
- * direct-identity references at Stage 1 (microseconds, zero API
- * cost) instead of letting them fall through to Stage 2 Haiku.
+ * direct-identity references deterministically (microseconds, zero
+ * API cost) without requiring operator-configured patterns.
  *
  * One synthetic `mention` pattern is emitted per entry in
  * `ASSISTANT_USERNAMES` so multi-handle bots (e.g. `@AyeAye` plus
@@ -187,8 +187,8 @@ function buildSyntheticIdentityPatterns(): TriggerPattern[] {
 }
 
 // Annotated with the concrete sync return type rather than the broader
-// `GateFn` (which widened to `GateDecision | Promise<GateDecision>` for
-// Stage 2 async gates). Tests call `triggerGate(ctx)` directly and
+// `GateFn` (which is widened to `GateDecision | Promise<GateDecision>`
+// to admit async gates). Tests call `triggerGate(ctx)` directly and
 // expect a sync `GateDecision`. Assigning into the registry via
 // `registerGate('trigger', triggerGate)` still satisfies `GateFn` —
 // the narrower sync signature is a subtype of the union.

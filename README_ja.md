@@ -187,22 +187,6 @@ Dockerはクロスプラットフォーム対応（macOS、Linux、さらにWSL2
 
 設定の肥大化を避けたいからです。すべてのユーザーがNanoClawをカスタマイズし、汎用的なシステムを設定するのではなく、コードが必要なことを正確に実行するようにすべきです。設定ファイルが欲しい場合は、Claudeに追加するよう伝えることができます。
 
-**サードパーティやオープンソースモデルを使えますか？**
-
-はい。NanoClawはClaude API互換のモデルエンドポイントに対応しています。`.env`ファイルで以下の環境変数を設定してください：
-
-```bash
-ANTHROPIC_BASE_URL=https://your-api-endpoint.com
-ANTHROPIC_AUTH_TOKEN=your-token-here
-```
-
-以下が使用可能です：
-- [Ollama](https://ollama.ai)とAPIプロキシ経由のローカルモデル
-- [Together AI](https://together.ai)、[Fireworks](https://fireworks.ai)等でホストされたオープンソースモデル
-- Anthropic互換APIのカスタムモデルデプロイメント
-
-注意：最高の互換性のため、モデルはAnthropic APIフォーマットに対応している必要があります。
-
 **問題のデバッグ方法は？**
 
 Claude Codeに聞いてください。「スケジューラーが動いていないのはなぜ？」「最近のログには何がある？」「このメッセージに返信がなかったのはなぜ？」これがNanoClawの基盤となるAIネイティブなアプローチです。

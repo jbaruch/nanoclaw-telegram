@@ -9,14 +9,11 @@ Run with:
 The deploy script's force-kill loop is container-name-driven
 (`docker ps --format '{{.Names}}' | ...`). A regression in the
 predicate either
-(a) silently leaves orchestrator/infrastructure containers in the
-agent pool — risking exit-137 kills on infra (the nanoclaw-litellm
-gateway was force-killed every deploy for 13 days when an anchored
-`^nanoclaw-litellm$` exclusion missed its UGOS compose container name
-`nanoclaw-litellm-nanoclaw-litellm-1`; see CHANGELOG) — or
+(a) silently leaves the orchestrator container (`nanoclaw`, no
+trailing dash) in the agent pool — risking an exit-137 kill on the
+orchestrator itself — or
 (b) excludes real agent containers, leaving stale-tile sessions
-running after deploy (a too-loose `^nanoclaw-litellm` prefix would
-wrongly drop a per-group agent whose slug starts with `litellm`).
+running after deploy.
 
 We test the predicate by extracting the literal pipeline from
 deploy.sh and running it against a fixed set of container names,
@@ -81,39 +78,6 @@ class AgentPredicateTests(unittest.TestCase):
         # handled in deploy.sh step 7, not via the agent-close path.
         self.assertEqual(_run_predicate(["nanoclaw"]), [])
 
-    def test_excludes_litellm_infrastructure(self) -> None:
-        # #609 gateway: a UGOS Pro compose project, so docker names the
-        # container `nanoclaw-litellm-nanoclaw-litellm-1` (project +
-        # service + replica index). It has no `/workspace/ipc/input`
-        # mount, so the `_close` sentinel write fails and the post-grace
-        # force-kill loop would SIGKILL it. The predicate must skip it.
-        self.assertEqual(
-            _run_predicate(["nanoclaw-litellm-nanoclaw-litellm-1"]), []
-        )
-
-    def test_excludes_gateway_across_replica_index(self) -> None:
-        # The exclusion leaves the replica index flexible so a recreate
-        # or scale bump (…-2) is still skipped.
-        self.assertEqual(
-            _run_predicate(
-                [
-                    "nanoclaw-litellm-nanoclaw-litellm-1",
-                    "nanoclaw-litellm-nanoclaw-litellm-2",
-                ]
-            ),
-            [],
-        )
-
-    def test_keeps_litellm_prefixed_group_agent(self) -> None:
-        # The exclusion targets the gateway's `project-service-index`
-        # container name, NOT every `nanoclaw-litellm*` name. A per-group
-        # agent whose slug starts with `litellm` (e.g. a group named
-        # `litellm-fans`, container `nanoclaw-litellm-fans`, or one named
-        # exactly `litellm`, container `nanoclaw-litellm`) is a real agent
-        # and must still be signaled/force-killed on deploy.
-        agents = ["nanoclaw-litellm-fans", "nanoclaw-litellm"]
-        self.assertEqual(_run_predicate(agents), agents)
-
     def test_includes_real_agent_containers(self) -> None:
         # Agent containers are named
         # `nanoclaw-<safeName><sessionSuffix>-<Date.now()>` per
@@ -126,14 +90,12 @@ class AgentPredicateTests(unittest.TestCase):
         self.assertEqual(_run_predicate(agents), agents)
 
     def test_mixed_set_returns_agents_only(self) -> None:
-        # Realistic `docker ps` output after deploy: orchestrator,
-        # litellm gateway (UGOS compose container), and one in-flight
-        # agent.
+        # Realistic `docker ps` output after deploy: orchestrator and
+        # one in-flight agent.
         self.assertEqual(
             _run_predicate(
                 [
                     "nanoclaw",
-                    "nanoclaw-litellm-nanoclaw-litellm-1",
                     "nanoclaw-default-1747934567890",
                 ]
             ),
@@ -153,7 +115,6 @@ class AgentPredicateTests(unittest.TestCase):
                 [
                     "homeassistant",
                     "portainer",
-                    "nanoclaw-litellm-nanoclaw-litellm-1",
                     "nanoclaw-default-1747934567890",
                 ]
             ),

@@ -6,7 +6,7 @@ description: |
   Pairs with `review-anthropic.md`; each workflow self-gates to skip PRs
   authored by its own family so the active reviewer is cross-family
   whenever the declaration permits — when the declaration spans both
-  paired families (e.g., `gpt-5.4 claude-opus-4-7`), or neither paired
+  paired families (e.g., `gpt-5.5 claude-opus-4-8`), or neither paired
   family (e.g., `gemini-2.5`, `human`-only), both reviewers run as the
   documented fallback. See `jbaruch/coding-policy: author-model-declaration`.
 
@@ -15,15 +15,25 @@ description: |
   from `main`. Fork PRs are skipped by gh-aw's fork-guard. Posts up to 10
   inline comments plus one consolidated review verdict.
 
-  Data flow / trust boundary: the reviewer sends the pull-request content
-  it evaluates — the diff, the PR title, body, and commit messages (read
-  for the author-model gate and the changed-file allowlist), and the
-  published policy files — to the review model (OpenAI here; Anthropic in
-  the paired workflow), the same provider whose model renders the verdict.
-  Repository secrets, tokens, and credentials are never included in that
-  payload. The `tessl install jbaruch/coding-policy` pre-step fetches the
-  latest published plugin from the official Tessl registry — a known
-  published ruleset, not arbitrary remote code.
+  Data flow / trust boundary: this workflow's review engine is
+  OpenAI; the paired workflow's is Anthropic. The engine the repository
+  owner configured reads the pull-request content it is asked to
+  evaluate as its ordinary inference input: the diff, the PR title,
+  body, and commit messages (the commit messages feed the author-model
+  gate), and the published policy rules it reviews against. Within this
+  workflow's run, PR content reaches no model provider other than its
+  configured engine; when the paired workflow also runs under the
+  documented fallback, it reads the same content with its own engine.
+  Repository secrets, tokens, and credentials are never part of the
+  model input.
+
+  The `tessl install jbaruch/coding-policy` pre-step fetches this
+  plugin's own published content from the official Tessl registry:
+  the policy rule set the reviewer evaluates against, plus
+  the helper scripts the gate job invokes (e.g., the author-family
+  resolver). It is the same `jbaruch/coding-policy` plugin that ships
+  this workflow, at its registry-published version rather than
+  unpublished working-tree content.
 
   Required repository secrets (set at
   https://github.com/<owner>/<repo>/settings/secrets/actions):
@@ -93,6 +103,11 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GH_TOKEN: ${{ github.token }}
+          # No actions/checkout in this job — without a git context `gh pr
+          # view` cannot infer the repo and fails on every run, silently
+          # reducing the gate to body-only (trailer-only PRs never skip).
+          # GH_REPO supplies the repo context explicitly.
+          GH_REPO: ${{ github.repository }}
         # Fails OPEN: a failed gate job would cascade-skip the agent and
         # silently drop the review, so any trouble here defaults
         # should_skip=false and lets the agent run. The setup/install steps
@@ -118,7 +133,14 @@ jobs:
 
 engine:
   id: codex
-  model: gpt-5.4
+  # Model pin renewal (see `jbaruch/coding-policy: dependency-management`,
+  # Freshness): no scanner tracks gh-aw `engine.model` pins. Check OpenAI's
+  # current Codex model and bump this pin at every reviewer-template change,
+  # at least quarterly. Verify the Codex CLI version pinned in the compiled
+  # lock file recognizes the new ID before shipping — the CLI silently remaps
+  # unknown model IDs to an older model (codex 0.118.0 ran `gpt-5.4` as
+  # `gpt-5.3-codex` with no error).
+  model: gpt-5.5
   env:
     # gh-aw's compiled validation step accepts EITHER CODEX_API_KEY or
     # OPENAI_API_KEY as the credential, but the Codex CLI / API-proxy

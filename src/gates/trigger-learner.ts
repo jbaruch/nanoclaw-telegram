@@ -14,9 +14,8 @@
  * ============================================================
  *
  * 1. **External corrective signal only.** Truth comes from the
- *    union of: user reactions on bot messages, owner explicit
- *    corrections, and the Stage 2 Haiku verdict (treated as soft
- *    truth). The agent's own Stage 1 verdict is NEVER used as
+ *    union of: user reactions on bot messages and owner explicit
+ *    corrections. The agent's own Stage 1 verdict is NEVER used as
  *    truth — that closes a self-reinforcement loop where the gate
  *    learns to confirm whatever it already does.
  *
@@ -135,8 +134,7 @@ export type SenderTier = 'owner' | 'non-owner' | 'anonymous';
  */
 export type TruthSource =
   | 'user_reaction' // 👍 / 👎 / similar emoji on the bot's response
-  | 'owner_correction' // freeform owner text correcting the gate
-  | 'haiku_verdict'; // Stage 2 classifier output as soft truth
+  | 'owner_correction'; // freeform owner text correcting the gate
 
 /**
  * One labeled sample. Each represents an inbound message + the
@@ -269,8 +267,7 @@ export function weightForTier(tier: SenderTier, cfg: LearnerConfig): number {
 /**
  * Stop words that would generate noisy proposals if scored as
  * keyword candidates. Conservative list — covering the most common
- * function words across English/Russian (the two languages live in
- * the worked examples in `haiku-classifier.ts`'s system prompt).
+ * function words across English/Russian.
  *
  * Not exhaustive: the goal is to drop obvious non-candidates, not
  * to be linguistically precise. The min-score gate downstream is

@@ -9,17 +9,13 @@
  * Responsibilities:
  *  1. Build a `LearnerPersistence` against the live SQLite DB and the
  *     pretty-printed host log (read via `host-log-parser.ts` —
- *     reuses the canonical `'gate decision'` and `'haiku classifier
- *     verdict'` records).
- *  2. Mine truth-labeled samples from the union of:
- *       - User reactions on bot messages (`reactions` table)
- *       - Stage 2 Haiku verdicts emitted by `haiku-classifier.ts`
- *         (mined out of host-log records)
- *     The `gate decision` log line carries the gate's own verdict —
- *     we DELIBERATELY do not feed that back as truth (self-
- *     reinforcement loop). It IS used to compute a per-pattern
- *     `wasRight` track record for auto-rollback, but only against
- *     external truth, never against itself.
+ *     reuses the canonical `'gate decision'` records).
+ *  2. Mine truth-labeled samples from user reactions on bot messages
+ *     (`reactions` table). The `gate decision` log line carries the
+ *     gate's own verdict — we DELIBERATELY do not feed that back as
+ *     truth (self-reinforcement loop). It IS used to compute a
+ *     per-pattern `wasRight` track record for auto-rollback, but only
+ *     against external truth, never against itself.
  *  3. Start a low-cadence loop (default daily) that walks every
  *     registered group and runs the learner once.
  */
@@ -71,10 +67,9 @@ const NEGATIVE_REACTIONS: ReadonlySet<string> = new Set(['👎', '❌', '😡'])
 
 /**
  * Resolve a sender's tier: owner > non-owner > anonymous. Owner is
- * detected via `ASSISTANT_OWNER_HANDLE` (the same env var the Stage 2
- * classifier uses, see `src/config.ts`). When the env is unset, no
- * sender qualifies as owner — the learner falls back to non-owner /
- * anonymous tiers.
+ * detected via `ASSISTANT_OWNER_HANDLE` (see `src/config.ts`). When
+ * the env is unset, no sender qualifies as owner — the learner falls
+ * back to non-owner / anonymous tiers.
  */
 export function classifySender(
   reactorJid: string,
@@ -101,9 +96,8 @@ export function classifySender(
 type MinedSample = LabeledSample;
 
 /**
- * Mine truth-labeled samples for ONE group, using:
- *  - Reactions on bot messages within the lookback window
- *  - Haiku verdicts emitted to the host log over the same window
+ * Mine truth-labeled samples for ONE group from reactions on bot
+ * messages within the lookback window.
  *
  * The function intentionally does NOT touch the `gate decision`
  * record's `finalDecision` field as a truth signal — that would
@@ -157,75 +151,6 @@ export function mineSamplesForGroup(
     }
   }
 
-  // 2. Mine Haiku verdicts from the host log. These are emitted as
-  //    INFO records with msg='haiku classifier verdict' carrying
-  //    {intent, confidence, reason, groupFolder}. We want only the
-  //    verdicts for THIS group; cross-group records are filtered by
-  //    `groupFolder` matching this group's folder. Resolution of
-  //    `groupJid → groupFolder` happens at the persistence-layer
-  //    seam (`buildLearnerPersistence`), so this function takes the
-  //    folder as a parameter via the upstream call.
-  // Implementation note: Haiku records are mined inside
-  // `buildLearnerPersistence` because that's where we have the
-  // groupFolder plumbed in; this function focuses on reaction
-  // mining only (the join is light).
-
-  return samples;
-}
-
-/**
- * Mine Haiku-verdict samples from the host log for ONE group folder.
- * Separate from `mineSamplesForGroup` because the join key is
- * `groupFolder` (what the log records), not `groupJid`.
- *
- * Stage 2's `intent` ('yes'/'no') is the truth signal. Since #451
- * item 4, the verdict log line carries `messageId` and `inboundText`
- * directly — no need to stitch via a paired `gate decision` record.
- *
- * Note on confidence: the Haiku log emits a calibrated confidence in
- * [0,1]. We treat verdicts with confidence < 0.7 as ambiguous and
- * skip them; the issue body called Haiku a "soft truth signal" and
- * an ambiguous ~0.55 verdict isn't truth, it's noise.
- *
- * Records emitted by an older orchestrator that pre-dates #451 item 4
- * (no `messageId` / `inboundText` fields on the line) are skipped
- * silently — they have no usable text and the join-via-`gate decision`
- * fallback was never wired in v1. Callers tolerate the empty result.
- */
-export function mineHaikuSamples(
-  groupFolder: string,
-  hostLogPath: string,
-  minConfidence: number = 0.7,
-): MinedSample[] {
-  const records = readHostLog(hostLogPath);
-  const samples: MinedSample[] = [];
-  for (const r of records) {
-    if (r.msg !== 'haiku classifier verdict') continue;
-    if (r.fields.groupFolder !== groupFolder) continue;
-    const intent = r.fields.intent;
-    if (intent !== 'yes' && intent !== 'no') continue;
-    const confidence = r.fields.confidence;
-    if (typeof confidence !== 'number') continue;
-    if (confidence < minConfidence) continue;
-    const inboundText = r.fields.inboundText;
-    if (typeof inboundText !== 'string' || inboundText.length === 0) continue;
-    // messageId is structurally required on post-#451-item-4 records
-    // but isn't load-bearing for sample mining (we don't dedupe
-    // here — multiple verdicts on the same message reflect different
-    // strategy passes and each is a legitimate data point). Read the
-    // field if present, otherwise fall through.
-    samples.push({
-      text: inboundText,
-      intent,
-      // Haiku verdicts have no sender — synthetic inbound. The
-      // learner's `senderTier` policy treats 'anonymous' as
-      // non-privileged, which matches: a Haiku verdict is software-
-      // produced, never owner-authoritative.
-      senderTier: 'anonymous',
-      source: 'haiku_verdict',
-      gateResponded: false,
-    });
-  }
   return samples;
 }
 
@@ -317,17 +242,12 @@ export function buildLearnerPersistence(
     },
     fetchSamples: (groupJid: string) => {
       const hostLogPath = hostLogsOrchestratorFile();
-      const reactionSamples = mineSamplesForGroup(groupJid, hostLogPath);
-      const groups = getAllRegisteredGroups();
-      const folder = groups[groupJid]?.folder;
-      const haikuSamples = folder ? mineHaikuSamples(folder, hostLogPath) : [];
-      return [...reactionSamples, ...haikuSamples];
+      return mineSamplesForGroup(groupJid, hostLogPath);
     },
     fetchDecisionHistories: (groupJid: string) => {
       const hostLogPath = hostLogsOrchestratorFile();
       // We need the per-message truth label to compute wasRight. v1
-      // pulls it from reactions; haiku-derived labels will join in
-      // when the producer-side messageId field lands.
+      // pulls it from reactions.
       const truthByMessageId = new Map<string, 'yes' | 'no'>();
       const reactionSamples = mineSamplesForGroup(groupJid, hostLogPath);
       void reactionSamples;

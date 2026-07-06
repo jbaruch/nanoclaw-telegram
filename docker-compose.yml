@@ -63,71 +63,13 @@ services:
       - "3001:3001"
     extra_hosts:
       # Docker-on-Linux doesn't auto-provide `host.docker.internal` —
-      # we add it explicitly so the orchestrator (and the credential-
-      # proxy inside it) can reach ports published on the NAS host
-      # by OTHER compose projects, e.g. `nanoclaw-litellm` publishing
-      # 4000:4000 from its own UGOS Pro project. Without this entry,
-      # the orchestrator's bridge network (`nanoclaw_default`,
-      # 172.18.0.0/16) is isolated from the LiteLLM project's bridge
-      # network (`nanoclaw-litellm_default`) and cannot reach the
-      # `0.0.0.0:4000` published port — neither via the NAS LAN IP
-      # nor via the docker bridge gateway, because docker iptables
-      # rules don't forward inter-bridge traffic to published ports.
-      # `host-gateway` resolves at container start to the host's
-      # docker0 / bridge interface IP, which IS the bind target of
-      # the published port. Operators flip the LiteLLM router on by
-      # setting `ANTHROPIC_BASE_URL=http://host.docker.internal:4000`
-      # in `~/nanoclaw/.env`.
+      # we add it explicitly so the orchestrator can reach services
+      # running on the NAS host from inside its own bridge network.
+      # Notably the OneCLI Agent Vault (#564): when it runs on the NAS
+      # host, `ONECLI_URL=http://host.docker.internal:10254` resolves
+      # to the host gateway via this mapping. `host-gateway` resolves
+      # at container start to the host's docker0 / bridge interface IP,
+      # which is the bind target of host-published ports. Without this
+      # entry the orchestrator's bridge network (`nanoclaw_default`,
+      # 172.18.0.0/16) can't reach those ports.
       - "host.docker.internal:host-gateway"
-
-  # The `nanoclaw-litellm` service was removed from this compose
-  # 2026-05-22. The LiteLLM router now runs as a separate UGOS Pro
-  # project on the NAS — that decouples the router's lifecycle from
-  # this project's recreate cycle and avoids the multi-agent kill
-  # races observed when deploy.sh's step-5 grep (which selects
-  # agents by the `^nanoclaw-` prefix) picked up the sidecar before
-  # the `^nanoclaw(-litellm)?$` exclude landed in #624.
-  #
-  # Repo / NAS topology for compose projects that need UGOS Pro UI
-  # visibility (orchestrator + sidecars):
-  # - Compose files live in this repo under `~/nanoclaw/`. Edits
-  #   flow through PR review and `deploy.sh` keeps working unchanged.
-  # - A symlink at `/volume1/docker/<project-name>/` points at the
-  #   in-repo dir so UGOS Pro's project UI discovers the compose
-  #   file. Both deploy.sh (working from `~/nanoclaw/`) and UGOS Pro
-  #   (working from the symlinked path) manage the same container
-  #   set because Docker derives the compose project name from the
-  #   directory basename.
-  # - The orchestrator: symlink `/volume1/docker/nanoclaw` →
-  #   `/home/jbaruch/nanoclaw`.
-  # - The LiteLLM router: symlink `/volume1/docker/nanoclaw-litellm`
-  #   → `/home/jbaruch/nanoclaw/container/litellm`.
-  #
-  # Secrets stay out of the repo. NEVER paste env values into UGOS
-  # Pro's project env UI — UGOS dumps those values into the compose
-  # file's `environment:` block, and through the symlink they would
-  # land in the tracked repo file (verified 2026-05-23: caught
-  # before any git contamination, see CHANGELOG entry). Instead,
-  # secrets live in `~/nanoclaw/.env` (gitignored at the repo root)
-  # and the UGOS project picks them up via a symlinked `.env` inside
-  # the project's compose dir:
-  #   ln -s ../../.env ~/nanoclaw/container/<project>/.env
-  # Linux resolves the relative target against the symlink's own
-  # parent, so the chain
-  #   /volume1/docker/<project>/.env -> <repo>/container/<project>/.env -> ~/nanoclaw/.env
-  # is followed at docker compose read time. The compose YAML stays
-  # `${VAR}` placeholders only; docker compose interpolates from
-  # `.env` at spawn time. The credential-proxy reads
-  # `ANTHROPIC_BASE_URL` from `~/nanoclaw/.env` and routes through
-  # whatever URL the operator sets (typically
-  # `http://host.docker.internal:4000` for the LiteLLM router — the
-  # `extra_hosts` block on this service maps that name to the
-  # host-gateway so inter-bridge traffic can reach the LiteLLM
-  # project's published port).
-  #
-  # UGOS Pro UI also stores compose `content` inline in its SQLite
-  # DB at `/volume1/@appstore/com.ugreen.docker/db/docker_info_log.db`
-  # (table `compose`); the UI renders from there. Adding a new UGOS
-  # Pro project rooted at a symlinked path requires a sudo INSERT
-  # into that table — see `container/litellm/docker-compose.yaml`
-  # for the canonical setup steps.

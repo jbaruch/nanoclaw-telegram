@@ -66,7 +66,7 @@ function sample(
   text: string,
   intent: 'yes' | 'no',
   senderTier: SenderTier,
-  source: TruthSource = 'haiku_verdict',
+  source: TruthSource = 'user_reaction',
   gateResponded: boolean = intent === 'yes',
 ): LabeledSample {
   return { text, intent, senderTier, source, gateResponded };
@@ -143,13 +143,9 @@ describe('TruthSource — no self-reinforcement leak', () => {
   it('the public TruthSource union excludes the gate verdict', () => {
     // This is a compile-time guarantee that the gate's own decision
     // can't be passed in as truth. The `LabeledSample` accepts only
-    // the three documented external sources.
-    const validSources: TruthSource[] = [
-      'user_reaction',
-      'owner_correction',
-      'haiku_verdict',
-    ];
-    expect(validSources).toHaveLength(3);
+    // the documented external sources.
+    const validSources: TruthSource[] = ['user_reaction', 'owner_correction'];
+    expect(validSources).toHaveLength(2);
     // Compile-time negative: assigning 'gate_verdict' to TruthSource
     // would trigger ts2322. We assert it at runtime via a string set
     // so a future refactor that widened the union would also fail
@@ -157,7 +153,6 @@ describe('TruthSource — no self-reinforcement leak', () => {
     const allowed = new Set(validSources);
     expect(allowed.has('user_reaction')).toBe(true);
     expect(allowed.has('owner_correction')).toBe(true);
-    expect(allowed.has('haiku_verdict')).toBe(true);
     // Reject the textual mark we forbid:
     expect(allowed.has('gate_verdict' as TruthSource)).toBe(false);
   });
@@ -178,7 +173,7 @@ describe('TruthSource — no self-reinforcement leak', () => {
       text: 'spam keyword spurious',
       intent: 'no' as const,
       senderTier: 'owner' as const,
-      source: 'haiku_verdict' as const,
+      source: 'user_reaction' as const,
       gateResponded: true, // gate was wrong every time
     }));
     const result = proposeFromSamples(samples, DEFAULT_CFG, frozenNow);

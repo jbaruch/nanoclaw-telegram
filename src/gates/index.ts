@@ -1,5 +1,5 @@
 /**
- * Host-side Stage 1/2 gate framework (#80, #83, #97).
+ * Host-side gate framework (#80, #97).
  *
  * Gates evaluate inbound messages BEFORE the orchestrator spawns a
  * container so no-op spawns (zero SDK queries, zero work) cost zero
@@ -11,54 +11,25 @@
  * Combinator semantics — "last-gate-wins" (#97):
  *   - Any gate can decisively `allow`. The first `allow` short-circuits
  *     the chain and becomes the final verdict; later gates are NOT run.
- *     This is the cost-saving path: a deterministic Stage 1 match
- *     prevents a wasted Stage 2 LLM call.
  *   - Only the LAST gate's `deny` is decisive. An intermediate gate's
  *     `deny` is advisory — the chain falls through to the next gate so
- *     a downstream classifier (e.g. Stage 2 Haiku) still gets the
- *     chance to allow grey-zone messages that earlier deterministic
- *     gates couldn't match.
+ *     a downstream gate still gets the chance to allow grey-zone
+ *     messages that earlier deterministic gates couldn't match.
  *   - `pass` always falls through to the next gate (no opinion).
  *   - Chain end with no decisive `allow` and no last-gate `deny` →
  *     fail-open `allow`.
  *
- * Truth table for the canonical `[trigger, haiku-classifier]` chain:
- *
- *   trigger | haiku      | final | rationale
- *   --------|------------|-------|-------------------------------------
- *   allow   | (skip)     | allow | Stage 1 short-circuit, no Haiku spent
- *   pass    | allow      | allow | Stage 2 caught grey-zone yes
- *   pass    | deny       | deny  | Stage 2 said no, last-gate decisive
- *   deny    | allow      | allow | Stage 1 advisory deny ignored
- *   deny    | deny       | deny  | Both agree on no (last-gate decisive)
- *   deny    | pass(ok)   | allow | healthy pass + chain-end fail-open
- *   deny    | pass(fail) | deny  | classifier FAILED — upstream advisory
- *           |            |       | deny preserved, not nullified (#671)
- *   pass    | pass(fail) | allow | classifier FAILED but no upstream deny
- *           |            |       | to preserve → fail-open
- *
- * The `pass(fail)` rows close the #671 money-bleed: the Stage 2 Haiku
- * classifier returns `pass` ONLY when it could not run (api-error /
- * timeout / unparseable / no-client), tagged `failed: true`. Under the
- * plain last-gate-wins rule a failed `pass` let a deterministic trigger
- * `deny` fall through to fail-open `allow`, so every transient
- * classifier outage silently degraded every non-strict Stage 2 group to
- * allow-all (one container spawn per message). A FAILED downstream gate
- * must never be MORE permissive than a healthy "no": when a gate that
- * runs after an advisory `deny` fails, the chain preserves that `deny`
- * instead of fail-opening. A HEALTHY classifier never returns `pass`, so
- * the `deny | pass(ok) | allow` row is unreachable for this chain today
- * and stays as documented.
- *
- * Historical note: prior to #97 the combinator was AND-only — `deny`
- * short-circuited from any position and `allow` did not short-circuit.
- * That produced two real-world failures: Stage 1 allows paid for an
- * unnecessary Haiku call, and Stage 1 denies bypassed the Stage 2
- * safety net for exactly the messages it was designed to catch.
+ * Deny-preservation (#671): a gate that returns `pass` because it could
+ * NOT run (tagged `failed: true`), that throws a
+ * {@link RecoverableGateError}, or that is unregistered, must never be
+ * MORE permissive than a healthy "no". When such a failed gate runs
+ * after an advisory `deny`, the chain preserves that `deny` at chain end
+ * instead of fail-opening — a transient downstream outage can't nullify
+ * a deterministic upstream `deny` into an allow-all.
  *
  * Future extension hooks (NOT implemented yet):
- *   - Stage 3 / additional gate types — append to the chain; the
- *     last-gate-wins rule keeps composing cleanly.
+ *   - Additional gate types — append to the chain; the last-gate-wins
+ *     rule keeps composing cleanly.
  *   - Self-improvement loop reading log records (#82).
  */
 import { logger } from '../logger.js';
@@ -71,12 +42,12 @@ export interface GateDecision {
   reason: string;
   /**
    * Set by a gate that returns `pass` because it could NOT form an
-   * opinion (the Stage 2 classifier's API call errored, timed out, or
-   * returned an unparseable verdict), as distinct from a healthy "no
-   * opinion" pass. `runGateChain` uses this so a FAILED downstream gate
-   * can't nullify an upstream advisory `deny` — a transient classifier
-   * outage must never be MORE permissive than a healthy "no" (#671). A
-   * healthy pass leaves this unset.
+   * opinion (e.g. an outbound API call errored, timed out, or returned
+   * an unparseable verdict), as distinct from a healthy "no opinion"
+   * pass. `runGateChain` uses this so a FAILED downstream gate can't
+   * nullify an upstream advisory `deny` — a transient outage must never
+   * be MORE permissive than a healthy "no" (#671). A healthy pass leaves
+   * this unset.
    */
   failed?: boolean;
 }
@@ -101,12 +72,10 @@ export interface GateContext {
     text: string;
     senderJid: string;
     /**
-     * Channel-side message id for the inbound (#451 item 4). Required
-     * so the producer-side enrichment of `haiku classifier verdict`
-     * can stamp `messageId` directly on the verdict log line —
-     * `mineHaikuSamples` no longer needs to stitch via a paired
-     * `gate decision` record. Plumbed from `NewMessage.id` at the
-     * `buildGateContext` call site in the orchestrator.
+     * Channel-side message id for the inbound (#451 item 4). Plumbed
+     * from `NewMessage.id` at the `buildGateContext` call site in the
+     * orchestrator so gate-decision log records can attribute a verdict
+     * to a specific message.
      */
     messageId: string;
     /**
@@ -120,12 +89,12 @@ export interface GateContext {
      * the inbound message is a Telegram-style reply. `undefined` when
      * the message is not a reply.
      *
-     * Why structured (not just a prefix string): Stage 1's matchers
-     * need to see the user's CLEAN body (so `LoMBot` inside a quote
-     * preview doesn't false-positive a synthetic identity match), but
-     * Stage 2's classifier still needs the reply context as a positive
-     * signal. Splitting into `text` + `replyTo` gives both paths what
-     * they need.
+     * Why structured (not just a prefix string): the trigger gate's
+     * matchers need to see the user's CLEAN body (so `LoMBot` inside a
+     * quote preview doesn't false-positive a synthetic identity match),
+     * while the `kind: 'reply'` matcher needs the structured reply
+     * context. Splitting into `text` + `replyTo` gives both what they
+     * need.
      */
     replyTo?: {
       messageId: string;
@@ -165,11 +134,10 @@ export interface GateContext {
 }
 
 /**
- * Gates may be sync or async. Stage 1 deterministic gates (e.g.
- * `trigger`) stay sync — return-type widening is a superset, so
- * existing sync functions still satisfy the type. Stage 2 gates that
- * call out to an LLM (e.g. `haiku-classifier` from #83) return a
- * Promise.
+ * Gates may be sync or async. Deterministic gates (e.g. `trigger`)
+ * stay sync — return-type widening is a superset, so existing sync
+ * functions still satisfy the type. Gates that call out to an LLM or
+ * other async I/O return a Promise.
  */
 export type GateFn = (ctx: GateContext) => GateDecision | Promise<GateDecision>;
 
@@ -425,7 +393,7 @@ export async function runGateChain(
 
     if (decision.decision === 'allow') {
       // Allow always short-circuits — first decisive allow wins.
-      // Remaining gates are NOT invoked (cost saving for Stage 2).
+      // Remaining gates are NOT invoked (cost saving for later gates).
       return finalize('allow', decision.reason);
     }
     if (decision.decision === 'deny') {
@@ -434,8 +402,8 @@ export async function runGateChain(
         return finalize('deny', decision.reason);
       }
       // Intermediate-gate deny is advisory and falls through so a
-      // downstream classifier still gets a chance to allow. Remember it
-      // and reset the failure watch: only failures from gates that run
+      // downstream gate still gets a chance to allow. Remember it and
+      // reset the failure watch: only failures from gates that run
       // AFTER this deny can justify preserving it.
       advisoryDenyReason = decision.reason;
       safetyNetFailed = false;
@@ -467,21 +435,5 @@ export async function runGateChain(
 
 // Built-in gate registration. Side-effect import — the registry is
 // populated once at module load and stays constant for the process.
-//
-// Ordering note: the `trigger` gate is deterministic and zero-cost;
-// the `haiku-classifier` gate (#83) makes an Anthropic API call.
-// When `stage2Enabled` is true on a group, `haiku-classifier` is
-// appended LAST to the resolved chain in `resolveGatesForGroup`
-// (`src/index.ts`) for two reasons under last-gate-wins (#97):
-//   1. A trigger `allow` short-circuits BEFORE the API call, so the
-//      Anthropic API is only hit for messages Stage 1 couldn't
-//      decisively allow.
-//   2. The classifier's `deny` becomes the decisive last-gate verdict
-//      so it can adjudicate grey-zone messages where Stage 1 said
-//      `pass` (or even an advisory `deny`).
-// Don't reorder this without re-reading that comment.
 import { triggerGate } from './trigger.js';
 registerGate('trigger', triggerGate);
-
-import { haikuClassifierGate } from './haiku-classifier.js';
-registerGate('haiku-classifier', haikuClassifierGate);
