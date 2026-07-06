@@ -859,9 +859,25 @@ export function checkTaskEvidence(
     };
   }
   const filePath = path.join(groupDir, relFile);
+  // Symlink containment (no-secrets): this reader runs HOST-side
+  // against a CONTAINER-writable group folder. Lexical validation of
+  // the spec can't stop an agent from planting a symlink at the
+  // evidence path that targets a host file outside the group tree
+  // (e.g. the .env), so resolve both ends through realpath and require
+  // the resolved evidence file to stay inside the resolved group
+  // folder. On escape, fail closed WITHOUT reading — the reason must
+  // never embed external file contents.
   let raw: string;
   try {
-    raw = fs.readFileSync(filePath, 'utf-8');
+    const groupRoot = fs.realpathSync(groupDir);
+    const resolved = fs.realpathSync(filePath);
+    if (resolved !== groupRoot && !resolved.startsWith(groupRoot + path.sep)) {
+      return {
+        ok: false,
+        reason: `evidence path resolves outside the group folder (symlink?): ${relFile} — the evidence file must live inside the group folder; inspect the group tree for a planted symlink`,
+      };
+    }
+    raw = fs.readFileSync(resolved, 'utf-8');
   } catch (err: unknown) {
     const code = (err as NodeJS.ErrnoException).code;
     if (
@@ -869,7 +885,8 @@ export function checkTaskEvidence(
       (code === 'ENOENT' ||
         code === 'EACCES' ||
         code === 'EISDIR' ||
-        code === 'ENOTDIR')
+        code === 'ENOTDIR' ||
+        code === 'ELOOP')
     ) {
       return {
         ok: false,
@@ -901,17 +918,24 @@ export function checkTaskEvidence(
       reason: `evidence field missing or not a string: ${field} in ${relFile} (got ${value === undefined ? 'undefined' : typeof value}) — align the 'evidence:' frontmatter field name with what the skill actually writes`,
     };
   }
+  // Cap the embedded value so a garbage field can't balloon the
+  // persisted task_run_logs.error / log line. Post-containment the
+  // value is group-folder data (agent-visible anyway), never external
+  // file contents.
+  const valuePreview = JSON.stringify(
+    value.length > 64 ? `${value.slice(0, 64)}…` : value,
+  );
   const parsedMs = Date.parse(value);
   if (Number.isNaN(parsedMs)) {
     return {
       ok: false,
-      reason: `evidence field is not a parseable date: ${field}=${JSON.stringify(value)} in ${relFile} — align the 'evidence:' frontmatter field with a field the skill stamps as an ISO timestamp`,
+      reason: `evidence field is not a parseable date: ${field}=${valuePreview} in ${relFile} — align the 'evidence:' frontmatter field with a field the skill stamps as an ISO timestamp`,
     };
   }
   if (parsedMs < runStartMs) {
     return {
       ok: false,
-      reason: `evidence stale: ${field}=${JSON.stringify(value)} predates run start ${new Date(runStartMs).toISOString()} — the run did not freshen the artifact; the pinned session is cleared automatically so the next fire retries fresh — if this recurs, inspect the run's container log for skipped pipeline steps`,
+      reason: `evidence stale: ${field}=${valuePreview} predates run start ${new Date(runStartMs).toISOString()} — the run did not freshen the artifact; the pinned session is cleared automatically so the next fire retries fresh — if this recurs, inspect the run's container log for skipped pipeline steps`,
     };
   }
   return { ok: true };

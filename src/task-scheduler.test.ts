@@ -3076,6 +3076,50 @@ describe('checkTaskEvidence (#720)', () => {
     }
   });
 
+  // no-secrets (#721 review): the reader runs HOST-side against a
+  // CONTAINER-writable group folder — a planted symlink must not let
+  // the host read (or leak into the persisted reason) anything outside
+  // the group tree.
+  it('fails closed on a symlink escaping the group folder, without reading the target', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'evidence-out-'));
+    try {
+      const secret = 'SECRET_TOKEN=leak-me-not-2026-07-01T12:05:00.000Z';
+      fs.writeFileSync(path.join(outside, 'host-secret.json'), secret);
+      fs.symlinkSync(
+        path.join(outside, 'host-secret.json'),
+        path.join(tmpDir, 'cfp-state.json'),
+      );
+      const r = checkTaskEvidence(
+        'cfp-state.json#_last_checked',
+        tmpDir,
+        RUN_START_MS,
+      );
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.reason).toContain('resolves outside the group folder');
+        // The escape reason must never embed target file contents.
+        expect(r.reason).not.toContain('SECRET_TOKEN');
+        expect(r.reason).not.toContain('leak-me-not');
+      }
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts a symlink that stays inside the group folder', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, 'real-state.json'),
+      JSON.stringify({ _last_checked: '2026-07-01T12:05:00.000Z' }),
+    );
+    fs.symlinkSync(
+      path.join(tmpDir, 'real-state.json'),
+      path.join(tmpDir, 'cfp-state.json'),
+    );
+    expect(
+      checkTaskEvidence('cfp-state.json#_last_checked', tmpDir, RUN_START_MS),
+    ).toEqual({ ok: true });
+  });
+
   it('fails on invalid JSON', () => {
     writeEvidence('{ not json');
     const r = checkTaskEvidence(
