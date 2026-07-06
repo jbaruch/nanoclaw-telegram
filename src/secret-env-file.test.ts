@@ -75,6 +75,14 @@ describe('SECRET_CONTAINER_VARS', () => {
     expect(SECRET_CONTAINER_VARS.has('YOUTUBE_API_KEY')).toBe(true);
   });
 
+  it('lists SESSIONIZE_SPEAKER_KEY (Sessionize speaker-profile key — read by the conferences tile discover-open-cfps.py for open-CFP discovery, jbaruch/nanoclaw-conferences#9)', () => {
+    expect(SECRET_CONTAINER_VARS.has('SESSIONIZE_SPEAKER_KEY')).toBe(true);
+  });
+
+  it('lists SESSIONIZE_EVENT_API_KEY (Sessionize event key — read by the conferences tile verify-sessionize.py for per-slug deadline verification)', () => {
+    expect(SECRET_CONTAINER_VARS.has('SESSIONIZE_EVENT_API_KEY')).toBe(true);
+  });
+
   it('does NOT include placeholder vars (proxied through OneCLI)', () => {
     expect(SECRET_CONTAINER_VARS.has('ANTHROPIC_API_KEY')).toBe(false);
     expect(SECRET_CONTAINER_VARS.has('CLAUDE_CODE_OAUTH_TOKEN')).toBe(false);

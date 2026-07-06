@@ -2717,3 +2717,86 @@ describe('USE_CUSTOM_PROMPT forwarding', () => {
     expect(args).toContain('USE_CUSTOM_PROMPT=1');
   });
 });
+
+// ----------------------------------------------------------------------
+// Sessionize key forwarding (#719 / PR #714).
+//
+// Outcome-level coverage of the actual forwarding chain:
+// CONTAINER_VARS → SECRET_CONTAINER_VARS partition → buildSecretEnvFile
+// → docker `--env-file`. The #719 production bug was a key present in
+// the host .env but absent from CONTAINER_VARS — a set-membership test
+// on SECRET_CONTAINER_VARS alone cannot catch that shape, so these
+// assert on the content actually written to the secret env-file during
+// a real spawn.
+// ----------------------------------------------------------------------
+
+describe('Sessionize key forwarding into the secret env-file (#719)', () => {
+  const ORIG_SPEAKER = process.env.SESSIONIZE_SPEAKER_KEY;
+  const ORIG_EVENT = process.env.SESSIONIZE_EVENT_API_KEY;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    process.env.SESSIONIZE_SPEAKER_KEY = 'sess-speaker-test';
+    process.env.SESSIONIZE_EVENT_API_KEY = 'sess-event-test';
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (ORIG_SPEAKER === undefined) delete process.env.SESSIONIZE_SPEAKER_KEY;
+    else process.env.SESSIONIZE_SPEAKER_KEY = ORIG_SPEAKER;
+    if (ORIG_EVENT === undefined) delete process.env.SESSIONIZE_EVENT_API_KEY;
+    else process.env.SESSIONIZE_EVENT_API_KEY = ORIG_EVENT;
+  });
+
+  it('main spawn materializes both Sessionize keys into the secret env-file', async () => {
+    const fsModule = await import('fs');
+    vi.mocked(fsModule.default.writeFileSync).mockClear();
+
+    const promise = runContainerAgent(
+      testGroup,
+      { ...testInput, isMain: true },
+      () => {},
+    );
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).toContain('--env-file');
+    // The env-file body is written through fs.writeFileSync (mocked
+    // here), so the mock's call log carries the exact content the
+    // container would receive. This fails if either key drops out of
+    // CONTAINER_VARS even while SECRET_CONTAINER_VARS membership holds.
+    const written = vi
+      .mocked(fsModule.default.writeFileSync)
+      .mock.calls.map((c) => String(c[1]))
+      .join('\n');
+    expect(written).toContain('SESSIONIZE_SPEAKER_KEY=sess-speaker-test');
+    expect(written).toContain('SESSIONIZE_EVENT_API_KEY=sess-event-test');
+    // Secrets must ride the env-file, never the visible `-e KEY=value`
+    // argv (which shows on `ps`/`docker inspect`).
+    expect(args).not.toContain('SESSIONIZE_SPEAKER_KEY=sess-speaker-test');
+    expect(args).not.toContain('SESSIONIZE_EVENT_API_KEY=sess-event-test');
+  });
+
+  it('untrusted spawn forwards neither Sessionize key', async () => {
+    const fsModule = await import('fs');
+    vi.mocked(fsModule.default.writeFileSync).mockClear();
+
+    // testGroup/testInput fixture is untrusted non-main.
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    const written = vi
+      .mocked(fsModule.default.writeFileSync)
+      .mock.calls.map((c) => String(c[1]))
+      .join('\n');
+    expect(written).not.toContain('SESSIONIZE');
+    expect(args.join(' ')).not.toContain('SESSIONIZE');
+  });
+});

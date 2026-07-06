@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.60] - 2026-07-06
+
+- Forwarded `SESSIONIZE_SPEAKER_KEY` and `SESSIONIZE_EVENT_API_KEY` into main/trusted agent containers via the secret env-file (#719, PR #714). The `jbaruch/nanoclaw-conferences` tile's deterministic check-cfps pipeline (`discover-open-cfps.py`, `verify-sessionize.py`) reads both directly from the container env, but neither was in `CONTAINER_VARS`, so since 2026-07-04 `nightly-cfp-sync` exited on "SESSIONIZE_SPEAKER_KEY is unset", skipped verification, and froze the `_last_checked` cursor — reported daily as `status=success` (the #601 silent-success watchdog surfaced it as `work_evidence_stale`). Both keys route through `SECRET_CONTAINER_VARS` (mode-0600 env-file, off `ps`/`docker ps`) mirroring the `YOUTUBE_API_KEY` pattern; untrusted containers never receive them. Coverage is outcome-level per review: a spawn-path test asserts the keys land in the materialized `--env-file` content on a main spawn (the exact regression shape — present in `.env`, absent from `CONTAINER_VARS`) and are absent from untrusted spawns and from visible `-e` argv. Root fix authored by AyeAye; test hardening + release bookkeeping added at review.
+
 ## [1.2.59] - 2026-07-05
 
 - Documented the two runtime inference auth modes in `.env.example`: Mode A (`ANTHROPIC_API_KEY`, metered) and Mode B (`CLAUDE_CODE_OAUTH_TOKEN` subscription OAuth — generated via `claude setup-token`, mutually exclusive with the API key, token counts still captured in `usage.jsonl`). The OAuth mode has existed in `src/credential-proxy.ts` since the proxy's two-mode design but was undocumented; this deployment now runs on it. Docs-only — no runtime change.
