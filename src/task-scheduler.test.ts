@@ -59,6 +59,7 @@ import {
   PRUNE_INTERVAL_MS,
   _resetSchedulerLoopForTests,
   applyComputeNextRunRemediation,
+  checkTaskEvidence,
   computeNextRun,
   computeNextRunDetailed,
   getCompletedTaskTtlMs,
@@ -68,7 +69,10 @@ import {
   startSchedulerLoop,
 } from './task-scheduler.js';
 import type { ScheduledTask } from './types.js';
-import { TIMEZONE } from './config.js';
+import { GROUPS_DIR, TIMEZONE } from './config.js';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 import { SqliteError } from 'better-sqlite3';
 import { logger } from './logger.js';
@@ -2968,6 +2972,355 @@ describe('plugin-hash session rotation (#710)', () => {
     // Once-tasks never resume (#336 scope), so the hash walk is
     // skipped entirely.
     expect(mockGetPluginRegistryHash).not.toHaveBeenCalled();
+  });
+});
+
+describe('checkTaskEvidence (#720)', () => {
+  // Pure-function unit tests — no DB, no scheduler. Fixed reference
+  // instants per `jbaruch/coding-policy: testing-standards`: the run
+  // start is a pinned literal and every evidence timestamp is a fixed
+  // offset from it, never the wall clock.
+  const RUN_START_MS = Date.parse('2026-07-01T12:00:00.000Z');
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evidence-720-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function writeEvidence(content: string): void {
+    fs.writeFileSync(path.join(tmpDir, 'cfp-state.json'), content);
+  }
+
+  it('passes when the evidence field is at or after the run start', () => {
+    writeEvidence(
+      JSON.stringify({ _last_checked: '2026-07-01T12:05:00.000Z' }),
+    );
+    expect(
+      checkTaskEvidence('cfp-state.json#_last_checked', tmpDir, RUN_START_MS),
+    ).toEqual({ ok: true });
+    // Exactly-equal timestamps pass too — the contract is >=, so an
+    // agent that stamps the file at the instant the run started isn't
+    // penalized for clock granularity.
+    writeEvidence(
+      JSON.stringify({ _last_checked: '2026-07-01T12:00:00.000Z' }),
+    );
+    expect(
+      checkTaskEvidence('cfp-state.json#_last_checked', tmpDir, RUN_START_MS),
+    ).toEqual({ ok: true });
+  });
+
+  it('fails on a stale evidence timestamp', () => {
+    writeEvidence(
+      JSON.stringify({ _last_checked: '2026-07-01T11:00:00.000Z' }),
+    );
+    const r = checkTaskEvidence(
+      'cfp-state.json#_last_checked',
+      tmpDir,
+      RUN_START_MS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toContain('evidence stale');
+      expect(r.reason).toContain('2026-07-01T11:00:00.000Z');
+    }
+  });
+
+  it('fails when the evidence file is missing', () => {
+    const r = checkTaskEvidence(
+      'cfp-state.json#_last_checked',
+      tmpDir,
+      RUN_START_MS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toContain('evidence file missing/unreadable');
+      expect(r.reason).toContain('ENOENT');
+    }
+  });
+
+  // The spec is re-guarded at fire time (not just at registration)
+  // because scheduled_tasks.evidence is a plain DB column a hand-edit
+  // can corrupt — a malformed spec must fail CLOSED, never produce
+  // junk path lookups.
+  it.each([
+    ['no separator', 'cfp-state.json'],
+    ['empty field half', 'cfp-state.json#'],
+    ['empty file half', '#_last_checked'],
+    ['second separator', 'cfp-state.json#a#b'],
+    ['absolute path', '/etc/passwd#_last_checked'],
+    ['traversal', '../other-group/cfp-state.json#_last_checked'],
+  ])('fails closed on a malformed spec from the DB: %s', (_label, spec) => {
+    const r = checkTaskEvidence(spec, tmpDir, RUN_START_MS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('malformed evidence spec');
+  });
+
+  it('folds ENOTDIR (intermediate path component is a file) into a failed check', () => {
+    // `state` is a FILE, so `state/cfp-state.json` traverses through a
+    // non-directory — readFileSync throws ENOTDIR, a misconfiguration
+    // shape, not a programming error.
+    fs.writeFileSync(path.join(tmpDir, 'state'), 'not a directory');
+    const r = checkTaskEvidence(
+      'state/cfp-state.json#_last_checked',
+      tmpDir,
+      RUN_START_MS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toContain('evidence file missing/unreadable');
+      expect(r.reason).toContain('ENOTDIR');
+    }
+  });
+
+  it('fails on invalid JSON', () => {
+    writeEvidence('{ not json');
+    const r = checkTaskEvidence(
+      'cfp-state.json#_last_checked',
+      tmpDir,
+      RUN_START_MS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('not valid JSON');
+  });
+
+  it('fails when the declared field is missing', () => {
+    writeEvidence(JSON.stringify({ other_field: 'x' }));
+    const r = checkTaskEvidence(
+      'cfp-state.json#_last_checked',
+      tmpDir,
+      RUN_START_MS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok)
+      expect(r.reason).toContain('evidence field missing or not a string');
+  });
+
+  it('fails when the declared field is not a string', () => {
+    writeEvidence(JSON.stringify({ _last_checked: 1751371200000 }));
+    const r = checkTaskEvidence(
+      'cfp-state.json#_last_checked',
+      tmpDir,
+      RUN_START_MS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok)
+      expect(r.reason).toContain('evidence field missing or not a string');
+  });
+
+  it('fails when the field is a string but not a parseable date', () => {
+    writeEvidence(JSON.stringify({ _last_checked: 'definitely-live' }));
+    const r = checkTaskEvidence(
+      'cfp-state.json#_last_checked',
+      tmpDir,
+      RUN_START_MS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('not a parseable date');
+  });
+});
+
+describe('work-evidence post-check integration (#720)', () => {
+  // Reference incident: a maintenance agent on a pinned SDK session
+  // fabricated an evidence-gated skill's success report — claimed
+  // `verification: "live"` without ever writing the state file. The
+  // scheduler now verifies the declared evidence artifact was
+  // actually freshened during the run: on failure the run is recorded
+  // as 'error' (prefix `evidence-check:`) AND the pinned session is
+  // cleared so the next fire starts fresh (a fresh session was
+  // experimentally shown to run honestly).
+  const EVIDENCE_GROUP = {
+    name: 'Evidence',
+    folder: 'evidence-720-test',
+    trigger: 'always',
+    added_at: '2026-01-01T00:00:00.000Z',
+    isMain: true,
+  };
+  const groupDir = path.join(GROUPS_DIR, 'evidence-720-test');
+
+  beforeEach(() => {
+    _initTestDatabase();
+    _resetSchedulerLoopForTests();
+    mockRunContainerAgent.mockClear();
+    fs.rmSync(groupDir, { recursive: true, force: true });
+    // Pin the clock so Date.now()-derived fixtures are identical on
+    // every run per `jbaruch/coding-policy: testing-standards`.
+    vi.useFakeTimers({ now: new Date('2026-07-01T12:00:00.000Z') });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    // runTask mkdirs the group folder under the repo's groups/ tree —
+    // remove it so tests leave no untracked files behind.
+    fs.rmSync(groupDir, { recursive: true, force: true });
+  });
+
+  function createEvidenceTask(withEvidence = true): void {
+    createTask({
+      id: 'evidence-task',
+      group_folder: 'evidence-720-test',
+      chat_jid: 'evidence@g.us',
+      prompt: 'Skill(skill: "tessl__check-cfps")',
+      schedule_type: 'interval',
+      schedule_value: '1800000',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    if (withEvidence) {
+      // `createTask` deliberately doesn't accept `evidence` (owner-
+      // scheduled tasks always leave it NULL); seed the column the way
+      // the cadence-registry rebuild would.
+      _execRawForTests('UPDATE scheduled_tasks SET evidence = ? WHERE id = ?', [
+        'cfp-state.json#_last_checked',
+        'evidence-task',
+      ]);
+    }
+  }
+
+  /** Container fake: run succeeds and re-emits the same session id. */
+  function mockAgentIssuing(id: string): void {
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result: 'ok',
+          newSessionId: id,
+        } as ContainerOutput);
+        return { status: 'success', result: 'ok', newSessionId: id };
+      },
+    );
+  }
+
+  async function fireOnce(): Promise<{ wipeSpy: ReturnType<typeof vi.fn> }> {
+    const enqueueTask = vi.fn(
+      (
+        _groupJid: string,
+        _taskId: string,
+        _sessionName: string,
+        fn: () => Promise<void>,
+      ) => {
+        void fn();
+      },
+    );
+    const wipeSpy = vi.fn(() => 1);
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'evidence@g.us': EVIDENCE_GROUP }),
+      queue: {
+        enqueueTask,
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+      wipeSessionJsonl: wipeSpy,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    return { wipeSpy };
+  }
+
+  function getRunLog(): { status: string; error: string | null } | undefined {
+    return _rawQueryForTests<{ status: string; error: string | null }>(
+      'SELECT status, error FROM task_run_logs WHERE task_id = ?',
+      ['evidence-task'],
+    )[0];
+  }
+
+  it('marks the run as error and clears the pinned session when evidence is stale', async () => {
+    createEvidenceTask();
+    setTaskSessionId('evidence-task', 'pinned-id');
+    // Evidence artifact exists but predates the run — the fabrication
+    // shape: the agent reports success without freshening the file.
+    fs.mkdirSync(groupDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(groupDir, 'cfp-state.json'),
+      JSON.stringify({ _last_checked: '2026-07-01T11:00:00.000Z' }),
+    );
+    mockAgentIssuing('pinned-id');
+
+    const { wipeSpy } = await fireOnce();
+
+    const log = getRunLog();
+    expect(log?.status).toBe('error');
+    expect(log?.error?.startsWith('evidence-check:')).toBe(true);
+    expect(log?.error).toContain('evidence stale');
+    // Pinned session cleared — the next fire starts fresh instead of
+    // resuming the session whose in-context precedent is a fabricated
+    // success report.
+    expect(getTaskById('evidence-task')?.session_id ?? null).toBeNull();
+    // The cleared pin's transcript is orphan (its DB pointer is gone)
+    // and gets wiped per #193 hygiene.
+    expect(wipeSpy).toHaveBeenCalledWith(
+      'evidence-720-test',
+      MAINTENANCE_SESSION_NAME,
+      'pinned-id',
+    );
+  });
+
+  it('marks the run as error and clears the pinned session when the evidence file is missing', async () => {
+    createEvidenceTask();
+    setTaskSessionId('evidence-task', 'pinned-id');
+    // No evidence file at all — the exact reference-incident shape.
+    mockAgentIssuing('pinned-id');
+
+    await fireOnce();
+
+    const log = getRunLog();
+    expect(log?.status).toBe('error');
+    expect(log?.error?.startsWith('evidence-check:')).toBe(true);
+    expect(log?.error).toContain('missing/unreadable');
+    expect(getTaskById('evidence-task')?.session_id ?? null).toBeNull();
+  });
+
+  it('keeps the run success and retains the session pin when evidence is freshened during the run', async () => {
+    createEvidenceTask();
+    setTaskSessionId('evidence-task', 'pinned-id');
+    // The honest shape: the agent writes the evidence artifact inside
+    // the run, stamped at (fake-)now — >= the run's start time.
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        fs.mkdirSync(groupDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(groupDir, 'cfp-state.json'),
+          JSON.stringify({ _last_checked: new Date().toISOString() }),
+        );
+        await onOutput({
+          status: 'success',
+          result: 'ok',
+          newSessionId: 'pinned-id',
+        } as ContainerOutput);
+        return { status: 'success', result: 'ok', newSessionId: 'pinned-id' };
+      },
+    );
+
+    const { wipeSpy } = await fireOnce();
+
+    const log = getRunLog();
+    expect(log?.status).toBe('success');
+    expect(log?.error ?? null).toBeNull();
+    expect(getTaskById('evidence-task')?.session_id).toBe('pinned-id');
+    expect(wipeSpy).not.toHaveBeenCalled();
+  });
+
+  it('leaves tasks without an evidence contract wholly unaffected', async () => {
+    createEvidenceTask(false);
+    setTaskSessionId('evidence-task', 'pinned-id');
+    // No evidence file exists; a declared contract would fail here —
+    // an undeclared one must not even look.
+    mockAgentIssuing('pinned-id');
+
+    const { wipeSpy } = await fireOnce();
+
+    const log = getRunLog();
+    expect(log?.status).toBe('success');
+    expect(log?.error ?? null).toBeNull();
+    expect(getTaskById('evidence-task')?.session_id).toBe('pinned-id');
+    expect(wipeSpy).not.toHaveBeenCalled();
   });
 });
 

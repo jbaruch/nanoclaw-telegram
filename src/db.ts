@@ -262,7 +262,15 @@ function createSchema(database: Database.Database): void {
       -- source (no effective routing change). See
       -- src/container-runner.ts resolveSessionAgentModel for the
       -- precedence rules.
-      agent_model TEXT
+      agent_model TEXT,
+      -- Declared work-evidence contract <relative-file>#<json-field>
+      -- for #720. Written by the cadence-registry from evidence:
+      -- frontmatter; the scheduler verifies post-run that the named
+      -- JSON date field in the group folder was freshened during the
+      -- run, else records the run as 'error' and clears the pinned
+      -- session. NULL = no evidence contract (all owner-scheduled
+      -- tasks).
+      evidence TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
     CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
@@ -454,6 +462,19 @@ function createSchema(database: Database.Database): void {
     .all() as Array<{ name: string }>;
   if (!agentModelCols.some((c) => c.name === 'agent_model')) {
     database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN agent_model TEXT`);
+  }
+
+  // Add evidence column for #720 — declared work-evidence contract
+  // `<relative-file>#<json-field>`. NULL on existing rows; populated
+  // declaratively via the cadence-registry's `evidence:` frontmatter on
+  // the next per-spawn rebuild. The scheduler checks it post-run — see
+  // `checkTaskEvidence` in src/task-scheduler.ts. PRAGMA-gated rather
+  // than try/catch per the no-error-suppression rule.
+  const evidenceCols = database
+    .prepare('PRAGMA table_info(scheduled_tasks)')
+    .all() as Array<{ name: string }>;
+  if (!evidenceCols.some((c) => c.name === 'evidence')) {
+    database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN evidence TEXT`);
   }
 
   // Switch task_run_logs.task_id FK to ON DELETE CASCADE. Without this,
