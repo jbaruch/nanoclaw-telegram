@@ -27,7 +27,7 @@ export function readEnvFile(keys: string[]): Record<string, string> {
   let content: string;
   try {
     content = fs.readFileSync(envFile, 'utf-8');
-  } catch (err) {
+  } catch (_err) {
     if (ENV_DEBUG_ENABLED) {
       process.stderr.write(
         `[env] .env file not found at ${envFile}, using defaults\n`,

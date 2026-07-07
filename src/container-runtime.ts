@@ -79,8 +79,8 @@ export function ensureContainerRuntimeRunning(): void {
       timeout: 10000,
     });
     logger.debug('Container runtime already running');
-  } catch {
-    logger.error('Docker is not running or not installed');
+  } catch (err) {
+    logger.error({ err }, 'Docker is not running or not installed');
     console.error(
       '\n╔════════════════════════════════════════════════════════════════╗',
     );
@@ -102,7 +102,9 @@ export function ensureContainerRuntimeRunning(): void {
     console.error(
       '╚════════════════════════════════════════════════════════════════╝\n',
     );
-    throw new Error('Container runtime is required but failed to start');
+    throw new Error('Container runtime is required but failed to start', {
+      cause: err,
+    });
   }
 }
 

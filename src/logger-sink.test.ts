@@ -106,7 +106,7 @@ describe('logger file sink', () => {
     // worked, neither the raw byte nor the literal `\x1b[` form is
     // present in the file. (The terminal still gets colors — see the
     // stdoutSpy assertion below.)
-    expect(contents).not.toMatch(/\x1b\[/);
+    expect(contents).not.toContain('\x1b[');
   });
 
   it('still emits color codes to stdout (terminal is unaffected)', () => {
@@ -120,7 +120,7 @@ describe('logger file sink', () => {
     logger.info('colored stdout');
     const stdout = writes.join('');
     // Terminal still gets the color codes — the strip is sink-only.
-    expect(stdout).toMatch(/\x1b\[/);
+    expect(stdout).toContain('\x1b[');
   });
 
   it('redacts bot tokens before writing to the sink', () => {

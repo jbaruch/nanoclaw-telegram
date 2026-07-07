@@ -431,7 +431,7 @@ describe('credential-proxy usage logging', () => {
 
     // Spin up a one-off upstream that returns gzip-compressed JSON
     // with the expected Content-Encoding header.
-    const gzipUpstream = http.createServer((req, res) => {
+    const gzipUpstream = http.createServer((_req, res) => {
       const body = gzipSync(
         Buffer.from(
           JSON.stringify({

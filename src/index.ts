@@ -1425,7 +1425,7 @@ export function _setRegisteredGroups(
  * Called by the GroupQueue when it's this group's turn.
  */
 async function processGroupMessages(chatJid: string): Promise<boolean> {
-  let group = registeredGroups[chatJid];
+  const group = registeredGroups[chatJid];
   if (!group) return true;
 
   const channel = findChannel(channels, chatJid);
