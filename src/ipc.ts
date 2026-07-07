@@ -676,17 +676,27 @@ export async function persistGlobalFilesToGit(opts: {
   return { committed: true, stdout: 'Committed and pushed.' };
 }
 
-export function startIpcWatcher(deps: IpcDeps): void {
+/**
+ * Start the IPC polling loop. Returns a stop handle that halts the
+ * loop and cancels the pending poll — production ignores it (the
+ * watcher lives for the process), integration tests use it so a
+ * finished suite doesn't leave a live timer polling a deleted tempdir.
+ */
+export function startIpcWatcher(deps: IpcDeps): () => void {
   if (ipcWatcherRunning) {
     logger.debug('IPC watcher already running, skipping duplicate start');
-    return;
+    return () => {};
   }
   ipcWatcherRunning = true;
 
   const ipcBaseDir = path.join(DATA_DIR, 'ipc');
   fs.mkdirSync(ipcBaseDir, { recursive: true });
 
+  let stopped = false;
+  let pollTimer: NodeJS.Timeout | undefined;
+
   const processIpcFiles = async () => {
+    if (stopped) return;
     // Scan all group IPC directories (identity determined by directory)
     let groupFolders: string[];
     try {
@@ -696,7 +706,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
       });
     } catch (err) {
       logger.error({ err }, 'Error reading IPC base directory');
-      setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
+      if (!stopped) pollTimer = setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
       return;
     }
 
@@ -1206,11 +1216,16 @@ export function startIpcWatcher(deps: IpcDeps): void {
       }
     }
 
-    setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
+    if (!stopped) pollTimer = setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
   };
 
   processIpcFiles();
   logger.info('IPC watcher started (per-group namespaces)');
+  return () => {
+    stopped = true;
+    if (pollTimer) clearTimeout(pollTimer);
+    ipcWatcherRunning = false;
+  };
 }
 
 export async function processTaskIpc(
