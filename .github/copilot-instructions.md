@@ -147,7 +147,7 @@ Before opening a PR, confirm:
 3. `npm run test` passes.
 4. For skills: tested on a fresh clone end-to-end.
 5. PR is scoped to one thing (one fix, one skill, one simplification).
-6. Check for existing PRs/issues: `gh pr list --repo qwibitai/nanoclaw --search "<topic>"`.
+6. Check for existing PRs/issues: `gh pr list --repo jbaruch/nanoclaw --search "<topic>"`. Never target `qwibitai/*` — the upstream fork is off-limits without explicit permission (see `repo-chain.md`).
 7. Fill in the PR template (`.github/PULL_REQUEST_TEMPLATE.md`).
 
 ---
