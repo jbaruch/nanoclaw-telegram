@@ -13,9 +13,11 @@ import { isValidGroupFolder } from '../src/group-folder.js';
 import { logger } from '../src/logger.js';
 import { emitStatus } from './status.js';
 
-// Type alias (not interface): aliases carry the implicit index
-// signature that lets `parsed` flow into `logger.info(obj, msg)`
-// (pino's Record<string, unknown> overload); interfaces don't.
+// Type alias (not interface) so `parsed` is assignable to the
+// `Record<string, unknown>` parameter of src/logger.ts's
+// `logger.info(dataOrMsg, msg)`: TypeScript gives object type
+// aliases an implicit index signature for this check but
+// deliberately not interfaces (microsoft/TypeScript#15300).
 type RegisterArgs = {
   jid: string;
   name: string;
