@@ -67,6 +67,60 @@ export function stripInternalBlocks(raw: string): string {
 }
 
 /**
+ * Claim the per-chat reply anchor for a piped inbound batch (#722).
+ *
+ * The anchor (`pendingReplyTo[chatJid]`) belongs to the oldest
+ * UNANSWERED TURN: the turn-start assignment sets it to that turn's
+ * triggering inbound (the newest message of the batch that woke the
+ * agent), and the output callback consumes it (sets `undefined`) on
+ * the first user-visible reply. A mid-turn pipe that
+ * unconditionally overwrote an UNCONSUMED anchor made the in-flight
+ * turn's final response quote the latest piped message instead of the
+ * one it was answering ("answered the wrong question"). A pipe may
+ * therefore claim the anchor only when it is free — i.e. the previous
+ * turn's reply already went out, making this batch the next turn's
+ * trigger. Piped messages are still processed either way; only the
+ * quoting anchor is protected.
+ *
+ * Returns whether the claim landed, so the caller can log the outcome.
+ */
+export function claimReplyAnchor(
+  anchors: Record<string, string | undefined>,
+  chatJid: string,
+  msgId: string | undefined,
+): boolean {
+  if (anchors[chatJid] !== undefined) return false;
+  anchors[chatJid] = msgId;
+  return true;
+}
+
+/**
+ * Consume the reply anchor at the IPC visible-send boundary (#722).
+ *
+ * A turn's first visible reply can go out via the IPC `send_message` /
+ * `send_file` tools long before the SDK result reaches the output
+ * callback (which is where `mark-displayed` used to be the only
+ * consumption point). Without consuming here, a pipe landing in that
+ * gap is refused as if the turn were still unanswered, and the NEXT
+ * answer loses its quote. Consumption applies only to the sending
+ * group's OWN chat (`isOwnChat`) — a cross-chat broadcast into some
+ * other chat is not that chat's in-flight turn answering, and must not
+ * steal its anchor.
+ *
+ * Returns whether the anchor was consumed, so the caller can log it.
+ */
+export function consumeReplyAnchorOnVisibleSend(
+  anchors: Record<string, string | undefined>,
+  chatJid: string,
+  isOwnChat: boolean,
+): boolean {
+  if (!isOwnChat) return false;
+  if (anchors[chatJid] === undefined) return false;
+  anchors[chatJid] = undefined;
+  return true;
+}
+
+/**
  * Decide what the orchestrator should do with a single streamed
  * SDK-result event. Pure function — no DB, no channel, no logger.
  *

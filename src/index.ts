@@ -156,7 +156,11 @@ import {
   releaseIdleTimerControl,
 } from './idle-timer.js';
 import type { IdleTimerControl } from './idle-timer.js';
-import { decideAgentOutputAction } from './agent-output-action.js';
+import {
+  claimReplyAnchor,
+  consumeReplyAnchorOnVisibleSend,
+  decideAgentOutputAction,
+} from './agent-output-action.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -1576,8 +1580,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // multiple messages are piped to the same container.
 
   // Track which message triggered the response — first reply quotes it.
-  // Uses shared pendingReplyTo map so follow-up messages piped via
-  // queue.sendMessage() can update the reply target for the output callback.
+  // Turn-start assignment is unconditional: this turn's trigger owns
+  // the anchor. Mid-turn pipes may only claim it AFTER the first reply
+  // consumes it (`claimReplyAnchor`, #722) — an unconditional overwrite
+  // there made long turns quote the latest piped message instead of
+  // the one they were answering.
   pendingReplyTo[chatJid] = missedMessages[missedMessages.length - 1]?.id;
   logger.info(
     {
@@ -2459,13 +2466,24 @@ async function startMessageLoop(): Promise<void> {
             // control, a fresh cycle will install one — no need to
             // synthesize a control here.
             getActiveIdleTimer(chatJid)?.reset('user-input');
-            // Update shared reply-to so the output callback quotes this message
-            pendingReplyTo[chatJid] = lastMsgId;
+            // #722: claim the reply anchor only when the in-flight
+            // turn has already consumed it — an unconditional overwrite
+            // here made the running turn's final response quote this
+            // piped batch instead of the message it was answering. When
+            // the anchor is free, this batch is the next turn's trigger
+            // and the claim lands; when held, the piped messages are
+            // still processed but the in-flight turn keeps its quote.
+            const anchorClaimed = claimReplyAnchor(
+              pendingReplyTo,
+              chatJid,
+              lastMsgId,
+            );
             logger.debug(
               {
                 chatJid,
                 count: messagesToSend.length,
                 replyToMessageId: lastMsgId,
+                anchorClaimed,
               },
               'Piped messages to active container',
             );
@@ -2833,6 +2851,26 @@ async function main(): Promise<void> {
   // `src/gates/trigger-learner.ts` for the full design.
   startTriggerLearner();
   startIpcWatcher({
+    // #722: release the reply anchor when the sending group's OWN chat
+    // received a confirmed visible reply via IPC send_message/send_file
+    // — the mark-displayed consumption in the output callback arrives
+    // only with the SDK result, and a pipe landing in that gap must be
+    // able to claim the anchor for the follow-up turn. Cross-chat
+    // sends never touch the target chat's anchor.
+    onVisibleReply: (chatJid, sourceGroupFolder) => {
+      const isOwnChat = registeredGroups[chatJid]?.folder === sourceGroupFolder;
+      const consumed = consumeReplyAnchorOnVisibleSend(
+        pendingReplyTo,
+        chatJid,
+        isOwnChat,
+      );
+      if (consumed) {
+        logger.debug(
+          { chatJid, sourceGroupFolder },
+          'Reply anchor consumed at IPC visible-send boundary',
+        );
+      }
+    },
     sendMessage: (jid, rawText, replyToMessageId) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);

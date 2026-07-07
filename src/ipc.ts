@@ -62,6 +62,16 @@ import {
 import { RegisteredGroup, TriggerPattern } from './types.js';
 
 export interface IpcDeps {
+  /**
+   * Fired after a successful VISIBLE bot send from the IPC
+   * `send_message` / `send_file` handlers (delivery confirmed by a
+   * returned message id). `sourceGroupFolder` is the sending group;
+   * the consumer decides whether the target chat is that group's own
+   * chat before consuming the reply anchor (#722 — the anchor must be
+   * released at the visible-send boundary, not only when the SDK
+   * result later reaches the output callback).
+   */
+  onVisibleReply?: (chatJid: string, sourceGroupFolder: string) => void;
   sendReaction?: (
     jid: string,
     messageId: string | undefined,
@@ -666,17 +676,27 @@ export async function persistGlobalFilesToGit(opts: {
   return { committed: true, stdout: 'Committed and pushed.' };
 }
 
-export function startIpcWatcher(deps: IpcDeps): void {
+/**
+ * Start the IPC polling loop. Returns a stop handle that halts the
+ * loop and cancels the pending poll — production ignores it (the
+ * watcher lives for the process), integration tests use it so a
+ * finished suite doesn't leave a live timer polling a deleted tempdir.
+ */
+export function startIpcWatcher(deps: IpcDeps): () => void {
   if (ipcWatcherRunning) {
     logger.debug('IPC watcher already running, skipping duplicate start');
-    return;
+    return () => {};
   }
   ipcWatcherRunning = true;
 
   const ipcBaseDir = path.join(DATA_DIR, 'ipc');
   fs.mkdirSync(ipcBaseDir, { recursive: true });
 
+  let stopped = false;
+  let pollTimer: NodeJS.Timeout | undefined;
+
   const processIpcFiles = async () => {
+    if (stopped) return;
     // Scan all group IPC directories (identity determined by directory)
     let groupFolders: string[];
     try {
@@ -686,7 +706,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
       });
     } catch (err) {
       logger.error({ err }, 'Error reading IPC base directory');
-      setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
+      if (!stopped) pollTimer = setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
       return;
     }
 
@@ -899,6 +919,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
                         'send_file: skipping caption storeMessage — sendFile returned no message id (delivery failed)',
                       );
                     }
+                    // #722: same visible-send anchor release as the
+                    // send_message path — a delivered file (with or
+                    // without caption) is a visible reply.
+                    if (typeof sentFileMsgId === 'string') {
+                      deps.onVisibleReply?.(data.chatJid, sourceGroup);
+                    }
                     logger.info(
                       { chatJid: data.chatJid, hostPath, sourceGroup },
                       'IPC file sent',
@@ -1048,6 +1074,14 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       );
                     }
                   }
+                  // #722: a confirmed visible reply releases the target
+                  // chat's reply anchor at the send boundary — the SDK
+                  // result's mark-displayed consumption arrives too late
+                  // for pipes landing in the gap. Own-chat gating lives
+                  // in the consumer (src/index.ts).
+                  if (typeof sentMsgId === 'string') {
+                    deps.onVisibleReply?.(data.chatJid, sourceGroup);
+                  }
                   // Gate the bot-row write on send success — see the
                   // `shouldStoreBotMessage` helper for the full rationale
                   // (phantom rows on swallowed Telegram sends would
@@ -1182,11 +1216,16 @@ export function startIpcWatcher(deps: IpcDeps): void {
       }
     }
 
-    setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
+    if (!stopped) pollTimer = setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
   };
 
   processIpcFiles();
   logger.info('IPC watcher started (per-group namespaces)');
+  return () => {
+    stopped = true;
+    if (pollTimer) clearTimeout(pollTimer);
+    ipcWatcherRunning = false;
+  };
 }
 
 export async function processTaskIpc(
