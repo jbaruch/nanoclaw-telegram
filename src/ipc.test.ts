@@ -747,6 +747,30 @@ describe('backupCommitAndPush', () => {
     }
   });
 
+  it('surfaces a broken upstream as an error instead of a false "Nothing to commit"', async () => {
+    // No upstream tracking ref → `rev-list @{u}..HEAD` fails. That must
+    // come back as a git-stage error (pending commits could exist and the
+    // push needs the same upstream), not as a silent no-op.
+    const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-noup-'));
+    try {
+      git(backupDir, ['init', '--initial-branch=main']);
+      git(backupDir, ['config', 'user.email', 'test@example.com']);
+      git(backupDir, ['config', 'user.name', 'Test']);
+      fs.writeFileSync(path.join(backupDir, 'seed.txt'), 'baseline\n');
+      git(backupDir, ['add', '-A']);
+      git(backupDir, ['commit', '-m', 'baseline']);
+      const result = await backupCommitAndPush({
+        backupDir,
+        message: 'backup: no upstream',
+        token: undefined,
+      });
+      expect(result.stage).toBe('git');
+      expect(result.error).toContain('git rev-list');
+    } finally {
+      fs.rmSync(backupDir, { recursive: true, force: true });
+    }
+  });
+
   it('pushes a stranded unpushed commit on a no-change run', async () => {
     const { backupDir, remote, cleanup } = setupRepo();
     try {

@@ -725,14 +725,18 @@ export async function backupCommitAndPush(opts: {
     committedHere = true;
   } else if (staged.code === 0) {
     // Nothing staged. Push a commit a prior run made but failed to push
-    // (HEAD ahead of upstream); otherwise it's a genuine no-op. A missing
-    // upstream ref makes `rev-list` fail — treat that as nothing pending.
+    // (HEAD ahead of upstream); otherwise it's a genuine no-op. A failing
+    // `rev-list` (missing/misconfigured upstream, corrupt ref) is a real
+    // error — mapping it to "nothing pending" would silently no-op the
+    // backup while pending commits exist, and the bare `git push` below
+    // needs the same upstream anyway. Surface it.
     const ahead = await runGit(backupDir, [
       'rev-list',
       '--count',
       '@{u}..HEAD',
     ]);
-    const aheadCount = ahead.code === 0 ? parseInt(ahead.stdout.trim(), 10) : 0;
+    if (ahead.code !== 0) return fail('git rev-list', ahead);
+    const aheadCount = parseInt(ahead.stdout.trim(), 10);
     if (!Number.isFinite(aheadCount) || aheadCount <= 0) {
       return { committed: false, stdout: 'Nothing to commit.' };
     }
@@ -743,12 +747,22 @@ export async function backupCommitAndPush(opts: {
 
   const push = await runGit(backupDir, ['push'], gitAuthEnv(token));
   if (push.code !== 0) {
+    const envelope = fail('git push', push);
     // Roll back the commit WE just made so the next run retries it instead
-    // of seeing a clean index and reporting a false no-op.
+    // of seeing a clean index and reporting a false no-op. If the rollback
+    // itself fails, say so in the envelope — the repo is then in the
+    // committed-but-unpushed state, which the ahead-of-upstream recovery
+    // above picks up on the next run.
     if (committedHere) {
-      await runGit(backupDir, ['reset', '--soft', 'HEAD~1']);
+      const rollback = await runGit(backupDir, ['reset', '--soft', 'HEAD~1']);
+      if (rollback.code !== 0) {
+        envelope.error = `${envelope.error} (rollback also failed: ${redactGitToken(
+          (rollback.stderr || rollback.stdout || 'failed').trim(),
+          token,
+        )} — a committed-but-unpushed backup commit remains; the next run recovers it via the ahead-of-upstream push)`;
+      }
     }
-    return fail('git push', push);
+    return envelope;
   }
   return { committed: true, stdout: 'Committed and pushed.' };
 }
