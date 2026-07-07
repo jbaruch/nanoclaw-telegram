@@ -592,4 +592,8 @@ git push -u origin "$BRANCH"
 echo ""
 echo "=== Sync branch pushed: $BRANCH ==="
 echo "Create a PR to review before merging to main:"
-echo "  cd $PUBLIC_DIR && gh pr create --base main --head $BRANCH"
+# --repo pinned per the `nanoclaw-host: repo-chain` rule (see
+# groups/global/BASH_SAFETY.md § PR creation): the public clone has
+# fork remotes, and an unpinned `gh pr create` can default to the
+# upstream repo.
+echo "  cd \"$PUBLIC_DIR\" && gh pr create --repo jbaruch/nanoclaw-public --base main --head $BRANCH"

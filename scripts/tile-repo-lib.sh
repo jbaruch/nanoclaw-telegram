@@ -249,7 +249,16 @@ summon_copilot() {
   local repo="$2"
   local pr_number="$3"
   local pr_node_id
-  pr_node_id=$(gh api graphql -f query='
+  # Repo target rides in the explicit $owner/$name GraphQL variables.
+  # GH_REPO is pinned as well, per the `nanoclaw-host: repo-chain`
+  # rule that every gh call names its target (see
+  # groups/global/BASH_SAFETY.md § PR creation — it's phrased as
+  # "pass --repo", but `gh api` has no --repo flag; the GH_REPO env
+  # var is gh's documented equivalent for it). The env pin keeps any
+  # future {owner}/{repo} placeholder edit from falling back to
+  # git-remote inference — which resolves to the upstream fork in some
+  # checkouts.
+  pr_node_id=$(GH_REPO="$owner/$repo" gh api graphql -f query='
   query($owner: String!, $name: String!, $number: Int!) {
     repository(owner: $owner, name: $name) {
       pullRequest(number: $number) { id }
@@ -265,7 +274,10 @@ summon_copilot() {
   if [ -z "$pr_node_id" ] || [ "$pr_node_id" = "null" ]; then
     return 1
   fi
-  gh api graphql -f query='
+  # The mutation addresses the PR by its globally-unique node ID (which
+  # the pinned lookup above resolved), so no repo inference is possible;
+  # GH_REPO is pinned anyway for the same future-proofing as above.
+  GH_REPO="$owner/$repo" gh api graphql -f query='
   mutation($prId: ID!, $botIds: [ID!]!) {
     requestReviews(input: { pullRequestId: $prId, botIds: $botIds, union: true }) {
       pullRequest { number }
@@ -284,6 +296,11 @@ summon_copilot_or_warn() {
     echo "Copilot review requested on $owner/$repo#$pr_number"
   else
     echo "WARN: could not summon Copilot on $owner/$repo#$pr_number — the PR is up; summon manually via:" >&2
-    echo "  gh api graphql -f query='mutation { requestReviews(input: { pullRequestId: <node_id>, botIds: [\"BOT_kgDOCnlnWA\"], union: true }) { pullRequest { number } } }'" >&2
+    # The printed commands carry the real owner/repo (in the GraphQL
+    # variables AND as a GH_REPO prefix — gh api's --repo equivalent)
+    # so a copy-paste can't run against an inferred (possibly
+    # upstream) repo.
+    echo "  node_id=\$(GH_REPO=\"$owner/$repo\" gh api graphql -f query='{ repository(owner: \"$owner\", name: \"$repo\") { pullRequest(number: $pr_number) { id } } }' --jq .data.repository.pullRequest.id)" >&2
+    echo "  GH_REPO=\"$owner/$repo\" gh api graphql -f query=\"mutation { requestReviews(input: { pullRequestId: \\\"\$node_id\\\", botIds: [\\\"BOT_kgDOCnlnWA\\\"], union: true }) { pullRequest { number } } }\"" >&2
   fi
 }
