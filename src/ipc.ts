@@ -677,6 +677,97 @@ export async function persistGlobalFilesToGit(opts: {
 }
 
 /**
+ * Stage everything in the backup repo, commit with `message`, and push,
+ * resolving with the result envelope (never rejects — the IPC handler always
+ * has an envelope to write). Git runs via `runGit` argument arrays — no
+ * shell — so the agent-supplied commit message can't execute anything on the
+ * host (#725; the previous `bash -c` wrapper was injectable through `$()`
+ * inside its double-quoted string). Behavior mirrors
+ * `persistGlobalFilesToGit`:
+ * - staged change present → commit, then push.
+ * - nothing staged but HEAD ahead of upstream → push the pending commit
+ *   (recovers the stranded state the old shell pipeline could leave when a
+ *   push failed after its commit).
+ * - nothing staged, nothing pending → `{ committed: false }` no-op.
+ * On a push failure after our own commit, roll back (`reset --soft`) so the
+ * next run retries the commit instead of reporting "Nothing to commit."
+ * Failure envelopes carry token-redacted stderr (`coding-policy: no-secrets`).
+ */
+export async function backupCommitAndPush(opts: {
+  backupDir: string;
+  message: string;
+  token?: string;
+}): Promise<PersistGitResult> {
+  const { backupDir, message, token } = opts;
+
+  const fail = (
+    label: string,
+    r: { stdout: string; stderr: string },
+  ): PersistGitResult => ({
+    error: redactGitToken(
+      `${label}: ${(r.stderr || r.stdout || 'failed').trim()}`,
+      token,
+    ),
+    stderr: redactGitToken(r.stderr, token).slice(-500),
+    stage: 'git',
+  });
+
+  const add = await runGit(backupDir, ['add', '-A']);
+  if (add.code !== 0) return fail('git add', add);
+
+  // `diff --cached --quiet` exits 1 when a staged change exists, 0 when the
+  // index matches HEAD, >1 on a real diff error.
+  const staged = await runGit(backupDir, ['diff', '--cached', '--quiet']);
+  let committedHere = false;
+  if (staged.code === 1) {
+    const commit = await runGit(backupDir, ['commit', '-m', message]);
+    if (commit.code !== 0) return fail('git commit', commit);
+    committedHere = true;
+  } else if (staged.code === 0) {
+    // Nothing staged. Push a commit a prior run made but failed to push
+    // (HEAD ahead of upstream); otherwise it's a genuine no-op. A failing
+    // `rev-list` (missing/misconfigured upstream, corrupt ref) is a real
+    // error — mapping it to "nothing pending" would silently no-op the
+    // backup while pending commits exist, and the bare `git push` below
+    // needs the same upstream anyway. Surface it.
+    const ahead = await runGit(backupDir, [
+      'rev-list',
+      '--count',
+      '@{u}..HEAD',
+    ]);
+    if (ahead.code !== 0) return fail('git rev-list', ahead);
+    const aheadCount = parseInt(ahead.stdout.trim(), 10);
+    if (!Number.isFinite(aheadCount) || aheadCount <= 0) {
+      return { committed: false, stdout: 'Nothing to commit.' };
+    }
+    // fall through to push the pending commit(s)
+  } else {
+    return fail('git diff', staged);
+  }
+
+  const push = await runGit(backupDir, ['push'], gitAuthEnv(token));
+  if (push.code !== 0) {
+    const envelope = fail('git push', push);
+    // Roll back the commit WE just made so the next run retries it instead
+    // of seeing a clean index and reporting a false no-op. If the rollback
+    // itself fails, say so in the envelope — the repo is then in the
+    // committed-but-unpushed state, which the ahead-of-upstream recovery
+    // above picks up on the next run.
+    if (committedHere) {
+      const rollback = await runGit(backupDir, ['reset', '--soft', 'HEAD~1']);
+      if (rollback.code !== 0) {
+        envelope.error = `${envelope.error} (rollback also failed: ${redactGitToken(
+          (rollback.stderr || rollback.stdout || 'failed').trim(),
+          token,
+        )} — a committed-but-unpushed backup commit remains; the next run recovers it via the ahead-of-upstream push)`;
+      }
+    }
+    return envelope;
+  }
+  return { committed: true, stdout: 'Committed and pushed.' };
+}
+
+/**
  * Start the IPC polling loop. Returns a stop handle that halts the
  * loop and cancels the pending poll — production ignores it (the
  * watcher lives for the process), integration tests use it so a
@@ -4340,74 +4431,36 @@ export async function processTaskIpc(
         const backupEnvVars = readBackupEnv(['GITHUB_TOKEN']);
         const ghToken = backupEnvVars.GITHUB_TOKEN;
 
-        execFile(
-          'bash',
-          [
-            '-c',
-            `cd "${backupDir}" && git add -A && (git diff --cached --quiet && echo '{"committed":false,"stdout":"Nothing to commit."}' || (git commit -m "${commitMsg.replace(/"/g, '\\"')}" && git push && echo '{"committed":true,"stdout":"Committed and pushed."}'))`,
-          ],
-          {
-            timeout: 60_000,
-            maxBuffer: 1024 * 1024,
-            env: {
-              ...process.env,
-              ...(ghToken
-                ? {
-                    GIT_ASKPASS: 'echo',
-                    GIT_TERMINAL_PROMPT: '0',
-                    GITHUB_TOKEN: ghToken,
-                    GIT_CONFIG_COUNT: '1',
-                    GIT_CONFIG_KEY_0:
-                      'url.https://x-access-token:' +
-                      ghToken +
-                      '@github.com/.insteadOf',
-                    GIT_CONFIG_VALUE_0: 'https://github.com/',
-                  }
-                : {}),
-            },
-          },
-          (error, stdout, stderr) => {
-            if (error) {
-              logger.error(
-                { sourceGroup, error: error.message, stderr },
-                'github_backup failed',
-              );
-              fs.writeFileSync(
-                resultPath,
-                JSON.stringify({
-                  error: error.message,
-                  stderr: stderr.slice(-500),
-                  stage: 'git',
-                  sync_summary: syncSummary,
-                }),
-              );
-            } else {
-              // stdout is the JSON echo from the bash script. The
-              // catch is narrowed to SyntaxError per
-              // `jbaruch/coding-policy: error-handling` — only the
-              // expected "malformed-JSON-from-bash" path falls back
-              // to the raw-stdout shape; any other thrown class
-              // (programmer error, OOM, runtime fault) propagates as
-              // a real failure.
-              const lastLine = stdout.trim().split('\n').pop() ?? '';
-              let parsed: { committed?: boolean; stdout?: string };
-              try {
-                parsed = JSON.parse(lastLine) as typeof parsed;
-              } catch (e) {
-                if (!(e instanceof SyntaxError)) throw e;
-                parsed = { stdout: stdout.trim() };
-              }
-              fs.writeFileSync(
-                resultPath,
-                JSON.stringify({ ...parsed, sync_summary: syncSummary }),
-              );
-              logger.info(
-                { sourceGroup, committed: parsed.committed },
-                'github_backup completed',
-              );
-            }
-          },
-        );
+        // Run the commit+push off the IPC loop (like persist_global_file):
+        // the promise resolves with the result envelope; the loop never
+        // blocks on git. `backupCommitAndPush` is the testable git boundary
+        // — argument-array git invocations, so the agent-supplied commit
+        // message can't inject host commands (#725).
+        backupCommitAndPush({
+          backupDir,
+          message: commitMsg,
+          token: ghToken,
+        }).then((backupResult) => {
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({ ...backupResult, sync_summary: syncSummary }),
+          );
+          if (backupResult.error) {
+            logger.error(
+              {
+                sourceGroup,
+                stage: backupResult.stage,
+                error: backupResult.error,
+              },
+              'github_backup failed',
+            );
+          } else {
+            logger.info(
+              { sourceGroup, committed: backupResult.committed },
+              'github_backup completed',
+            );
+          }
+        });
       }
       break;
 
