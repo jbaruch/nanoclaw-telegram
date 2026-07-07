@@ -27,7 +27,13 @@ export function readEnvFile(keys: string[]): Record<string, string> {
   let content: string;
   try {
     content = fs.readFileSync(envFile, 'utf-8');
-  } catch (_err) {
+  } catch (err) {
+    // Only a missing .env is the expected "no config" case. Anything
+    // else (EACCES, EISDIR, I/O failure) means a .env likely exists
+    // but is unreadable — silently returning {} there would run the
+    // orchestrator without its secrets, so let it propagate
+    // (`coding-policy: error-handling`).
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     if (ENV_DEBUG_ENABLED) {
       process.stderr.write(
         `[env] .env file not found at ${envFile}, using defaults\n`,
