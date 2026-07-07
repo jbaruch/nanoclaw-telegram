@@ -7,6 +7,9 @@
     },
     "jbaruch/coding-policy": {
       "version": "latest"
+    },
+    "finsi/codex-review": {
+      "version": "latest"
     }
   }
 }
