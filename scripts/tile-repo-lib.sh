@@ -241,9 +241,11 @@ summon_copilot_or_warn() {
     echo "Copilot review requested on $owner/$repo#$pr_number"
   else
     echo "WARN: could not summon Copilot on $owner/$repo#$pr_number — the PR is up; summon manually via:" >&2
-    # The printed commands carry the real owner/repo so the operator
-    # can't run them against an inferred (possibly upstream) repo.
-    echo "  node_id=\$(gh api graphql -f query='{ repository(owner: \"$owner\", name: \"$repo\") { pullRequest(number: $pr_number) { id } } }' --jq .data.repository.pullRequest.id)" >&2
-    echo "  gh api graphql -f query=\"mutation { requestReviews(input: { pullRequestId: \\\"\$node_id\\\", botIds: [\\\"BOT_kgDOCnlnWA\\\"], union: true }) { pullRequest { number } } }\"" >&2
+    # The printed commands carry the real owner/repo (in the GraphQL
+    # variables AND as a GH_REPO prefix — gh api's --repo equivalent)
+    # so a copy-paste can't run against an inferred (possibly
+    # upstream) repo.
+    echo "  node_id=\$(GH_REPO=\"$owner/$repo\" gh api graphql -f query='{ repository(owner: \"$owner\", name: \"$repo\") { pullRequest(number: $pr_number) { id } } }' --jq .data.repository.pullRequest.id)" >&2
+    echo "  GH_REPO=\"$owner/$repo\" gh api graphql -f query=\"mutation { requestReviews(input: { pullRequestId: \\\"\$node_id\\\", botIds: [\\\"BOT_kgDOCnlnWA\\\"], union: true }) { pullRequest { number } } }\"" >&2
   fi
 }
