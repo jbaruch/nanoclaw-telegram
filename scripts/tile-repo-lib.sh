@@ -14,33 +14,39 @@
 # Mirrors gitAuthEnv() in src/ipc.ts. The env prefix applies to the
 # single git invocation only.
 #
-# stderr is buffered and re-emitted through a redaction filter: on
-# auth/transport failures git echoes the REWRITTEN (token-bearing) URL
-# in its diagnostics — the same leak redactGitToken() closes on the TS
-# side — and these scripts' stderr flows into IPC result envelopes and
-# logs. The exit code is git's, not the filter's. Trade-off: stderr
-# progress (e.g. clone progress) appears only after git exits.
+# BOTH output streams are buffered and re-emitted through a redaction
+# filter. stderr: on auth/transport failures git echoes token-bearing
+# URLs in its diagnostics — the same leak redactGitToken() closes on
+# the TS side — and these scripts' stderr flows into IPC result
+# envelopes and logs. stdout: the injected GIT_CONFIG_* pair is
+# printable by wrapped commands (`git config --list`), and callers'
+# stdout reaches the same consumers. The exit code is git's, not the
+# filter's. Trade-off: output (e.g. clone progress) appears only after
+# git exits.
 #
 # Usage: git_with_token <token> <git-args...>
 git_with_token() {
   local token="$1"
   shift
-  local rc=0 sed_rc=0 errfile
-  errfile=$(mktemp)
+  local rc=0 sed_rc=0 outfile errfile
+  # Explicit template: BSD mktemp variants reject the no-arg form.
+  outfile=$(mktemp "${TMPDIR:-/tmp}/git-with-token-out.XXXXXX")
+  errfile=$(mktemp "${TMPDIR:-/tmp}/git-with-token-err.XXXXXX")
   GIT_ASKPASS=echo \
     GIT_TERMINAL_PROMPT=0 \
     GIT_CONFIG_COUNT=1 \
     GIT_CONFIG_KEY_0="url.https://x-access-token:${token}@github.com/.insteadOf" \
     GIT_CONFIG_VALUE_0="https://github.com/" \
-    git "$@" 2>"$errfile" || rc=$?
-  # Capture the filter's rc instead of letting callers' `set -e` abort
-  # between sed and rm — an abort there would strand the token-bearing
-  # temp file on disk. The failure still surfaces loudly below; raw
-  # stderr is never emitted unfiltered.
+    git "$@" >"$outfile" 2>"$errfile" || rc=$?
+  # Capture the filters' rc instead of letting callers' `set -e` abort
+  # between sed and rm — an abort there would strand token-bearing
+  # temp files on disk. A filter failure still surfaces loudly below;
+  # raw output is never emitted unfiltered.
+  sed -E 's/x-access-token:[^@[:space:]]+@/x-access-token:***@/g' "$outfile" || sed_rc=$?
   sed -E 's/x-access-token:[^@[:space:]]+@/x-access-token:***@/g' "$errfile" >&2 || sed_rc=$?
-  rm -f "$errfile"
+  rm -f "$outfile" "$errfile"
   if [ "$sed_rc" -ne 0 ]; then
-    echo "ERROR: git_with_token could not filter git stderr (sed rc=$sed_rc); raw output withheld to avoid leaking the token" >&2
+    echo "ERROR: git_with_token could not filter git output (sed rc=$sed_rc); raw output withheld to avoid leaking the token" >&2
     return "$sed_rc"
   fi
   return "$rc"

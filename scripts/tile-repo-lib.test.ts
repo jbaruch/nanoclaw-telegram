@@ -103,14 +103,14 @@ describe('git_with_token', () => {
     expect(result.stderr).toContain('x-access-token:***@github.com/x.git');
   });
 
-  it('emits redacted stderr while passing stdout through untouched', () => {
+  it('redacts token-bearing stdout too (the injected config is printable)', () => {
     // `git config --list` under the wrapper prints the injected
-    // insteadOf pair on stdout during the wrapped invocation only —
-    // callers consume stdout (branch names, etc.) unfiltered.
-    const result = runInLib(
-      `git_with_token "${FAKE_TOKEN}" config --list | grep -c insteadof`,
-    );
+    // insteadOf pair on stdout — and callers' stdout reaches the same
+    // IPC/log consumers as stderr, so the wrapper filters both.
+    const result = runInLib(`git_with_token "${FAKE_TOKEN}" config --list`);
     expect(result.status).toBe(0);
-    expect(result.stdout.trim()).toBe('1');
+    expect(result.stdout).toContain('insteadof');
+    expect(result.stdout).not.toContain(FAKE_TOKEN);
+    expect(result.stdout).toContain('x-access-token:***@');
   });
 });
