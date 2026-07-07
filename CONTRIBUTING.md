@@ -4,10 +4,10 @@
 
 1. **Check for existing work.** Search open PRs and issues before starting:
    ```bash
-   gh pr list --repo qwibitai/nanoclaw --search "<your feature>"
-   gh issue list --repo qwibitai/nanoclaw --search "<your feature>"
+   gh pr list --repo jbaruch/nanoclaw --search "<your feature>"
+   gh issue list --repo jbaruch/nanoclaw --search "<your feature>"
    ```
-   If a related PR or issue exists, build on it rather than duplicating effort.
+   If a related PR or issue exists, build on it rather than duplicating effort. Never run `gh` against `qwibitai/*` — the upstream fork is off-limits without explicit permission (per the `nanoclaw-host: repo-chain` rule; see `groups/global/BASH_SAFETY.md` § PR creation).
 
 2. **Check alignment.** Read the [Philosophy section in README.md](README.md#philosophy). Source code changes should only be things 90%+ of users need. Skills can be more niche, but should still be useful beyond a single person's setup.
 
