@@ -69,10 +69,11 @@ export function stripInternalBlocks(raw: string): string {
 /**
  * Claim the per-chat reply anchor for a piped inbound batch (#722).
  *
- * The anchor (`pendingReplyTo[chatJid]`) belongs to the OLDEST
- * unanswered inbound: the turn-start assignment sets it to the
- * triggering message, and the output callback consumes it (sets
- * `undefined`) on the first user-visible reply. A mid-turn pipe that
+ * The anchor (`pendingReplyTo[chatJid]`) belongs to the oldest
+ * UNANSWERED TURN: the turn-start assignment sets it to that turn's
+ * triggering inbound (the newest message of the batch that woke the
+ * agent), and the output callback consumes it (sets `undefined`) on
+ * the first user-visible reply. A mid-turn pipe that
  * unconditionally overwrote an UNCONSUMED anchor made the in-flight
  * turn's final response quote the latest piped message instead of the
  * one it was answering ("answered the wrong question"). A pipe may
