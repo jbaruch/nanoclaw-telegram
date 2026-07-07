@@ -10,7 +10,11 @@ import { logger } from '../src/logger.js';
 import { isRoot } from './platform.js';
 import { emitStatus } from './status.js';
 
-function parseArgs(args: string[]): { empty: boolean; json: string; force: boolean } {
+function parseArgs(args: string[]): {
+  empty: boolean;
+  json: string;
+  force: boolean;
+} {
   let empty = false;
   let json = '';
   let force = false;

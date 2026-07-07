@@ -930,8 +930,7 @@ async function main(): Promise<void> {
             // for errors that genuinely originated in the SDK call.
             const isAbort =
               err instanceof Error &&
-              (err.name === 'AbortError' ||
-                err.message?.includes('aborted'));
+              (err.name === 'AbortError' || err.message?.includes('aborted'));
             const isAnthropicApiError = err instanceof Anthropic.APIError;
             const isNetworkError =
               err instanceof Error &&

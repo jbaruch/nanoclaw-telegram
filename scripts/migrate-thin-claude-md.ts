@@ -164,7 +164,9 @@ function printPlan(plan: Plan, applying: boolean): void {
     `\n=== Migration plan${applying ? ' (APPLY)' : ' (DRY RUN — pass --apply to execute)'} ===\n`,
   );
 
-  console.log(`${verb} delete (${plan.vanillaToDelete.length}) — vanilla template, mount takes over:`);
+  console.log(
+    `${verb} delete (${plan.vanillaToDelete.length}) — vanilla template, mount takes over:`,
+  );
   for (const p of plan.vanillaToDelete) console.log(`    ${p}`);
 
   console.log(

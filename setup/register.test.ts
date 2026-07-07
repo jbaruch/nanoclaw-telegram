@@ -293,20 +293,14 @@ describe('CLAUDE.md template copy', () => {
       for (const mdFile of mdFiles) {
         let content = fs.readFileSync(mdFile, 'utf-8');
         content = content.replace(/^# Andy$/m, `# ${assistantName}`);
-        content = content.replace(
-          /You are Andy/g,
-          `You are ${assistantName}`,
-        );
+        content = content.replace(/You are Andy/g, `You are ${assistantName}`);
         fs.writeFileSync(mdFile, content);
       }
     }
   }
 
   function readGroupMd(folder: string): string {
-    return fs.readFileSync(
-      path.join(groupsDir, folder, 'CLAUDE.md'),
-      'utf-8',
-    );
+    return fs.readFileSync(path.join(groupsDir, folder, 'CLAUDE.md'), 'utf-8');
   }
 
   beforeEach(() => {
