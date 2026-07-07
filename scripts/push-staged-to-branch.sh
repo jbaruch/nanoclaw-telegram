@@ -58,7 +58,10 @@ RULES_SRC="$STAGING_DIR/rules"
 TESSL_TILES_DIR="${TESSL_TILES_DIR:-}"
 
 # --- Clone the existing branch ---
-TILE_REPO_URL="https://x-access-token:${TOKEN}@github.com/${TILE_OWNER}/${TILE_NAME}.git"
+# Token-free URL: auth rides in via `git_with_token`'s env-scoped
+# insteadOf rewrite (tile-repo-lib.sh), so the token never appears in
+# process argv or the clone's .git/config (#728).
+TILE_REPO_URL="https://github.com/${TILE_OWNER}/${TILE_NAME}.git"
 TILE_REPO_DIR="/tmp/push-${TILE_NAME}-$$"
 
 cleanup_temp() {
@@ -71,7 +74,7 @@ rm -rf "$TILE_REPO_DIR"
 # --single-branch + --branch fails loudly if BRANCH doesn't exist on the
 # remote — which is what we want (the caller is claiming it's an "existing
 # PR branch"; if it's not, don't silently create one).
-git clone --depth 1 --single-branch --branch "$BRANCH" "$TILE_REPO_URL" "$TILE_REPO_DIR"
+git_with_token "$TOKEN" clone --depth 1 --single-branch --branch "$BRANCH" "$TILE_REPO_URL" "$TILE_REPO_DIR"
 
 PROMOTED=0
 BLOCKED=0
@@ -228,8 +231,9 @@ fi
 
 git commit -m "$COMMIT_MSG"
 # `--` before refspec so a branch name starting with `-` can't be
-# reparsed as a git-push option.
-git push origin -- "$BRANCH"
+# reparsed as a git-push option. Auth comes from git_with_token — the
+# clone's remote URL is token-free.
+git_with_token "$TOKEN" push origin -- "$BRANCH"
 
 echo "Pushed $PROMOTED item(s) to $BRANCH on $TILE_OWNER/$TILE_NAME."
 

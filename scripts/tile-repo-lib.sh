@@ -6,6 +6,26 @@
 # Source-only — not meant to be run directly. Callers must have `set -e`
 # active so the awk/grep invariants actually fail the script.
 
+# Run git with GitHub auth injected through process-scoped environment
+# config (an `insteadOf` URL rewrite), never through the clone URL or
+# argv: /proc/<pid>/cmdline is world-readable while the environment is
+# uid-gated, and a token-bearing URL would also persist into the clone's
+# .git/config where diagnostics and error output can pick it up (#728).
+# Mirrors gitAuthEnv() in src/ipc.ts. The env prefix applies to the
+# single git invocation only.
+#
+# Usage: git_with_token <token> <git-args...>
+git_with_token() {
+  local token="$1"
+  shift
+  GIT_ASKPASS=echo \
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0="url.https://x-access-token:${token}@github.com/.insteadOf" \
+    GIT_CONFIG_VALUE_0="https://github.com/" \
+    git "$@"
+}
+
 # Read a single frontmatter field from a SKILL.md. Prints the normalised
 # value on stdout (empty if unset or no frontmatter block). Frontmatter
 # is the block between the first two `---` markers at the top of the file.
