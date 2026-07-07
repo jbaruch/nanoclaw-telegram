@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as crypto from 'crypto';
-import { generateToken, mintToken, parseArgs } from './aye-confirm.ts';
-import { parseDuration } from '../container/agent-runner/src/confirmation-tokens.ts';
+import { generateToken, mintToken, parseArgs } from './aye-confirm.js';
+import { parseDuration } from '../container/agent-runner/src/confirmation-tokens.js';
 
 // ---- parseArgs ----
 //

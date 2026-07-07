@@ -603,6 +603,9 @@ function runStage1(
     message: {
       text: cleanText,
       senderJid: msg.sender,
+      // Channel-side message id, same as the orchestrator plumbs from
+      // NewMessage.id at its buildGateContext call site.
+      messageId: msg.id,
       replyToMessageId: replyToBotId,
       isFromMe: msg.is_from_me === 1,
     },

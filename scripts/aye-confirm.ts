@@ -39,7 +39,7 @@ import {
   loadConfirmationTokens,
   parseDuration,
   saveConfirmationTokens,
-} from '../container/agent-runner/src/confirmation-tokens.ts';
+} from '../container/agent-runner/src/confirmation-tokens.js';
 
 const VALID_SCOPES: ReadonlyArray<DestructiveScope> = [
   'nuke_session',

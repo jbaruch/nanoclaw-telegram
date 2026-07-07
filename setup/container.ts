@@ -24,7 +24,6 @@ export async function run(args: string[]): Promise<void> {
   const projectRoot = process.cwd();
   const { runtime } = parseArgs(args);
   const image = 'nanoclaw-agent:latest';
-  const logFile = path.join(projectRoot, 'logs', 'setup.log');
 
   if (!runtime) {
     emitStatus('SETUP_CONTAINER', {

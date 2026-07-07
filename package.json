@@ -5,18 +5,18 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "format": "prettier --write \"src/**/*.ts\" \"container/agent-runner/src/**/*.ts\"",
-    "format:fix": "prettier --write \"src/**/*.ts\" \"container/agent-runner/src/**/*.ts\"",
-    "format:check": "prettier --check \"src/**/*.ts\" \"container/agent-runner/src/**/*.ts\"",
+    "format": "prettier --write \"src/**/*.ts\" \"scripts/**/*.ts\" \"setup/**/*.ts\" \"container/agent-runner/src/**/*.ts\"",
+    "format:fix": "prettier --write \"src/**/*.ts\" \"scripts/**/*.ts\" \"setup/**/*.ts\" \"container/agent-runner/src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"scripts/**/*.ts\" \"setup/**/*.ts\" \"container/agent-runner/src/**/*.ts\"",
     "prepare": "husky",
     "setup": "tsx setup/index.ts",
     "auth": "tsx src/whatsapp-auth.ts",
-    "lint": "eslint src/",
-    "lint:fix": "eslint src/ --fix",
+    "lint": "eslint src/ scripts/ setup/",
+    "lint:fix": "eslint src/ scripts/ setup/ --fix",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -48,6 +48,6 @@
     "node": ">=24"
   },
   "lint-staged": {
-    "src/**/*.ts": "prettier --write"
+    "{src,scripts,setup}/**/*.ts": "prettier --write"
   }
 }

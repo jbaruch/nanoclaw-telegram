@@ -5,7 +5,7 @@ import noCatchAll from 'eslint-plugin-no-catch-all'
 
 export default [
   { ignores: ['node_modules/', 'dist/', 'container/', 'groups/'] },
-  { files: ['src/**/*.{js,ts}'] },
+  { files: ['src/**/*.{js,ts}', 'scripts/**/*.{js,ts}', 'setup/**/*.{js,ts}'] },
   { languageOptions: { globals: globals.node } },
   pluginJs.configs.recommended,
   ...tseslint.configs.recommended,
