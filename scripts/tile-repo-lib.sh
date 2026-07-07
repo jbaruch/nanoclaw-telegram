@@ -14,16 +14,28 @@
 # Mirrors gitAuthEnv() in src/ipc.ts. The env prefix applies to the
 # single git invocation only.
 #
+# stderr is buffered and re-emitted through a redaction filter: on
+# auth/transport failures git echoes the REWRITTEN (token-bearing) URL
+# in its diagnostics — the same leak redactGitToken() closes on the TS
+# side — and these scripts' stderr flows into IPC result envelopes and
+# logs. The exit code is git's, not the filter's. Trade-off: stderr
+# progress (e.g. clone progress) appears only after git exits.
+#
 # Usage: git_with_token <token> <git-args...>
 git_with_token() {
   local token="$1"
   shift
+  local rc=0 errfile
+  errfile=$(mktemp)
   GIT_ASKPASS=echo \
     GIT_TERMINAL_PROMPT=0 \
     GIT_CONFIG_COUNT=1 \
     GIT_CONFIG_KEY_0="url.https://x-access-token:${token}@github.com/.insteadOf" \
     GIT_CONFIG_VALUE_0="https://github.com/" \
-    git "$@"
+    git "$@" 2>"$errfile" || rc=$?
+  sed -E 's/x-access-token:[^@[:space:]]+@/x-access-token:***@/g' "$errfile" >&2
+  rm -f "$errfile"
+  return "$rc"
 }
 
 # Read a single frontmatter field from a SKILL.md. Prints the normalised
