@@ -54,7 +54,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/tile-repo-lib.sh"
 
 # --- Clone tile repo ---
-TILE_REPO_URL="https://x-access-token:${TOKEN}@github.com/${TILE_OWNER}/${TILE_NAME}.git"
+# Token-free URL: auth rides in via `git_with_token`'s env-scoped
+# insteadOf rewrite (tile-repo-lib.sh), so the token never appears in
+# process argv or the clone's .git/config (#728).
+TILE_REPO_URL="https://github.com/${TILE_OWNER}/${TILE_NAME}.git"
 TILE_REPO_DIR="/tmp/promote-${TILE_NAME}-$$"
 
 # Clean up the temp clone on any exit path — success, failure, or
@@ -68,7 +71,7 @@ trap cleanup_temp EXIT
 
 echo "Cloning ${TILE_OWNER}/${TILE_NAME}..."
 rm -rf "$TILE_REPO_DIR"
-git clone --depth 1 "$TILE_REPO_URL" "$TILE_REPO_DIR"
+git_with_token "$TOKEN" clone --depth 1 "$TILE_REPO_URL" "$TILE_REPO_DIR"
 
 PROMOTED=0
 BLOCKED=0
@@ -254,8 +257,9 @@ git commit -m "$COMMIT_MSG"
 # Push branch. `--` before the refspec guards against a pathological
 # branch name starting with `-` getting reparsed as a git-push option.
 # Not currently possible because BRANCH is constructed above, but future
-# refactors should inherit the safety without thinking.
-git push -u origin -- "$BRANCH"
+# refactors should inherit the safety without thinking. Auth comes from
+# git_with_token — the clone's remote URL is token-free.
+git_with_token "$TOKEN" push -u origin -- "$BRANCH"
 
 # Print the branch name on its own line so the agent can parse it out of
 # stdout and feed it back to the `push_staged_to_branch` MCP tool for

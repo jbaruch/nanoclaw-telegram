@@ -6,6 +6,61 @@
 # Source-only — not meant to be run directly. Callers must have `set -e`
 # active so the awk/grep invariants actually fail the script.
 
+# Run git with GitHub auth injected through process-scoped environment
+# config (an `insteadOf` URL rewrite), never through the clone URL or
+# argv: /proc/<pid>/cmdline is world-readable while the environment is
+# uid-gated, and a token-bearing URL would also persist into the clone's
+# .git/config where diagnostics and error output can pick it up (#728).
+# Mirrors gitAuthEnv() in src/ipc.ts. The env prefix applies to the
+# single git invocation only.
+#
+# BOTH output streams are buffered and re-emitted through a redaction
+# filter. stderr: on auth/transport failures git echoes token-bearing
+# URLs in its diagnostics — the same leak redactGitToken() closes on
+# the TS side — and these scripts' stderr flows into IPC result
+# envelopes and logs. stdout: the injected GIT_CONFIG_* pair is
+# printable by wrapped commands (`git config --list`), and callers'
+# stdout reaches the same consumers. The exit code is git's, not the
+# filter's. Trade-off: output (e.g. clone progress) appears only after
+# git exits.
+#
+# Usage: git_with_token <token> <git-args...>
+git_with_token() {
+  local token="$1"
+  shift
+  local rc=0 sed_rc=0 outfile errfile
+  # Explicit template: BSD mktemp variants reject the no-arg form.
+  outfile=$(mktemp "${TMPDIR:-/tmp}/git-with-token-out.XXXXXX")
+  errfile=$(mktemp "${TMPDIR:-/tmp}/git-with-token-err.XXXXXX")
+  GIT_ASKPASS=echo \
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0="url.https://x-access-token:${token}@github.com/.insteadOf" \
+    GIT_CONFIG_VALUE_0="https://github.com/" \
+    git "$@" >"$outfile" 2>"$errfile" || rc=$?
+  # Capture the filters' rc instead of letting callers' `set -e` abort
+  # between sed and rm — an abort there would strand token-bearing
+  # temp files on disk. A filter failure still surfaces loudly below;
+  # raw output is never emitted unfiltered.
+  sed -E 's/x-access-token:[^@[:space:]]+@/x-access-token:***@/g' "$outfile" || sed_rc=$?
+  sed -E 's/x-access-token:[^@[:space:]]+@/x-access-token:***@/g' "$errfile" >&2 || sed_rc=$?
+  # Scrub-then-unlink, with the rc captured so callers' `set -e` can't
+  # abort mid-cleanup: truncating first means that even a failed unlink
+  # strands only empty files, never raw token-bearing output. A scrub
+  # failure surfaces loudly and fails the call.
+  local cleanup_rc=0
+  { : >"$outfile" && : >"$errfile" && rm -f -- "$outfile" "$errfile"; } || cleanup_rc=$?
+  if [ "$cleanup_rc" -ne 0 ]; then
+    echo "ERROR: git_with_token could not scrub its temp files (rc=$cleanup_rc) — check ${TMPDIR:-/tmp} for git-with-token-* leftovers (the git operation itself may have succeeded)" >&2
+    return "$cleanup_rc"
+  fi
+  if [ "$sed_rc" -ne 0 ]; then
+    echo "ERROR: git_with_token could not filter git output (sed rc=$sed_rc); raw output withheld to avoid leaking the token" >&2
+    return "$sed_rc"
+  fi
+  return "$rc"
+}
+
 # Read a single frontmatter field from a SKILL.md. Prints the normalised
 # value on stdout (empty if unset or no frontmatter block). Frontmatter
 # is the block between the first two `---` markers at the top of the file.
