@@ -15,6 +15,7 @@ import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
 import {
   PERSISTABLE_GLOBAL_FILES,
   applyMaintenancePrefix,
+  backupCommitAndPush,
   fetchSessionizeEventsBatch,
   normalizeSessionizeEvent,
   persistGlobalFilesToGit,
@@ -618,6 +619,149 @@ describe('persistGlobalFilesToGit', () => {
       // main on the remote never received the stray file.
       const remoteFiles = git(remote, ['ls-tree', '--name-only', 'main']);
       expect(remoteFiles).not.toContain('unrelated.txt');
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe('backupCommitAndPush', () => {
+  // Same real-git-in-tmpdir pattern as persistGlobalFilesToGit above, but
+  // with an upstream-tracking branch since the backup repo pushes its
+  // default upstream (`git push` with no refspec).
+  function git(cwd: string, args: string[]): string {
+    return execFileSync('git', args, {
+      cwd,
+      encoding: 'utf-8',
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+  }
+
+  function setupRepo(): {
+    backupDir: string;
+    remote: string;
+    cleanup: () => void;
+  } {
+    const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-work-'));
+    const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-bare-'));
+    git(remote, ['init', '--bare', '--initial-branch=main']);
+    git(backupDir, ['init', '--initial-branch=main']);
+    git(backupDir, ['config', 'user.email', 'test@example.com']);
+    git(backupDir, ['config', 'user.name', 'Test']);
+    git(backupDir, ['remote', 'add', 'origin', remote]);
+    fs.writeFileSync(path.join(backupDir, 'seed.txt'), 'baseline\n');
+    git(backupDir, ['add', '-A']);
+    git(backupDir, ['commit', '-m', 'baseline']);
+    // -u establishes the upstream ref the bare `git push` resolves.
+    git(backupDir, ['push', '-u', 'origin', 'main']);
+    return {
+      backupDir,
+      remote,
+      cleanup: () => {
+        fs.rmSync(backupDir, { recursive: true, force: true });
+        fs.rmSync(remote, { recursive: true, force: true });
+      },
+    };
+  }
+
+  it('commits and pushes new backup content', async () => {
+    const { backupDir, remote, cleanup } = setupRepo();
+    try {
+      fs.writeFileSync(path.join(backupDir, 'state.sql'), 'INSERT ...;\n');
+      const result = await backupCommitAndPush({
+        backupDir,
+        message: 'backup: 2026-07-07',
+        token: undefined,
+      });
+      expect(result).toMatchObject({ committed: true });
+      expect(git(remote, ['log', '--oneline', '-1', 'main'])).toContain(
+        'backup: 2026-07-07',
+      );
+      expect(git(remote, ['show', 'main:state.sql'])).toContain('INSERT');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('treats an agent-supplied commit message as data, never as shell (#725)', async () => {
+    const { backupDir, remote, cleanup } = setupRepo();
+    try {
+      // The pre-fix `bash -c` pipeline executed `$()` command substitution
+      // inside its double-quoted string. If any shell still interprets the
+      // message, the marker file appears and the pushed message loses the
+      // literal `$()` text.
+      const marker = path.join(backupDir, 'pwned');
+      const hostileMsg = `backup: $(touch ${marker}) \`touch ${marker}\` "; touch ${marker}; "`;
+      fs.writeFileSync(path.join(backupDir, 'data.txt'), 'content\n');
+      const result = await backupCommitAndPush({
+        backupDir,
+        message: hostileMsg,
+        token: undefined,
+      });
+      expect(result).toMatchObject({ committed: true });
+      // No command substitution ran on the host.
+      expect(fs.existsSync(marker)).toBe(false);
+      // The hostile text survived verbatim as an inert commit message.
+      const remoteMsg = git(remote, ['log', '-1', '--format=%B', 'main']);
+      expect(remoteMsg).toContain('$(touch');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('reports committed:false when there is nothing to back up', async () => {
+    const { backupDir, cleanup } = setupRepo();
+    try {
+      const result = await backupCommitAndPush({
+        backupDir,
+        message: 'backup: noop',
+        token: undefined,
+      });
+      expect(result.committed).toBe(false);
+      expect(result.error).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('rolls back its commit on push failure and redacts the token', async () => {
+    const { backupDir, remote, cleanup } = setupRepo();
+    try {
+      const headBefore = git(backupDir, ['rev-parse', 'HEAD']).trim();
+      fs.rmSync(remote, { recursive: true, force: true });
+      fs.writeFileSync(path.join(backupDir, 'data.txt'), 'will fail\n');
+      const token = 'ghs_backupSECRETtoken';
+      const result = await backupCommitAndPush({
+        backupDir,
+        message: 'backup: push fails',
+        token,
+      });
+      expect(result.stage).toBe('git');
+      expect(result.error).toBeTruthy();
+      expect(JSON.stringify(result)).not.toContain(token);
+      // Rolled back — the next run re-stages and retries instead of
+      // reporting a false "Nothing to commit."
+      expect(git(backupDir, ['rev-parse', 'HEAD']).trim()).toBe(headBefore);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('pushes a stranded unpushed commit on a no-change run', async () => {
+    const { backupDir, remote, cleanup } = setupRepo();
+    try {
+      // The pre-fix pipeline could commit and then fail the push, leaving
+      // HEAD ahead of upstream with a clean tree.
+      fs.writeFileSync(path.join(backupDir, 'data.txt'), 'stranded\n');
+      git(backupDir, ['add', '-A']);
+      git(backupDir, ['commit', '-m', 'backup: stranded']);
+      const result = await backupCommitAndPush({
+        backupDir,
+        message: 'backup: recover',
+        token: undefined,
+      });
+      expect(result).toMatchObject({ committed: true });
+      expect(git(remote, ['show', 'main:data.txt'])).toContain('stranded');
     } finally {
       cleanup();
     }
