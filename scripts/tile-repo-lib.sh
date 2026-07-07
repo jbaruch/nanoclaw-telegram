@@ -195,8 +195,10 @@ summon_copilot() {
   local pr_number="$3"
   local pr_node_id
   # Repo target rides in the explicit $owner/$name GraphQL variables.
-  # GH_REPO is pinned as well (repo-chain.md: every gh call names its
-  # target): `gh api` has no --repo flag, and the env pin keeps any
+  # GH_REPO is pinned as well (per the `nanoclaw-host: repo-chain`
+  # rule — see groups/global/BASH_SAFETY.md § PR creation — every gh
+  # call names its target): `gh api` has no --repo flag, and the env
+  # pin keeps any
   # future {owner}/{repo} placeholder edit from falling back to
   # git-remote inference — which resolves to the upstream fork in some
   # checkouts.

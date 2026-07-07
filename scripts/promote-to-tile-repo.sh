@@ -272,9 +272,10 @@ Copilot review requested below. Merge after the review is clean and any findings
 ## Iteration
 Fixups land on THIS branch via the \`push_staged_to_branch\` MCP tool: read PR comments → fix in staging → call the tool with branch \`$BRANCH\`. Restage-and-re-promote is the fallback; it opens a new PR."
 
-# --repo pinned explicitly per repo-chain.md: gh otherwise defaults to
-# the upstream fork in some environments and would leak tile updates
-# to the wrong repo.
+# --repo pinned explicitly per the `nanoclaw-host: repo-chain` rule
+# (see groups/global/BASH_SAFETY.md § PR creation): gh otherwise
+# defaults to the upstream fork in some environments and would leak
+# tile updates to the wrong repo.
 GH_TOKEN="$TOKEN" gh pr create \
   --repo "$TILE_OWNER/$TILE_NAME" \
   --base main \
