@@ -1,8 +1,50 @@
 import { describe, it, expect } from 'vitest';
 import {
+  claimReplyAnchor,
   decideAgentOutputAction,
   stripInternalBlocks,
 } from './agent-output-action.js';
+
+describe('claimReplyAnchor (#722)', () => {
+  it('claims a free anchor (previous turn already replied)', () => {
+    const anchors: Record<string, string | undefined> = {};
+    expect(claimReplyAnchor(anchors, 'chat@g.us', 'piped-1')).toBe(true);
+    expect(anchors['chat@g.us']).toBe('piped-1');
+  });
+
+  it('refuses to clobber an unconsumed anchor (in-flight turn keeps its quote)', () => {
+    // The #722 live repro: trigger sets the anchor, the turn runs long,
+    // a piped batch arrives BEFORE the first reply — the final response
+    // must still quote the trigger, not the pipe.
+    const anchors: Record<string, string | undefined> = {
+      'chat@g.us': 'trigger-msg',
+    };
+    expect(claimReplyAnchor(anchors, 'chat@g.us', 'piped-1')).toBe(false);
+    expect(anchors['chat@g.us']).toBe('trigger-msg');
+  });
+
+  it('full turn sequence: trigger held → pipe refused → consume → next pipe claims', () => {
+    const anchors: Record<string, string | undefined> = {};
+    // Turn start (unconditional assignment in processGroupMessages).
+    anchors['chat@g.us'] = 'trigger-msg';
+    // Mid-turn pipe: refused, in-flight quote preserved.
+    expect(claimReplyAnchor(anchors, 'chat@g.us', 'piped-1')).toBe(false);
+    // Output callback sends the reply and consumes the anchor.
+    anchors['chat@g.us'] = undefined;
+    // Next pipe is the next turn's trigger: claim lands.
+    expect(claimReplyAnchor(anchors, 'chat@g.us', 'piped-2')).toBe(true);
+    expect(anchors['chat@g.us']).toBe('piped-2');
+  });
+
+  it('is per-chat: one chat holding its anchor does not block another', () => {
+    const anchors: Record<string, string | undefined> = {
+      'a@g.us': 'held',
+    };
+    expect(claimReplyAnchor(anchors, 'b@g.us', 'msg-b')).toBe(true);
+    expect(anchors['a@g.us']).toBe('held');
+    expect(anchors['b@g.us']).toBe('msg-b');
+  });
+});
 
 describe('decideAgentOutputAction', () => {
   it('returns mark-displayed when chat_displayed=true and text is non-empty (#581 wrapper-skill case)', () => {

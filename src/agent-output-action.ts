@@ -67,6 +67,33 @@ export function stripInternalBlocks(raw: string): string {
 }
 
 /**
+ * Claim the per-chat reply anchor for a piped inbound batch (#722).
+ *
+ * The anchor (`pendingReplyTo[chatJid]`) belongs to the OLDEST
+ * unanswered inbound: the turn-start assignment sets it to the
+ * triggering message, and the output callback consumes it (sets
+ * `undefined`) on the first user-visible reply. A mid-turn pipe that
+ * unconditionally overwrote an UNCONSUMED anchor made the in-flight
+ * turn's final response quote the latest piped message instead of the
+ * one it was answering ("answered the wrong question"). A pipe may
+ * therefore claim the anchor only when it is free — i.e. the previous
+ * turn's reply already went out, making this batch the next turn's
+ * trigger. Piped messages are still processed either way; only the
+ * quoting anchor is protected.
+ *
+ * Returns whether the claim landed, so the caller can log the outcome.
+ */
+export function claimReplyAnchor(
+  anchors: Record<string, string | undefined>,
+  chatJid: string,
+  msgId: string | undefined,
+): boolean {
+  if (anchors[chatJid] !== undefined) return false;
+  anchors[chatJid] = msgId;
+  return true;
+}
+
+/**
  * Decide what the orchestrator should do with a single streamed
  * SDK-result event. Pure function — no DB, no channel, no logger.
  *

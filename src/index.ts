@@ -156,7 +156,10 @@ import {
   releaseIdleTimerControl,
 } from './idle-timer.js';
 import type { IdleTimerControl } from './idle-timer.js';
-import { decideAgentOutputAction } from './agent-output-action.js';
+import {
+  claimReplyAnchor,
+  decideAgentOutputAction,
+} from './agent-output-action.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -1576,8 +1579,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // multiple messages are piped to the same container.
 
   // Track which message triggered the response — first reply quotes it.
-  // Uses shared pendingReplyTo map so follow-up messages piped via
-  // queue.sendMessage() can update the reply target for the output callback.
+  // Turn-start assignment is unconditional: this turn's trigger owns
+  // the anchor. Mid-turn pipes may only claim it AFTER the first reply
+  // consumes it (`claimReplyAnchor`, #722) — an unconditional overwrite
+  // there made long turns quote the latest piped message instead of
+  // the one they were answering.
   pendingReplyTo[chatJid] = missedMessages[missedMessages.length - 1]?.id;
   logger.info(
     {
@@ -2459,13 +2465,24 @@ async function startMessageLoop(): Promise<void> {
             // control, a fresh cycle will install one — no need to
             // synthesize a control here.
             getActiveIdleTimer(chatJid)?.reset('user-input');
-            // Update shared reply-to so the output callback quotes this message
-            pendingReplyTo[chatJid] = lastMsgId;
+            // #722: claim the reply anchor only when the in-flight
+            // turn has already consumed it — an unconditional overwrite
+            // here made the running turn's final response quote this
+            // piped batch instead of the message it was answering. When
+            // the anchor is free, this batch is the next turn's trigger
+            // and the claim lands; when held, the piped messages are
+            // still processed but the in-flight turn keeps its quote.
+            const anchorClaimed = claimReplyAnchor(
+              pendingReplyTo,
+              chatJid,
+              lastMsgId,
+            );
             logger.debug(
               {
                 chatJid,
                 count: messagesToSend.length,
                 replyToMessageId: lastMsgId,
+                anchorClaimed,
               },
               'Piped messages to active container',
             );
