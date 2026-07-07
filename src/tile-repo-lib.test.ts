@@ -8,13 +8,16 @@ import { describe, it, expect } from 'vitest';
 
 // Contract tests for `git_with_token` in scripts/tile-repo-lib.sh (#728):
 // auth must never ride in argv or persist into the clone's .git/config,
-// git's exit code must pass through, and stderr must be re-emitted with
-// token-bearing URLs redacted. Exercised by shelling into bash and
-// sourcing the lib — vitest's `scripts/**/*.test.ts` include runs this
-// in the existing CI job with no workflow changes.
+// git's exit code must pass through, and both output streams must be
+// re-emitted with token-bearing URLs redacted. Exercised by shelling
+// into bash and sourcing the lib. Lives under src/ so the repo's
+// deterministic gates (tsc --noEmit, eslint src/, prettier src glob)
+// cover it in addition to vitest.
 
 const LIB_PATH = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'scripts',
   'tile-repo-lib.sh',
 );
 
@@ -85,7 +88,9 @@ describe('git_with_token', () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).not.toContain(FAKE_TOKEN);
     // stderr still flows through to the caller (redacted, not dropped).
-    expect(result.stderr).toContain('unable to access');
+    // `fatal:` is git's own die() prefix — stable across git/curl
+    // versions, unlike the proxy-specific message text.
+    expect(result.stderr).toContain('fatal:');
   });
 
   it('redacts token-bearing URLs that git writes to stderr', () => {

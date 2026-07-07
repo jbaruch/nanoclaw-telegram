@@ -44,7 +44,16 @@ git_with_token() {
   # raw output is never emitted unfiltered.
   sed -E 's/x-access-token:[^@[:space:]]+@/x-access-token:***@/g' "$outfile" || sed_rc=$?
   sed -E 's/x-access-token:[^@[:space:]]+@/x-access-token:***@/g' "$errfile" >&2 || sed_rc=$?
-  rm -f "$outfile" "$errfile"
+  # Scrub-then-unlink, with the rc captured so callers' `set -e` can't
+  # abort mid-cleanup: truncating first means that even a failed unlink
+  # strands only empty files, never raw token-bearing output. A scrub
+  # failure surfaces loudly and fails the call.
+  local cleanup_rc=0
+  { : >"$outfile" && : >"$errfile" && rm -f -- "$outfile" "$errfile"; } || cleanup_rc=$?
+  if [ "$cleanup_rc" -ne 0 ]; then
+    echo "ERROR: git_with_token could not scrub its temp files (rc=$cleanup_rc) — check ${TMPDIR:-/tmp} for git-with-token-* leftovers (the git operation itself may have succeeded)" >&2
+    return "$cleanup_rc"
+  fi
   if [ "$sed_rc" -ne 0 ]; then
     echo "ERROR: git_with_token could not filter git output (sed rc=$sed_rc); raw output withheld to avoid leaking the token" >&2
     return "$sed_rc"
