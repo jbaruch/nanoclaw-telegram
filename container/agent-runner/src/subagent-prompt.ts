@@ -45,7 +45,7 @@ export function shouldIncludeSubagentDefinitions(
  * Read-on-spawn directive for the bulk tile rules (#696).
  *
  * The general-purpose subagent used to inline the full text of every
- * `<tilesDir>/**​/rules/*.md` into its prompt. The SDK puts that whole
+ * `<tilesDir>/**\/rules/*.md` into its prompt. The SDK puts that whole
  * block in the MAIN agent's cached prefix, so it was paid via
  * `cache_read` on every interactive turn (~97.5K tokens) for a
  * capability that fires ~never (0/200 recent interactive runs). The

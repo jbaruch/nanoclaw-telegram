@@ -86,7 +86,7 @@ const KEYWORD_PATTERNS: { keyword: string; pattern: RegExp }[] = [
  * sentence-final period doesn't get glued onto the path.
  */
 const PATH_RE =
-  /(?<=^|[\s(:'"\[])(?:\/[A-Za-z0-9_.@\-/]+|[A-Za-z0-9_.@\-]+\/[A-Za-z0-9_.@\-/]+)/g;
+  /(?<=^|[\s(:'"[])(?:\/[A-Za-z0-9_.@\-/]+|[A-Za-z0-9_.@-]+\/[A-Za-z0-9_.@\-/]+)/g;
 const TRAILING_PUNCT_RE = /[.,;:!?]+$/;
 
 /**

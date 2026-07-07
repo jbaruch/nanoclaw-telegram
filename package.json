@@ -15,8 +15,8 @@
     "prepare": "husky",
     "setup": "tsx setup/index.ts",
     "auth": "tsx src/whatsapp-auth.ts",
-    "lint": "eslint src/ scripts/ setup/",
-    "lint:fix": "eslint src/ scripts/ setup/ --fix",
+    "lint": "eslint src/ scripts/ setup/ container/agent-runner/src/",
+    "lint:fix": "eslint src/ scripts/ setup/ container/agent-runner/src/ --fix",
     "test": "vitest run",
     "test:watch": "vitest"
   },

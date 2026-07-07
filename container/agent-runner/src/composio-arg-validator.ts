@@ -282,6 +282,7 @@ function checkString(
     // and 0x0A (\n); a body field may legitimately contain those. \r
     // (0x0D) is included in the reject set because CRLF in a body is
     // the common header-spoof pattern even when the field isn't a header.
+    // eslint-disable-next-line no-control-regex -- control chars are the match target: this validator exists to reject them
     const m = value.match(/[\x00-\x08\x0B-\x1F\x7F]/);
     if (m) {
       const code = m[0].charCodeAt(0);

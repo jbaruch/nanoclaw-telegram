@@ -97,7 +97,9 @@ function sanitizeIdentifier(raw: string): string {
   return collapsed.slice(0, IDENTIFIER_MAX_CHARS) + '…';
 }
 
-export interface ExtractRequest<T> {
+// The phantom `_T` binds a call site's ExtractRequest<Foo> annotation to
+// extractStructured<T>'s return type; no field references it directly.
+export interface ExtractRequest<_T> {
   /** Raw external content. Will be trimmed to `maxInputBytes`. */
   rawText: string;
   /** Provenance descriptor — used in the sub-agent prompt. */
