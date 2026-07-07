@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   claimReplyAnchor,
+  consumeReplyAnchorOnVisibleSend,
   decideAgentOutputAction,
   stripInternalBlocks,
 } from './agent-output-action.js';
@@ -43,6 +44,50 @@ describe('claimReplyAnchor (#722)', () => {
     expect(claimReplyAnchor(anchors, 'b@g.us', 'msg-b')).toBe(true);
     expect(anchors['a@g.us']).toBe('held');
     expect(anchors['b@g.us']).toBe('msg-b');
+  });
+});
+
+describe('consumeReplyAnchorOnVisibleSend (#722, IPC boundary)', () => {
+  it('consumes a held anchor on an own-chat visible send', () => {
+    const anchors: Record<string, string | undefined> = {
+      'chat@g.us': 'trigger-msg',
+    };
+    expect(consumeReplyAnchorOnVisibleSend(anchors, 'chat@g.us', true)).toBe(
+      true,
+    );
+    expect(anchors['chat@g.us']).toBeUndefined();
+  });
+
+  it('never consumes on a cross-chat send (broadcast must not steal the quote)', () => {
+    const anchors: Record<string, string | undefined> = {
+      'chat@g.us': 'trigger-msg',
+    };
+    expect(consumeReplyAnchorOnVisibleSend(anchors, 'chat@g.us', false)).toBe(
+      false,
+    );
+    expect(anchors['chat@g.us']).toBe('trigger-msg');
+  });
+
+  it('no-ops on an already-free anchor', () => {
+    const anchors: Record<string, string | undefined> = {};
+    expect(consumeReplyAnchorOnVisibleSend(anchors, 'chat@g.us', true)).toBe(
+      false,
+    );
+  });
+
+  it('review-round-2 race: IPC visible reply releases the anchor so a pipe in the gap claims it', () => {
+    const anchors: Record<string, string | undefined> = {};
+    // Turn start.
+    anchors['chat@g.us'] = 'trigger-msg';
+    // Agent sends its visible reply via IPC send_message (delivery
+    // confirmed) — BEFORE the SDK result reaches the output callback.
+    expect(consumeReplyAnchorOnVisibleSend(anchors, 'chat@g.us', true)).toBe(
+      true,
+    );
+    // Follow-up pipe lands in the gap: the anchor is free, so the
+    // claim lands and the next answer quotes the follow-up.
+    expect(claimReplyAnchor(anchors, 'chat@g.us', 'piped-1')).toBe(true);
+    expect(anchors['chat@g.us']).toBe('piped-1');
   });
 });
 

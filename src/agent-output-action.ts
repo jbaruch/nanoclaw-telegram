@@ -95,6 +95,32 @@ export function claimReplyAnchor(
 }
 
 /**
+ * Consume the reply anchor at the IPC visible-send boundary (#722).
+ *
+ * A turn's first visible reply can go out via the IPC `send_message` /
+ * `send_file` tools long before the SDK result reaches the output
+ * callback (which is where `mark-displayed` used to be the only
+ * consumption point). Without consuming here, a pipe landing in that
+ * gap is refused as if the turn were still unanswered, and the NEXT
+ * answer loses its quote. Consumption applies only to the sending
+ * group's OWN chat (`isOwnChat`) — a cross-chat broadcast into some
+ * other chat is not that chat's in-flight turn answering, and must not
+ * steal its anchor.
+ *
+ * Returns whether the anchor was consumed, so the caller can log it.
+ */
+export function consumeReplyAnchorOnVisibleSend(
+  anchors: Record<string, string | undefined>,
+  chatJid: string,
+  isOwnChat: boolean,
+): boolean {
+  if (!isOwnChat) return false;
+  if (anchors[chatJid] === undefined) return false;
+  anchors[chatJid] = undefined;
+  return true;
+}
+
+/**
  * Decide what the orchestrator should do with a single streamed
  * SDK-result event. Pure function — no DB, no channel, no logger.
  *

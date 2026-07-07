@@ -158,6 +158,7 @@ import {
 import type { IdleTimerControl } from './idle-timer.js';
 import {
   claimReplyAnchor,
+  consumeReplyAnchorOnVisibleSend,
   decideAgentOutputAction,
 } from './agent-output-action.js';
 
@@ -2850,6 +2851,26 @@ async function main(): Promise<void> {
   // `src/gates/trigger-learner.ts` for the full design.
   startTriggerLearner();
   startIpcWatcher({
+    // #722: release the reply anchor when the sending group's OWN chat
+    // received a confirmed visible reply via IPC send_message/send_file
+    // — the mark-displayed consumption in the output callback arrives
+    // only with the SDK result, and a pipe landing in that gap must be
+    // able to claim the anchor for the follow-up turn. Cross-chat
+    // sends never touch the target chat's anchor.
+    onVisibleReply: (chatJid, sourceGroupFolder) => {
+      const isOwnChat = registeredGroups[chatJid]?.folder === sourceGroupFolder;
+      const consumed = consumeReplyAnchorOnVisibleSend(
+        pendingReplyTo,
+        chatJid,
+        isOwnChat,
+      );
+      if (consumed) {
+        logger.debug(
+          { chatJid, sourceGroupFolder },
+          'Reply anchor consumed at IPC visible-send boundary',
+        );
+      }
+    },
     sendMessage: (jid, rawText, replyToMessageId) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
