@@ -74,14 +74,17 @@ function makeDeps(overrides: Partial<IpcDeps>): IpcDeps {
   };
 }
 
+// Deterministic fixture naming (testing-standards: no wall-clock or
+// random test data). Each beforeEach wipes the IPC dir, so a simple
+// monotonic counter guarantees uniqueness within and across tests.
+let ipcFixtureSeq = 0;
+
 function writeIpcMessage(payload: Record<string, unknown>): void {
   const dir = path.join(TEST_DATA_DIR, 'ipc', GROUP.folder, 'messages');
   fs.mkdirSync(dir, { recursive: true });
+  ipcFixtureSeq += 1;
   fs.writeFileSync(
-    path.join(
-      dir,
-      `msg-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
-    ),
+    path.join(dir, `msg-${ipcFixtureSeq}.json`),
     JSON.stringify(payload),
   );
 }
