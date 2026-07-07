@@ -25,7 +25,7 @@
 git_with_token() {
   local token="$1"
   shift
-  local rc=0 errfile
+  local rc=0 sed_rc=0 errfile
   errfile=$(mktemp)
   GIT_ASKPASS=echo \
     GIT_TERMINAL_PROMPT=0 \
@@ -33,8 +33,16 @@ git_with_token() {
     GIT_CONFIG_KEY_0="url.https://x-access-token:${token}@github.com/.insteadOf" \
     GIT_CONFIG_VALUE_0="https://github.com/" \
     git "$@" 2>"$errfile" || rc=$?
-  sed -E 's/x-access-token:[^@[:space:]]+@/x-access-token:***@/g' "$errfile" >&2
+  # Capture the filter's rc instead of letting callers' `set -e` abort
+  # between sed and rm — an abort there would strand the token-bearing
+  # temp file on disk. The failure still surfaces loudly below; raw
+  # stderr is never emitted unfiltered.
+  sed -E 's/x-access-token:[^@[:space:]]+@/x-access-token:***@/g' "$errfile" >&2 || sed_rc=$?
   rm -f "$errfile"
+  if [ "$sed_rc" -ne 0 ]; then
+    echo "ERROR: git_with_token could not filter git stderr (sed rc=$sed_rc); raw output withheld to avoid leaking the token" >&2
+    return "$sed_rc"
+  fi
   return "$rc"
 }
 
