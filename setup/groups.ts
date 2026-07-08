@@ -109,6 +109,7 @@ async function syncGroups(projectRoot: string): Promise<void> {
   // Run sync script via a temp file to avoid shell escaping issues with node -e
   logger.info('Fetching group metadata');
   let syncOk = false;
+  const tmpScript = path.join(projectRoot, '.tmp-group-sync.mjs');
   try {
     const syncScript = `
 import makeWASocket, { useMultiFileAuthState, makeCacheableSignalKeyStore, Browsers } from '@whiskeysockets/baileys';
@@ -179,27 +180,23 @@ sock.ev.on('connection.update', async (update) => {
 });
 `;
 
-    const tmpScript = path.join(projectRoot, '.tmp-group-sync.mjs');
     fs.writeFileSync(tmpScript, syncScript, 'utf-8');
-    try {
-      const output = execSync(`node ${tmpScript}`, {
-        cwd: projectRoot,
-        encoding: 'utf-8',
-        timeout: 45000,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      syncOk = output.includes('SYNCED:');
-      logger.info({ output: output.trim() }, 'Sync output');
-    } finally {
-      try {
-        fs.unlinkSync(tmpScript);
-      } catch {
-        /* ignore cleanup errors */
-      }
-    }
+    const output = execSync(`node ${tmpScript}`, {
+      cwd: projectRoot,
+      encoding: 'utf-8',
+      timeout: 45000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    syncOk = output.includes('SYNCED:');
+    logger.info({ output: output.trim() }, 'Sync output');
   } catch (err) {
     logger.error({ err }, 'Sync failed');
   }
+  // Cleanup outside the sync-outcome path: force absorbs the expected
+  // missing-file case (including a failed writeFileSync above), while
+  // an unexpected failure propagates on its own terms instead of
+  // masking — or being masked by — the sync outcome.
+  fs.rmSync(tmpScript, { force: true });
 
   // Count groups in DB using better-sqlite3 (no sqlite3 CLI)
   let groupsInDb = 0;
