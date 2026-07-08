@@ -4,7 +4,7 @@
  * Other channels discover group names at runtime — this step auto-skips for them.
  * Replaces 05-sync-groups.sh + 05b-list-groups.sh
  */
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -181,7 +181,9 @@ sock.ev.on('connection.update', async (update) => {
 `;
 
     fs.writeFileSync(tmpScript, syncScript, 'utf-8');
-    const output = execSync(`node ${tmpScript}`, {
+    // execFileSync: tmpScript is data — no shell, so a projectRoot
+    // with spaces or metacharacters can't break the invocation.
+    const output = execFileSync('node', [tmpScript], {
       cwd: projectRoot,
       encoding: 'utf-8',
       timeout: 45000,
