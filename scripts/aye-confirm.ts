@@ -39,7 +39,7 @@ import {
   loadConfirmationTokens,
   parseDuration,
   saveConfirmationTokens,
-} from '../container/agent-runner/src/confirmation-tokens.ts';
+} from '../container/agent-runner/src/confirmation-tokens.js';
 
 const VALID_SCOPES: ReadonlyArray<DestructiveScope> = [
   'nuke_session',
@@ -71,13 +71,13 @@ function usage(exitCode: number): never {
   const stream = exitCode === 0 ? process.stdout : process.stderr;
   stream.write(
     `aye-confirm — mint a destructive-op confirmation token\n\n` +
-    `Usage:\n` +
-    `  aye-confirm --scope <scope> --reason '<text>' [--ttl 5m] [--chat-jid <jid>]\n\n` +
-    `Valid scopes:\n` +
-    VALID_SCOPES.map((s) => `  - ${s}`).join('\n') +
-    `\n\nThe minted token prints to stdout. Paste it into the chat (or ` +
-    `let the agent retry the gated tool — it'll consume the token ` +
-    `automatically on the next attempt).\n`,
+      `Usage:\n` +
+      `  aye-confirm --scope <scope> --reason '<text>' [--ttl 5m] [--chat-jid <jid>]\n\n` +
+      `Valid scopes:\n` +
+      VALID_SCOPES.map((s) => `  - ${s}`).join('\n') +
+      `\n\nThe minted token prints to stdout. Paste it into the chat (or ` +
+      `let the agent retry the gated tool — it'll consume the token ` +
+      `automatically on the next attempt).\n`,
   );
   process.exit(exitCode);
 }
@@ -129,7 +129,12 @@ export function parseArgs(argv: ReadonlyArray<string>): ParsedArgs {
   }
   // Validate ttl by parsing; throws with a clear message on bad input.
   parseDuration(ttl);
-  return { scope: scope as DestructiveScope, reason: reason as string, ttl, chatJid };
+  return {
+    scope: scope as DestructiveScope,
+    reason: reason as string,
+    ttl,
+    chatJid,
+  };
 }
 
 /**
@@ -193,7 +198,7 @@ function main(): void {
   process.stdout.write(fresh.token + '\n');
   process.stderr.write(
     `aye-confirm: minted token for scope=${fresh.scope} ttl=${args.ttl} ` +
-    `expires_at=${fresh.expires_at}\n`,
+      `expires_at=${fresh.expires_at}\n`,
   );
 }
 

@@ -7,13 +7,18 @@
 import fs from 'fs';
 import path from 'path';
 
-import { STORE_DIR } from '../src/config.ts';
-import { initDatabase, setRegisteredGroup } from '../src/db.ts';
-import { isValidGroupFolder } from '../src/group-folder.ts';
-import { logger } from '../src/logger.ts';
-import { emitStatus } from './status.ts';
+import { STORE_DIR } from '../src/config.js';
+import { initDatabase, setRegisteredGroup } from '../src/db.js';
+import { isValidGroupFolder } from '../src/group-folder.js';
+import { logger } from '../src/logger.js';
+import { emitStatus } from './status.js';
 
-interface RegisterArgs {
+// Type alias (not interface) so `parsed` is assignable to the
+// `Record<string, unknown>` parameter of src/logger.ts's
+// `logger.info(dataOrMsg, msg)`: TypeScript gives object type
+// aliases an implicit index signature for this check but
+// deliberately not interfaces (microsoft/TypeScript#15300).
+type RegisterArgs = {
   jid: string;
   name: string;
   trigger: string;
@@ -22,7 +27,7 @@ interface RegisterArgs {
   requiresTrigger: boolean;
   isMain: boolean;
   assistantName: string;
-}
+};
 
 function parseArgs(args: string[]): RegisterArgs {
   const result: RegisterArgs = {

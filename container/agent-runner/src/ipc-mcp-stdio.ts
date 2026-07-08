@@ -1848,7 +1848,7 @@ print(json.dumps({"events": result, "count": len(result), "minutes": ${minutes}}
 `;
         break;
 
-      case 'room_status':
+      case 'room_status': {
         const room = (args.room || '').replace(/'/g, "''");
         pythonCode = `
 import sqlite3, json
@@ -1866,6 +1866,7 @@ result = [dict(r) for r in rows]
 print(json.dumps({"room": "${room}", "events": result, "count": len(result), "minutes": ${minutes}}, indent=2))
 `;
         break;
+      }
 
       case 'battery_report':
         pythonCode = `
@@ -1887,7 +1888,7 @@ print(json.dumps({"critical": critical, "low": low, "ok_count": len(ok), "total_
 `;
         break;
 
-      case 'device_history':
+      case 'device_history': {
         const dev = (args.device || '').replace(/'/g, "''");
         pythonCode = `
 import sqlite3, json
@@ -1904,6 +1905,7 @@ result = [dict(r) for r in rows]
 print(json.dumps({"device_pattern": "${dev}", "events": result, "count": len(result)}, indent=2))
 `;
         break;
+      }
 
       case 'hub_health':
         pythonCode = `
@@ -1987,7 +1989,7 @@ print(json.dumps({
 `;
         break;
 
-      case 'custom_sql':
+      case 'custom_sql': {
         if (!args.sql) {
           return {
             content: [
@@ -2022,6 +2024,7 @@ result = [dict(r) for r in rows]
 print(json.dumps({"results": result, "count": len(result)}, indent=2))
 `;
         break;
+      }
 
       default:
         return {

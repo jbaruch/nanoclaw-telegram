@@ -137,6 +137,7 @@ export function sanitizePathForDisplay(p: string): string {
   // This includes \t even though it's harmless in single-line text;
   // keeping the rule simple is worth losing tab indentation in path
   // display.
+  // eslint-disable-next-line no-control-regex -- control chars are the scrub target of this sanitizer
   let cleaned = p.replace(/[\x00-\x1F\x7F]+/g, ' ');
   if (Buffer.byteLength(cleaned, 'utf8') > MAX_DISPLAY_PATH_BYTES) {
     // Truncate by byte length (not char length) so multi-byte UTF-8

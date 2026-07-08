@@ -71,9 +71,7 @@ describe('buildPlan', () => {
     fs.writeFileSync(path.join(dir, 'MEMORY.md'), '# pre-existing\n');
     const plan = buildPlan(path.join(tmpRoot, 'groups'));
     expect(plan.memoryMdToCreate).toEqual([]);
-    expect(plan.alreadyHaveMemoryMd).toEqual([
-      path.join(dir, 'MEMORY.md'),
-    ]);
+    expect(plan.alreadyHaveMemoryMd).toEqual([path.join(dir, 'MEMORY.md')]);
   });
 
   it('skips CLAUDE.md handling for main/ and global/ (git-managed templates)', () => {
@@ -100,9 +98,9 @@ describe('buildPlan', () => {
         path.join(tmpRoot, 'groups', 'telegram_real', 'MEMORY.md'),
       ].sort(),
     );
-    expect(
-      plan.memoryMdToCreate.some((p) => p.includes('/global/')),
-    ).toBe(false);
+    expect(plan.memoryMdToCreate.some((p) => p.includes('/global/'))).toBe(
+      false,
+    );
   });
 
   it('records groups already missing CLAUDE.md as already-migrated', () => {

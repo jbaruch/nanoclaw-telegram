@@ -35,10 +35,12 @@ COPY package*.json ./
 ENV HUSKY=0
 RUN npm install
 
-# Copy source and build TypeScript
+# Copy source and build TypeScript. The root tsconfig is the
+# check-everything (noEmit) config gating scripts/ and setup/ too;
+# the image compiles src/ only, via the emit-only build config.
 COPY src/ ./src/
-COPY tsconfig.json ./
-RUN npx tsc
+COPY tsconfig.json tsconfig.build.json ./
+RUN npx tsc -p tsconfig.build.json
 
 # Copy container config (skills, build script, Dockerfile for agent image)
 COPY container/ ./container/

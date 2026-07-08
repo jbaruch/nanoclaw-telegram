@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as crypto from 'crypto';
-import { generateToken, mintToken, parseArgs } from './aye-confirm.ts';
-import { parseDuration } from '../container/agent-runner/src/confirmation-tokens.ts';
+import { generateToken, mintToken, parseArgs } from './aye-confirm.js';
+import { parseDuration } from '../container/agent-runner/src/confirmation-tokens.js';
 
 // ---- parseArgs ----
 //
@@ -15,11 +14,11 @@ describe('parseArgs', () => {
   let stdoutMock: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    exitMock = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((((code?: number | string | null) => {
-        throw new Error(`process.exit(${code ?? 0})`);
-      }) as unknown) as typeof process.exit);
+    exitMock = vi.spyOn(process, 'exit').mockImplementation(((
+      code?: number | string | null,
+    ) => {
+      throw new Error(`process.exit(${code ?? 0})`);
+    }) as unknown as typeof process.exit);
     stderrMock = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -133,14 +132,7 @@ describe('parseArgs', () => {
 
   it('errors when --ttl value cannot be parsed (forwarded from parseDuration)', () => {
     expect(() =>
-      parseArgs([
-        '--scope',
-        'nuke_session',
-        '--reason',
-        'r',
-        '--ttl',
-        '5x',
-      ]),
+      parseArgs(['--scope', 'nuke_session', '--reason', 'r', '--ttl', '5x']),
     ).toThrow(/duration|invalid/i);
   });
 });
@@ -234,8 +226,10 @@ describe('generateToken', () => {
 
   it('hex-encodes the bytes verbatim (32 chars per 16 bytes)', () => {
     const fake = () =>
-      Buffer.from([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11,
-                   0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99]);
+      Buffer.from([
+        0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+        0x66, 0x77, 0x88, 0x99,
+      ]);
     expect(generateToken(fake)).toBe('aabbccddeeff00112233445566778899');
   });
 

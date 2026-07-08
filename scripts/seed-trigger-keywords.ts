@@ -603,6 +603,9 @@ function runStage1(
     message: {
       text: cleanText,
       senderJid: msg.sender,
+      // Channel-side message id, same as the orchestrator plumbs from
+      // NewMessage.id at its buildGateContext call site.
+      messageId: msg.id,
       replyToMessageId: replyToBotId,
       isFromMe: msg.is_from_me === 1,
     },
@@ -927,8 +930,7 @@ async function main(): Promise<void> {
             // for errors that genuinely originated in the SDK call.
             const isAbort =
               err instanceof Error &&
-              (err.name === 'AbortError' ||
-                err.message?.includes('aborted'));
+              (err.name === 'AbortError' || err.message?.includes('aborted'));
             const isAnthropicApiError = err instanceof Anthropic.APIError;
             const isNetworkError =
               err instanceof Error &&

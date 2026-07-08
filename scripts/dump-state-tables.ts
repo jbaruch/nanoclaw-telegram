@@ -37,7 +37,10 @@ if (
     process.exit(2);
   }
   const tables = tablesArg
-    ? tablesArg.split(',').map((s) => s.trim()).filter(Boolean)
+    ? tablesArg
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
     : undefined;
   const report = runDumpPlan({ dbPath, outDir, tables });
   process.stdout.write(JSON.stringify(report, null, 2) + '\n');
