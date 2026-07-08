@@ -46,6 +46,26 @@ export function redactBotTokens(input: string): string {
   return input.replace(BOT_TOKEN_RE, 'bot$1:<redacted>');
 }
 
+// Credentials embedded as URL userinfo (`scheme://user:pass@host`). The
+// OneCLI MITM proxy is injected into the container spawn argv as
+// `HTTPS_PROXY=http://x:<onecli-key>@host.docker.internal:10255`, so any log
+// line that carries the raw argv (e.g. the spawn mount-config debug line)
+// would otherwise leak the gateway key. Redact the whole userinfo segment,
+// keeping scheme+host for diagnostics. Only URLs with an `@` are touched.
+const URL_CREDENTIALS_RE = /(https?:\/\/)[^\s/@]+@/gi;
+
+/**
+ * Redact URL-embedded credentials (`scheme://user:pass@host` userinfo) from
+ * any log line before it lands on disk / stderr. Same write-time output-layer
+ * approach as {@link redactBotTokens} so it covers every log path.
+ *
+ * @internal exported ONLY for `logger.test.ts`. Application code must not call
+ *   it — the logger already applies it to every write.
+ */
+export function redactUrlCredentials(input: string): string {
+  return input.replace(URL_CREDENTIALS_RE, '$1<redacted>@');
+}
+
 const COLORS: Record<Level, string> = {
   debug: '\x1b[34m',
   info: '\x1b[32m',
@@ -235,7 +255,7 @@ function log(
     typeof dataOrMsg === 'string'
       ? `[${ts()}] ${tag} (${process.pid}): ${MSG_COLOR}${dataOrMsg}${RESET}\n`
       : `[${ts()}] ${tag} (${process.pid}): ${MSG_COLOR}${msg}${RESET}${formatData(dataOrMsg)}\n`;
-  const redacted = redactBotTokens(line);
+  const redacted = redactUrlCredentials(redactBotTokens(line));
   stream.write(redacted);
   // The file sink gets the same content but ANSI-stripped — color codes
   // render as garbled `\x1b[...m` literals in tools that don't

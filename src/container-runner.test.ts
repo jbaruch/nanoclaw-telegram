@@ -108,6 +108,16 @@ vi.mock('./credential-proxy.js', () => ({
   detectAuthMode: vi.fn(() => 'api-key'),
 }));
 
+// Mock onecli-client (#746). Default no-op matches the unconfigured path that
+// every other test in this file (and prod until #746) exercises. The
+// #746 regression `describe` block at the bottom flips isOneCliConfigured on
+// and has applyOneCliToSpawn append flags the way the SDK does (append-only)
+// to prove the image token still lands last.
+vi.mock('./onecli-client.js', () => ({
+  isOneCliConfigured: vi.fn(() => false),
+  applyOneCliToSpawn: vi.fn(async () => false),
+}));
+
 // #305 Phase 2a — runContainerAgent now invokes the cadence-registry
 // rebuild after `buildVolumeMounts`. The wrapper in `./db.js` throws
 // when the module-private `db` handle is uninitialised (this test
@@ -175,6 +185,7 @@ import {
   getInstalledTiles,
 } from './container-runner.js';
 import { logger } from './logger.js';
+import { isOneCliConfigured, applyOneCliToSpawn } from './onecli-client.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -2798,5 +2809,89 @@ describe('Sessionize key forwarding into the secret env-file (#719)', () => {
       .join('\n');
     expect(written).not.toContain('SESSIONIZE');
     expect(args.join(' ')).not.toContain('SESSIONIZE');
+  });
+});
+
+// -------------------------------------------------------------------
+// #746 — OneCLI spawn flags must land BEFORE the image token.
+// The bug: buildContainerArgs pushed CONTAINER_IMAGE, then
+// applyOneCliToSpawn appended -e/-v/--add-host after it, so docker
+// parsed them as the container COMMAND and the MITM never engaged.
+// The fix pushes the image at the call site AFTER applyOneCliToSpawn.
+// These tests exercise the real runContainerAgent spawn argv.
+// -------------------------------------------------------------------
+describe('#746 — OneCLI flags precede the image in spawn argv', () => {
+  // [option token, value] pairs the SDK appends, in argv order.
+  const ONECLI_ARGS: ReadonlyArray<readonly [string, string]> = [
+    ['-e', 'HTTPS_PROXY=http://x:tok@host.docker.internal:10255'],
+    ['-e', 'SSL_CERT_FILE=/tmp/onecli-combined-ca.pem'],
+    ['-v', '/tmp/onecli-ca.pem:/tmp/onecli-gateway-ca.pem:ro'],
+    ['--add-host', 'host.docker.internal:host-gateway'],
+  ];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    vi.mocked(isOneCliConfigured).mockReset();
+    vi.mocked(applyOneCliToSpawn).mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    // Restore the file-wide default no-op so no later test sees OneCLI on.
+    vi.mocked(isOneCliConfigured).mockReturnValue(false);
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(false);
+  });
+
+  it('appends OneCLI -e/-v/--add-host before CONTAINER_IMAGE when configured', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    // Mirror the SDK's append-only mutation of the argv.
+    vi.mocked(applyOneCliToSpawn).mockImplementation(async (args: string[]) => {
+      for (const [opt, val] of ONECLI_ARGS) args.push(opt, val);
+      return true;
+    });
+
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    // OneCLI-on adds an `await applyOneCliToSpawn` before the spawn, so the
+    // spawn (and its close-handler registration) lands a microtask later than
+    // the OneCLI-off path. Flush it before emitting close, or the process
+    // never resolves.
+    await vi.advanceTimersByTimeAsync(1);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    const imageIdx = args.indexOf('nanoclaw-agent:latest');
+
+    // Image is present and is the LAST argv element.
+    expect(imageIdx).toBeGreaterThanOrEqual(0);
+    expect(imageIdx).toBe(args.length - 1);
+
+    // Every OneCLI value AND its immediately-preceding option token
+    // (-e/-v/--add-host) land before the image, so docker reads them as run
+    // options rather than the container COMMAND.
+    for (const [opt, val] of ONECLI_ARGS) {
+      const valIdx = args.indexOf(val);
+      expect(valIdx).toBeGreaterThan(0);
+      expect(valIdx).toBeLessThan(imageIdx);
+      expect(args[valIdx - 1]).toBe(opt);
+    }
+    expect(vi.mocked(applyOneCliToSpawn)).toHaveBeenCalledTimes(1);
+  });
+
+  it('unconfigured spawn ends with the image and never calls OneCLI', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(false);
+
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args[args.length - 1]).toBe('nanoclaw-agent:latest');
+    expect(args).not.toContain(ONECLI_ARGS[0]![1]);
+    expect(vi.mocked(applyOneCliToSpawn)).not.toHaveBeenCalled();
   });
 });

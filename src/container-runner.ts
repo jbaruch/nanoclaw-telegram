@@ -3149,8 +3149,10 @@ function buildContainerArgs(
     }
   }
 
-  args.push(CONTAINER_IMAGE);
-
+  // #746: CONTAINER_IMAGE is intentionally NOT pushed here. It is appended by
+  // the caller AFTER applyOneCliToSpawn runs, so the OneCLI `-e`/`-v`/
+  // `--add-host` flags (which the SDK appends) land as `docker run` options
+  // before the image token rather than as the container COMMAND after it.
   return {
     args,
     cleanup: secretEnvFile ? secretEnvFile.cleanup : () => {},
@@ -3384,11 +3386,15 @@ export async function runContainerAgent(
     // host.docker.internal mapping. The synchronous gate keeps the pre-#635
     // spawn path microtask-free when OneCLI is off — relevant for tests that
     // emit 'close' between `runContainerAgent` invocation and the spawn
-    // registering its close handler. The logger.debug below picks up the
-    // mutated args for the audit record.
+    // registering its close handler.
     if (isOneCliConfigured()) {
       await applyOneCliToSpawn(containerArgs, trustTier);
     }
+
+    // #746: append the image LAST — after OneCLI's flags — so `docker run`
+    // parses those flags as run options, not as the container COMMAND.
+    // buildContainerArgs deliberately returns pre-image args for this reason.
+    containerArgs.push(CONTAINER_IMAGE);
 
     logger.debug(
       {

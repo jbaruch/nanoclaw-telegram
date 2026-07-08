@@ -147,10 +147,22 @@ export async function applyOneCliToSpawn(
     const active = await client.applyContainerConfig(args, {
       agent: agentIdentifierForTier(tier),
       combineCaBundle: true,
-      addHostMapping: true,
+      // #746: the spawn argv already carries `--add-host=host.docker.internal:
+      // host-gateway` from hostGatewayArgs() on Linux, so let the SDK skip its
+      // duplicate mapping.
+      addHostMapping: false,
     });
     if (active) {
-      logger.debug({ tier }, 'OneCLI gateway config applied to container');
+      // Info (not debug): a debug-only success line is why the argv-order bug
+      // (#746) went unnoticed for weeks while this returned true. Surface
+      // whether the proxy env actually landed on the spawn argv.
+      logger.info(
+        {
+          tier,
+          httpsProxyApplied: args.some((a) => a.startsWith('HTTPS_PROXY=')),
+        },
+        'OneCLI gateway config applied to container',
+      );
     } else {
       // The SDK catches gateway/config fetch failures and resolves `false`
       // (no throw) — this is the main recoverable failure path that

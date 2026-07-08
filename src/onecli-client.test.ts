@@ -187,7 +187,9 @@ describe('onecli-client', () => {
       expect(applyContainerConfigMock).toHaveBeenCalledWith(args, {
         agent: 'nanoclaw-untrusted',
         combineCaBundle: true,
-        addHostMapping: true,
+        // #746: spawn argv already carries --add-host from hostGatewayArgs();
+        // the SDK must not add its duplicate.
+        addHostMapping: false,
       });
       expect(args).toContain('HTTPS_PROXY=http://onecli');
     });

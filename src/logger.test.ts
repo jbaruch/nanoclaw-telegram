@@ -51,7 +51,8 @@ import {
 const ORIGINAL_LOG_LEVEL = process.env.LOG_LEVEL;
 process.env.LOG_LEVEL = 'info';
 vi.resetModules();
-const { logger, redactBotTokens } = await import('./logger.js');
+const { logger, redactBotTokens, redactUrlCredentials } =
+  await import('./logger.js');
 
 afterAll(() => {
   if (ORIGINAL_LOG_LEVEL === undefined) {
@@ -88,6 +89,32 @@ describe('redactBotTokens', () => {
   it('leaves unrelated strings untouched', () => {
     const s = 'just a regular log line with no token in it at all';
     expect(redactBotTokens(s)).toBe(s);
+  });
+});
+
+describe('redactUrlCredentials', () => {
+  it('redacts the OneCLI proxy userinfo while keeping scheme + host', () => {
+    const argv =
+      '-e HTTPS_PROXY=http://x:aoc_fakeGatewayKey@host.docker.internal:10255 nanoclaw-agent:latest';
+    const out = redactUrlCredentials(argv);
+    expect(out).not.toContain('aoc_fakeGatewayKey');
+    expect(out).toContain(
+      'HTTPS_PROXY=http://<redacted>@host.docker.internal:10255',
+    );
+  });
+
+  it('redacts every credentialed URL in a multi-URL line', () => {
+    const input = 'a=https://u1:p1@a.example b=http://u2:p2@b.example/path?q=1';
+    const out = redactUrlCredentials(input);
+    expect(out).not.toContain('p1');
+    expect(out).not.toContain('p2');
+    expect(out).toContain('https://<redacted>@a.example');
+    expect(out).toContain('http://<redacted>@b.example/path?q=1');
+  });
+
+  it('leaves credential-free URLs untouched', () => {
+    const s = 'ANTHROPIC_BASE_URL=http://host.docker.internal:3001/c/tok/v1';
+    expect(redactUrlCredentials(s)).toBe(s);
   });
 });
 
@@ -151,5 +178,22 @@ describe('logger redacts tokens in all output shapes', () => {
     expect(combined).not.toContain(FAKE_SECRET);
     // Bot ID should still be present for correlation
     expect(combined).toContain(`bot${FAKE_BOT_ID}:<redacted>`);
+  });
+
+  it('redacts a URL-embedded credential through the logger output path', () => {
+    // End-to-end: pins that the sink actually applies redactUrlCredentials on
+    // its way to the stream, not just that the helper works in isolation.
+    // Mirrors the real #746 leak — the spawn mount-config debug line carrying
+    // the OneCLI proxy argv.
+    logger.info(
+      {
+        containerArgs:
+          '-e HTTPS_PROXY=http://x:aoc_fakeGatewayKey@host.docker.internal:10255 nanoclaw-agent:latest',
+      },
+      'Container mount configuration',
+    );
+    const combined = writes.join('');
+    expect(combined).not.toContain('aoc_fakeGatewayKey');
+    expect(combined).toContain('http://<redacted>@host.docker.internal:10255');
   });
 });
