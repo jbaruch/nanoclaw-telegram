@@ -146,7 +146,6 @@ PRIVATE_IPC_HANDLERS=(
   'sessionize_get_event'
   'sessionize_open_cfps'
   'audible_backup'
-  'dominos_pizza'
 )
 PRIVATE_MCP_TOOLS=(
   'sync_tripit'
@@ -154,7 +153,6 @@ PRIVATE_MCP_TOOLS=(
   'sessionize_get_event'
   'sessionize_open_cfps'
   'audible_backup'
-  'dominos_pizza'
   'smarthome_status'
 )
 
@@ -416,8 +414,8 @@ echo ""
 # Enumerate every IPC handler / MCP tool in the scrubbed public tree and
 # compare against an explicit allowlist. Anything unknown aborts the sync
 # BEFORE we commit or push — so adding a new private integration without
-# updating the scrub regex (as happened with `dominos_pizza` and
-# `smarthome_status` in the first round of PR #24) can no longer leak
+# updating the scrub regex (as happened with `smarthome_status` in
+# the first round of PR #24) can no longer leak
 # silently. To add a new public-safe handler/tool, add its name to the
 # corresponding allowlist below.
 APPROVED_PUBLIC_IPC_HANDLERS=(

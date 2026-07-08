@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.63] - 2026-07-08
+
+- Removed the dead `dominos_pizza` IPC capability (#742, part of #741). It was a conference demo: the orchestrator hardcoded `docker run --rm dominos-order:latest` in `processTaskIpc` and the agent-runner exposed a matching `dominos_pizza` MCP tool in main/trusted containers. Nothing used it. Both sides are deleted (host handler + container MCP tool + its IPC emit/poll loop), along with the stale `dominos_pizza` reference in `github_backup`'s authorization comment and its now-dead entries in `scripts/sync-to-public.sh`'s `PRIVATE_IPC_HANDLERS` / `PRIVATE_MCP_TOOLS` scrub lists. First cut in the IPC de-god-classing effort (#741), which decouples per-plugin concerns from the orchestrator core.
+
 ## [1.2.62] - 2026-07-07
 
 - Fixed final-response reply-threading getting clobbered by mid-turn piped inbound (#722). The per-chat `pendingReplyTo` anchor is set to the triggering message at turn start and consumed on the first user-visible reply — but the pipe path overwrote it unconditionally, so a turn that ran long enough to absorb new messages threaded its final answer to whatever landed last instead of the question it was answering (live repro: two consecutive wrong-quotes in the main chat on 2026-07-07, "ты не на то ответил"). A pipe now claims the anchor only when it is free (new pure `claimReplyAnchor` in `src/agent-output-action.ts`): an in-flight turn keeps its quote, while the post-consume case — where a later output genuinely answers the piped follow-up — still claims correctly. Piped messages are processed exactly as before; only the quoting anchor is protected. The anchor is also consumed at the IPC visible-send boundary (`send_message`/`send_file` with confirmed delivery, own-chat only) — the mark-displayed consumption arrives only with the SDK result, and a pipe landing in that gap must be able to claim the anchor for the follow-up turn (review round 2). The pipe-path debug log now records `anchorClaimed`.

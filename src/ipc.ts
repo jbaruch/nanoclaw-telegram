@@ -4353,7 +4353,7 @@ export async function processTaskIpc(
       if (data.requestId) {
         // Authorization: github_backup performs a host-side filesystem
         // sync + `git push` using GITHUB_TOKEN — same privilege class
-        // as `audible_backup`, `dominos_pizza`, `promote_staging`, all
+        // as `audible_backup`, `promote_staging`, all
         // of which gate on `isMain`. Untrusted-tier groups have a
         // separate `#324` token gate at the container layer (the
         // confirmation-tokens hook), but the host-side gate here
@@ -4829,83 +4829,6 @@ export async function processTaskIpc(
                   logs: stderr?.slice(-2000),
                 }),
               );
-            }
-          },
-        );
-      }
-      break;
-
-    case 'dominos_pizza':
-      if (data.requestId) {
-        if (!isMain) {
-          logger.warn({ sourceGroup }, 'Unauthorized dominos_pizza attempt');
-          break;
-        }
-
-        const dominosResultPath = scriptResultPath(sourceGroup, data);
-
-        const dominosCommand = data.command || '';
-        const dominosPayload = data.payload || '';
-        const dominosConfirm = data.confirm === true;
-        logger.info(
-          { sourceGroup, command: dominosCommand, confirm: dominosConfirm },
-          'Running dominos_pizza',
-        );
-
-        const payloadStr =
-          typeof dominosPayload === 'string'
-            ? dominosPayload
-            : JSON.stringify(dominosPayload);
-
-        const dominosArgs: string[] = [
-          'run',
-          '--rm',
-          'dominos-order:latest',
-          dominosCommand,
-          ...(payloadStr ? [payloadStr] : []),
-          ...(dominosConfirm ? ['--confirm'] : []),
-        ];
-
-        execFile(
-          'docker',
-          dominosArgs,
-          {
-            cwd: process.cwd(),
-            env: {
-              PATH: process.env.PATH || '/usr/bin:/bin',
-              HOME: process.env.HOME || '/root',
-            },
-            timeout: 120_000,
-            maxBuffer: 1024 * 1024,
-          },
-          (error, stdout, stderr) => {
-            if (error) {
-              logger.error(
-                { sourceGroup, error: error.message, stderr },
-                'dominos_pizza failed',
-              );
-              fs.writeFileSync(
-                dominosResultPath,
-                JSON.stringify({
-                  error: error.message,
-                  stderr: stderr.slice(-500),
-                }),
-              );
-            } else {
-              logger.info(
-                { sourceGroup, command: dominosCommand },
-                'dominos_pizza completed',
-              );
-              try {
-                const parsed = JSON.parse(stdout);
-                if (stderr) parsed.logs = stderr.slice(-1000);
-                fs.writeFileSync(dominosResultPath, JSON.stringify(parsed));
-              } catch {
-                fs.writeFileSync(
-                  dominosResultPath,
-                  JSON.stringify({ raw: stdout, logs: stderr?.slice(-1000) }),
-                );
-              }
             }
           },
         );
