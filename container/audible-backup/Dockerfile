@@ -3,14 +3,14 @@
 # ffmpeg are deliberately floating tags, NOT pinned digests/versions.
 # Rationale: this sidecar is rebuilt only on operator demand (no CI
 # build trigger, no scheduled rebuild), and the operator has explicitly
-# opted out of manual base-image maintenance. Floating `python:3.12-slim`
+# opted out of manual base-image maintenance. Floating `python:3.13-slim`
 # + unpinned ffmpeg lets each rebuild pick up Debian / Python security
 # patches without requiring a manifest update; the cost is that a
 # rebuild may behave differently from the prior one. We accept that
 # tradeoff for runtime infrastructure (OS + decoder) but NOT for the
 # Python application dependency below (audible-cli), where a version
 # bump can silently break the script contract.
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
