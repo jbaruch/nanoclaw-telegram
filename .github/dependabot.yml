@@ -1,0 +1,36 @@
+# Freshness mechanism for the digest-pinned Docker base images
+# (`coding-policy: dependency-management` Freshness — "Automate it where
+# a scanner supports the ecosystem: a committed Dependabot or Renovate
+# config"). When a watched base tag is re-published, Dependabot opens a
+# PR advancing the `@sha256:` pin, so a base bump is a reviewed change
+# rather than silent cache drift.
+#
+# Scope is intentionally the `docker` ecosystem only. The npm ecosystems
+# (root `package.json`, `container/agent-runner/package.json`) are a
+# separate concern and would land in their own change.
+version: 2
+updates:
+  # Orchestrator image (Dockerfile.orchestrator, repo root).
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+
+  # Agent-container image — what nanoclaw agent containers run on.
+  - package-ecosystem: docker
+    directory: "/container"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+
+  # audible-backup sidecar (python:3.12-slim). Not digest-pinned yet;
+  # watched here so its base also gets a reviewed-bump path.
+  - package-ecosystem: docker
+    directory: "/container/audible-backup"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
