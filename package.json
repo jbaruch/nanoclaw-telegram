@@ -48,6 +48,6 @@
     "node": ">=24"
   },
   "lint-staged": {
-    "{src,scripts,setup}/**/*.ts": "prettier --write"
+    "{src,scripts,setup,container/agent-runner/src}/**/*.ts": "prettier --write"
   }
 }
