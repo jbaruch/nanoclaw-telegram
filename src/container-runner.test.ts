@@ -2935,8 +2935,14 @@ describe('#746 — OneCLI flags precede the image in spawn argv', () => {
 // -------------------------------------------------------------------
 describe('#640 — OneCLI-managed credential forwarding', () => {
   const REAL = 'REAL_MAPS_KEY_must_not_reach_container';
+  // Capture the pre-suite value so cleanup restores it exactly (delete only
+  // if it was unset) — an unconditional delete would leave the shared process
+  // env dirty for later tests on a run that started with the var set
+  // (testing-standards: no shared mutable state between tests).
+  let savedMapsKey: string | undefined;
 
   beforeEach(() => {
+    savedMapsKey = process.env.GOOGLE_MAPS_API_KEY;
     vi.useFakeTimers();
     fakeProc = createFakeProcess();
     vi.mocked(spawn).mockClear();
@@ -2950,7 +2956,11 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     vi.useRealTimers();
     vi.mocked(isOneCliConfigured).mockReturnValue(false);
     vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(false);
-    delete process.env.GOOGLE_MAPS_API_KEY;
+    if (savedMapsKey === undefined) {
+      delete process.env.GOOGLE_MAPS_API_KEY;
+    } else {
+      process.env.GOOGLE_MAPS_API_KEY = savedMapsKey;
+    }
   });
 
   it('forwards GOOGLE_MAPS_API_KEY as the onecli-managed placeholder, never the real value, when the agent proxy is enabled and applied', async () => {
