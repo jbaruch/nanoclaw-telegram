@@ -2951,9 +2951,12 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     delete process.env.GOOGLE_MAPS_API_KEY;
   });
 
-  it('forwards GOOGLE_MAPS_API_KEY as the onecli-managed placeholder, never the real value, when the agent proxy is enabled', async () => {
+  it('forwards GOOGLE_MAPS_API_KEY as the onecli-managed placeholder, never the real value, when the agent proxy is enabled and applied', async () => {
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
     vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
+    // Proxy actually lands on the spawn — the swap will happen, so the
+    // placeholder is safe.
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
     process.env.GOOGLE_MAPS_API_KEY = REAL;
 
     const mainInput = { ...testInput, isMain: true };
@@ -2966,6 +2969,32 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
     expect(args).toContain('GOOGLE_MAPS_API_KEY=onecli-managed');
     expect(args.join(' ')).not.toContain(REAL);
+  });
+
+  it('FAILS CLOSED when the proxy is enabled but applyOneCliToSpawn cannot apply it (never spawns a container with a dead placeholder key)', async () => {
+    // Both flags on → buildContainerArgs placeholders the Maps key (real value
+    // withheld). But the gateway is unreachable, so applyOneCliToSpawn resolves
+    // false: the proxy env never lands, and a direct request with the
+    // placeholder would REQUEST_DENIED. The spawn must throw instead — the
+    // queue retries with backoff, so a transient blip self-heals.
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(false);
+    process.env.GOOGLE_MAPS_API_KEY = REAL;
+
+    const mainInput = { ...testInput, isMain: true };
+    const promise = runContainerAgent(testGroup, mainInput, () => {});
+    // Attach the rejection expectation BEFORE advancing timers so the
+    // rejection (which fires while the applyOneCliToSpawn await flushes) is
+    // never momentarily unhandled — otherwise Vitest reports it as an
+    // unhandled error even though the assertion passes.
+    const rejected = expect(promise).rejects.toThrow(
+      /OneCLI agent proxy required/,
+    );
+    await vi.advanceTimersByTimeAsync(1); // flush the applyOneCliToSpawn await
+    await rejected;
+    // No container was ever spawned.
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
   });
 
   it('does NOT placeholder when OneCLI is configured but the agent proxy is OFF (prod-before-cutover: a placeholder here would ship a dead key on a DIRECT request)', async () => {
