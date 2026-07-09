@@ -14,7 +14,54 @@ vi.mock('./logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), warn: vi.fn() },
 }));
 
+// #637: default OneCLI OFF (matches every pre-existing test — the proxy
+// injects from .env). The OneCLI-exchange test flips isOneCliConfigured on and
+// has getOneCliOutboundConfig return a config. HttpsProxyAgent is mocked to a
+// plain http.Agent so the request reaches the local upstream mock directly
+// (the real CONNECT-tunnel-through-OneCLI path is verified live, not here).
+vi.mock('./onecli-client.js', () => ({
+  isOneCliConfigured: vi.fn(() => false),
+  getOneCliOutboundConfig: vi.fn(async () => null),
+}));
+// Spy on HttpsProxyAgent construction so a CI test can assert the HTTPS
+// OneCLI routing branch builds the agent with the minted proxy URL + CA
+// (the real CONNECT/TLS tunnel is platform-bound and verified live at cutover).
+// Spy on https.request and delegate to http.request so an `https:` upstream
+// URL (isHttps === true) actually reaches the local HTTP upstream mock. Lets a
+// CI test assert the OneCLI agent is attached to the HTTPS request options.
+const httpsRequestSpy = vi.hoisted(() => vi.fn());
+vi.mock('https', async () => {
+  const actual = await vi.importActual<typeof import('https')>('https');
+  const httpMod = await import('http');
+  return {
+    ...actual,
+    request: (opts: unknown, cb: unknown) => {
+      httpsRequestSpy(opts);
+      return (httpMod.request as (o: unknown, c: unknown) => unknown)(opts, cb);
+    },
+  };
+});
+
+const httpsProxyAgentCtor = vi.hoisted(() => vi.fn());
+vi.mock('https-proxy-agent', async () => {
+  const httpMod = await import('http');
+  // Real class extending http.Agent so `new HttpsProxyAgent(...)` yields a
+  // working agent that connects directly to the local upstream mock.
+  return {
+    HttpsProxyAgent: class extends httpMod.Agent {
+      constructor(...args: unknown[]) {
+        super();
+        httpsProxyAgentCtor(...args);
+      }
+    },
+  };
+});
+
 import { startCredentialProxy } from './credential-proxy.js';
+import {
+  isOneCliConfigured,
+  getOneCliOutboundConfig,
+} from './onecli-client.js';
 import { registerContainer, _resetRegistry } from './proxy-registry.js';
 
 function makeRequest(
@@ -105,6 +152,14 @@ describe('credential-proxy', () => {
     await new Promise<void>((r) => proxyServer?.close(() => r()));
     await new Promise<void>((r) => upstreamServer?.close(() => r()));
     for (const key of Object.keys(mockEnv)) delete mockEnv[key];
+    // Restore OneCLI-off default AND clear call history so no later test sees
+    // it configured or inherits a prior call count.
+    vi.mocked(isOneCliConfigured).mockReset();
+    vi.mocked(isOneCliConfigured).mockReturnValue(false);
+    vi.mocked(getOneCliOutboundConfig).mockReset();
+    vi.mocked(getOneCliOutboundConfig).mockResolvedValue(null);
+    httpsProxyAgentCtor.mockClear();
+    httpsRequestSpy.mockClear();
   });
 
   async function startProxy(env: Record<string, string>): Promise<number> {
@@ -155,6 +210,107 @@ describe('credential-proxy', () => {
     expect(lastUpstreamHeaders['authorization']).toBe(
       'Bearer real-oauth-token',
     );
+  });
+
+  it('#637: OAuth exchange routes through OneCLI and does NOT inject the .env token when OneCLI is configured', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(getOneCliOutboundConfig).mockResolvedValue({
+      proxyUrl: 'http://x:aoc_tok@gw:10255',
+      ca: 'fake-ca',
+    });
+    proxyPort = await startProxy({
+      CLAUDE_CODE_OAUTH_TOKEN: 'real-oauth-token',
+    });
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/api/oauth/claude_cli/create_api_key',
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer placeholder',
+        },
+      },
+      '{}',
+    );
+
+    // The credential-proxy must NOT replace the placeholder with the .env
+    // token — OneCLI injects the real Bearer on the (mocked) tunnel, so the
+    // container's placeholder passes through here untouched.
+    expect(lastUpstreamHeaders['authorization']).toBe('Bearer placeholder');
+    expect(lastUpstreamHeaders['authorization']).not.toBe(
+      'Bearer real-oauth-token',
+    );
+    expect(vi.mocked(getOneCliOutboundConfig)).toHaveBeenCalledWith('main');
+    // The HTTPS routing branch built the tunnel agent with the minted
+    // proxy URL + CA (the CONNECT/TLS hop itself is verified live).
+    expect(httpsProxyAgentCtor).toHaveBeenCalledWith(
+      'http://x:aoc_tok@gw:10255',
+      { ca: 'fake-ca' },
+    );
+  });
+
+  it('#637: attaches the OneCLI agent to the request options on an HTTPS upstream', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(getOneCliOutboundConfig).mockResolvedValue({
+      proxyUrl: 'http://x:aoc_tok@gw:10255',
+      ca: 'fake-ca',
+    });
+    Object.assign(mockEnv, { CLAUDE_CODE_OAUTH_TOKEN: 'real-oauth-token' });
+    // https: upstream → isHttps true → the `oneCliAgent && isHttps` branch
+    // attaches the agent. Mocked https.request delegates to http so it still
+    // reaches the local HTTP upstream mock.
+    proxyServer = await startCredentialProxy(0, '127.0.0.1', {
+      upstreamUrl: new URL(`https://127.0.0.1:${upstreamPort}`),
+    });
+    const port = (proxyServer.address() as AddressInfo).port;
+
+    await makeRequest(
+      port,
+      {
+        method: 'POST',
+        path: '/api/oauth/claude_cli/create_api_key',
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer placeholder',
+        },
+      },
+      '{}',
+    );
+
+    expect(httpsRequestSpy).toHaveBeenCalledTimes(1);
+    const opts = httpsRequestSpy.mock.calls[0]![0] as { agent?: unknown };
+    expect(opts.agent).toBeDefined();
+  });
+
+  it('#637: /v1/messages does NOT route through OneCLI (no Authorization header)', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(getOneCliOutboundConfig).mockResolvedValue({
+      proxyUrl: 'http://x:aoc_tok@gw:10255',
+      ca: 'fake-ca',
+    });
+    proxyPort = await startProxy({
+      CLAUDE_CODE_OAUTH_TOKEN: 'real-oauth-token',
+    });
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': 'temp-key-from-exchange',
+        },
+      },
+      '{}',
+    );
+
+    // No Authorization → not the OneCLI path → forwarded direct with the temp
+    // key, usage-tap path untouched. OneCLI is never consulted.
+    expect(lastUpstreamHeaders['x-api-key']).toBe('temp-key-from-exchange');
+    expect(vi.mocked(getOneCliOutboundConfig)).not.toHaveBeenCalled();
   });
 
   it('OAuth mode does not inject Authorization when container omits it', async () => {

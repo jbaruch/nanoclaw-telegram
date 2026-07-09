@@ -11,14 +11,21 @@
  *             subsequent requests carry the temp key which is valid as-is.
  */
 import { createServer, Server } from 'http';
-import { request as httpsRequest } from 'https';
+import { request as httpsRequest, Agent } from 'https';
 import { request as httpRequest, RequestOptions } from 'http';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { brotliDecompressSync, gunzipSync, inflateSync } from 'zlib';
 
+import { HttpsProxyAgent } from 'https-proxy-agent';
+
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
+import {
+  getOneCliOutboundConfig,
+  isOneCliConfigured,
+  type TrustTier,
+} from './onecli-client.js';
 import { lookupContainer } from './proxy-registry.js';
 import {
   appendUsageRecord,
@@ -116,419 +123,502 @@ export function startCredentialProxy(
 
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
-      req.on('end', () => {
-        const rawBody = Buffer.concat(chunks);
+      req.on('end', async () => {
+        // outer-boundary-process-contract: the container reads a hung
+        // connection / missing response as a silent failure. Making this
+        // handler async turns any unexpected throw (wire-filter, TTL rewrite,
+        // OneCLI mint, request build) into an unobserved promise rejection, so
+        // the whole body is wrapped — on error emit a 502 (actionable for the
+        // container) instead of leaving the request to hang. Propagating out
+        // of this async callback would break that contract.
+        try {
+          const rawBody = Buffer.concat(chunks);
 
-        // Wire-tool catalog interceptor (issue #119): strip SDK-builtin tools
-        // we never use and trim the Bash description on outgoing /v1/messages
-        // requests. Default ON; disable with STRIP_DEAD_TOOLS=0. Reduces
-        // cache_create per cold start by ~12K tokens per tier.
-        const originalLength = rawBody.length;
-        const filterResult = applyWireToolFilter(
-          upstreamPath,
-          req.method,
-          rawBody,
-          process.env,
-          (err) => {
-            logger.warn(
-              { err, url: upstreamPath },
-              'Wire-tool filter: body parse failed, forwarding unchanged',
-            );
-          },
-        );
-        let body = filterResult.body;
-        if (filterResult.applied) {
-          // Logged at DEBUG, not INFO. The SDK ships the full catalog
-          // on every /v1/messages, so an INFO line per request would
-          // dominate the log stream in steady state. The interceptor's
-          // effect is observable via DUMP_API_REQUESTS (#467) when an
-          // operator wants per-request visibility.
-          logger.debug(
-            {
-              url: upstreamPath,
-              toolsStripped: filterResult.stats.toolsStripped,
-              descriptionsTrimmed: filterResult.stats.descriptionsTrimmed,
-              bodyDelta: body.length - originalLength,
-            },
-            'Wire-tool interceptor active',
-          );
-        }
-
-        // Prompt-cache TTL extension (#537): for configured idle-prone
-        // main DM containers, upgrade SDK-emitted ephemeral cache
-        // breakpoints to the 1h tier. Runs after tool filtering so the
-        // forwarded body, request dumps, and usage accounting all agree.
-        const ttlResult = applyPromptCacheTtl(
-          upstreamPath,
-          req.method,
-          body,
-          containerCtx,
-          process.env,
-          (err) => {
-            logger.warn(
-              { err, url: upstreamPath, group: containerCtx?.group },
-              'Prompt-cache TTL rewrite: body parse failed, forwarding unchanged',
-            );
-          },
-        );
-        body = ttlResult.body;
-        if (ttlResult.applied) {
-          // DEBUG, not INFO — this fires on every applicable
-          // /v1/messages, which would dominate the log stream in
-          // steady state. Matches the wire-tool interceptor's
-          // log level above. Per-request visibility is available via
-          // DUMP_API_REQUESTS (#467) when needed.
-          logger.debug(
-            {
-              url: upstreamPath,
-              group: containerCtx?.group,
-              tier: containerCtx?.tier,
-              session: containerCtx?.session,
-              ttlApplied: ttlResult.stats.ttlApplied,
-            },
-            'Prompt-cache TTL rewrite active',
-          );
-        }
-
-        // Optional request capture for prompt/tool-catalog inspection.
-        // Set DUMP_API_REQUESTS=<dir> in the orchestrator env to enable.
-        // Default OFF; never enable in long-running production — the
-        // captured request bodies contain user prompts and the SDK's
-        // full system prompt + tool catalog, which is sensitive
-        // operator material. Single-shot capture pattern: set, fire
-        // one request, unset.
-        //
-        // Placed AFTER the wire-tool interceptor so the dumped body
-        // reflects what was actually forwarded upstream (post-filter,
-        // post-Bash-trim) — capture before the filter would dump the
-        // pre-strip catalog and obscure the interceptor's effect.
-        //
-        // Failure handling per `error-handling.Specific Exceptions` +
-        // `Graceful Fallback`: catch ONLY the known recoverable
-        // `NodeJS.ErrnoException` codes that fs operations emit on
-        // operator-misconfigured dump targets (EACCES, ENOSPC,
-        // ENOENT, ENOTDIR, EPERM, EROFS, EISDIR). On those we log and
-        // continue forwarding — the proxy's primary contract is to
-        // forward the request; capture is strictly diagnostic. On any
-        // OTHER exception (TypeError, ReferenceError, programming
-        // bugs introduced by future edits), we rethrow so the bug
-        // surfaces loudly instead of being silently swallowed by a
-        // catch-all. Sync I/O is intentional: this is operator-toggled
-        // debug, used in single-shot mode where dump-path latency is
-        // acceptable.
-        const dumpDir = process.env.DUMP_API_REQUESTS;
-        if (dumpDir) {
-          try {
-            mkdirSync(dumpDir, { recursive: true });
-            const ts = new Date().toISOString().replace(/[:.]/g, '-');
-            // Strip query string and sanitize the filename component
-            // to a conservative set so dumps glob predictably even when
-            // the proxied URL carries `?foo=bar` or other unsafe chars.
-            const urlPath = upstreamPath.split('?')[0];
-            const lastRaw = urlPath.split('/').pop() || 'root';
-            const last = lastRaw.replace(/[^a-zA-Z0-9._-]/g, '_') || 'root';
-            const method =
-              (req.method || 'UNKNOWN').replace(/[^A-Z]/g, '') || 'UNKNOWN';
-            writeFileSync(join(dumpDir, `${ts}-${method}-${last}.json`), body);
-          } catch (err) {
-            const RECOVERABLE_FS_CODES = new Set([
-              'EACCES',
-              'ENOSPC',
-              'ENOENT',
-              'ENOTDIR',
-              'EPERM',
-              'EROFS',
-              'EISDIR',
-            ]);
-            const code =
-              err instanceof Error && 'code' in err
-                ? (err as NodeJS.ErrnoException).code
-                : undefined;
-            if (code && RECOVERABLE_FS_CODES.has(code)) {
+          // Wire-tool catalog interceptor (issue #119): strip SDK-builtin tools
+          // we never use and trim the Bash description on outgoing /v1/messages
+          // requests. Default ON; disable with STRIP_DEAD_TOOLS=0. Reduces
+          // cache_create per cold start by ~12K tokens per tier.
+          const originalLength = rawBody.length;
+          const filterResult = applyWireToolFilter(
+            upstreamPath,
+            req.method,
+            rawBody,
+            process.env,
+            (err) => {
               logger.warn(
-                { code, dumpDir, err: (err as Error).message },
-                'DUMP_API_REQUESTS write failed — continuing forward without capture',
+                { err, url: upstreamPath },
+                'Wire-tool filter: body parse failed, forwarding unchanged',
               );
-            } else {
-              // Unexpected exception (programming bug, not an fs
-              // condition the operator can fix). Surface loudly per
-              // `error-handling.Specific Exceptions`.
-              throw err;
-            }
-          }
-        }
-
-        // Capture response body for usage logging (#479 / ligolnik#125)
-        // only on /v1/messages — other endpoints (oauth exchange, health
-        // checks) have no `usage` field. Match via `isMessagesEndpoint()`
-        // (#479 sub-#4 — share one helper across the proxy so the next
-        // `?beta=...` bump can't desync capture from the wire-tool filter
-        // the way #126 caught). We tee the upstream stream into both the
-        // client response and a buffer, parse usage after the upstream
-        // ends, and append a JSONL line. Cap the buffer at 10MB; beyond
-        // that we skip capture rather than blow memory. The response
-        // stream itself is never gated on this — pipe is wired up first
-        // and is never blocked or delayed by capture.
-        const captureUsage =
-          req.method === 'POST' && isMessagesEndpoint(upstreamPath);
-        const requestStartMs = Date.now();
-        // Sniff the request body for the model name so we can fall back
-        // when the response is malformed / can't be parsed.
-        let requestModel: string | null = null;
-        if (captureUsage) {
-          noteMessagesRequest();
-          try {
-            const parsed = JSON.parse(body.toString('utf8'));
-            if (parsed && typeof parsed.model === 'string')
-              requestModel = parsed.model;
-          } catch {
-            // Body isn't JSON — leave model null; the response usually
-            // carries it anyway.
-          }
-        }
-
-        // Forward the request upstream to Anthropic. On any connection
-        // failure the client sees a 502.
-        const sendUpstreamRequest = (targetUrl: URL): void => {
-          const isHttps = targetUrl.protocol === 'https:';
-          const makeRequest = isHttps ? httpsRequest : httpRequest;
-
-          const headers: Record<
-            string,
-            string | number | string[] | undefined
-          > = {
-            ...(req.headers as Record<string, string>),
-            host: targetUrl.host,
-            'content-length': body.length,
-          };
-
-          // Strip hop-by-hop headers that must not be forwarded by proxies
-          delete headers['connection'];
-          delete headers['keep-alive'];
-          delete headers['transfer-encoding'];
-
-          if (authMode === 'api-key') {
-            // API key mode: replace any placeholder with the real key.
-            delete headers['x-api-key'];
-            headers['x-api-key'] = secrets.ANTHROPIC_API_KEY;
-          } else {
-            // OAuth mode: replace placeholder Bearer token with the real
-            // one only when the container actually sends an Authorization
-            // header (exchange request + auth probes). Post-exchange
-            // requests use x-api-key only, so they pass through without
-            // token injection.
-            if (headers['authorization']) {
-              delete headers['authorization'];
-              if (oauthToken) {
-                headers['authorization'] = `Bearer ${oauthToken}`;
-              }
-            }
+            },
+          );
+          let body = filterResult.body;
+          if (filterResult.applied) {
+            // Logged at DEBUG, not INFO. The SDK ships the full catalog
+            // on every /v1/messages, so an INFO line per request would
+            // dominate the log stream in steady state. The interceptor's
+            // effect is observable via DUMP_API_REQUESTS (#467) when an
+            // operator wants per-request visibility.
+            logger.debug(
+              {
+                url: upstreamPath,
+                toolsStripped: filterResult.stats.toolsStripped,
+                descriptionsTrimmed: filterResult.stats.descriptionsTrimmed,
+                bodyDelta: body.length - originalLength,
+              },
+              'Wire-tool interceptor active',
+            );
           }
 
-          const upstream = makeRequest(
-            {
-              hostname: targetUrl.hostname,
-              port: targetUrl.port || (isHttps ? 443 : 80),
-              path: upstreamPath,
-              method: req.method,
-              headers,
-            } as RequestOptions,
-            (upRes) => {
-              res.writeHead(upRes.statusCode!, upRes.headers);
+          // Prompt-cache TTL extension (#537): for configured idle-prone
+          // main DM containers, upgrade SDK-emitted ephemeral cache
+          // breakpoints to the 1h tier. Runs after tool filtering so the
+          // forwarded body, request dumps, and usage accounting all agree.
+          const ttlResult = applyPromptCacheTtl(
+            upstreamPath,
+            req.method,
+            body,
+            containerCtx,
+            process.env,
+            (err) => {
+              logger.warn(
+                { err, url: upstreamPath, group: containerCtx?.group },
+                'Prompt-cache TTL rewrite: body parse failed, forwarding unchanged',
+              );
+            },
+          );
+          body = ttlResult.body;
+          if (ttlResult.applied) {
+            // DEBUG, not INFO — this fires on every applicable
+            // /v1/messages, which would dominate the log stream in
+            // steady state. Matches the wire-tool interceptor's
+            // log level above. Per-request visibility is available via
+            // DUMP_API_REQUESTS (#467) when needed.
+            logger.debug(
+              {
+                url: upstreamPath,
+                group: containerCtx?.group,
+                tier: containerCtx?.tier,
+                session: containerCtx?.session,
+                ttlApplied: ttlResult.stats.ttlApplied,
+              },
+              'Prompt-cache TTL rewrite active',
+            );
+          }
 
-              if (!captureUsage || upRes.statusCode !== 200) {
-                upRes.pipe(res);
-                return;
-              }
-
-              // Tee: forward chunks to the client AND collect them for
-              // usage parsing. We attach the data/end listeners directly
-              // on `upRes` (instead of `upRes.pipe(res)` + a separate
-              // capture-only data listener) because the pipe-then-attach
-              // shape silently dropped capture in production: 37 of 37
-              // /v1/messages requests through the post-#487 deploy
-              // tripped sub-#3's silent-zero guard. The exact failure
-              // mode (listener-attach race vs. pipe consuming chunks
-              // before the late listener subscribed) wasn't pinpointed,
-              // but reverting to the explicit-tee shape from
-              // ligolnik#125 — augmented with explicit pause/resume
-              // for backpressure — restores capture and addresses the
-              // OpenAI reviewer's original concern about pipe's
-              // implicit backpressure being lost. `res.write()` returns
-              // false when its buffer is full; we pause `upRes` and
-              // resume on the client's `drain` event. This is the
-              // mechanism `pipe` uses internally; doing it explicitly
-              // keeps the data listener on the same flow.
-              const captured: Buffer[] = [];
-              let captureSize = 0;
-              let capped = false;
-              // Backpressure: track whether upRes was paused so resume
-              // only fires once per drain. Using a closure flag rather
-              // than upRes.isPaused() because the latter is also true
-              // briefly after construction.
-              let upPaused = false;
-              const resumeUpstream = () => {
-                if (upPaused) {
-                  upPaused = false;
-                  upRes.resume();
-                }
-              };
-              // Client-disconnect handler: if the client aborts mid-stream,
-              // tear down the upstream so we don't keep consuming data,
-              // and drop our listeners so subsequent res.write/end calls
-              // can't crash on a destroyed socket.
-              const onClientClose = () => {
-                if (!upRes.destroyed) upRes.destroy();
-                res.removeListener('drain', resumeUpstream);
-              };
-              res.on('drain', resumeUpstream);
-              res.on('close', onClientClose);
-              // Helper: guard res.write so an already-ended/destroyed
-              // client can't crash the proxy. Returns true on successful
-              // write, false otherwise (so the caller can stop capturing).
-              // Catches only the specific Node stream errors that
-              // res.write() can throw on a torn-down socket — write
-              // races between our writableEnded/destroyed check and
-              // the write call itself. Any other exception is a
-              // programming bug and propagates per
-              // error-handling.Specific Exceptions.
-              const STREAM_TEARDOWN_CODES = new Set([
-                'ERR_STREAM_WRITE_AFTER_END',
-                'ERR_STREAM_DESTROYED',
-                'ERR_STREAM_ALREADY_FINISHED',
+          // Optional request capture for prompt/tool-catalog inspection.
+          // Set DUMP_API_REQUESTS=<dir> in the orchestrator env to enable.
+          // Default OFF; never enable in long-running production — the
+          // captured request bodies contain user prompts and the SDK's
+          // full system prompt + tool catalog, which is sensitive
+          // operator material. Single-shot capture pattern: set, fire
+          // one request, unset.
+          //
+          // Placed AFTER the wire-tool interceptor so the dumped body
+          // reflects what was actually forwarded upstream (post-filter,
+          // post-Bash-trim) — capture before the filter would dump the
+          // pre-strip catalog and obscure the interceptor's effect.
+          //
+          // Failure handling per `error-handling.Specific Exceptions` +
+          // `Graceful Fallback`: catch ONLY the known recoverable
+          // `NodeJS.ErrnoException` codes that fs operations emit on
+          // operator-misconfigured dump targets (EACCES, ENOSPC,
+          // ENOENT, ENOTDIR, EPERM, EROFS, EISDIR). On those we log and
+          // continue forwarding — the proxy's primary contract is to
+          // forward the request; capture is strictly diagnostic. On any
+          // OTHER exception (TypeError, ReferenceError, programming
+          // bugs introduced by future edits), we rethrow so the bug
+          // surfaces loudly instead of being silently swallowed by a
+          // catch-all. Sync I/O is intentional: this is operator-toggled
+          // debug, used in single-shot mode where dump-path latency is
+          // acceptable.
+          const dumpDir = process.env.DUMP_API_REQUESTS;
+          if (dumpDir) {
+            try {
+              mkdirSync(dumpDir, { recursive: true });
+              const ts = new Date().toISOString().replace(/[:.]/g, '-');
+              // Strip query string and sanitize the filename component
+              // to a conservative set so dumps glob predictably even when
+              // the proxied URL carries `?foo=bar` or other unsafe chars.
+              const urlPath = upstreamPath.split('?')[0];
+              const lastRaw = urlPath.split('/').pop() || 'root';
+              const last = lastRaw.replace(/[^a-zA-Z0-9._-]/g, '_') || 'root';
+              const method =
+                (req.method || 'UNKNOWN').replace(/[^A-Z]/g, '') || 'UNKNOWN';
+              writeFileSync(
+                join(dumpDir, `${ts}-${method}-${last}.json`),
+                body,
+              );
+            } catch (err) {
+              const RECOVERABLE_FS_CODES = new Set([
+                'EACCES',
+                'ENOSPC',
+                'ENOENT',
+                'ENOTDIR',
+                'EPERM',
+                'EROFS',
+                'EISDIR',
               ]);
-              const safeWrite = (chunk: Buffer): boolean => {
-                if (res.writableEnded || res.destroyed) return false;
-                try {
-                  return res.write(chunk);
-                } catch (err) {
-                  const code =
-                    err instanceof Error && 'code' in err
-                      ? (err as NodeJS.ErrnoException).code
-                      : undefined;
-                  if (code && STREAM_TEARDOWN_CODES.has(code)) return false;
-                  throw err;
+              const code =
+                err instanceof Error && 'code' in err
+                  ? (err as NodeJS.ErrnoException).code
+                  : undefined;
+              if (code && RECOVERABLE_FS_CODES.has(code)) {
+                logger.warn(
+                  { code, dumpDir, err: (err as Error).message },
+                  'DUMP_API_REQUESTS write failed — continuing forward without capture',
+                );
+              } else {
+                // Unexpected exception (programming bug, not an fs
+                // condition the operator can fix). Surface loudly per
+                // `error-handling.Specific Exceptions`.
+                throw err;
+              }
+            }
+          }
+
+          // Capture response body for usage logging (#479 / ligolnik#125)
+          // only on /v1/messages — other endpoints (oauth exchange, health
+          // checks) have no `usage` field. Match via `isMessagesEndpoint()`
+          // (#479 sub-#4 — share one helper across the proxy so the next
+          // `?beta=...` bump can't desync capture from the wire-tool filter
+          // the way #126 caught). We tee the upstream stream into both the
+          // client response and a buffer, parse usage after the upstream
+          // ends, and append a JSONL line. Cap the buffer at 10MB; beyond
+          // that we skip capture rather than blow memory. The response
+          // stream itself is never gated on this — pipe is wired up first
+          // and is never blocked or delayed by capture.
+          const captureUsage =
+            req.method === 'POST' && isMessagesEndpoint(upstreamPath);
+          const requestStartMs = Date.now();
+          // Sniff the request body for the model name so we can fall back
+          // when the response is malformed / can't be parsed.
+          let requestModel: string | null = null;
+          if (captureUsage) {
+            noteMessagesRequest();
+            try {
+              const parsed = JSON.parse(body.toString('utf8'));
+              if (parsed && typeof parsed.model === 'string')
+                requestModel = parsed.model;
+            } catch {
+              // Body isn't JSON — leave model null; the response usually
+              // carries it anyway.
+            }
+          }
+
+          // Forward the request upstream to Anthropic. On any connection
+          // failure the client sees a 502.
+          const sendUpstreamRequest = (
+            targetUrl: URL,
+            oneCliAgent?: Agent,
+          ): void => {
+            const isHttps = targetUrl.protocol === 'https:';
+            const makeRequest = isHttps ? httpsRequest : httpRequest;
+
+            const headers: Record<
+              string,
+              string | number | string[] | undefined
+            > = {
+              ...(req.headers as Record<string, string>),
+              host: targetUrl.host,
+              'content-length': body.length,
+            };
+
+            // Strip hop-by-hop headers that must not be forwarded by proxies
+            delete headers['connection'];
+            delete headers['keep-alive'];
+            delete headers['transfer-encoding'];
+
+            if (oneCliAgent) {
+              // #637: OneCLI injects the real Bearer on the outbound hop (this
+              // request tunnels through the OneCLI gateway). Leave the
+              // container's placeholder Authorization for OneCLI to overwrite;
+              // the .env token is never read here.
+            } else if (authMode === 'api-key') {
+              // API key mode: replace any placeholder with the real key.
+              delete headers['x-api-key'];
+              headers['x-api-key'] = secrets.ANTHROPIC_API_KEY;
+            } else {
+              // OAuth mode: replace placeholder Bearer token with the real
+              // one only when the container actually sends an Authorization
+              // header (exchange request + auth probes). Post-exchange
+              // requests use x-api-key only, so they pass through without
+              // token injection.
+              if (headers['authorization']) {
+                delete headers['authorization'];
+                if (oauthToken) {
+                  headers['authorization'] = `Bearer ${oauthToken}`;
                 }
-              };
-              upRes.on('data', (chunk: Buffer) => {
-                const writeOk = safeWrite(chunk);
-                if (!writeOk && !upPaused) {
-                  upPaused = true;
-                  upRes.pause();
+              }
+            }
+
+            const upstream = makeRequest(
+              {
+                hostname: targetUrl.hostname,
+                port: targetUrl.port || (isHttps ? 443 : 80),
+                path: upstreamPath,
+                method: req.method,
+                headers,
+                // #637: when set, the outbound tunnels through the OneCLI
+                // gateway (CONNECT + MITM CA) so OneCLI injects the vaulted
+                // Bearer. Only the OAuth-exchange/probe requests set this;
+                // /v1/messages forwards direct so the usage tap is untouched.
+                // HttpsProxyAgent only tunnels HTTPS (CONNECT) — never attach it
+                // to a plain-HTTP upstream (prod is always https api.anthropic;
+                // http is a test-only upstream override).
+                ...(oneCliAgent && isHttps ? { agent: oneCliAgent } : {}),
+              } as RequestOptions,
+              (upRes) => {
+                res.writeHead(upRes.statusCode!, upRes.headers);
+
+                if (!captureUsage || upRes.statusCode !== 200) {
+                  upRes.pipe(res);
+                  return;
                 }
-                if (capped) return;
-                captureSize += chunk.length;
-                if (captureSize > USAGE_CAPTURE_BUFFER_CAP) {
-                  capped = true;
-                  captured.length = 0;
-                  logger.warn(
-                    { url: upstreamPath, size: captureSize },
-                    'usage-log: response too large, skipping capture',
-                  );
-                } else {
-                  captured.push(chunk);
-                }
-              });
-              upRes.on('end', () => {
-                if (!res.writableEnded && !res.destroyed) res.end();
-                res.removeListener('drain', resumeUpstream);
-                res.removeListener('close', onClientClose);
-                if (capped) return;
-                const rawBuffer = Buffer.concat(captured);
-                // The Claude SDK (undici) sends `accept-encoding: gzip,
-                // deflate, br` by default, so Anthropic's edge serves
-                // compressed responses. The proxy forwards the raw
-                // (encoded) bytes to the client so the SDK can
-                // decompress them transparently — but for capture we
-                // need the decompressed text to parse SSE / JSON. Read
-                // the response Content-Encoding and decode accordingly;
-                // identity (or unset) keeps the raw bytes. Decompression
-                // failures fall through to the raw buffer with a warn
-                // log so downstream parsing still gets a chance.
-                const encoding = (
-                  upRes.headers['content-encoding'] || ''
-                ).toLowerCase();
-                let bodyBuffer = rawBuffer;
-                if (
-                  encoding === 'gzip' ||
-                  encoding === 'br' ||
-                  encoding === 'deflate'
-                ) {
+
+                // Tee: forward chunks to the client AND collect them for
+                // usage parsing. We attach the data/end listeners directly
+                // on `upRes` (instead of `upRes.pipe(res)` + a separate
+                // capture-only data listener) because the pipe-then-attach
+                // shape silently dropped capture in production: 37 of 37
+                // /v1/messages requests through the post-#487 deploy
+                // tripped sub-#3's silent-zero guard. The exact failure
+                // mode (listener-attach race vs. pipe consuming chunks
+                // before the late listener subscribed) wasn't pinpointed,
+                // but reverting to the explicit-tee shape from
+                // ligolnik#125 — augmented with explicit pause/resume
+                // for backpressure — restores capture and addresses the
+                // OpenAI reviewer's original concern about pipe's
+                // implicit backpressure being lost. `res.write()` returns
+                // false when its buffer is full; we pause `upRes` and
+                // resume on the client's `drain` event. This is the
+                // mechanism `pipe` uses internally; doing it explicitly
+                // keeps the data listener on the same flow.
+                const captured: Buffer[] = [];
+                let captureSize = 0;
+                let capped = false;
+                // Backpressure: track whether upRes was paused so resume
+                // only fires once per drain. Using a closure flag rather
+                // than upRes.isPaused() because the latter is also true
+                // briefly after construction.
+                let upPaused = false;
+                const resumeUpstream = () => {
+                  if (upPaused) {
+                    upPaused = false;
+                    upRes.resume();
+                  }
+                };
+                // Client-disconnect handler: if the client aborts mid-stream,
+                // tear down the upstream so we don't keep consuming data,
+                // and drop our listeners so subsequent res.write/end calls
+                // can't crash on a destroyed socket.
+                const onClientClose = () => {
+                  if (!upRes.destroyed) upRes.destroy();
+                  res.removeListener('drain', resumeUpstream);
+                };
+                res.on('drain', resumeUpstream);
+                res.on('close', onClientClose);
+                // Helper: guard res.write so an already-ended/destroyed
+                // client can't crash the proxy. Returns true on successful
+                // write, false otherwise (so the caller can stop capturing).
+                // Catches only the specific Node stream errors that
+                // res.write() can throw on a torn-down socket — write
+                // races between our writableEnded/destroyed check and
+                // the write call itself. Any other exception is a
+                // programming bug and propagates per
+                // error-handling.Specific Exceptions.
+                const STREAM_TEARDOWN_CODES = new Set([
+                  'ERR_STREAM_WRITE_AFTER_END',
+                  'ERR_STREAM_DESTROYED',
+                  'ERR_STREAM_ALREADY_FINISHED',
+                ]);
+                const safeWrite = (chunk: Buffer): boolean => {
+                  if (res.writableEnded || res.destroyed) return false;
                   try {
-                    if (encoding === 'gzip') bodyBuffer = gunzipSync(rawBuffer);
-                    else if (encoding === 'br')
-                      bodyBuffer = brotliDecompressSync(rawBuffer);
-                    else bodyBuffer = inflateSync(rawBuffer);
+                    return res.write(chunk);
                   } catch (err) {
+                    const code =
+                      err instanceof Error && 'code' in err
+                        ? (err as NodeJS.ErrnoException).code
+                        : undefined;
+                    if (code && STREAM_TEARDOWN_CODES.has(code)) return false;
+                    throw err;
+                  }
+                };
+                upRes.on('data', (chunk: Buffer) => {
+                  const writeOk = safeWrite(chunk);
+                  if (!writeOk && !upPaused) {
+                    upPaused = true;
+                    upRes.pause();
+                  }
+                  if (capped) return;
+                  captureSize += chunk.length;
+                  if (captureSize > USAGE_CAPTURE_BUFFER_CAP) {
+                    capped = true;
+                    captured.length = 0;
                     logger.warn(
-                      {
-                        err,
-                        url: upstreamPath,
-                        encoding,
-                        rawBytes: rawBuffer.length,
-                      },
-                      'usage-log: response decompression failed, falling back to raw buffer for parse',
+                      { url: upstreamPath, size: captureSize },
+                      'usage-log: response too large, skipping capture',
+                    );
+                  } else {
+                    captured.push(chunk);
+                  }
+                });
+                upRes.on('end', () => {
+                  if (!res.writableEnded && !res.destroyed) res.end();
+                  res.removeListener('drain', resumeUpstream);
+                  res.removeListener('close', onClientClose);
+                  if (capped) return;
+                  const rawBuffer = Buffer.concat(captured);
+                  // The Claude SDK (undici) sends `accept-encoding: gzip,
+                  // deflate, br` by default, so Anthropic's edge serves
+                  // compressed responses. The proxy forwards the raw
+                  // (encoded) bytes to the client so the SDK can
+                  // decompress them transparently — but for capture we
+                  // need the decompressed text to parse SSE / JSON. Read
+                  // the response Content-Encoding and decode accordingly;
+                  // identity (or unset) keeps the raw bytes. Decompression
+                  // failures fall through to the raw buffer with a warn
+                  // log so downstream parsing still gets a chance.
+                  const encoding = (
+                    upRes.headers['content-encoding'] || ''
+                  ).toLowerCase();
+                  let bodyBuffer = rawBuffer;
+                  if (
+                    encoding === 'gzip' ||
+                    encoding === 'br' ||
+                    encoding === 'deflate'
+                  ) {
+                    try {
+                      if (encoding === 'gzip')
+                        bodyBuffer = gunzipSync(rawBuffer);
+                      else if (encoding === 'br')
+                        bodyBuffer = brotliDecompressSync(rawBuffer);
+                      else bodyBuffer = inflateSync(rawBuffer);
+                    } catch (err) {
+                      logger.warn(
+                        {
+                          err,
+                          url: upstreamPath,
+                          encoding,
+                          rawBytes: rawBuffer.length,
+                        },
+                        'usage-log: response decompression failed, falling back to raw buffer for parse',
+                      );
+                    }
+                  }
+                  const bodyText = bodyBuffer.toString('utf8');
+                  const ctx: ContainerContext = containerCtx ?? {
+                    group: 'unknown',
+                    tier: 'untrusted',
+                    session: 'unknown',
+                    task_id: null,
+                    message_id: null,
+                  };
+                  try {
+                    const record = parseUsageFromBody(
+                      bodyText,
+                      ctx,
+                      Date.now() - requestStartMs,
+                      requestModel,
+                    );
+                    if (record) {
+                      noteCaptureWrite();
+                      // Fire-and-forget. appendUsageRecord swallows IO
+                      // errors internally so this can never reject.
+                      void appendUsageRecord(usageLogPath, record);
+                    }
+                  } catch (err) {
+                    // Defense in depth: parseUsageFromBody is designed not
+                    // to throw, but if it ever does, we MUST NOT propagate.
+                    logger.warn(
+                      { err, url: upstreamPath },
+                      'usage-log: parse failed',
                     );
                   }
-                }
-                const bodyText = bodyBuffer.toString('utf8');
-                const ctx: ContainerContext = containerCtx ?? {
-                  group: 'unknown',
-                  tier: 'untrusted',
-                  session: 'unknown',
-                  task_id: null,
-                  message_id: null,
-                };
-                try {
-                  const record = parseUsageFromBody(
-                    bodyText,
-                    ctx,
-                    Date.now() - requestStartMs,
-                    requestModel,
-                  );
-                  if (record) {
-                    noteCaptureWrite();
-                    // Fire-and-forget. appendUsageRecord swallows IO
-                    // errors internally so this can never reject.
-                    void appendUsageRecord(usageLogPath, record);
-                  }
-                } catch (err) {
-                  // Defense in depth: parseUsageFromBody is designed not
-                  // to throw, but if it ever does, we MUST NOT propagate.
+                });
+                upRes.on('error', (err) => {
                   logger.warn(
                     { err, url: upstreamPath },
-                    'usage-log: parse failed',
+                    'usage-log: upstream stream error during capture',
                   );
-                }
-              });
-              upRes.on('error', (err) => {
-                logger.warn(
-                  { err, url: upstreamPath },
-                  'usage-log: upstream stream error during capture',
-                );
-                res.removeListener('drain', resumeUpstream);
-                res.removeListener('close', onClientClose);
-                if (!res.writableEnded && !res.destroyed) res.end();
-              });
-            },
-          );
-
-          upstream.on('error', (err) => {
-            logger.error(
-              { err, url: upstreamPath },
-              'Credential proxy upstream error',
+                  res.removeListener('drain', resumeUpstream);
+                  res.removeListener('close', onClientClose);
+                  if (!res.writableEnded && !res.destroyed) res.end();
+                });
+              },
             );
-            if (!res.headersSent) {
-              res.writeHead(502);
-              res.end('Bad Gateway');
+
+            upstream.on('error', (err) => {
+              logger.error(
+                { err, url: upstreamPath },
+                'Credential proxy upstream error',
+              );
+              if (!res.headersSent) {
+                res.writeHead(502);
+                res.end('Bad Gateway');
+              }
+            });
+
+            upstream.write(body);
+            upstream.end();
+          };
+
+          // #637: route the Anthropic OAuth-exchange request (the only request
+          // that carries an Authorization header) through the OneCLI gateway so
+          // OneCLI injects the vaulted Bearer instead of the credential-proxy
+          // reading the token from .env. /v1/messages (temp x-api-key, no
+          // Authorization) forwards direct — usage tap unchanged. When OneCLI is
+          // unreachable, oneCliAgent stays undefined and the request falls back
+          // to .env injection (transition-safe; a hard 401 post-cutover once the
+          // token leaves .env, which is the correct failure).
+          let oneCliAgent: Agent | undefined;
+          if (
+            authMode === 'oauth' &&
+            req.headers['authorization'] &&
+            isOneCliConfigured()
+          ) {
+            // Mint against the requesting container's own trust tier so the
+            // OneCLI agent identity matches the caller; fall back to main for
+            // unknown tokens or the non-TrustTier 'classifier' tier.
+            const tier: TrustTier =
+              containerCtx?.tier === 'trusted' ||
+              containerCtx?.tier === 'untrusted'
+                ? containerCtx.tier
+                : 'main';
+            try {
+              const cfg = await getOneCliOutboundConfig(tier);
+              if (cfg) {
+                oneCliAgent = new HttpsProxyAgent(cfg.proxyUrl, { ca: cfg.ca });
+              }
+            } catch {
+              // The handler is async now, so a thrown mint error would reject
+              // the promise and hang the request with no response. Swallow it to
+              // the fallback path (`.env` injection, or a hard 401 post-cutover)
+              // — the request always reaches sendUpstreamRequest below. No `err`
+              // in the payload (no-secrets): getOneCliOutboundConfig already
+              // logs its own gateway errors (statusCode only); anything reaching
+              // here is a local HttpsProxyAgent/readFileSync error whose message
+              // could echo the proxy URL's embedded gateway token.
+              logger.warn(
+                { url: upstreamPath },
+                'OneCLI outbound-config mint failed; falling back to .env token injection for this request',
+              );
             }
-          });
-
-          upstream.write(body);
-          upstream.end();
-        };
-
-        sendUpstreamRequest(upstreamUrl);
+          }
+          sendUpstreamRequest(upstreamUrl, oneCliAgent);
+          // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
+        } catch (err) {
+          logger.error(
+            { err, url: upstreamPath },
+            'Credential proxy request handler failed unexpectedly — returning 502',
+          );
+          if (!res.headersSent) {
+            res.writeHead(502);
+            res.end('Bad Gateway');
+          } else if (!res.writableEnded && !res.destroyed) {
+            res.end();
+          }
+        }
       });
     });
 

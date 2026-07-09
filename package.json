@@ -27,6 +27,7 @@
     "cron-parser": "5.5.0",
     "geo-tz": "^8.1.7",
     "grammy": "^1.39.3",
+    "https-proxy-agent": "^7.0.6",
     "openai": "^6.33.0"
   },
   "devDependencies": {

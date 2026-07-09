@@ -11,6 +11,8 @@
  * The Anthropic/OpenAI swap sub-issue (#637) tightens this to hard-fail once
  * OneCLI is the only credential path.
  */
+import { readFileSync } from 'fs';
+
 import { OneCLI, OneCLIError, OneCLIRequestError } from '@onecli-sh/sdk';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
@@ -68,6 +70,68 @@ export function isOneCliConfigured(): boolean {
 export function oneCliAgentProxyEnabled(): boolean {
   const env = readEnvFile(['ONECLI_AGENT_PROXY']);
   return env.ONECLI_AGENT_PROXY === '1';
+}
+
+/**
+ * Mint a OneCLI outbound-proxy config for the orchestrator's OWN outbound
+ * HTTPS. Used by the credential-proxy to tunnel the Anthropic OAuth-exchange
+ * request through the OneCLI gateway so OneCLI injects the vaulted Bearer
+ * (#637) — the token then lives only in the vault, not in `.env`.
+ *
+ * Returns the proxy URL (with the agent-scoped gateway token) and the
+ * combined CA-bundle contents to trust the MITM cert, or `null` when OneCLI
+ * is unconfigured / unreachable (caller falls back to `.env` injection during
+ * the transition; post-cutover a null here is a hard auth failure — correct).
+ */
+export async function getOneCliOutboundConfig(
+  tier: TrustTier,
+): Promise<{ proxyUrl: string; ca: string } | null> {
+  const client = getClient();
+  if (!client) return null;
+  try {
+    const probe: string[] = [];
+    const active = await client.applyContainerConfig(probe, {
+      agent: agentIdentifierForTier(tier),
+      combineCaBundle: true,
+      addHostMapping: false,
+    });
+    if (!active) return null;
+    let proxyUrl: string | undefined;
+    let combinedCaPath: string | undefined;
+    let gatewayCaPath: string | undefined;
+    for (let i = 0; i < probe.length; i++) {
+      const v = probe[i + 1] ?? '';
+      if (probe[i] === '-e' && v.startsWith('HTTPS_PROXY=')) {
+        proxyUrl = v.slice('HTTPS_PROXY='.length);
+      } else if (probe[i] === '-v' && /onecli-combined-ca\.pem:ro$/.test(v)) {
+        combinedCaPath = v.split(':')[0];
+      } else if (probe[i] === '-v' && /onecli-gateway-ca\.pem:ro$/.test(v)) {
+        gatewayCaPath = v.split(':')[0];
+      }
+    }
+    // Prefer the combined bundle (system CAs + OneCLI CA); fall back to the
+    // gateway CA alone when combineCaBundle didn't emit a combined mount (its
+    // system-CA read can fail). Both contain OneCLI's MITM signing cert.
+    const caPath = combinedCaPath ?? gatewayCaPath;
+    if (!proxyUrl || !caPath) return null;
+    return { proxyUrl, ca: readFileSync(caPath, 'utf8') };
+  } catch (err) {
+    if (err instanceof OneCLIRequestError) {
+      logger.warn(
+        { tier, statusCode: err.statusCode },
+        'OneCLI getOneCliOutboundConfig rejected by gateway — Anthropic exchange falls back to .env token injection if present',
+      );
+      return null;
+    }
+    if (err instanceof OneCLIError) {
+      logger.warn(
+        { tier },
+        'OneCLI getOneCliOutboundConfig failed before reaching the gateway — Anthropic exchange falls back to .env token injection if present',
+      );
+      return null;
+    }
+    throw err;
+  }
 }
 
 function getClient(): OneCLI | null {

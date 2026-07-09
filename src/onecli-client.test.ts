@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 const {
   ensureAgentMock,
   applyContainerConfigMock,
+  readFileSyncMock,
   envFileMock,
   FakeOneCLIError,
   FakeOneCLIRequestError,
@@ -31,6 +32,7 @@ const {
   return {
     ensureAgentMock: vi.fn(),
     applyContainerConfigMock: vi.fn(),
+    readFileSyncMock: vi.fn(() => 'ca-file-contents'),
     // envFileMock must be hoisted because the `./env.js` mock factory
     // below closes over it. Without `vi.hoisted`, the mock factory
     // (which Vitest hoists above top-level `const` declarations) could
@@ -62,6 +64,8 @@ vi.mock('./env.js', () => ({
   ),
 }));
 
+vi.mock('fs', () => ({ readFileSync: readFileSyncMock }));
+
 vi.mock('./logger.js', () => ({
   logger: {
     info: vi.fn(),
@@ -74,6 +78,7 @@ vi.mock('./logger.js', () => ({
 import {
   applyOneCliToSpawn,
   ensureAgentForTier,
+  getOneCliOutboundConfig,
   isOneCliConfigured,
   oneCliAgentProxyEnabled,
   TRUST_TIERS,
@@ -86,6 +91,88 @@ describe('onecli-client', () => {
     _resetOneCliClient();
     ensureAgentMock.mockReset();
     applyContainerConfigMock.mockReset();
+    readFileSyncMock.mockReset();
+    readFileSyncMock.mockReturnValue('ca-file-contents');
+  });
+
+  describe('getOneCliOutboundConfig', () => {
+    const configure = () => {
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
+    };
+
+    it('returns null when OneCLI is unconfigured (no gateway call)', async () => {
+      expect(await getOneCliOutboundConfig('main')).toBeNull();
+      expect(applyContainerConfigMock).not.toHaveBeenCalled();
+    });
+
+    it('extracts the proxy URL + combined CA contents on the active path', async () => {
+      configure();
+      applyContainerConfigMock.mockImplementation((args: string[]) => {
+        args.push('-e', 'HTTPS_PROXY=http://x:aoc_tok@gw:10255');
+        args.push(
+          '-v',
+          '/host/onecli-combined-ca.pem:/tmp/onecli-combined-ca.pem:ro',
+        );
+        return Promise.resolve(true);
+      });
+
+      const cfg = await getOneCliOutboundConfig('trusted');
+      expect(cfg).toEqual({
+        proxyUrl: 'http://x:aoc_tok@gw:10255',
+        ca: 'ca-file-contents',
+      });
+      expect(readFileSyncMock).toHaveBeenCalledWith(
+        '/host/onecli-combined-ca.pem',
+        'utf8',
+      );
+    });
+
+    it('falls back to the gateway CA when no combined bundle is mounted', async () => {
+      configure();
+      applyContainerConfigMock.mockImplementation((args: string[]) => {
+        args.push('-e', 'HTTPS_PROXY=http://x:aoc_tok@gw:10255');
+        args.push(
+          '-v',
+          '/host/onecli-proxy-ca.pem:/tmp/onecli-gateway-ca.pem:ro',
+        );
+        return Promise.resolve(true);
+      });
+
+      const cfg = await getOneCliOutboundConfig('main');
+      expect(cfg?.proxyUrl).toBe('http://x:aoc_tok@gw:10255');
+      expect(readFileSyncMock).toHaveBeenCalledWith(
+        '/host/onecli-proxy-ca.pem',
+        'utf8',
+      );
+    });
+
+    it('returns null when applyContainerConfig reports inactive', async () => {
+      configure();
+      applyContainerConfigMock.mockResolvedValue(false);
+      expect(await getOneCliOutboundConfig('main')).toBeNull();
+    });
+
+    it('returns null when the argv has no CA mount (nothing to read)', async () => {
+      configure();
+      applyContainerConfigMock.mockImplementation((args: string[]) => {
+        args.push('-e', 'HTTPS_PROXY=http://x:aoc_tok@gw:10255');
+        return Promise.resolve(true);
+      });
+      expect(await getOneCliOutboundConfig('main')).toBeNull();
+      expect(readFileSyncMock).not.toHaveBeenCalled();
+    });
+
+    it('returns null (not throw) when the gateway rejects', async () => {
+      configure();
+      applyContainerConfigMock.mockRejectedValue(
+        new FakeOneCLIRequestError('rejected', {
+          url: 'http://gw',
+          statusCode: 502,
+        }),
+      );
+      expect(await getOneCliOutboundConfig('main')).toBeNull();
+    });
   });
 
   describe('oneCliAgentProxyEnabled', () => {
