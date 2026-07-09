@@ -2926,10 +2926,12 @@ describe('#746 — OneCLI flags precede the image in spawn argv', () => {
 // -------------------------------------------------------------------
 // #640 — OneCLI-managed credentials enter the container as a non-empty
 // placeholder (real value swapped in by the gateway), so the real
-// secret never reaches the agent environ. Gated on the AGENT PROXY flag
-// (`oneCliAgentProxyEnabled`), NOT `isOneCliConfigured`: the placeholder
-// is only correct when the agent's outbound request actually traverses
-// the gateway that swaps the real value back in.
+// secret never reaches the agent environ. Gated on BOTH conjuncts of the
+// proxy-application condition — `isOneCliConfigured() &&
+// oneCliAgentProxyEnabled()` — since the placeholder is only correct when
+// the agent's outbound request actually traverses the gateway that swaps
+// the real value back in. When the gate passes but the proxy cannot be
+// applied at spawn time, the spawn fails closed (covered below).
 // -------------------------------------------------------------------
 describe('#640 — OneCLI-managed credential forwarding', () => {
   const REAL = 'REAL_MAPS_KEY_must_not_reach_container';
