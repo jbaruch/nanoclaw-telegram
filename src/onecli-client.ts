@@ -270,20 +270,32 @@ export async function applyOneCliToSpawn(
       // duplicate mapping.
       addHostMapping: false,
     });
-    if (active) {
-      // #640: preserve the agent's Anthropic path when the gateway proxy env
-      // lands on the spawn. The SDK-applied config sets HTTP_PROXY + HTTPS_PROXY
-      // (+ NODE_USE_ENV_PROXY) but NO `NO_PROXY`. The agent reaches its local
-      // credential-proxy over PLAIN HTTP at `http://host.docker.internal:3001`
-      // (ANTHROPIC_BASE_URL); with HTTP_PROXY set and nothing excluding that
-      // host, that hop gets routed through the OneCLI gateway → ECONNRESET
-      // (this is exactly INCIDENT-746). Excluding the host-gateway (and
-      // loopback) keeps the cred-proxy hop direct while real external HTTPS
-      // (maps.googleapis.com, api.github.com, …) still flows through OneCLI for
-      // the vault swap. Appended AFTER applyContainerConfig so it wins over any
-      // gateway-supplied value (docker uses the last `-e` for a repeated key).
+    // #640: preserve the agent's Anthropic path whenever the gateway proxy env
+    // lands on the spawn. The SDK-applied config sets HTTP_PROXY + HTTPS_PROXY
+    // (+ NODE_USE_ENV_PROXY) but NO `NO_PROXY`. The agent reaches its local
+    // credential-proxy over PLAIN HTTP at `http://host.docker.internal:3001`
+    // (ANTHROPIC_BASE_URL); with HTTP_PROXY set and nothing excluding that
+    // host, that hop gets routed through the OneCLI gateway → ECONNRESET
+    // (this is exactly INCIDENT-746). Excluding the host-gateway (and loopback)
+    // keeps the cred-proxy hop direct while real external HTTPS
+    // (maps.googleapis.com, api.github.com, …) still flows through OneCLI for
+    // the vault swap.
+    //
+    // Keyed on the ACTUAL presence of HTTP(S)_PROXY in the argv, NOT on
+    // `active`: today `applyContainerConfig` only pushes proxy env on the same
+    // path it returns true, but decoupling keeps the bypass correct if a future
+    // SDK ever mutates argv with proxy env yet reports a non-true result
+    // (partial/empty config) — otherwise INCIDENT-746 could silently return.
+    // Appended AFTER applyContainerConfig so it wins over any gateway-supplied
+    // value (docker uses the last `-e` for a repeated key).
+    const proxyEnvLanded = args.some(
+      (a) => a.startsWith('HTTP_PROXY=') || a.startsWith('HTTPS_PROXY='),
+    );
+    if (proxyEnvLanded) {
       args.push('-e', `NO_PROXY=${AGENT_PROXY_BYPASS_HOSTS}`);
       args.push('-e', `no_proxy=${AGENT_PROXY_BYPASS_HOSTS}`);
+    }
+    if (active) {
       // Info (not debug): a debug-only success line is why the argv-order bug
       // (#746) went unnoticed for weeks while this returned true. Surface
       // whether the proxy env actually landed on the spawn argv.

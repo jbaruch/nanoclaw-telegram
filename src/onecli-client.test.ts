@@ -380,7 +380,30 @@ describe('onecli-client', () => {
       );
     });
 
-    it('does NOT append NO_PROXY when the SDK reports inactive (no proxy env landed)', async () => {
+    it('appends NO_PROXY when proxy env landed on argv even if the SDK reports inactive (#640 — decoupled from `active` so SDK drift cannot resurrect INCIDENT-746)', async () => {
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
+      // Hypothetical drift: SDK pushes proxy env but still resolves false.
+      applyContainerConfigMock.mockImplementation((args: string[]) => {
+        args.push('-e', 'HTTPS_PROXY=http://onecli');
+        return Promise.resolve(false);
+      });
+
+      const args = ['run', '-i', '--rm', 'image'];
+      const active = await applyOneCliToSpawn(args, 'main');
+
+      expect(active).toBe(false);
+      // The cred-proxy bypass rides on the proxy env being present, not on the
+      // return value — so the agent's Anthropic hop stays direct regardless.
+      expect(args).toContain(
+        'NO_PROXY=host.docker.internal,localhost,127.0.0.1',
+      );
+      expect(args).toContain(
+        'no_proxy=host.docker.internal,localhost,127.0.0.1',
+      );
+    });
+
+    it('does NOT append NO_PROXY when no proxy env landed on argv (SDK inactive, nothing pushed)', async () => {
       envFileMock.ONECLI_URL = 'http://localhost:10254';
       envFileMock.ONECLI_API_KEY = 'oc_test';
       applyContainerConfigMock.mockResolvedValue(false);
