@@ -297,15 +297,16 @@ export async function applyOneCliToSpawn(
       // a bare override would DROP a pre-existing NO_PROXY (e.g. a future
       // gateway that ships its own internal-host bypass), reintroducing
       // connectivity regressions. Nothing upstream sets NO_PROXY today, but
-      // union keeps this correct if that changes. Case-insensitive match picks
-      // up either `NO_PROXY`/`no_proxy`.
-      const existing = args.find((a) => /^no_proxy=/i.test(a));
-      const existingHosts = existing
-        ? existing.slice(existing.indexOf('=') + 1)
-        : '';
+      // union keeps this correct if that changes. Collect EVERY existing
+      // `NO_PROXY`/`no_proxy` entry (case-insensitive) — both cases, or a
+      // value repeated across multiple `-e` — so no bypass list is dropped.
+      const existingHosts = args
+        .filter((a) => /^no_proxy=/i.test(a))
+        .map((a) => a.slice(a.indexOf('=') + 1));
       const mergedHosts = Array.from(
         new Set(
-          `${existingHosts},${AGENT_PROXY_BYPASS_HOSTS}`
+          [...existingHosts, AGENT_PROXY_BYPASS_HOSTS]
+            .join(',')
             .split(',')
             .map((h) => h.trim())
             .filter(Boolean),

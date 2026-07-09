@@ -385,16 +385,19 @@ describe('onecli-client', () => {
       envFileMock.ONECLI_API_KEY = 'oc_test';
       applyContainerConfigMock.mockImplementation((args: string[]) => {
         args.push('-e', 'HTTPS_PROXY=http://onecli');
-        // A future gateway ships its own bypass — must be preserved.
-        args.push('-e', 'NO_PROXY=internal.corp,10.0.0.0/8');
+        // A future gateway ships its own bypass across MULTIPLE entries (both
+        // cases, distinct values) — every one must be preserved, not just the
+        // first matched.
+        args.push('-e', 'NO_PROXY=internal.corp');
+        args.push('-e', 'no_proxy=10.0.0.0/8');
         return Promise.resolve(true);
       });
 
       const args = ['run', '-i', '--rm', 'image'];
       await applyOneCliToSpawn(args, 'main');
 
-      // The winning (last) NO_PROXY carries the union — upstream hosts kept,
-      // our bypass hosts added, no duplicates.
+      // The winning (last) NO_PROXY carries the union — every upstream host
+      // kept, our bypass hosts added, no duplicates.
       const merged = args
         .filter((a) => a.startsWith('NO_PROXY='))
         .pop()!
