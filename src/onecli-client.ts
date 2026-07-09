@@ -31,6 +31,23 @@ const DEFAULT_TIMEOUT_MS = 1500;
 
 let cachedClient: OneCLI | null = null;
 
+/**
+ * Per-tier cache of the minted outbound-proxy config. The credential-proxy
+ * calls `getOneCliOutboundConfig` for every Authorization-carrying request it
+ * forwards. In this deployment that includes the `/v1/messages` traffic, not
+ * just the OAuth exchange: the Claude Code SDK sends a placeholder Bearer that
+ * OneCLI swaps (confirmed live — the cutover's self-signed errors were on
+ * `/v1/messages`). Minting fresh each time would add a gateway round-trip +
+ * CA-file write per message, so cache `{proxyUrl, ca}` for a short TTL: the
+ * OneCLI CA is stable and the agent-scoped proxy token is reused across the
+ * window; on expiry the next call re-mints.
+ */
+const OUTBOUND_CACHE_TTL_MS = 60_000;
+const outboundConfigCache = new Map<
+  TrustTier,
+  { proxyUrl: string; ca: string; expiresAt: number }
+>();
+
 interface OneCliEnvOptions {
   url: string;
   apiKey: string;
@@ -88,6 +105,10 @@ export async function getOneCliOutboundConfig(
 ): Promise<{ proxyUrl: string; ca: string } | null> {
   const client = getClient();
   if (!client) return null;
+  const cached = outboundConfigCache.get(tier);
+  if (cached && cached.expiresAt > Date.now()) {
+    return { proxyUrl: cached.proxyUrl, ca: cached.ca };
+  }
   try {
     const probe: string[] = [];
     const active = await client.applyContainerConfig(probe, {
@@ -114,7 +135,13 @@ export async function getOneCliOutboundConfig(
     // system-CA read can fail). Both contain OneCLI's MITM signing cert.
     const caPath = combinedCaPath ?? gatewayCaPath;
     if (!proxyUrl || !caPath) return null;
-    return { proxyUrl, ca: readFileSync(caPath, 'utf8') };
+    const ca = readFileSync(caPath, 'utf8');
+    outboundConfigCache.set(tier, {
+      proxyUrl,
+      ca,
+      expiresAt: Date.now() + OUTBOUND_CACHE_TTL_MS,
+    });
+    return { proxyUrl, ca };
   } catch (err) {
     if (err instanceof OneCLIRequestError) {
       logger.warn(
@@ -149,6 +176,7 @@ function getClient(): OneCLI | null {
 // Exposed for tests; not part of the public stable surface.
 export function _resetOneCliClient(): void {
   cachedClient = null;
+  outboundConfigCache.clear();
 }
 
 function agentIdentifierForTier(tier: TrustTier): string {

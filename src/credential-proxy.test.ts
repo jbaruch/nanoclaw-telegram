@@ -243,11 +243,12 @@ describe('credential-proxy', () => {
       'Bearer real-oauth-token',
     );
     expect(vi.mocked(getOneCliOutboundConfig)).toHaveBeenCalledWith('main');
-    // The HTTPS routing branch built the tunnel agent with the minted
-    // proxy URL + CA (the CONNECT/TLS hop itself is verified live).
+    // The HTTPS routing branch built the tunnel agent with the minted proxy
+    // URL. The CA is NOT passed to the agent constructor (https-proxy-agent
+    // ignores it) — it goes on the request options; see the HTTPS-upstream
+    // test below.
     expect(httpsProxyAgentCtor).toHaveBeenCalledWith(
       'http://x:aoc_tok@gw:10255',
-      { ca: 'fake-ca' },
     );
   });
 
@@ -280,8 +281,55 @@ describe('credential-proxy', () => {
     );
 
     expect(httpsRequestSpy).toHaveBeenCalledTimes(1);
-    const opts = httpsRequestSpy.mock.calls[0]![0] as { agent?: unknown };
+    const opts = httpsRequestSpy.mock.calls[0]![0] as {
+      agent?: unknown;
+      ca?: unknown;
+    };
     expect(opts.agent).toBeDefined();
+    // The CA is applied on the request options (NOT the agent) — this is the
+    // fix for the self-signed-certificate failure the live cutover exposed.
+    expect(opts.ca).toBe('fake-ca');
+  });
+
+  it('#637: /v1/messages WITH an Authorization header routes through OneCLI (agent + CA on options, .env token not injected)', async () => {
+    // The load-bearing path this whole PR fixes: in this deployment the SDK
+    // sends a placeholder Bearer on /v1/messages, so it routes through OneCLI
+    // (the cutover's self-signed errors were on /v1/messages). Assert the CA
+    // lands on the request options and the .env token is NOT injected.
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(getOneCliOutboundConfig).mockResolvedValue({
+      proxyUrl: 'http://x:aoc_tok@gw:10255',
+      ca: 'fake-ca',
+    });
+    Object.assign(mockEnv, { CLAUDE_CODE_OAUTH_TOKEN: 'real-oauth-token' });
+    proxyServer = await startCredentialProxy(0, '127.0.0.1', {
+      upstreamUrl: new URL(`https://127.0.0.1:${upstreamPort}`),
+    });
+    const port = (proxyServer.address() as AddressInfo).port;
+
+    await makeRequest(
+      port,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer placeholder',
+        },
+      },
+      '{}',
+    );
+
+    expect(httpsRequestSpy).toHaveBeenCalledTimes(1);
+    const opts = httpsRequestSpy.mock.calls[0]![0] as {
+      agent?: unknown;
+      ca?: unknown;
+    };
+    expect(opts.agent).toBeDefined();
+    expect(opts.ca).toBe('fake-ca');
+    expect(vi.mocked(getOneCliOutboundConfig)).toHaveBeenCalled();
+    // .env token NOT injected — OneCLI swaps the placeholder on the tunnel.
+    expect(lastUpstreamHeaders['authorization']).toBe('Bearer placeholder');
   });
 
   it('#637: /v1/messages does NOT route through OneCLI (no Authorization header)', async () => {

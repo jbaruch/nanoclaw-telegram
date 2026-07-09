@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const {
   ensureAgentMock,
@@ -101,6 +101,16 @@ describe('onecli-client', () => {
       envFileMock.ONECLI_API_KEY = 'oc_test';
     };
 
+    // Freeze the clock so the TTL-cache behaviour is deterministic (the cache
+    // reads Date.now()); advance it explicitly to exercise expiry.
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     it('returns null when OneCLI is unconfigured (no gateway call)', async () => {
       expect(await getOneCliOutboundConfig('main')).toBeNull();
       expect(applyContainerConfigMock).not.toHaveBeenCalled();
@@ -172,6 +182,56 @@ describe('onecli-client', () => {
         }),
       );
       expect(await getOneCliOutboundConfig('main')).toBeNull();
+    });
+
+    it('caches the config — a second call within TTL does not re-mint', async () => {
+      configure();
+      applyContainerConfigMock.mockImplementation((args: string[]) => {
+        args.push('-e', 'HTTPS_PROXY=http://x:aoc_tok@gw:10255');
+        args.push(
+          '-v',
+          '/host/onecli-combined-ca.pem:/tmp/onecli-combined-ca.pem:ro',
+        );
+        return Promise.resolve(true);
+      });
+
+      const a = await getOneCliOutboundConfig('main');
+      const b = await getOneCliOutboundConfig('main');
+      expect(a).toEqual(b);
+      expect(applyContainerConfigMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('caches per-tier (distinct tiers each mint once)', async () => {
+      configure();
+      applyContainerConfigMock.mockImplementation((args: string[]) => {
+        args.push('-e', 'HTTPS_PROXY=http://x:aoc_tok@gw:10255');
+        args.push(
+          '-v',
+          '/host/onecli-combined-ca.pem:/tmp/onecli-combined-ca.pem:ro',
+        );
+        return Promise.resolve(true);
+      });
+
+      await getOneCliOutboundConfig('main');
+      await getOneCliOutboundConfig('trusted');
+      expect(applyContainerConfigMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('re-mints after the TTL expires', async () => {
+      configure();
+      applyContainerConfigMock.mockImplementation((args: string[]) => {
+        args.push('-e', 'HTTPS_PROXY=http://x:aoc_tok@gw:10255');
+        args.push(
+          '-v',
+          '/host/onecli-combined-ca.pem:/tmp/onecli-combined-ca.pem:ro',
+        );
+        return Promise.resolve(true);
+      });
+
+      await getOneCliOutboundConfig('main');
+      vi.advanceTimersByTime(61_000); // past the 60s TTL
+      await getOneCliOutboundConfig('main');
+      expect(applyContainerConfigMock).toHaveBeenCalledTimes(2);
     });
   });
 

@@ -309,7 +309,7 @@ export function startCredentialProxy(
           // failure the client sees a 502.
           const sendUpstreamRequest = (
             targetUrl: URL,
-            oneCliAgent?: Agent,
+            oneCli?: { agent: Agent; ca: string },
           ): void => {
             const isHttps = targetUrl.protocol === 'https:';
             const makeRequest = isHttps ? httpsRequest : httpRequest;
@@ -328,7 +328,7 @@ export function startCredentialProxy(
             delete headers['keep-alive'];
             delete headers['transfer-encoding'];
 
-            if (oneCliAgent) {
+            if (oneCli) {
               // #637: OneCLI injects the real Bearer on the outbound hop (this
               // request tunnels through the OneCLI gateway). Leave the
               // container's placeholder Authorization for OneCLI to overwrite;
@@ -338,11 +338,12 @@ export function startCredentialProxy(
               delete headers['x-api-key'];
               headers['x-api-key'] = secrets.ANTHROPIC_API_KEY;
             } else {
-              // OAuth mode: replace placeholder Bearer token with the real
-              // one only when the container actually sends an Authorization
-              // header (exchange request + auth probes). Post-exchange
-              // requests use x-api-key only, so they pass through without
-              // token injection.
+              // OAuth mode (.env fallback path, when OneCLI didn't handle this
+              // request): replace the placeholder Bearer with the real token
+              // whenever the container sends an Authorization header. In this
+              // deployment that includes /v1/messages (the SDK sends a
+              // placeholder Bearer, confirmed live) — the OAuth Bearer
+              // authenticates message traffic directly, not just the exchange.
               if (headers['authorization']) {
                 delete headers['authorization'];
                 if (oauthToken) {
@@ -360,12 +361,17 @@ export function startCredentialProxy(
                 headers,
                 // #637: when set, the outbound tunnels through the OneCLI
                 // gateway (CONNECT + MITM CA) so OneCLI injects the vaulted
-                // Bearer. Only the OAuth-exchange/probe requests set this;
-                // /v1/messages forwards direct so the usage tap is untouched.
-                // HttpsProxyAgent only tunnels HTTPS (CONNECT) — never attach it
-                // to a plain-HTTP upstream (prod is always https api.anthropic;
-                // http is a test-only upstream override).
-                ...(oneCliAgent && isHttps ? { agent: oneCliAgent } : {}),
+                // Bearer. The CA MUST go on the request options, NOT the
+                // HttpsProxyAgent constructor — https-proxy-agent v7 does not
+                // apply its constructor `ca` to the destination TLS, so an
+                // agent-only CA yields `self-signed certificate in certificate
+                // chain` (proven by isolated repro). HttpsProxyAgent only
+                // tunnels HTTPS (CONNECT); never attach it to a plain-HTTP
+                // upstream (prod is always https api.anthropic; http is a
+                // test-only upstream override).
+                ...(oneCli && isHttps
+                  ? { agent: oneCli.agent, ca: oneCli.ca }
+                  : {}),
               } as RequestOptions,
               (upRes) => {
                 res.writeHead(upRes.statusCode!, upRes.headers);
@@ -563,15 +569,16 @@ export function startCredentialProxy(
             upstream.end();
           };
 
-          // #637: route the Anthropic OAuth-exchange request (the only request
-          // that carries an Authorization header) through the OneCLI gateway so
-          // OneCLI injects the vaulted Bearer instead of the credential-proxy
-          // reading the token from .env. /v1/messages (temp x-api-key, no
-          // Authorization) forwards direct — usage tap unchanged. When OneCLI is
-          // unreachable, oneCliAgent stays undefined and the request falls back
-          // to .env injection (transition-safe; a hard 401 post-cutover once the
-          // token leaves .env, which is the correct failure).
-          let oneCliAgent: Agent | undefined;
+          // #637: route Authorization-carrying Anthropic requests through the
+          // OneCLI gateway so OneCLI injects the vaulted Bearer instead of the
+          // credential-proxy reading the token from .env. In this deployment
+          // that is the OAuth exchange AND /v1/messages (both carry a
+          // placeholder Bearer — confirmed live). The tunnelled request is
+          // still tee'd for usage below, so the tap is unchanged. When OneCLI
+          // is unreachable, oneCli stays undefined and the request falls back
+          // to .env injection (transition-safe; a hard 401 post-cutover once
+          // the token leaves .env, which is the correct failure).
+          let oneCli: { agent: Agent; ca: string } | undefined;
           if (
             authMode === 'oauth' &&
             req.headers['authorization'] &&
@@ -588,7 +595,12 @@ export function startCredentialProxy(
             try {
               const cfg = await getOneCliOutboundConfig(tier);
               if (cfg) {
-                oneCliAgent = new HttpsProxyAgent(cfg.proxyUrl, { ca: cfg.ca });
+                // CA is applied on the request options in sendUpstreamRequest,
+                // not on the agent (https-proxy-agent ignores constructor ca).
+                oneCli = {
+                  agent: new HttpsProxyAgent(cfg.proxyUrl),
+                  ca: cfg.ca,
+                };
               }
             } catch {
               // The handler is async now, so a thrown mint error would reject
@@ -605,7 +617,7 @@ export function startCredentialProxy(
               );
             }
           }
-          sendUpstreamRequest(upstreamUrl, oneCliAgent);
+          sendUpstreamRequest(upstreamUrl, oneCli);
           // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
         } catch (err) {
           logger.error(
