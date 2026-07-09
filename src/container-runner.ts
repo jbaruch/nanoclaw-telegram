@@ -538,6 +538,40 @@ export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Placeholder value forwarded into the container for OneCLI-managed
+ * credentials (see `ONECLI_MANAGED_VARS`). Non-empty so consumer skills
+ * that guard on "is the key set?" don't hard-fail; the real secret is
+ * swapped in by OneCLI's MITM gateway on the outbound request, so this
+ * literal never authenticates anything and never reaches the upstream.
+ */
+export const ONECLI_MANAGED_PLACEHOLDER = 'onecli-managed';
+
+/**
+ * Credentials that migrate from real-value env-file injection to OneCLI
+ * placeholder + gateway swap (umbrella #564, cleanup #640). When the OneCLI
+ * agent proxy is enabled (`ONECLI_AGENT_PROXY=1`), the container receives
+ * `<VAR>=onecli-managed` instead of the real value, and OneCLI's TLS-MITM
+ * injects the real secret for the vault host-pattern (verified for header AND
+ * query-param injection). When the agent proxy is OFF (local dev, or prod
+ * before the cutover), the var falls back to real-value forwarding via the
+ * normal `SECRET_CONTAINER_VARS` path.
+ *
+ * Preconditions to add a var here: (1) a OneCLI vault entry exists for its
+ * host with the correct header/param injection config, (2) the credential is
+ * purely container-outbound (no host-side reader that would also need it
+ * placeholdered), (3) injection is probe-verified for that host.
+ *
+ * `GOOGLE_MAPS_API_KEY` — vault host `maps.googleapis.com`, param `key`.
+ * Container-outbound only (drive-planner / flight-assist tiles); no host use.
+ * Swap probe-verified 2026-07-09: a placeholder-key Distance Matrix request
+ * through the gateway returned real distances (proof the `key` param is
+ * overwritten with the vaulted value).
+ */
+export const ONECLI_MANAGED_VARS: ReadonlySet<string> = new Set([
+  'GOOGLE_MAPS_API_KEY',
+]);
+
+/**
  * Result of materializing an env-file for a container spawn.
  * `args` are appended to the `docker run` argv; `cleanup` MUST be
  * invoked after the container exits (close OR error path) to remove
@@ -2897,8 +2931,25 @@ function buildContainerArgs(
   // env-file (passed via `--env-file`) so they don't appear on the
   // docker process command line; non-secrets stay on `-e KEY=value`.
   // See the SECRET_CONTAINER_VARS docstring for the policy.
+  // #640: when the OneCLI agent proxy is live it swaps real secrets in at the
+  // gateway, so OneCLI-managed vars enter the container as a non-empty
+  // placeholder and their real value never touches the container environ.
+  // Falls back to real-value forwarding otherwise.
+  //
+  // The gate MUST be `oneCliAgentProxyEnabled()`, NOT `isOneCliConfigured()`:
+  // in prod OneCLI is configured (the credential-proxy routes Anthropic through
+  // it, #637) while the agent proxy is OFF, so the agent's outbound Maps call
+  // does NOT pass through the gateway. Placeholdering on the weaker `configured`
+  // gate would ship `key=onecli-managed` on a DIRECT request → REQUEST_DENIED.
+  // The same flag gates `applyOneCliToSpawn` below, so placeholder and swap
+  // switch on together atomically.
+  const oneCliManagesSecrets = oneCliAgentProxyEnabled();
   const secretEnv: Record<string, string> = {};
   for (const varName of varsToForward) {
+    if (oneCliManagesSecrets && ONECLI_MANAGED_VARS.has(varName)) {
+      args.push('-e', `${varName}=${ONECLI_MANAGED_PLACEHOLDER}`);
+      continue;
+    }
     const value = process.env[varName] || envFromFile[varName];
     if (!value) continue;
     if (SECRET_CONTAINER_VARS.has(varName)) {

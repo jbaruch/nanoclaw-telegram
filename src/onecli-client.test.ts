@@ -358,6 +358,41 @@ describe('onecli-client', () => {
       expect(args).toContain('HTTPS_PROXY=http://onecli');
     });
 
+    it('appends NO_PROXY (both cases) excluding the host-gateway when the proxy is applied (#640 — preserves the Anthropic cred-proxy hop)', async () => {
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
+      applyContainerConfigMock.mockImplementation((args: string[]) => {
+        // The gateway sets HTTP_PROXY + HTTPS_PROXY but no NO_PROXY.
+        args.push('-e', 'HTTP_PROXY=http://onecli');
+        args.push('-e', 'HTTPS_PROXY=http://onecli');
+        return Promise.resolve(true);
+      });
+
+      const args = ['run', '-i', '--rm', 'image'];
+      const active = await applyOneCliToSpawn(args, 'main');
+
+      expect(active).toBe(true);
+      expect(args).toContain(
+        'NO_PROXY=host.docker.internal,localhost,127.0.0.1',
+      );
+      expect(args).toContain(
+        'no_proxy=host.docker.internal,localhost,127.0.0.1',
+      );
+    });
+
+    it('does NOT append NO_PROXY when the SDK reports inactive (no proxy env landed)', async () => {
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
+      applyContainerConfigMock.mockResolvedValue(false);
+
+      const args = ['run', '-i', '--rm', 'image'];
+      const active = await applyOneCliToSpawn(args, 'main');
+
+      expect(active).toBe(false);
+      expect(args.some((a) => a.startsWith('NO_PROXY='))).toBe(false);
+      expect(args.some((a) => a.startsWith('no_proxy='))).toBe(false);
+    });
+
     it('warns when SDK resolves false (configured but unreachable gateway)', async () => {
       // The real SDK catches gateway/config fetch failures and resolves
       // `false` instead of throwing. The `applyOneCliToSpawn` wrapper must

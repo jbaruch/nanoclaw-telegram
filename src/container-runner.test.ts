@@ -2922,3 +2922,89 @@ describe('#746 — OneCLI flags precede the image in spawn argv', () => {
     expect(vi.mocked(applyOneCliToSpawn)).not.toHaveBeenCalled();
   });
 });
+
+// -------------------------------------------------------------------
+// #640 — OneCLI-managed credentials enter the container as a non-empty
+// placeholder (real value swapped in by the gateway), so the real
+// secret never reaches the agent environ. Gated on the AGENT PROXY flag
+// (`oneCliAgentProxyEnabled`), NOT `isOneCliConfigured`: the placeholder
+// is only correct when the agent's outbound request actually traverses
+// the gateway that swaps the real value back in.
+// -------------------------------------------------------------------
+describe('#640 — OneCLI-managed credential forwarding', () => {
+  const REAL = 'REAL_MAPS_KEY_must_not_reach_container';
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    vi.mocked(isOneCliConfigured).mockReset();
+    vi.mocked(oneCliAgentProxyEnabled).mockReset();
+    vi.mocked(applyOneCliToSpawn).mockReset();
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(false);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.mocked(isOneCliConfigured).mockReturnValue(false);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(false);
+    delete process.env.GOOGLE_MAPS_API_KEY;
+  });
+
+  it('forwards GOOGLE_MAPS_API_KEY as the onecli-managed placeholder, never the real value, when the agent proxy is enabled', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
+    process.env.GOOGLE_MAPS_API_KEY = REAL;
+
+    const mainInput = { ...testInput, isMain: true };
+    const promise = runContainerAgent(testGroup, mainInput, () => {});
+    await vi.advanceTimersByTimeAsync(1); // flush the applyOneCliToSpawn await
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).toContain('GOOGLE_MAPS_API_KEY=onecli-managed');
+    expect(args.join(' ')).not.toContain(REAL);
+  });
+
+  it('does NOT placeholder when OneCLI is configured but the agent proxy is OFF (prod-before-cutover: a placeholder here would ship a dead key on a DIRECT request)', async () => {
+    // The exact prod state the gate bug would have broken: OneCLI runs for the
+    // Anthropic credential-proxy (configured=true) but agents are proxy-less
+    // (agentProxy=false), so nothing swaps the key back in. The real value MUST
+    // still be forwarded (via the SECRET env-file), never the placeholder.
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(false);
+    process.env.GOOGLE_MAPS_API_KEY = REAL;
+
+    const mainInput = { ...testInput, isMain: true };
+    const promise = runContainerAgent(testGroup, mainInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).not.toContain('GOOGLE_MAPS_API_KEY=onecli-managed');
+    // Real value routes through the 0600 env-file (SECRET var), never a plain
+    // -e placeholder on the argv, and the real value never appears on argv.
+    expect(args.join(' ')).not.toContain(REAL);
+  });
+
+  it('does NOT placeholder when OneCLI is fully unconfigured (dev fallback keeps the real-value env-file path)', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(false);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(false);
+    process.env.GOOGLE_MAPS_API_KEY = REAL;
+
+    const mainInput = { ...testInput, isMain: true };
+    const promise = runContainerAgent(testGroup, mainInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    // Maps is a SECRET var → real value routes through the 0600 env-file, so
+    // it never appears as a plain -e placeholder on the argv.
+    expect(args).not.toContain('GOOGLE_MAPS_API_KEY=onecli-managed');
+    expect(args.join(' ')).not.toContain(REAL);
+  });
+});

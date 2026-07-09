@@ -20,6 +20,17 @@ import { TRUST_TIERS, type TrustTier } from './trust-tier.js';
 
 export { TRUST_TIERS, type TrustTier };
 
+/**
+ * Hosts the agent must reach WITHOUT going through the OneCLI gateway when the
+ * agent proxy is applied (#640). Must include the container→host gateway
+ * hostname (`CONTAINER_HOST_GATEWAY` in `container-runtime.ts`), which the
+ * agent dials over plain HTTP for `ANTHROPIC_BASE_URL` (the credential-proxy).
+ * Hardcoded rather than imported: `container-runtime.ts` runs host-probing at
+ * module load, and pulling it into this module's import graph breaks the
+ * `fs`-mocked unit tests. Keep in sync with `CONTAINER_HOST_GATEWAY`.
+ */
+const AGENT_PROXY_BYPASS_HOSTS = 'host.docker.internal,localhost,127.0.0.1';
+
 const AGENT_IDENTIFIER_PREFIX = 'nanoclaw';
 /**
  * Tight per-call timeout so a configured-but-unreachable OneCLI gateway
@@ -260,6 +271,19 @@ export async function applyOneCliToSpawn(
       addHostMapping: false,
     });
     if (active) {
+      // #640: preserve the agent's Anthropic path when the gateway proxy env
+      // lands on the spawn. The SDK-applied config sets HTTP_PROXY + HTTPS_PROXY
+      // (+ NODE_USE_ENV_PROXY) but NO `NO_PROXY`. The agent reaches its local
+      // credential-proxy over PLAIN HTTP at `http://host.docker.internal:3001`
+      // (ANTHROPIC_BASE_URL); with HTTP_PROXY set and nothing excluding that
+      // host, that hop gets routed through the OneCLI gateway → ECONNRESET
+      // (this is exactly INCIDENT-746). Excluding the host-gateway (and
+      // loopback) keeps the cred-proxy hop direct while real external HTTPS
+      // (maps.googleapis.com, api.github.com, …) still flows through OneCLI for
+      // the vault swap. Appended AFTER applyContainerConfig so it wins over any
+      // gateway-supplied value (docker uses the last `-e` for a repeated key).
+      args.push('-e', `NO_PROXY=${AGENT_PROXY_BYPASS_HOSTS}`);
+      args.push('-e', `no_proxy=${AGENT_PROXY_BYPASS_HOSTS}`);
       // Info (not debug): a debug-only success line is why the argv-order bug
       // (#746) went unnoticed for weeks while this returned true. Surface
       // whether the proxy env actually landed on the spawn argv.
