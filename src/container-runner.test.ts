@@ -3137,4 +3137,24 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     expect(caTmpWrites).toHaveLength(2);
     expect(caTmpWrites[0]).not.toBe(caTmpWrites[1]);
   });
+
+  it('fails closed (and never spawns) when CA delivery THROWS, not just returns false (#640 — secret env-file cleanup)', async () => {
+    // A throw from mountOneCliAgentCa (here: getOneCliOutboundConfig rejects,
+    // but equally a mkdirSync/writeFileSync failure) must be caught, clean up
+    // the already-materialized 0600 secret env-file, and rethrow — not spawn a
+    // container and not leak forwarded secrets on disk (no-secrets).
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
+    vi.mocked(getOneCliOutboundConfig).mockRejectedValue(
+      new Error('gateway boom'),
+    );
+
+    const mainInput = { ...testInput, isMain: true };
+    const promise = runContainerAgent(testGroup, mainInput, () => {});
+    const rejected = expect(promise).rejects.toThrow(/gateway boom/);
+    await vi.advanceTimersByTimeAsync(1);
+    await rejected;
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+  });
 });

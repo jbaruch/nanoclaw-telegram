@@ -3540,40 +3540,48 @@ export async function runContainerAgent(
     // agent traffic is #640. Without this split, re-enabling ONECLI_URL for
     // #637 would re-apply the agent proxy that broke the LLM path.
     if (isOneCliConfigured() && oneCliAgentProxyEnabled()) {
-      const proxyApplied = await applyOneCliToSpawn(containerArgs, trustTier);
-      if (proxyApplied) {
-        // The agent's outbound HTTPS now traverses the OneCLI MITM gateway;
-        // deliver the CA so it can validate the MITM cert. The SDK's own CA
-        // mount is broken under DooD (see mountOneCliAgentCa) — without a
-        // trusted CA EVERY external HTTPS call fails TLS, so a CA-delivery
-        // failure is fail-closed, same as a withheld managed credential.
-        const caMounted = await mountOneCliAgentCa(containerArgs, trustTier);
-        if (!caMounted) {
-          cleanupSecretEnvFile();
+      // Any failure applying OneCLI must clean up the 0600 secret env-file that
+      // buildContainerArgs already materialized — the close/error handlers that
+      // otherwise clean it up aren't installed yet, so a bare throw here would
+      // leave forwarded secrets on disk (no-secrets). This covers the
+      // fail-closed throws below AND a throw from applyOneCliToSpawn or
+      // mountOneCliAgentCa's fs writes / getOneCliOutboundConfig.
+      try {
+        const proxyApplied = await applyOneCliToSpawn(containerArgs, trustTier);
+        if (proxyApplied) {
+          // The agent's outbound HTTPS now traverses the OneCLI MITM gateway;
+          // deliver the CA so it can validate the MITM cert. The SDK's own CA
+          // mount is broken under DooD (see mountOneCliAgentCa) — without a
+          // trusted CA EVERY external HTTPS call fails TLS, so a CA-delivery
+          // failure is fail-closed, same as a withheld managed credential.
+          const caMounted = await mountOneCliAgentCa(containerArgs, trustTier);
+          if (!caMounted) {
+            throw new Error(
+              'OneCLI agent proxy applied but its MITM CA could not be ' +
+                'delivered to the container — every external HTTPS call would ' +
+                'fail TLS. Confirm the OneCLI gateway is reachable (`curl -sf ' +
+                '$ONECLI_URL/health` on the NAS); the queue retries with backoff.',
+            );
+          }
+        } else if (managedPlaceholdersApplied) {
+          // #640 fail-closed: buildContainerArgs replaced managed credentials
+          // with placeholders under this same gate, withholding the real values.
+          // The gateway proxy could NOT be applied, so those placeholders would
+          // go out on DIRECT requests and fail (REQUEST_DENIED). Refuse to spawn
+          // a dead-credentialed container. The queue retries with backoff
+          // (index.ts catch → 'error'), so a transient gateway blip self-heals;
+          // untrusted spawns forward no vars, so this path is skipped for them.
           throw new Error(
-            'OneCLI agent proxy applied but its MITM CA could not be delivered ' +
-              'to the container — every external HTTPS call would fail TLS. ' +
-              'Confirm the OneCLI gateway is reachable (`curl -sf ' +
-              '$ONECLI_URL/health` on the NAS); the queue retries with backoff.',
+            'OneCLI agent proxy required (ONECLI_AGENT_PROXY=1) but could not ' +
+              'be applied to this spawn — managed credentials were withheld as ' +
+              'placeholders and would fail on a direct request. Confirm the ' +
+              'OneCLI gateway is reachable (`curl -sf $ONECLI_URL/health` on the ' +
+              'NAS) and the tier agent exists (`onecli agents list`), then retry.',
           );
         }
-      } else if (managedPlaceholdersApplied) {
-        // #640 fail-closed: buildContainerArgs replaced managed credentials with
-        // placeholders under this same gate, withholding the real values from
-        // the container. The gateway proxy could NOT be applied (unreachable /
-        // rejected), so those placeholders would go out on DIRECT requests and
-        // fail (REQUEST_DENIED). Refuse to spawn a dead-credentialed container:
-        // clean up the secret env-file and throw. The queue retries with backoff
-        // (index.ts catch → 'error'), so a transient gateway blip self-heals;
-        // untrusted spawns forward no vars, so this path is skipped for them.
+      } catch (err) {
         cleanupSecretEnvFile();
-        throw new Error(
-          'OneCLI agent proxy required (ONECLI_AGENT_PROXY=1) but could not be ' +
-            'applied to this spawn — managed credentials were withheld as ' +
-            'placeholders and would fail on a direct request. Confirm the OneCLI ' +
-            'gateway is reachable (`curl -sf $ONECLI_URL/health` on the NAS) and ' +
-            'the tier agent exists (`onecli agents list`), then retry.',
-        );
+        throw err;
       }
     }
 
