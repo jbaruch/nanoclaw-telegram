@@ -78,6 +78,7 @@ vi.mock('fs', async () => {
       // so the mock must satisfy the call rather than rely on a
       // catch-all.
       chownSync: vi.fn(),
+      chmodSync: vi.fn(),
       symlinkSync: vi.fn(),
       readlinkSync: vi.fn(() => ''),
       lstatSync: vi.fn(() => {
@@ -117,6 +118,12 @@ vi.mock('./onecli-client.js', () => ({
   isOneCliConfigured: vi.fn(() => false),
   oneCliAgentProxyEnabled: vi.fn(() => false),
   applyOneCliToSpawn: vi.fn(async () => false),
+  // Default to an available CA so any proxy-applied spawn path gets a valid
+  // MITM bundle; tests that assert the CA-unavailable fail-closed override this.
+  getOneCliOutboundConfig: vi.fn(async () => ({
+    proxyUrl: 'http://gw:10255',
+    ca: 'CA-BUNDLE-CONTENT',
+  })),
 }));
 
 // #305 Phase 2a — runContainerAgent now invokes the cadence-registry
@@ -190,6 +197,7 @@ import {
   isOneCliConfigured,
   oneCliAgentProxyEnabled,
   applyOneCliToSpawn,
+  getOneCliOutboundConfig,
 } from './onecli-client.js';
 import type { RegisteredGroup } from './types.js';
 
@@ -2950,6 +2958,14 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     vi.mocked(oneCliAgentProxyEnabled).mockReset();
     vi.mocked(applyOneCliToSpawn).mockReset();
     vi.mocked(applyOneCliToSpawn).mockResolvedValue(false);
+    // Default: CA is available. When the proxy is applied, the spawn delivers
+    // the OneCLI CA via getOneCliOutboundConfig; a null here fails the spawn
+    // closed (own test below), so proxy-applied tests need a valid CA.
+    vi.mocked(getOneCliOutboundConfig).mockReset();
+    vi.mocked(getOneCliOutboundConfig).mockResolvedValue({
+      proxyUrl: 'http://gw:10255',
+      ca: 'CA-BUNDLE-CONTENT',
+    });
   });
 
   afterEach(() => {
@@ -3047,5 +3063,47 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     // it never appears as a plain -e placeholder on the argv.
     expect(args).not.toContain('GOOGLE_MAPS_API_KEY=onecli-managed');
     expect(args.join(' ')).not.toContain(REAL);
+  });
+
+  it('mounts the OneCLI CA + points every CA env var at it when the proxy is applied (#640 — SDK CA mount is broken under DooD)', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
+
+    const mainInput = { ...testInput, isMain: true };
+    const promise = runContainerAgent(testGroup, mainInput, () => {});
+    await vi.advanceTimersByTimeAsync(1); // flush applyOneCliToSpawn + CA await
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    // CA bind-mounted read-only at the fixed container path.
+    expect(args.some((a) => a.endsWith(':/onecli/ca.pem:ro'))).toBe(true);
+    // Every CA env var (curl, python, node, git, openssl) re-pointed at it.
+    for (const v of [
+      'SSL_CERT_FILE',
+      'NODE_EXTRA_CA_CERTS',
+      'REQUESTS_CA_BUNDLE',
+      'CURL_CA_BUNDLE',
+      'GIT_SSL_CAINFO',
+    ]) {
+      expect(args).toContain(`${v}=/onecli/ca.pem`);
+    }
+  });
+
+  it('FAILS CLOSED when the proxy is applied but the CA cannot be delivered (a proxied container with no trusted CA fails all external HTTPS)', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
+    // Gateway unreachable for the CA fetch → no CA content.
+    vi.mocked(getOneCliOutboundConfig).mockResolvedValue(null);
+
+    const mainInput = { ...testInput, isMain: true };
+    const promise = runContainerAgent(testGroup, mainInput, () => {});
+    const rejected = expect(promise).rejects.toThrow(/MITM CA could not be/);
+    await vi.advanceTimersByTimeAsync(1);
+    await rejected;
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
   });
 });

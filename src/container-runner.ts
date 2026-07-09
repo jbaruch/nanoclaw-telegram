@@ -54,6 +54,7 @@ import { detectAuthMode } from './credential-proxy.js';
 import { registerContainer, unregisterContainer } from './proxy-registry.js';
 import {
   applyOneCliToSpawn,
+  getOneCliOutboundConfig,
   isOneCliConfigured,
   oneCliAgentProxyEnabled,
 } from './onecli-client.js';
@@ -1408,6 +1409,63 @@ function toHostPath(localPath: string): string {
   const rel = path.relative(projectRoot, localPath);
   if (rel.startsWith('..') || path.isAbsolute(rel)) return localPath; // outside project
   return path.join(HOST_PROJECT_ROOT, rel);
+}
+
+/** Container path the OneCLI MITM CA bundle is mounted at for proxied agents. */
+const ONECLI_AGENT_CA_CONTAINER_PATH = '/onecli/ca.pem';
+
+/** CA env vars re-pointed at the mounted bundle — covers curl, python-requests,
+ * node, git, and openssl-linked tools. */
+const ONECLI_AGENT_CA_ENV_VARS = [
+  'SSL_CERT_FILE',
+  'NODE_EXTRA_CA_CERTS',
+  'REQUESTS_CA_BUNDLE',
+  'CURL_CA_BUNDLE',
+  'GIT_SSL_CAINFO',
+] as const;
+
+/**
+ * Deliver the OneCLI MITM CA into an agent spawn so its gateway-proxied HTTPS
+ * traffic can validate the MITM cert. Returns false when the CA content is
+ * unavailable (gateway unreachable) — the caller MUST then fail the spawn
+ * closed, because a proxied container without a trusted CA cannot complete ANY
+ * external HTTPS (every request now traverses the MITM gateway).
+ *
+ * Why this exists (jbaruch/nanoclaw#640): the OneCLI SDK's own CA mount is
+ * broken under Docker-out-of-Docker. It writes the CA to a temp file INSIDE the
+ * orchestrator container and bind-mounts it, but the host docker daemon resolves
+ * the `-v` source against the HOST filesystem (not the orchestrator container's),
+ * so docker creates an empty directory and every agent gateway-MITM TLS
+ * handshake fails. We instead write the CA content to a host-visible path via
+ * `toHostPath` (the same DooD translation every other mount uses), mount it
+ * read-only, and OVERRIDE every CA env var the SDK leaves broken/empty. The
+ * `-v` + `-e` land AFTER the SDK's, so docker's last-wins resolves to ours.
+ *
+ * Written 0644 (world-readable) because agents run as a non-root `--user`, and
+ * onecli's own `ca-bundle.pem` is 0770/uid-999 which a non-root agent cannot
+ * read (proven in #640 throwaway-container tests).
+ */
+async function mountOneCliAgentCa(
+  args: string[],
+  tier: TrustTier,
+): Promise<boolean> {
+  const outbound = await getOneCliOutboundConfig(tier);
+  if (!outbound || !outbound.ca) return false;
+  const caDir = path.join(STORE_DIR, 'onecli-ca');
+  fs.mkdirSync(caDir, { recursive: true });
+  const caFile = path.join(caDir, `${tier}.pem`);
+  // Atomic write (tmp + rename) so concurrent same-tier spawns never read a
+  // half-written file; the content is identical across spawns so the rename
+  // race is benign. chmod after write because writeFileSync mode is umasked.
+  const tmpFile = `${caFile}.${process.pid}.tmp`;
+  fs.writeFileSync(tmpFile, outbound.ca, { mode: 0o644 });
+  fs.chmodSync(tmpFile, 0o644);
+  fs.renameSync(tmpFile, caFile);
+  args.push('-v', `${toHostPath(caFile)}:${ONECLI_AGENT_CA_CONTAINER_PATH}:ro`);
+  for (const envVar of ONECLI_AGENT_CA_ENV_VARS) {
+    args.push('-e', `${envVar}=${ONECLI_AGENT_CA_CONTAINER_PATH}`);
+  }
+  return true;
 }
 
 /**
@@ -3476,17 +3534,31 @@ export async function runContainerAgent(
     // #637 would re-apply the agent proxy that broke the LLM path.
     if (isOneCliConfigured() && oneCliAgentProxyEnabled()) {
       const proxyApplied = await applyOneCliToSpawn(containerArgs, trustTier);
-      // #640 fail-closed: buildContainerArgs replaced managed credentials with
-      // placeholders under this same gate, withholding the real values from the
-      // container. If the gateway proxy could NOT be applied (unreachable /
-      // rejected — applyOneCliToSpawn returned false), those placeholders would
-      // go out on DIRECT requests and fail (REQUEST_DENIED). Refuse to spawn a
-      // dead-credentialed container: clean up the secret env-file and throw an
-      // actionable error. The queue retries with backoff (index.ts catch →
-      // 'error'), so a transient gateway blip self-heals; a persistent outage
-      // surfaces the remediation in the logs. Untrusted spawns forward no vars,
-      // so managedPlaceholdersApplied is false and they proceed unaffected.
-      if (!proxyApplied && managedPlaceholdersApplied) {
+      if (proxyApplied) {
+        // The agent's outbound HTTPS now traverses the OneCLI MITM gateway;
+        // deliver the CA so it can validate the MITM cert. The SDK's own CA
+        // mount is broken under DooD (see mountOneCliAgentCa) — without a
+        // trusted CA EVERY external HTTPS call fails TLS, so a CA-delivery
+        // failure is fail-closed, same as a withheld managed credential.
+        const caMounted = await mountOneCliAgentCa(containerArgs, trustTier);
+        if (!caMounted) {
+          cleanupSecretEnvFile();
+          throw new Error(
+            'OneCLI agent proxy applied but its MITM CA could not be delivered ' +
+              'to the container — every external HTTPS call would fail TLS. ' +
+              'Confirm the OneCLI gateway is reachable (`curl -sf ' +
+              '$ONECLI_URL/health` on the NAS); the queue retries with backoff.',
+          );
+        }
+      } else if (managedPlaceholdersApplied) {
+        // #640 fail-closed: buildContainerArgs replaced managed credentials with
+        // placeholders under this same gate, withholding the real values from
+        // the container. The gateway proxy could NOT be applied (unreachable /
+        // rejected), so those placeholders would go out on DIRECT requests and
+        // fail (REQUEST_DENIED). Refuse to spawn a dead-credentialed container:
+        // clean up the secret env-file and throw. The queue retries with backoff
+        // (index.ts catch → 'error'), so a transient gateway blip self-heals;
+        // untrusted spawns forward no vars, so this path is skipped for them.
         cleanupSecretEnvFile();
         throw new Error(
           'OneCLI agent proxy required (ONECLI_AGENT_PROXY=1) but could not be ' +
