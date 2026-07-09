@@ -1451,13 +1451,20 @@ async function mountOneCliAgentCa(
 ): Promise<boolean> {
   const outbound = await getOneCliOutboundConfig(tier);
   if (!outbound || !outbound.ca) return false;
-  const caDir = path.join(STORE_DIR, 'onecli-ca');
+  // Under DATA_DIR, NOT STORE_DIR: `store/` is bind-mounted RW into main/trusted
+  // agents at /workspace/store, which would let an agent overwrite the backing
+  // file of its own RO /onecli/ca.pem CA mount (trust-anchor tampering / DoS).
+  // DATA_DIR is only mounted into agents via specific per-group subdirs
+  // (state/, sessions/, ipc/) — a fresh onecli-ca/ subdir is never mounted.
+  const caDir = path.join(DATA_DIR, 'onecli-ca');
   fs.mkdirSync(caDir, { recursive: true });
   const caFile = path.join(caDir, `${tier}.pem`);
-  // Atomic write (tmp + rename) so concurrent same-tier spawns never read a
-  // half-written file; the content is identical across spawns so the rename
-  // race is benign. chmod after write because writeFileSync mode is umasked.
-  const tmpFile = `${caFile}.${process.pid}.tmp`;
+  // Atomic write (unique tmp + rename) so concurrent same-tier spawns never
+  // read a half-written file. The orchestrator is a SINGLE process, so the tmp
+  // name must be unique per CALL — process.pid would collide across concurrent
+  // spawns. Content is identical across spawns, so the final rename race is
+  // benign. chmod after write because writeFileSync mode is subject to umask.
+  const tmpFile = `${caFile}.${randomBytes(8).toString('hex')}.tmp`;
   fs.writeFileSync(tmpFile, outbound.ca, { mode: 0o644 });
   fs.chmodSync(tmpFile, 0o644);
   fs.renameSync(tmpFile, caFile);

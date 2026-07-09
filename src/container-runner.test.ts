@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
+import fs from 'fs';
 
 // Sentinel markers must match container-runner.ts
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -3105,5 +3106,35 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     await vi.advanceTimersByTimeAsync(1);
     await rejected;
     expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+  });
+
+  it('writes each spawn CA bundle to a UNIQUE tmp path so concurrent same-tier spawns never collide, and both succeed (#640)', async () => {
+    // The orchestrator is a single process, so a pid-based tmp name would
+    // collide across concurrent same-tier spawns and one could ENOENT on
+    // rename. Two same-tier spawns must produce two distinct tmp paths.
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
+    vi.mocked(fs.writeFileSync).mockClear();
+
+    for (let i = 0; i < 2; i++) {
+      fakeProc = createFakeProcess();
+      const p = runContainerAgent(
+        testGroup,
+        { ...testInput, isMain: true },
+        () => {},
+      );
+      await vi.advanceTimersByTimeAsync(1);
+      fakeProc.emit('close', 0);
+      await vi.advanceTimersByTimeAsync(10);
+      await p; // neither spawn throws
+    }
+
+    const caTmpWrites = vi
+      .mocked(fs.writeFileSync)
+      .mock.calls.map((c) => String(c[0]))
+      .filter((pth) => pth.includes('onecli-ca') && pth.endsWith('.tmp'));
+    expect(caTmpWrites).toHaveLength(2);
+    expect(caTmpWrites[0]).not.toBe(caTmpWrites[1]);
   });
 });
