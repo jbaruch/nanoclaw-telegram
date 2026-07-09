@@ -538,6 +538,44 @@ export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Placeholder value forwarded into the container for OneCLI-managed
+ * credentials (see `ONECLI_MANAGED_VARS`). Non-empty so consumer skills
+ * that guard on "is the key set?" don't hard-fail; the real secret is
+ * swapped in by OneCLI's MITM gateway on the outbound request, so this
+ * literal never authenticates anything and never reaches the upstream.
+ */
+export const ONECLI_MANAGED_PLACEHOLDER = 'onecli-managed';
+
+/**
+ * Credentials that migrate from real-value env-file injection to OneCLI
+ * placeholder + gateway swap (umbrella #564, cleanup #640). When OneCLI is
+ * configured AND the agent proxy is enabled (`isOneCliConfigured() &&
+ * oneCliAgentProxyEnabled()` — the same gate the spawn uses to apply the
+ * gateway proxy), the container receives `<VAR>=onecli-managed` instead of the
+ * real value, and OneCLI's TLS-MITM injects the real secret for the vault
+ * host-pattern (verified for header AND query-param injection). When either
+ * conjunct is off (local dev, or prod before the cutover), the var falls back
+ * to real-value forwarding via the normal `SECRET_CONTAINER_VARS` path. If the
+ * gate passes but the gateway proxy cannot actually be applied at spawn time,
+ * the caller fails the spawn closed (see `managedPlaceholdersApplied`) rather
+ * than shipping a container with a dead placeholder credential.
+ *
+ * Preconditions to add a var here: (1) a OneCLI vault entry exists for its
+ * host with the correct header/param injection config, (2) the credential is
+ * purely container-outbound (no host-side reader that would also need it
+ * placeholdered), (3) injection is probe-verified for that host.
+ *
+ * `GOOGLE_MAPS_API_KEY` — vault host `maps.googleapis.com`, param `key`.
+ * Container-outbound only (drive-planner / flight-assist tiles); no host use.
+ * Swap probe-verified 2026-07-09: a placeholder-key Distance Matrix request
+ * through the gateway returned real distances (proof the `key` param is
+ * overwritten with the vaulted value).
+ */
+export const ONECLI_MANAGED_VARS: ReadonlySet<string> = new Set([
+  'GOOGLE_MAPS_API_KEY',
+]);
+
+/**
  * Result of materializing an env-file for a container spawn.
  * `args` are appended to the `docker run` argv; `cleanup` MUST be
  * invoked after the container exits (close OR error path) to remove
@@ -2779,6 +2817,15 @@ interface BuildContainerArgsResult {
   // written, so callers can invoke it unconditionally on container
   // exit without a null-check.
   cleanup: () => void;
+  // True when at least one `ONECLI_MANAGED_VARS` credential was forwarded as
+  // an `onecli-managed` placeholder (real value withheld from the container).
+  // The caller MUST fail the spawn closed if the gateway proxy is then not
+  // actually applied (`applyOneCliToSpawn` returns false), because a withheld
+  // credential would otherwise go out as a dead placeholder on a direct
+  // request (REQUEST_DENIED). Distinct from "the flag is on": untrusted
+  // spawns forward no vars, so nothing is placeholdered and no fail-close is
+  // owed even with the flag set.
+  managedPlaceholdersApplied: boolean;
 }
 
 function buildContainerArgs(
@@ -2897,8 +2944,35 @@ function buildContainerArgs(
   // env-file (passed via `--env-file`) so they don't appear on the
   // docker process command line; non-secrets stay on `-e KEY=value`.
   // See the SECRET_CONTAINER_VARS docstring for the policy.
+  // #640: when the OneCLI agent proxy is live it swaps real secrets in at the
+  // gateway, so OneCLI-managed vars enter the container as a non-empty
+  // placeholder and their real value never touches the container environ.
+  // Falls back to real-value forwarding otherwise.
+  //
+  // The gate mirrors EXACTLY the condition that decides whether the gateway
+  // proxy is applied to the spawn (`isOneCliConfigured() &&
+  // oneCliAgentProxyEnabled()` at the call site). Both conjuncts are load-
+  // bearing:
+  //   - `oneCliAgentProxyEnabled()` alone is insufficient: in prod OneCLI is
+  //     configured for the Anthropic credential-proxy (#637) but the agent
+  //     proxy is OFF, so the agent's Maps call does not traverse the gateway.
+  //   - `isOneCliConfigured()` is the other half: with only the flag set (no
+  //     ONECLI_URL/API_KEY) `applyOneCliToSpawn` is never called, so a
+  //     placeholder would go out on a DIRECT request → REQUEST_DENIED.
+  // Matching the call-site gate means placeholdering happens iff the proxy-
+  // application branch runs. The remaining gap — `applyOneCliToSpawn` itself
+  // returning false (gateway unreachable) — is closed at the call site by
+  // failing the spawn when `managedPlaceholdersApplied` is true (see below).
+  const oneCliManagesSecrets =
+    isOneCliConfigured() && oneCliAgentProxyEnabled();
+  let managedPlaceholdersApplied = false;
   const secretEnv: Record<string, string> = {};
   for (const varName of varsToForward) {
+    if (oneCliManagesSecrets && ONECLI_MANAGED_VARS.has(varName)) {
+      args.push('-e', `${varName}=${ONECLI_MANAGED_PLACEHOLDER}`);
+      managedPlaceholdersApplied = true;
+      continue;
+    }
     const value = process.env[varName] || envFromFile[varName];
     if (!value) continue;
     if (SECRET_CONTAINER_VARS.has(varName)) {
@@ -3160,6 +3234,7 @@ function buildContainerArgs(
   return {
     args,
     cleanup: secretEnvFile ? secretEnvFile.cleanup : () => {},
+    managedPlaceholdersApplied,
   };
 }
 
@@ -3371,19 +3446,22 @@ export async function runContainerAgent(
   // on the early-throw window. The handlers below also call
   // unregisterContainer; unregister is idempotent regardless.
   try {
-    const { args: containerArgs, cleanup: cleanupSecretEnvFile } =
-      buildContainerArgs(
-        mounts,
-        containerName,
-        group,
-        input.isMain,
-        sessionName,
-        input.replyToMessageId,
-        input.chatJid,
-        input.continuationCycleId,
-        attributionToken,
-        input.taskAgentModel,
-      );
+    const {
+      args: containerArgs,
+      cleanup: cleanupSecretEnvFile,
+      managedPlaceholdersApplied,
+    } = buildContainerArgs(
+      mounts,
+      containerName,
+      group,
+      input.isMain,
+      sessionName,
+      input.replyToMessageId,
+      input.chatJid,
+      input.continuationCycleId,
+      attributionToken,
+      input.taskAgentModel,
+    );
 
     // #564 groundwork: when OneCLI is configured, mutate containerArgs to add
     // HTTPS_PROXY env, mount the OneCLI CA bundle, and add
@@ -3397,7 +3475,27 @@ export async function runContainerAgent(
     // agent traffic is #640. Without this split, re-enabling ONECLI_URL for
     // #637 would re-apply the agent proxy that broke the LLM path.
     if (isOneCliConfigured() && oneCliAgentProxyEnabled()) {
-      await applyOneCliToSpawn(containerArgs, trustTier);
+      const proxyApplied = await applyOneCliToSpawn(containerArgs, trustTier);
+      // #640 fail-closed: buildContainerArgs replaced managed credentials with
+      // placeholders under this same gate, withholding the real values from the
+      // container. If the gateway proxy could NOT be applied (unreachable /
+      // rejected — applyOneCliToSpawn returned false), those placeholders would
+      // go out on DIRECT requests and fail (REQUEST_DENIED). Refuse to spawn a
+      // dead-credentialed container: clean up the secret env-file and throw an
+      // actionable error. The queue retries with backoff (index.ts catch →
+      // 'error'), so a transient gateway blip self-heals; a persistent outage
+      // surfaces the remediation in the logs. Untrusted spawns forward no vars,
+      // so managedPlaceholdersApplied is false and they proceed unaffected.
+      if (!proxyApplied && managedPlaceholdersApplied) {
+        cleanupSecretEnvFile();
+        throw new Error(
+          'OneCLI agent proxy required (ONECLI_AGENT_PROXY=1) but could not be ' +
+            'applied to this spawn — managed credentials were withheld as ' +
+            'placeholders and would fail on a direct request. Confirm the OneCLI ' +
+            'gateway is reachable (`curl -sf $ONECLI_URL/health` on the NAS) and ' +
+            'the tier agent exists (`onecli agents list`), then retry.',
+        );
+      }
     }
 
     // #746: append the image LAST — after OneCLI's flags — so `docker run`

@@ -20,6 +20,17 @@ import { TRUST_TIERS, type TrustTier } from './trust-tier.js';
 
 export { TRUST_TIERS, type TrustTier };
 
+/**
+ * Hosts the agent must reach WITHOUT going through the OneCLI gateway when the
+ * agent proxy is applied (#640). Must include the container→host gateway
+ * hostname (`CONTAINER_HOST_GATEWAY` in `container-runtime.ts`), which the
+ * agent dials over plain HTTP for `ANTHROPIC_BASE_URL` (the credential-proxy).
+ * Hardcoded rather than imported: `container-runtime.ts` runs host-probing at
+ * module load, and pulling it into this module's import graph breaks the
+ * `fs`-mocked unit tests. Keep in sync with `CONTAINER_HOST_GATEWAY`.
+ */
+const AGENT_PROXY_BYPASS_HOSTS = 'host.docker.internal,localhost,127.0.0.1';
+
 const AGENT_IDENTIFIER_PREFIX = 'nanoclaw';
 /**
  * Tight per-call timeout so a configured-but-unreachable OneCLI gateway
@@ -259,6 +270,51 @@ export async function applyOneCliToSpawn(
       // duplicate mapping.
       addHostMapping: false,
     });
+    // #640: preserve the agent's Anthropic path whenever the gateway proxy env
+    // lands on the spawn. The SDK-applied config sets HTTP_PROXY + HTTPS_PROXY
+    // (+ NODE_USE_ENV_PROXY) but NO `NO_PROXY`. The agent reaches its local
+    // credential-proxy over PLAIN HTTP at `http://host.docker.internal:3001`
+    // (ANTHROPIC_BASE_URL); with HTTP_PROXY set and nothing excluding that
+    // host, that hop gets routed through the OneCLI gateway → ECONNRESET
+    // (this is exactly INCIDENT-746). Excluding the host-gateway (and loopback)
+    // keeps the cred-proxy hop direct while real external HTTPS
+    // (maps.googleapis.com, api.github.com, …) still flows through OneCLI for
+    // the vault swap.
+    //
+    // Keyed on the ACTUAL presence of HTTP(S)_PROXY in the argv, NOT on
+    // `active`: today `applyContainerConfig` only pushes proxy env on the same
+    // path it returns true, but decoupling keeps the bypass correct if a future
+    // SDK ever mutates argv with proxy env yet reports a non-true result
+    // (partial/empty config) — otherwise INCIDENT-746 could silently return.
+    // The merged value is appended AFTER applyContainerConfig so it wins over
+    // any gateway-supplied value (docker uses the last `-e` for a repeated key).
+    const proxyEnvLanded = args.some(
+      (a) => a.startsWith('HTTP_PROXY=') || a.startsWith('HTTPS_PROXY='),
+    );
+    if (proxyEnvLanded) {
+      // UNION our required bypass hosts with any NO_PROXY the gateway/SDK
+      // already set — don't blindly override it. Docker's last-`-e`-wins means
+      // a bare override would DROP a pre-existing NO_PROXY (e.g. a future
+      // gateway that ships its own internal-host bypass), reintroducing
+      // connectivity regressions. Nothing upstream sets NO_PROXY today, but
+      // union keeps this correct if that changes. Collect EVERY existing
+      // `NO_PROXY`/`no_proxy` entry (case-insensitive) — both cases, or a
+      // value repeated across multiple `-e` — so no bypass list is dropped.
+      const existingHosts = args
+        .filter((a) => /^no_proxy=/i.test(a))
+        .map((a) => a.slice(a.indexOf('=') + 1));
+      const mergedHosts = Array.from(
+        new Set(
+          [...existingHosts, AGENT_PROXY_BYPASS_HOSTS]
+            .join(',')
+            .split(',')
+            .map((h) => h.trim())
+            .filter(Boolean),
+        ),
+      ).join(',');
+      args.push('-e', `NO_PROXY=${mergedHosts}`);
+      args.push('-e', `no_proxy=${mergedHosts}`);
+    }
     if (active) {
       // Info (not debug): a debug-only success line is why the argv-order bug
       // (#746) went unnoticed for weeks while this returned true. Surface

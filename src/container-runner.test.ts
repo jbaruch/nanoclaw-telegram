@@ -2922,3 +2922,130 @@ describe('#746 — OneCLI flags precede the image in spawn argv', () => {
     expect(vi.mocked(applyOneCliToSpawn)).not.toHaveBeenCalled();
   });
 });
+
+// -------------------------------------------------------------------
+// #640 — OneCLI-managed credentials enter the container as a non-empty
+// placeholder (real value swapped in by the gateway), so the real
+// secret never reaches the agent environ. Gated on BOTH conjuncts of the
+// proxy-application condition — `isOneCliConfigured() &&
+// oneCliAgentProxyEnabled()` — since the placeholder is only correct when
+// the agent's outbound request actually traverses the gateway that swaps
+// the real value back in. When the gate passes but the proxy cannot be
+// applied at spawn time, the spawn fails closed (covered below).
+// -------------------------------------------------------------------
+describe('#640 — OneCLI-managed credential forwarding', () => {
+  const REAL = 'REAL_MAPS_KEY_must_not_reach_container';
+  // Capture the pre-suite value so cleanup restores it exactly (delete only
+  // if it was unset) — an unconditional delete would leave the shared process
+  // env dirty for later tests on a run that started with the var set
+  // (testing-standards: no shared mutable state between tests).
+  let savedMapsKey: string | undefined;
+
+  beforeEach(() => {
+    savedMapsKey = process.env.GOOGLE_MAPS_API_KEY;
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    vi.mocked(isOneCliConfigured).mockReset();
+    vi.mocked(oneCliAgentProxyEnabled).mockReset();
+    vi.mocked(applyOneCliToSpawn).mockReset();
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(false);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.mocked(isOneCliConfigured).mockReturnValue(false);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(false);
+    if (savedMapsKey === undefined) {
+      delete process.env.GOOGLE_MAPS_API_KEY;
+    } else {
+      process.env.GOOGLE_MAPS_API_KEY = savedMapsKey;
+    }
+  });
+
+  it('forwards GOOGLE_MAPS_API_KEY as the onecli-managed placeholder, never the real value, when the agent proxy is enabled and applied', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
+    // Proxy actually lands on the spawn — the swap will happen, so the
+    // placeholder is safe.
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
+    process.env.GOOGLE_MAPS_API_KEY = REAL;
+
+    const mainInput = { ...testInput, isMain: true };
+    const promise = runContainerAgent(testGroup, mainInput, () => {});
+    await vi.advanceTimersByTimeAsync(1); // flush the applyOneCliToSpawn await
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).toContain('GOOGLE_MAPS_API_KEY=onecli-managed');
+    expect(args.join(' ')).not.toContain(REAL);
+  });
+
+  it('FAILS CLOSED when the proxy is enabled but applyOneCliToSpawn cannot apply it (never spawns a container with a dead placeholder key)', async () => {
+    // Both flags on → buildContainerArgs placeholders the Maps key (real value
+    // withheld). But the gateway is unreachable, so applyOneCliToSpawn resolves
+    // false: the proxy env never lands, and a direct request with the
+    // placeholder would REQUEST_DENIED. The spawn must throw instead — the
+    // queue retries with backoff, so a transient blip self-heals.
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(false);
+    process.env.GOOGLE_MAPS_API_KEY = REAL;
+
+    const mainInput = { ...testInput, isMain: true };
+    const promise = runContainerAgent(testGroup, mainInput, () => {});
+    // Attach the rejection expectation BEFORE advancing timers so the
+    // rejection (which fires while the applyOneCliToSpawn await flushes) is
+    // never momentarily unhandled — otherwise Vitest reports it as an
+    // unhandled error even though the assertion passes.
+    const rejected = expect(promise).rejects.toThrow(
+      /OneCLI agent proxy required/,
+    );
+    await vi.advanceTimersByTimeAsync(1); // flush the applyOneCliToSpawn await
+    await rejected;
+    // No container was ever spawned.
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+  });
+
+  it('does NOT placeholder when OneCLI is configured but the agent proxy is OFF (prod-before-cutover: a placeholder here would ship a dead key on a DIRECT request)', async () => {
+    // The exact prod state the gate bug would have broken: OneCLI runs for the
+    // Anthropic credential-proxy (configured=true) but agents are proxy-less
+    // (agentProxy=false), so nothing swaps the key back in. The real value MUST
+    // still be forwarded (via the SECRET env-file), never the placeholder.
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(false);
+    process.env.GOOGLE_MAPS_API_KEY = REAL;
+
+    const mainInput = { ...testInput, isMain: true };
+    const promise = runContainerAgent(testGroup, mainInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args).not.toContain('GOOGLE_MAPS_API_KEY=onecli-managed');
+    // Real value routes through the 0600 env-file (SECRET var), never a plain
+    // -e placeholder on the argv, and the real value never appears on argv.
+    expect(args.join(' ')).not.toContain(REAL);
+  });
+
+  it('does NOT placeholder when OneCLI is fully unconfigured (dev fallback keeps the real-value env-file path)', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(false);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(false);
+    process.env.GOOGLE_MAPS_API_KEY = REAL;
+
+    const mainInput = { ...testInput, isMain: true };
+    const promise = runContainerAgent(testGroup, mainInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    // Maps is a SECRET var → real value routes through the 0600 env-file, so
+    // it never appears as a plain -e placeholder on the argv.
+    expect(args).not.toContain('GOOGLE_MAPS_API_KEY=onecli-managed');
+    expect(args.join(' ')).not.toContain(REAL);
+  });
+});
