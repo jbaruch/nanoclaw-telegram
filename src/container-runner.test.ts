@@ -3001,6 +3001,41 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     expect(args.join(' ')).not.toContain(REAL);
   });
 
+  it('placeholders every ONECLI_MANAGED_VARS credential (Maps, TomTom, YouTube, GitHub), never the real value, when the proxy is applied (#640)', async () => {
+    const MANAGED = [
+      'GOOGLE_MAPS_API_KEY',
+      'TOMTOM_API_KEY',
+      'YOUTUBE_API_KEY',
+      'GITHUB_TOKEN',
+    ];
+    const saved = new Map(MANAGED.map((v) => [v, process.env[v]]));
+    for (const v of MANAGED) process.env[v] = `REAL_${v}_must_not_reach`;
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
+
+    try {
+      const mainInput = { ...testInput, isMain: true };
+      const promise = runContainerAgent(testGroup, mainInput, () => {});
+      await vi.advanceTimersByTimeAsync(1);
+      fakeProc.emit('close', 0);
+      await vi.advanceTimersByTimeAsync(10);
+      await promise;
+
+      const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+      const joined = args.join(' ');
+      for (const v of MANAGED) {
+        expect(args).toContain(`${v}=onecli-managed`);
+        expect(joined).not.toContain(`REAL_${v}_must_not_reach`);
+      }
+    } finally {
+      for (const [v, val] of saved) {
+        if (val === undefined) delete process.env[v];
+        else process.env[v] = val;
+      }
+    }
+  });
+
   it('FAILS CLOSED when the proxy is enabled but applyOneCliToSpawn cannot apply it (never spawns a container with a dead placeholder key)', async () => {
     // Both flags on → buildContainerArgs placeholders the Maps key (real value
     // withheld). But the gateway is unreachable, so applyOneCliToSpawn resolves
@@ -3143,11 +3178,12 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     // A throw from mountOneCliAgentCa (here: getOneCliOutboundConfig rejects,
     // but equally a mkdirSync/writeFileSync failure) must be caught, clean up
     // the already-materialized secret env-file, and rethrow — not spawn and not
-    // leave forwarded secrets on disk. GITHUB_TOKEN is a forwarded SECRET var
-    // (NOT OneCLI-managed under the proxy), so it materializes a real env-file
-    // whose cleanup (fs.unlinkSync) must fire on the throw path.
-    const savedGh = process.env.GITHUB_TOKEN;
-    process.env.GITHUB_TOKEN = 'ghp_secret_must_be_cleaned_up';
+    // leave forwarded secrets on disk. SESSIONIZE_SPEAKER_KEY is a forwarded
+    // SECRET var that is NOT OneCLI-managed (injection-gap: key is path-embedded,
+    // so it can't be vaulted), so it materializes a real env-file whose cleanup
+    // (fs.unlinkSync) must fire on the throw path.
+    const savedGh = process.env.SESSIONIZE_SPEAKER_KEY;
+    process.env.SESSIONIZE_SPEAKER_KEY = 'sz_secret_must_be_cleaned_up';
     vi.mocked(fs.unlinkSync).mockClear();
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
     vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
@@ -3167,8 +3203,8 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
       // (would fail if the catch only rethrew and left the file on disk).
       expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalled();
     } finally {
-      if (savedGh === undefined) delete process.env.GITHUB_TOKEN;
-      else process.env.GITHUB_TOKEN = savedGh;
+      if (savedGh === undefined) delete process.env.SESSIONIZE_SPEAKER_KEY;
+      else process.env.SESSIONIZE_SPEAKER_KEY = savedGh;
     }
   });
 });

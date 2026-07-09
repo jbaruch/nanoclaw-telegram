@@ -562,18 +562,25 @@ export const ONECLI_MANAGED_PLACEHOLDER = 'onecli-managed';
  * than shipping a container with a dead placeholder credential.
  *
  * Preconditions to add a var here: (1) a OneCLI vault entry exists for its
- * host with the correct header/param injection config, (2) the credential is
- * purely container-outbound (no host-side reader that would also need it
- * placeholdered), (3) injection is probe-verified for that host.
+ * host with the correct header/param injection config, (2) injection is
+ * probe-verified for that host (placeholder key/header through the gateway
+ * returns real data). A host-side reader does NOT disqualify a var: only the
+ * CONTAINER is placeholdered here, so a var the host also reads (e.g.
+ * `GITHUB_TOKEN` → the `github_backup` IPC handler's `git push`) keeps its real
+ * value in `.env` for the host while agents get the placeholder + swap.
  *
- * `GOOGLE_MAPS_API_KEY` — vault host `maps.googleapis.com`, param `key`.
- * Container-outbound only (drive-planner / flight-assist tiles); no host use.
- * Swap probe-verified 2026-07-09: a placeholder-key Distance Matrix request
- * through the gateway returned real distances (proof the `key` param is
- * overwritten with the vaulted value).
+ * All entries swap-verified through the gateway (placeholder → real data):
+ * `GOOGLE_MAPS_API_KEY` — `maps.googleapis.com`, param `key` (Distance Matrix).
+ * `TOMTOM_API_KEY`      — `api.tomtom.com`, param `key` (routing / geocode).
+ * `YOUTUBE_API_KEY`     — `www.googleapis.com` path `/youtube/*`, param `key`.
+ * `GITHUB_TOKEN`        — `api.github.com`, header `Authorization: Bearer` (gh);
+ *                          host-side `github_backup` still reads the .env value.
  */
 export const ONECLI_MANAGED_VARS: ReadonlySet<string> = new Set([
   'GOOGLE_MAPS_API_KEY',
+  'TOMTOM_API_KEY',
+  'YOUTUBE_API_KEY',
+  'GITHUB_TOKEN',
 ]);
 
 /**
