@@ -70,6 +70,7 @@ vi.mock('fs', async () => {
       statSync: vi.fn(() => ({ isDirectory: () => false })),
       copyFileSync: vi.fn(),
       renameSync: vi.fn(),
+      unlinkSync: vi.fn(),
       rmSync: vi.fn(),
       // chownSync is a no-op so the post-mkdir chown on the
       // /workspace/state mount (and the trusted-dir mount above) doesn't
@@ -3138,11 +3139,16 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     expect(caTmpWrites[0]).not.toBe(caTmpWrites[1]);
   });
 
-  it('fails closed (and never spawns) when CA delivery THROWS, not just returns false (#640 — secret env-file cleanup)', async () => {
+  it('fails closed AND unlinks the materialized 0600 secret env-file when CA delivery THROWS (#640 — no leaked secrets on disk)', async () => {
     // A throw from mountOneCliAgentCa (here: getOneCliOutboundConfig rejects,
     // but equally a mkdirSync/writeFileSync failure) must be caught, clean up
-    // the already-materialized 0600 secret env-file, and rethrow — not spawn a
-    // container and not leak forwarded secrets on disk (no-secrets).
+    // the already-materialized secret env-file, and rethrow — not spawn and not
+    // leave forwarded secrets on disk. GITHUB_TOKEN is a forwarded SECRET var
+    // (NOT OneCLI-managed under the proxy), so it materializes a real env-file
+    // whose cleanup (fs.unlinkSync) must fire on the throw path.
+    const savedGh = process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN = 'ghp_secret_must_be_cleaned_up';
+    vi.mocked(fs.unlinkSync).mockClear();
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
     vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
     vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
@@ -3150,11 +3156,19 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
       new Error('gateway boom'),
     );
 
-    const mainInput = { ...testInput, isMain: true };
-    const promise = runContainerAgent(testGroup, mainInput, () => {});
-    const rejected = expect(promise).rejects.toThrow(/gateway boom/);
-    await vi.advanceTimersByTimeAsync(1);
-    await rejected;
-    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+    try {
+      const mainInput = { ...testInput, isMain: true };
+      const promise = runContainerAgent(testGroup, mainInput, () => {});
+      const rejected = expect(promise).rejects.toThrow(/gateway boom/);
+      await vi.advanceTimersByTimeAsync(1);
+      await rejected;
+      expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+      // Outcome: the secret env-file was unlinked before the rejection surfaced
+      // (would fail if the catch only rethrew and left the file on disk).
+      expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalled();
+    } finally {
+      if (savedGh === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = savedGh;
+    }
   });
 });
