@@ -380,6 +380,35 @@ describe('onecli-client', () => {
       );
     });
 
+    it('MERGES the required bypass hosts into a pre-existing NO_PROXY instead of overriding it (#640 — never drops an upstream-set bypass)', async () => {
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
+      applyContainerConfigMock.mockImplementation((args: string[]) => {
+        args.push('-e', 'HTTPS_PROXY=http://onecli');
+        // A future gateway ships its own bypass — must be preserved.
+        args.push('-e', 'NO_PROXY=internal.corp,10.0.0.0/8');
+        return Promise.resolve(true);
+      });
+
+      const args = ['run', '-i', '--rm', 'image'];
+      await applyOneCliToSpawn(args, 'main');
+
+      // The winning (last) NO_PROXY carries the union — upstream hosts kept,
+      // our bypass hosts added, no duplicates.
+      const merged = args
+        .filter((a) => a.startsWith('NO_PROXY='))
+        .pop()!
+        .slice('NO_PROXY='.length)
+        .split(',');
+      expect(merged).toContain('internal.corp');
+      expect(merged).toContain('10.0.0.0/8');
+      expect(merged).toContain('host.docker.internal');
+      expect(merged).toContain('localhost');
+      expect(merged).toContain('127.0.0.1');
+      // No duplicate host entries.
+      expect(new Set(merged).size).toBe(merged.length);
+    });
+
     it('appends NO_PROXY when proxy env landed on argv even if the SDK reports inactive (#640 — decoupled from `active` so SDK drift cannot resurrect INCIDENT-746)', async () => {
       envFileMock.ONECLI_URL = 'http://localhost:10254';
       envFileMock.ONECLI_API_KEY = 'oc_test';

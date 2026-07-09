@@ -286,14 +286,33 @@ export async function applyOneCliToSpawn(
     // path it returns true, but decoupling keeps the bypass correct if a future
     // SDK ever mutates argv with proxy env yet reports a non-true result
     // (partial/empty config) — otherwise INCIDENT-746 could silently return.
-    // Appended AFTER applyContainerConfig so it wins over any gateway-supplied
-    // value (docker uses the last `-e` for a repeated key).
+    // The merged value is appended AFTER applyContainerConfig so it wins over
+    // any gateway-supplied value (docker uses the last `-e` for a repeated key).
     const proxyEnvLanded = args.some(
       (a) => a.startsWith('HTTP_PROXY=') || a.startsWith('HTTPS_PROXY='),
     );
     if (proxyEnvLanded) {
-      args.push('-e', `NO_PROXY=${AGENT_PROXY_BYPASS_HOSTS}`);
-      args.push('-e', `no_proxy=${AGENT_PROXY_BYPASS_HOSTS}`);
+      // UNION our required bypass hosts with any NO_PROXY the gateway/SDK
+      // already set — don't blindly override it. Docker's last-`-e`-wins means
+      // a bare override would DROP a pre-existing NO_PROXY (e.g. a future
+      // gateway that ships its own internal-host bypass), reintroducing
+      // connectivity regressions. Nothing upstream sets NO_PROXY today, but
+      // union keeps this correct if that changes. Case-insensitive match picks
+      // up either `NO_PROXY`/`no_proxy`.
+      const existing = args.find((a) => /^no_proxy=/i.test(a));
+      const existingHosts = existing
+        ? existing.slice(existing.indexOf('=') + 1)
+        : '';
+      const mergedHosts = Array.from(
+        new Set(
+          `${existingHosts},${AGENT_PROXY_BYPASS_HOSTS}`
+            .split(',')
+            .map((h) => h.trim())
+            .filter(Boolean),
+        ),
+      ).join(',');
+      args.push('-e', `NO_PROXY=${mergedHosts}`);
+      args.push('-e', `no_proxy=${mergedHosts}`);
     }
     if (active) {
       // Info (not debug): a debug-only success line is why the argv-order bug
