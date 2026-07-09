@@ -55,6 +55,21 @@ export function isOneCliConfigured(): boolean {
   return readEnvOptions() !== null;
 }
 
+/**
+ * Gate for the agent-spawn proxy injection (`applyOneCliToSpawn`), SEPARATE
+ * from `isOneCliConfigured`. #637 makes the credential-proxy route Anthropic
+ * through OneCLI while agents themselves stay proxy-less — putting OneCLI in
+ * front of agent traffic is #640 (external-cred swap), which also needs the
+ * non-vault-passthrough validation. Without this split, re-enabling
+ * `ONECLI_URL` for #637 would re-apply the agent proxy that broke the LLM
+ * path (the agent's call to its local credential-proxy got routed through the
+ * OneCLI gateway → ECONNRESET). Default OFF; #640 flips it on.
+ */
+export function oneCliAgentProxyEnabled(): boolean {
+  const env = readEnvFile(['ONECLI_AGENT_PROXY']);
+  return env.ONECLI_AGENT_PROXY === '1';
+}
+
 function getClient(): OneCLI | null {
   if (cachedClient) return cachedClient;
   const opts = readEnvOptions();

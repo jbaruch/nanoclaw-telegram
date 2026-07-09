@@ -115,6 +115,7 @@ vi.mock('./credential-proxy.js', () => ({
 // to prove the image token still lands last.
 vi.mock('./onecli-client.js', () => ({
   isOneCliConfigured: vi.fn(() => false),
+  oneCliAgentProxyEnabled: vi.fn(() => false),
   applyOneCliToSpawn: vi.fn(async () => false),
 }));
 
@@ -185,7 +186,11 @@ import {
   getInstalledTiles,
 } from './container-runner.js';
 import { logger } from './logger.js';
-import { isOneCliConfigured, applyOneCliToSpawn } from './onecli-client.js';
+import {
+  isOneCliConfigured,
+  oneCliAgentProxyEnabled,
+  applyOneCliToSpawn,
+} from './onecli-client.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -2834,6 +2839,7 @@ describe('#746 — OneCLI flags precede the image in spawn argv', () => {
     fakeProc = createFakeProcess();
     vi.mocked(spawn).mockClear();
     vi.mocked(isOneCliConfigured).mockReset();
+    vi.mocked(oneCliAgentProxyEnabled).mockReset();
     vi.mocked(applyOneCliToSpawn).mockReset();
   });
 
@@ -2841,11 +2847,13 @@ describe('#746 — OneCLI flags precede the image in spawn argv', () => {
     vi.useRealTimers();
     // Restore the file-wide default no-op so no later test sees OneCLI on.
     vi.mocked(isOneCliConfigured).mockReturnValue(false);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(false);
     vi.mocked(applyOneCliToSpawn).mockResolvedValue(false);
   });
 
-  it('appends OneCLI -e/-v/--add-host before CONTAINER_IMAGE when configured', async () => {
+  it('appends OneCLI -e/-v/--add-host before CONTAINER_IMAGE when configured and agent-proxy enabled', async () => {
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
     // Mirror the SDK's append-only mutation of the argv.
     vi.mocked(applyOneCliToSpawn).mockImplementation(async (args: string[]) => {
       for (const [opt, val] of ONECLI_ARGS) args.push(opt, val);
@@ -2883,6 +2891,25 @@ describe('#746 — OneCLI flags precede the image in spawn argv', () => {
 
   it('unconfigured spawn ends with the image and never calls OneCLI', async () => {
     vi.mocked(isOneCliConfigured).mockReturnValue(false);
+
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    expect(args[args.length - 1]).toBe('nanoclaw-agent:latest');
+    expect(args).not.toContain(ONECLI_ARGS[0]![1]);
+    expect(vi.mocked(applyOneCliToSpawn)).not.toHaveBeenCalled();
+  });
+
+  // #637: OneCLI configured but the agent-proxy flag OFF — agents must stay
+  // proxy-less (OneCLI serves the credential-proxy's Anthropic hop, not agent
+  // traffic). This is the guard that stops re-enabling ONECLI_URL from
+  // re-applying the agent proxy that broke the LLM path.
+  it('does NOT apply the agent proxy when OneCLI is configured but ONECLI_AGENT_PROXY is off', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(false);
 
     const promise = runContainerAgent(testGroup, testInput, () => {});
     fakeProc.emit('close', 0);

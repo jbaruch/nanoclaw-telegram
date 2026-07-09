@@ -52,7 +52,11 @@ import {
 import { defaultComputeNextRun } from './cadence-registry.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { registerContainer, unregisterContainer } from './proxy-registry.js';
-import { applyOneCliToSpawn, isOneCliConfigured } from './onecli-client.js';
+import {
+  applyOneCliToSpawn,
+  isOneCliConfigured,
+  oneCliAgentProxyEnabled,
+} from './onecli-client.js';
 import type { TrustTier } from './trust-tier.js';
 import { rebuildCadenceRegistryForGroup } from './db.js';
 import { isHandoffActive } from './handoff.js';
@@ -3387,7 +3391,12 @@ export async function runContainerAgent(
     // spawn path microtask-free when OneCLI is off — relevant for tests that
     // emit 'close' between `runContainerAgent` invocation and the spawn
     // registering its close handler.
-    if (isOneCliConfigured()) {
+    // #637: agent-spawn proxy injection is gated on a SEPARATE flag, not just
+    // isOneCliConfigured. #637 enables OneCLI for the credential-proxy's
+    // Anthropic hop while agents stay proxy-less; putting OneCLI in front of
+    // agent traffic is #640. Without this split, re-enabling ONECLI_URL for
+    // #637 would re-apply the agent proxy that broke the LLM path.
+    if (isOneCliConfigured() && oneCliAgentProxyEnabled()) {
       await applyOneCliToSpawn(containerArgs, trustTier);
     }
 
