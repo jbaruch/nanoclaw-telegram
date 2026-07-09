@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
+import fs from 'fs';
 
 // Sentinel markers must match container-runner.ts
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -69,6 +70,7 @@ vi.mock('fs', async () => {
       statSync: vi.fn(() => ({ isDirectory: () => false })),
       copyFileSync: vi.fn(),
       renameSync: vi.fn(),
+      unlinkSync: vi.fn(),
       rmSync: vi.fn(),
       // chownSync is a no-op so the post-mkdir chown on the
       // /workspace/state mount (and the trusted-dir mount above) doesn't
@@ -78,6 +80,7 @@ vi.mock('fs', async () => {
       // so the mock must satisfy the call rather than rely on a
       // catch-all.
       chownSync: vi.fn(),
+      chmodSync: vi.fn(),
       symlinkSync: vi.fn(),
       readlinkSync: vi.fn(() => ''),
       lstatSync: vi.fn(() => {
@@ -117,6 +120,12 @@ vi.mock('./onecli-client.js', () => ({
   isOneCliConfigured: vi.fn(() => false),
   oneCliAgentProxyEnabled: vi.fn(() => false),
   applyOneCliToSpawn: vi.fn(async () => false),
+  // Default to an available CA so any proxy-applied spawn path gets a valid
+  // MITM bundle; tests that assert the CA-unavailable fail-closed override this.
+  getOneCliOutboundConfig: vi.fn(async () => ({
+    proxyUrl: 'http://gw:10255',
+    ca: 'CA-BUNDLE-CONTENT',
+  })),
 }));
 
 // #305 Phase 2a — runContainerAgent now invokes the cadence-registry
@@ -190,6 +199,7 @@ import {
   isOneCliConfigured,
   oneCliAgentProxyEnabled,
   applyOneCliToSpawn,
+  getOneCliOutboundConfig,
 } from './onecli-client.js';
 import type { RegisteredGroup } from './types.js';
 
@@ -2950,6 +2960,14 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     vi.mocked(oneCliAgentProxyEnabled).mockReset();
     vi.mocked(applyOneCliToSpawn).mockReset();
     vi.mocked(applyOneCliToSpawn).mockResolvedValue(false);
+    // Default: CA is available. When the proxy is applied, the spawn delivers
+    // the OneCLI CA via getOneCliOutboundConfig; a null here fails the spawn
+    // closed (own test below), so proxy-applied tests need a valid CA.
+    vi.mocked(getOneCliOutboundConfig).mockReset();
+    vi.mocked(getOneCliOutboundConfig).mockResolvedValue({
+      proxyUrl: 'http://gw:10255',
+      ca: 'CA-BUNDLE-CONTENT',
+    });
   });
 
   afterEach(() => {
@@ -3047,5 +3065,110 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     // it never appears as a plain -e placeholder on the argv.
     expect(args).not.toContain('GOOGLE_MAPS_API_KEY=onecli-managed');
     expect(args.join(' ')).not.toContain(REAL);
+  });
+
+  it('mounts the OneCLI CA + points every CA env var at it when the proxy is applied (#640 — SDK CA mount is broken under DooD)', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
+
+    const mainInput = { ...testInput, isMain: true };
+    const promise = runContainerAgent(testGroup, mainInput, () => {});
+    await vi.advanceTimersByTimeAsync(1); // flush applyOneCliToSpawn + CA await
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise;
+
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    // CA bind-mounted read-only at the fixed container path.
+    expect(args.some((a) => a.endsWith(':/onecli/ca.pem:ro'))).toBe(true);
+    // Every CA env var (curl, python, node, git, openssl) re-pointed at it.
+    for (const v of [
+      'SSL_CERT_FILE',
+      'NODE_EXTRA_CA_CERTS',
+      'REQUESTS_CA_BUNDLE',
+      'CURL_CA_BUNDLE',
+      'GIT_SSL_CAINFO',
+    ]) {
+      expect(args).toContain(`${v}=/onecli/ca.pem`);
+    }
+  });
+
+  it('FAILS CLOSED when the proxy is applied but the CA cannot be delivered (a proxied container with no trusted CA fails all external HTTPS)', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
+    // Gateway unreachable for the CA fetch → no CA content.
+    vi.mocked(getOneCliOutboundConfig).mockResolvedValue(null);
+
+    const mainInput = { ...testInput, isMain: true };
+    const promise = runContainerAgent(testGroup, mainInput, () => {});
+    const rejected = expect(promise).rejects.toThrow(/MITM CA could not be/);
+    await vi.advanceTimersByTimeAsync(1);
+    await rejected;
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+  });
+
+  it('writes each spawn CA bundle to a UNIQUE tmp path so concurrent same-tier spawns never collide, and both succeed (#640)', async () => {
+    // The orchestrator is a single process, so a pid-based tmp name would
+    // collide across concurrent same-tier spawns and one could ENOENT on
+    // rename. Two same-tier spawns must produce two distinct tmp paths.
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
+    vi.mocked(fs.writeFileSync).mockClear();
+
+    for (let i = 0; i < 2; i++) {
+      fakeProc = createFakeProcess();
+      const p = runContainerAgent(
+        testGroup,
+        { ...testInput, isMain: true },
+        () => {},
+      );
+      await vi.advanceTimersByTimeAsync(1);
+      fakeProc.emit('close', 0);
+      await vi.advanceTimersByTimeAsync(10);
+      await p; // neither spawn throws
+    }
+
+    const caTmpWrites = vi
+      .mocked(fs.writeFileSync)
+      .mock.calls.map((c) => String(c[0]))
+      .filter((pth) => pth.includes('onecli-ca') && pth.endsWith('.tmp'));
+    expect(caTmpWrites).toHaveLength(2);
+    expect(caTmpWrites[0]).not.toBe(caTmpWrites[1]);
+  });
+
+  it('fails closed AND unlinks the materialized 0600 secret env-file when CA delivery THROWS (#640 — no leaked secrets on disk)', async () => {
+    // A throw from mountOneCliAgentCa (here: getOneCliOutboundConfig rejects,
+    // but equally a mkdirSync/writeFileSync failure) must be caught, clean up
+    // the already-materialized secret env-file, and rethrow — not spawn and not
+    // leave forwarded secrets on disk. GITHUB_TOKEN is a forwarded SECRET var
+    // (NOT OneCLI-managed under the proxy), so it materializes a real env-file
+    // whose cleanup (fs.unlinkSync) must fire on the throw path.
+    const savedGh = process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN = 'ghp_secret_must_be_cleaned_up';
+    vi.mocked(fs.unlinkSync).mockClear();
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
+    vi.mocked(getOneCliOutboundConfig).mockRejectedValue(
+      new Error('gateway boom'),
+    );
+
+    try {
+      const mainInput = { ...testInput, isMain: true };
+      const promise = runContainerAgent(testGroup, mainInput, () => {});
+      const rejected = expect(promise).rejects.toThrow(/gateway boom/);
+      await vi.advanceTimersByTimeAsync(1);
+      await rejected;
+      expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+      // Outcome: the secret env-file was unlinked before the rejection surfaced
+      // (would fail if the catch only rethrew and left the file on disk).
+      expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalled();
+    } finally {
+      if (savedGh === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = savedGh;
+    }
   });
 });
