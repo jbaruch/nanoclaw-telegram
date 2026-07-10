@@ -2892,9 +2892,9 @@ interface BuildContainerArgsResult {
   // The caller MUST fail the spawn closed if the gateway proxy is then not
   // actually applied (`applyOneCliToSpawn` returns false), because a withheld
   // credential would otherwise go out as a dead placeholder on a direct
-  // request (REQUEST_DENIED). Distinct from "the flag is on": untrusted
+  // request (REQUEST_DENIED). Distinct from "OneCLI is configured": untrusted
   // spawns forward no vars, so nothing is placeholdered and no fail-close is
-  // owed even with the flag set.
+  // owed even when OneCLI is configured.
   managedPlaceholdersApplied: boolean;
 }
 

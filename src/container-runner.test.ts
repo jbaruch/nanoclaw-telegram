@@ -3004,10 +3004,10 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     }
   });
 
-  it('FAILS CLOSED when the proxy is enabled but applyOneCliToSpawn cannot apply it (never spawns a container with a dead placeholder key)', async () => {
-    // Both flags on → buildContainerArgs placeholders the Maps key (real value
-    // withheld). But the gateway is unreachable, so applyOneCliToSpawn resolves
-    // false: the proxy env never lands, and a direct request with the
+  it('FAILS CLOSED when OneCLI is configured but applyOneCliToSpawn cannot apply the proxy (never spawns a container with a dead placeholder key)', async () => {
+    // OneCLI configured → buildContainerArgs placeholders the Maps key (real
+    // value withheld). But the gateway is unreachable, so applyOneCliToSpawn
+    // resolves false: the proxy env never lands, and a direct request with the
     // placeholder would REQUEST_DENIED. The spawn must throw instead — the
     // queue retries with backoff, so a transient blip self-heals.
     vi.mocked(isOneCliConfigured).mockReturnValue(true);

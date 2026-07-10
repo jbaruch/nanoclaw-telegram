@@ -291,9 +291,10 @@ export async function applyOneCliToSpawn(
     // applyContainerConfig just appended, so an api-key-mode placeholder the
     // caller set earlier (container-runner, host in api-key mode) is left
     // intact — so the agent keeps CLAUDE_CODE_OAUTH_TOKEN and its Anthropic
-    // traffic rides the cred-proxy → OneCLI vaulted Bearer, exactly as with the
-    // flag off. OPENAI_API_KEY is deliberately NOT stripped: OpenAI traffic DOES
-    // traverse the gateway, so its placeholder swap works as designed.
+    // traffic rides the cred-proxy → OneCLI vaulted Bearer, unaffected by the
+    // gateway proxy being in front of the agent's other outbound HTTPS.
+    // OPENAI_API_KEY is deliberately NOT stripped: OpenAI traffic DOES traverse
+    // the gateway, so its placeholder swap works as designed.
     removeInjectedEnvVar(args, preConfigLen, 'ANTHROPIC_API_KEY');
     // #640: preserve the agent's Anthropic path whenever the gateway proxy env
     // lands on the spawn. The SDK-applied config sets HTTP_PROXY + HTTPS_PROXY
