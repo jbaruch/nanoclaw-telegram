@@ -530,10 +530,10 @@ export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
   // `ps`/`docker ps`, same as the other API keys.
   'SESSIONIZE_SPEAKER_KEY',
   // Sessionize event API key — read by the same tile's
-  // `verify-sessionize.py` for live per-slug CFP-deadline verification
-  // (the host-side `sessionize_get_events` IPC handler reads the same
-  // .env entry; forwarding it lets the deterministic driver do the
-  // round-trip in-container without IPC). Same env-file treatment.
+  // `verify-sessionize.py` for live per-slug CFP-deadline verification.
+  // The container-side driver is now the sole consumer; forwarding the
+  // key lets it do the round-trip in-container without IPC. Same
+  // env-file treatment.
   'SESSIONIZE_EVENT_API_KEY',
 ]);
 
