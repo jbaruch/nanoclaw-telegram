@@ -143,15 +143,11 @@ echo "Scrubbing files..."
 PRIVATE_IPC_HANDLERS=(
   'sync_tripit'
   'fetch_trakt_history'
-  'sessionize_get_event'
-  'sessionize_open_cfps'
   'audible_backup'
 )
 PRIVATE_MCP_TOOLS=(
   'sync_tripit'
   'fetch_trakt_history'
-  'sessionize_get_event'
-  'sessionize_open_cfps'
   'audible_backup'
   'smarthome_status'
 )
@@ -263,12 +259,6 @@ import re
 f = '$PUBLIC_DIR/src/container-runner.ts'
 code = open(f).read()
 code = code.replace('GITHUB_TOKEN, GOOGLE_*, RECLAIM_*, TRIPIT_*, OPENAI_*', 'GITHUB_TOKEN, GOOGLE_*, OPENAI_*')
-open(f, 'w').write(code)
-
-# ipc.ts: remove sessionize from comment
-f = '$PUBLIC_DIR/src/ipc.ts'
-code = open(f).read()
-code = code.replace('/ github_backup / promote_staging / sessionize', '/ github_backup / promote_staging')
 open(f, 'w').write(code)
 
 # telegram-sanitize.ts: the JSDoc attributes this module to a script
