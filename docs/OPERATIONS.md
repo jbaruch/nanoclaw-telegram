@@ -162,27 +162,33 @@ sqlite3 ~/nanoclaw/store/messages.db "UPDATE scheduled_tasks SET prompt='new pro
 | `COMPOSIO_API_KEY` | app.composio.dev | Agent containers, main/trusted only. Project-scoped `ak_*` key; sent as `x-api-key` to BOTH Composio surfaces — REST (`composio-fetch` precheck) and the headless custom MCP server (`mcp__composio__*`: Gmail, Calendar, Tasks). |
 | `COMPOSIO_MCP_URL` | app.composio.dev (custom MCP server) | Agent containers, main/trusted only. URL of the headless custom MCP server (`backend.composio.dev/v3/mcp/<id>/mcp`); the agent runner appends `?user_id=$COMPOSIO_USER_ID` and authenticates with `x-api-key`. Replaced the retired `COMPOSIO_MCP_KEY` after Composio's consumer "Connect" gateway moved to interactive OAuth. Account-identifying server id → env-file 0600 like the key. |
 | `COMPOSIO_USER_ID` | app.composio.dev (connected-accounts list) | Agent containers, main/trusted only (binds Composio REST + MCP calls to the user's connected accounts; account-identifying, treated like the API key) |
-| `GITHUB_TOKEN` | github.com/settings/tokens | Host scripts (git push via IPC) **and** forwarded into main/trusted containers for the `gh` CLI (cost-monitor dashboard skills run `gh issue edit/comment`) |
-| `BYAIR_MCP_URL` | byairapp.com/mcp (Pro) | Agent containers, main/trusted only. byAir flight-status polling (`jbaruch/nanoclaw-travel` flight-assist precheck); API key inline in the URL → env-file 0600 |
-| `GOOGLE_MAPS_API_KEY` | console.cloud.google.com | Agent containers, main/trusted only. Distance Matrix traffic-aware time-to-leave (same tile) |
-| `TOMTOM_API_KEY` | developer.tomtom.com | Agent containers, main/trusted only. TomTom geocode + `calculateRoute` (`api.tomtom.com`) — routing backup behind Google Maps + the `drive-planner` skill (same tile) |
-| `YOUTUBE_API_KEY` | console.cloud.google.com | Agent containers, main/trusted only. Native YouTube Data API for the admin tile's `youtube-comment-check` skill |
+| `GITHUB_TOKEN` | github.com/settings/tokens | Host scripts (git push via IPC) with the real `.env` value; **and** the `gh` CLI in main/trusted containers via OneCLI placeholder + gateway swap (`ONECLI_MANAGED_VARS`) — cost-monitor dashboard skills run `gh issue edit/comment` |
+| `BYAIR_MCP_URL` | byairapp.com/mcp (Pro) | Agent containers, main/trusted only. byAir flight-status polling (`jbaruch/nanoclaw-travel` flight-assist precheck); API key inline in the URL → forwarded real (env-file 0600; query-embedded, injection-gap) |
+| `GOOGLE_MAPS_API_KEY` | console.cloud.google.com | Agent containers, main/trusted only. Distance Matrix traffic-aware time-to-leave (same tile). OneCLI-managed (placeholder + swap) |
+| `TOMTOM_API_KEY` | developer.tomtom.com | Agent containers, main/trusted only. TomTom geocode + `calculateRoute` (`api.tomtom.com`) — routing backup behind Google Maps + the `drive-planner` skill (same tile). OneCLI-managed (placeholder + swap) |
+| `YOUTUBE_API_KEY` | console.cloud.google.com | Agent containers, main/trusted only. Native YouTube Data API for the admin tile's `youtube-comment-check` skill. OneCLI-managed (placeholder + swap) |
 | `TRIPIT_ICAL_URL` | TripIt settings | Host scripts only (tripit-reclaim sync) |
 | `RECLAIM_API_TOKEN` | reclaim.ai settings | Host scripts only (tripit-reclaim sync) |
 | `GOOGLE_CLIENT_ID` | GCP console | Host scripts only (Calendar OOO blocks) |
 | `GOOGLE_CLIENT_SECRET` | GCP console | Host scripts only (Calendar OOO blocks) |
 | `GOOGLE_REFRESH_TOKEN` | OAuth flow | Host scripts only (Calendar OOO blocks) |
 
-Forwarded-into-container credentials live in `src/container-runner.ts` (`CONTAINER_VARS` is the full forwarded list; `SECRET_CONTAINER_VARS` is the subset routed through a mode-0600 env-file rather than `-e` so it stays off `docker ps`). The current forwarded set is:
+Forwarded-into-container credentials live in `src/container-runner.ts` (`CONTAINER_VARS` is the full forwarded list; `SECRET_CONTAINER_VARS` is the subset routed through a mode-0600 env-file rather than `-e` so it stays off `docker ps`; `ONECLI_MANAGED_VARS` is the subset whose real value is NOT forwarded).
 
-- The three Composio values — `COMPOSIO_API_KEY` (`x-api-key` for both Composio REST and the headless custom MCP server), `COMPOSIO_MCP_URL` (the account-specific `/v3/mcp/<id>/mcp` URL — replaced the retired `ck_*` `COMPOSIO_MCP_KEY` when the consumer "Connect" gateway moved to interactive OAuth), and `COMPOSIO_USER_ID` (account-identifying — selects which user's connected accounts to act against).
-- `GITHUB_TOKEN` — the `gh` CLI inside main/trusted containers (cost-monitor dashboard skills run `gh issue edit/comment` directly).
-- `BYAIR_MCP_URL` — byAir flight-status polling (`jbaruch/nanoclaw-travel` flight-assist precheck; API key inline in the URL).
-- `GOOGLE_MAPS_API_KEY` — Distance Matrix traffic-aware time-to-leave (same tile).
-- `TOMTOM_API_KEY` — TomTom geocode + `calculateRoute` (`api.tomtom.com`), the routing backup behind Google Maps and the `drive-planner` skill (same tile).
-- `YOUTUBE_API_KEY` — native YouTube Data API for the admin tile's `youtube-comment-check` skill.
+**OneCLI-managed (`ONECLI_MANAGED_VARS`)** — with the agent proxy live (`ONECLI_AGENT_PROXY=1`), the container receives an `onecli-managed` placeholder and OneCLI's MITM gateway injects the real vaulted value on the outbound request (real key never in the agent environ; falls back to real-value forwarding when the proxy is off):
 
-All forward to main/trusted tiers only. Everything else stays host-side and is reached through host scripts invoked via IPC. `docs/SECURITY.md` §4 is the authoritative per-tier view. The OneCLI-proxy migration (#564) is eliminating this in-container forwarding.
+- `GOOGLE_MAPS_API_KEY` — Distance Matrix (`maps.googleapis.com`, param `key`).
+- `TOMTOM_API_KEY` — TomTom geocode + `calculateRoute` (`api.tomtom.com`, param `key`; routing backup + `drive-planner`).
+- `YOUTUBE_API_KEY` — native YouTube Data API (`www.googleapis.com` path `/youtube/*`, param `key`; admin tile's `youtube-comment-check`).
+- `GITHUB_TOKEN` — the `gh` CLI inside main/trusted containers (`api.github.com`, `Authorization: Bearer`). The real value stays in host `.env` for the host-side `github_backup` `git push`; only the container is placeholdered.
+
+**Still forwarded as real** (env-file 0600) — OneCLI can't vault these yet or they're retiring:
+
+- The three Composio values — `COMPOSIO_API_KEY` (`x-api-key` for both Composio REST and the headless custom MCP server), `COMPOSIO_MCP_URL` (the account-specific `/v3/mcp/<id>/mcp` URL), and `COMPOSIO_USER_ID` (account-identifying). Retiring with #639.
+- `BYAIR_MCP_URL` — byAir flight-status polling; token inline in the query string (OneCLI query-param injection not yet available).
+- `SESSIONIZE_*` — CFP discovery/verification; key embedded in the URL path (OneCLI path-segment injection not yet available).
+
+All forward to main/trusted tiers only, **never** untrusted. Everything else stays host-side and is reached through host scripts invoked via IPC. `docs/SECURITY.md` §4 is the authoritative per-tier view. Finishing the OneCLI migration (#564) — retiring Composio and growing OneCLI path/query injection — is the remaining work.
 
 ## Agent Container Capabilities
 
