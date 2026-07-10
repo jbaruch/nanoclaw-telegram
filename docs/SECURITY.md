@@ -49,13 +49,16 @@ IPC directories are per-group (isolated namespaces). For untrusted containers, I
 
 ### 4. Credential Isolation
 
-The design goal is that **containers never see real API keys**: the Anthropic key is brokered by the host credential proxy (containers receive only a placeholder), and most credentials stay host-side, used by host scripts via IPC. A set of **tile-consumed credentials is still forwarded into main/trusted containers** as environment variables (secrets via a mode-0600 env-file so they don't appear on `docker ps`). The authoritative lists live in `src/container-runner.ts`: `CONTAINER_VARS` is everything forwarded; `SECRET_CONTAINER_VARS` is the subset routed through the env-file rather than `-e`. As of this writing the forwarded set is the three Composio values (`COMPOSIO_API_KEY`/`COMPOSIO_MCP_URL`/`COMPOSIO_USER_ID`), `GITHUB_TOKEN` (container-side `gh`), `BYAIR_MCP_URL`, `GOOGLE_MAPS_API_KEY`, `TOMTOM_API_KEY`, and `YOUTUBE_API_KEY` — main/trusted only, **never** untrusted. Eliminating this in-container exposure so the goal holds universally is the OneCLI-proxy migration (#564); Composio is the largest single piece of it (both REST and the headless custom MCP server use the one project-scoped `ak_*` key via `x-api-key`).
+The design goal is that **containers never see real API keys**: the Anthropic key is brokered by the host credential proxy (containers receive only a placeholder), and most credentials stay host-side, used by host scripts via IPC. The authoritative lists live in `src/container-runner.ts`: `CONTAINER_VARS` is everything forwarded into main/trusted containers (**never** untrusted); `SECRET_CONTAINER_VARS` is the subset routed through a mode-0600 env-file rather than `-e` so it stays off `docker ps`; `ONECLI_MANAGED_VARS` is the subset that no longer forwards its real value at all.
+
+With the OneCLI agent proxy live (`ONECLI_AGENT_PROXY=1`, #640), the `ONECLI_MANAGED_VARS` credentials — `GOOGLE_MAPS_API_KEY`, `TOMTOM_API_KEY`, `YOUTUBE_API_KEY`, `GITHUB_TOKEN` — enter the container as an `onecli-managed` **placeholder**; OneCLI's TLS-MITM gateway injects the real vaulted value on the outbound request, so the real key never enters the agent environ. (`GITHUB_TOKEN` keeps its real value in host `.env` for the host-side `github_backup` `git push`, but the container only ever sees the placeholder.) The still-forwarded-as-real remainder is the three Composio values (retiring with #639) and the injection-gap keys OneCLI can't vault yet — `BYAIR_MCP_URL` (token in the query string) and `SESSIONIZE_*` (key in the URL path). When the agent proxy is off (dev), all vars fall back to real-value forwarding. Finishing this migration — retiring Composio and growing OneCLI path/query injection — is the remaining #564 work.
 
 | Credential | Main | Trusted | Untrusted |
 |------------|------|---------|-----------|
 | Anthropic API | Via proxy (placeholder key) | Via proxy | Via proxy |
-| Forwarded tile credentials — `CONTAINER_VARS` in `src/container-runner.ts` (Composio `ak_*` + `MCP_URL` + `USER_ID`, `GITHUB_TOKEN`, `BYAIR_MCP_URL`, `GOOGLE_MAPS_API_KEY`, `TOMTOM_API_KEY`, `YOUTUBE_API_KEY`) | Env-file (0600) | Env-file (0600) | **None** |
-| Everything else (Trakt, Sessionize, channel tokens, …) | Via host scripts (IPC) | Via host scripts (IPC) | **None** |
+| OneCLI-managed — `ONECLI_MANAGED_VARS` (`GOOGLE_MAPS_API_KEY`, `TOMTOM_API_KEY`, `YOUTUBE_API_KEY`, `GITHUB_TOKEN`) | Placeholder + gateway swap | Placeholder + gateway swap | **None** |
+| Still forwarded as real — `CONTAINER_VARS` minus managed (Composio `ak_*` + `MCP_URL` + `USER_ID`, `BYAIR_MCP_URL`, `SESSIONIZE_*`) | Env-file (0600) | Env-file (0600) | **None** |
+| Everything else (Trakt, Reclaim, channel tokens, …) | Via host scripts (IPC) | Via host scripts (IPC) | **None** |
 
 ### 5. Tile-Based Rule Enforcement
 
