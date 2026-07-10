@@ -80,7 +80,6 @@ import {
   ensureAgentForTier,
   getOneCliOutboundConfig,
   isOneCliConfigured,
-  oneCliAgentProxyEnabled,
   TRUST_TIERS,
   _resetOneCliClient,
 } from './onecli-client.js';
@@ -232,22 +231,6 @@ describe('onecli-client', () => {
       vi.advanceTimersByTime(61_000); // past the 60s TTL
       await getOneCliOutboundConfig('main');
       expect(applyContainerConfigMock).toHaveBeenCalledTimes(2);
-    });
-  });
-
-  describe('oneCliAgentProxyEnabled', () => {
-    it('is false by default (flag absent)', () => {
-      expect(oneCliAgentProxyEnabled()).toBe(false);
-    });
-
-    it('is false for any value other than "1"', () => {
-      envFileMock.ONECLI_AGENT_PROXY = 'true';
-      expect(oneCliAgentProxyEnabled()).toBe(false);
-    });
-
-    it('is true only when ONECLI_AGENT_PROXY === "1"', () => {
-      envFileMock.ONECLI_AGENT_PROXY = '1';
-      expect(oneCliAgentProxyEnabled()).toBe(true);
     });
   });
 
