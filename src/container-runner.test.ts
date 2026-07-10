@@ -2765,6 +2765,11 @@ describe('Sessionize key forwarding into the secret env-file (#719)', () => {
     vi.mocked(spawn).mockClear();
     process.env.SESSIONIZE_SPEAKER_KEY = 'sess-speaker-test';
     process.env.SESSIONIZE_EVENT_API_KEY = 'sess-event-test';
+    // These keys are now ONECLI_MANAGED_VARS: OneCLI-configured spawns
+    // placeholder them (covered by the #640 placeholder suite). This suite
+    // asserts the dev-fallback (OneCLI unconfigured) real-value env-file path,
+    // so pin the gate false explicitly rather than lean on the module default.
+    vi.mocked(isOneCliConfigured).mockReturnValue(false);
   });
 
   afterEach(() => {
@@ -2975,8 +2980,11 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
   });
 
   it('placeholders every ONECLI_MANAGED_VARS credential, never the real value, when the proxy is applied (#640)', async () => {
-    // Iterate the real set so this auto-covers any future managed var.
-    const MANAGED = [...ONECLI_MANAGED_VARS];
+    // Iterate the real map so this auto-covers any future managed var. Each
+    // var forwards its OWN mapped placeholder — the bare `onecli-managed`
+    // sentinel for scalar creds, a URL-shaped placeholder for URL-valued ones
+    // (e.g. BYAIR_MCP_URL) — never the real value.
+    const MANAGED = [...ONECLI_MANAGED_VARS.keys()];
     const saved = new Map(MANAGED.map((v) => [v, process.env[v]]));
     for (const v of MANAGED) process.env[v] = `REAL_${v}_must_not_reach`;
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
@@ -2992,8 +3000,8 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
 
       const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
       const joined = args.join(' ');
-      for (const v of MANAGED) {
-        expect(args).toContain(`${v}=onecli-managed`);
+      for (const [v, placeholder] of ONECLI_MANAGED_VARS) {
+        expect(args).toContain(`${v}=${placeholder}`);
         expect(joined).not.toContain(`REAL_${v}_must_not_reach`);
       }
     } finally {
@@ -3049,8 +3057,8 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     // The container WAS spawned (fell through), carrying no managed placeholder.
     expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1);
     const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
-    for (const v of ONECLI_MANAGED_VARS) {
-      expect(args).not.toContain(`${v}=onecli-managed`);
+    for (const [v, placeholder] of ONECLI_MANAGED_VARS) {
+      expect(args).not.toContain(`${v}=${placeholder}`);
     }
   });
 
