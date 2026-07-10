@@ -193,6 +193,7 @@ import {
   DEFAULT_AGENT_MODEL,
   getRegistryTilesDir,
   getInstalledTiles,
+  ONECLI_MANAGED_VARS,
 } from './container-runner.js';
 import { logger } from './logger.js';
 import {
@@ -3001,13 +3002,9 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     expect(args.join(' ')).not.toContain(REAL);
   });
 
-  it('placeholders every ONECLI_MANAGED_VARS credential (Maps, TomTom, YouTube, GitHub), never the real value, when the proxy is applied (#640)', async () => {
-    const MANAGED = [
-      'GOOGLE_MAPS_API_KEY',
-      'TOMTOM_API_KEY',
-      'YOUTUBE_API_KEY',
-      'GITHUB_TOKEN',
-    ];
+  it('placeholders every ONECLI_MANAGED_VARS credential, never the real value, when the proxy is applied (#640)', async () => {
+    // Iterate the real set so this auto-covers any future managed var.
+    const MANAGED = [...ONECLI_MANAGED_VARS];
     const saved = new Map(MANAGED.map((v) => [v, process.env[v]]));
     for (const v of MANAGED) process.env[v] = `REAL_${v}_must_not_reach`;
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
@@ -3182,7 +3179,7 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     // SECRET var that is NOT OneCLI-managed (injection-gap: key is path-embedded,
     // so it can't be vaulted), so it materializes a real env-file whose cleanup
     // (fs.unlinkSync) must fire on the throw path.
-    const savedGh = process.env.SESSIONIZE_SPEAKER_KEY;
+    const savedSessionize = process.env.SESSIONIZE_SPEAKER_KEY;
     process.env.SESSIONIZE_SPEAKER_KEY = 'sz_secret_must_be_cleaned_up';
     vi.mocked(fs.unlinkSync).mockClear();
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
@@ -3203,8 +3200,9 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
       // (would fail if the catch only rethrew and left the file on disk).
       expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalled();
     } finally {
-      if (savedGh === undefined) delete process.env.SESSIONIZE_SPEAKER_KEY;
-      else process.env.SESSIONIZE_SPEAKER_KEY = savedGh;
+      if (savedSessionize === undefined)
+        delete process.env.SESSIONIZE_SPEAKER_KEY;
+      else process.env.SESSIONIZE_SPEAKER_KEY = savedSessionize;
     }
   });
 });
