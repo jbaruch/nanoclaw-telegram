@@ -247,6 +247,26 @@ export async function ensureAgentForTier(tier: TrustTier): Promise<void> {
 }
 
 /**
+ * Remove `-e <name>=<value>` pairs that `applyContainerConfig` appended to the
+ * spawn argv at or after `fromIndex`. Scans only the appended tail, so an
+ * identically-named `-e` the caller pushed earlier (e.g. the api-key-mode
+ * placeholder container-runner sets) is preserved. Iterates backwards so a
+ * splice never shifts an index still to be visited. Mutates `args` in place.
+ */
+function removeInjectedEnvVar(
+  args: string[],
+  fromIndex: number,
+  name: string,
+): void {
+  const prefix = `${name}=`;
+  for (let i = args.length - 2; i >= fromIndex; i--) {
+    if (args[i] === '-e' && args[i + 1]?.startsWith(prefix)) {
+      args.splice(i, 2);
+    }
+  }
+}
+
+/**
  * When OneCLI is configured, mutate the docker-spawn argv to add HTTPS_PROXY
  * env, mount the OneCLI CA bundle, and add the host.docker.internal mapping.
  * Returns whether OneCLI was applied to the spawn.
@@ -262,6 +282,7 @@ export async function applyOneCliToSpawn(
   const client = getClient();
   if (!client) return false;
   try {
+    const preConfigLen = args.length;
     const active = await client.applyContainerConfig(args, {
       agent: agentIdentifierForTier(tier),
       combineCaBundle: true,
@@ -270,6 +291,25 @@ export async function applyOneCliToSpawn(
       // duplicate mapping.
       addHostMapping: false,
     });
+    // #640: the gateway's container-config carries ANTHROPIC_API_KEY=<sentinel>
+    // (a MITM placeholder it expects to swap on outbound api.anthropic.com
+    // requests). applyContainerConfig injects EVERY config.env key onto the
+    // spawn, so that placeholder lands on the agent. But NanoClaw's agents reach
+    // Anthropic through the credential-proxy (ANTHROPIC_BASE_URL →
+    // host.docker.internal, NO_PROXY-excluded) — never through the gateway — so
+    // the swap never fires. Worse, the Claude SDK treats a set ANTHROPIC_API_KEY
+    // as api-key mode: it drops the OAuth flow and sends `x-api-key: <sentinel>`
+    // with no Authorization header. The cred-proxy's OneCLI-injection gate needs
+    // an Authorization header, so it forwards the sentinel raw → 401 on every
+    // real turn (the #640 cutover break, pinned via CREDPROXY_AUTH_DEBUG). Strip
+    // the gateway-injected ANTHROPIC_API_KEY — only from the tail
+    // applyContainerConfig just appended, so an api-key-mode placeholder the
+    // caller set earlier (container-runner, host in api-key mode) is left
+    // intact — so the agent keeps CLAUDE_CODE_OAUTH_TOKEN and its Anthropic
+    // traffic rides the cred-proxy → OneCLI vaulted Bearer, exactly as with the
+    // flag off. OPENAI_API_KEY is deliberately NOT stripped: OpenAI traffic DOES
+    // traverse the gateway, so its placeholder swap works as designed.
+    removeInjectedEnvVar(args, preConfigLen, 'ANTHROPIC_API_KEY');
     // #640: preserve the agent's Anthropic path whenever the gateway proxy env
     // lands on the spawn. The SDK-applied config sets HTTP_PROXY + HTTPS_PROXY
     // (+ NODE_USE_ENV_PROXY) but NO `NO_PROXY`. The agent reaches its local

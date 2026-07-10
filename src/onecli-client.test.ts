@@ -448,6 +448,62 @@ describe('onecli-client', () => {
       expect(args.some((a) => a.startsWith('no_proxy='))).toBe(false);
     });
 
+    it('strips the gateway-injected ANTHROPIC_API_KEY, keeps OPENAI_API_KEY (#640 — root cause of the cutover 401s)', async () => {
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
+      applyContainerConfigMock.mockImplementation((args: string[]) => {
+        // The gateway's container-config injects its MITM placeholders + proxy
+        // env. ANTHROPIC_API_KEY=<sentinel> would flip the Claude SDK into
+        // api-key mode (x-api-key, no Authorization) — but Anthropic rides the
+        // cred-proxy, never the gateway, so the sentinel would reach Anthropic
+        // raw → 401. OPENAI_API_KEY is fine: OpenAI DOES traverse the gateway.
+        args.push('-e', 'HTTPS_PROXY=http://onecli');
+        args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+        args.push('-e', 'OPENAI_API_KEY=placeholder');
+        return Promise.resolve(true);
+      });
+
+      const args = ['run', '-i', '--rm', 'image'];
+      await applyOneCliToSpawn(args, 'main');
+
+      // The gateway ANTHROPIC_API_KEY and its `-e` flag are gone.
+      expect(args.some((a) => a.startsWith('ANTHROPIC_API_KEY='))).toBe(false);
+      // OpenAI's gateway swap still works, so its placeholder stays.
+      expect(args).toContain('OPENAI_API_KEY=placeholder');
+      // No dangling `-e`: every remaining flag keeps its KEY=VALUE partner.
+      args.forEach((a, i) => {
+        if (a === '-e') expect(args[i + 1]).toMatch(/=/);
+      });
+    });
+
+    it('preserves an ANTHROPIC_API_KEY the caller set BEFORE applyContainerConfig (api-key-mode placeholder untouched)', async () => {
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
+      applyContainerConfigMock.mockImplementation((args: string[]) => {
+        args.push('-e', 'HTTPS_PROXY=http://onecli');
+        args.push('-e', 'ANTHROPIC_API_KEY=gateway-sentinel');
+        return Promise.resolve(true);
+      });
+
+      // container-runner sets ANTHROPIC_API_KEY=placeholder BEFORE calling
+      // applyOneCliToSpawn when the host is in api-key mode; the cred-proxy
+      // swaps that one for the real key, so it must survive. Only the tail the
+      // SDK appended is scrubbed.
+      const args = [
+        'run',
+        '-i',
+        '--rm',
+        '-e',
+        'ANTHROPIC_API_KEY=placeholder',
+        'image',
+      ];
+      await applyOneCliToSpawn(args, 'main');
+
+      expect(args.filter((a) => a.startsWith('ANTHROPIC_API_KEY='))).toEqual([
+        'ANTHROPIC_API_KEY=placeholder',
+      ]);
+    });
+
     it('warns when SDK resolves false (configured but unreachable gateway)', async () => {
       // The real SDK catches gateway/config fetch failures and resolves
       // `false` instead of throwing. The `applyOneCliToSpawn` wrapper must
