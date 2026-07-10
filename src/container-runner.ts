@@ -552,7 +552,8 @@ export const ONECLI_MANAGED_PLACEHOLDER = 'onecli-managed';
  * skill reads a real-looking URL so its own URL parse/validation still passes;
  * the gateway overwrites the `onecli-managed` sentinel with the vaulted secret
  * on the outbound request (query-param injection for `api.byairapp.com`). Keep
- * the host/path in sync with the vault entry's `hostPattern`.
+ * the host in sync with the vault entry's `hostPattern` and the `api_key` param
+ * name with its `paramName` (the `/mcp` path is not part of the match).
  */
 export const BYAIR_MANAGED_PLACEHOLDER = `https://api.byairapp.com/mcp?api_key=${ONECLI_MANAGED_PLACEHOLDER}`;
 
@@ -562,8 +563,10 @@ export const BYAIR_MANAGED_PLACEHOLDER = `https://api.byairapp.com/mcp?api_key=$
  * configured (`isOneCliConfigured()` — the same gate the spawn uses to apply
  * the gateway proxy), the container receives the var's mapped placeholder
  * instead of the real value, and OneCLI's TLS-MITM injects the real secret for
- * the vault host-pattern (verified for header, query-param, AND URL-path
- * injection). When OneCLI is unconfigured (local dev), the var falls back to
+ * the vault host-pattern (the managed vars below use header and query-param
+ * injection; OneCLI also supports URL-path injection, used host-side by the
+ * TripIt sync in #748, not by any var here). When OneCLI is unconfigured (local
+ * dev), the var falls back to
  * real-value forwarding via the normal `SECRET_CONTAINER_VARS` path. If the
  * gate passes but the gateway proxy cannot actually be applied at spawn time,
  * the caller fails the spawn closed (see `managedPlaceholdersApplied`) rather
