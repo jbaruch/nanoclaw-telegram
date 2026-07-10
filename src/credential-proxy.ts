@@ -376,6 +376,29 @@ export function startCredentialProxy(
               (upRes) => {
                 res.writeHead(upRes.statusCode!, upRes.headers);
 
+                // #640 investigation: gated per-request auth-path trace. Pins
+                // why real agent-runner turns 401 under ONECLI_AGENT_PROXY=1
+                // while a bare `claude -p` under identical proxy+CA passes. The
+                // OneCLI-injection decision (`oneCli`) and the upstream status
+                // are both known here, for the same request. Booleans + status
+                // only — never token values (no-secrets). Enable with
+                // CREDPROXY_AUTH_DEBUG=1; default OFF, single-shot capture.
+                if (process.env.CREDPROXY_AUTH_DEBUG === '1') {
+                  logger.info(
+                    {
+                      pathSuffix: upstreamPath.split('?')[0],
+                      method: req.method,
+                      authMode,
+                      hasAuthHeader: !!req.headers['authorization'],
+                      hasXApiKey: !!req.headers['x-api-key'],
+                      oneCliUsed: !!oneCli,
+                      tier: containerCtx?.tier ?? null,
+                      upstreamStatus: upRes.statusCode ?? null,
+                    },
+                    'credproxy-auth-debug',
+                  );
+                }
+
                 if (!captureUsage || upRes.statusCode !== 200) {
                   upRes.pipe(res);
                   return;
