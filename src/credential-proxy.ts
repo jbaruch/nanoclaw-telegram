@@ -376,44 +376,6 @@ export function startCredentialProxy(
               (upRes) => {
                 res.writeHead(upRes.statusCode!, upRes.headers);
 
-                // #640: gated per-request auth-path trace, kept as a permanent
-                // diagnostic for the agent→cred-proxy→OneCLI auth path. (It
-                // pinned the cutover 401: under the gateway proxy the agent sent
-                // `x-api-key` with no Authorization, so the OneCLI-injection gate
-                // was skipped — fixed by stripping the gateway ANTHROPIC_API_KEY
-                // sentinel in applyOneCliToSpawn.) The OneCLI-injection decision
-                // (`oneCli`) and the upstream status are both known here, for the
-                // same request. Booleans + status only — never token values
-                // (no-secrets). Enable with CREDPROXY_AUTH_DEBUG=1; default OFF.
-                if (process.env.CREDPROXY_AUTH_DEBUG === '1') {
-                  // Allowlisted endpoint label, never raw path material: this
-                  // proxy only ever forwards to api.anthropic.com, but the repo
-                  // has path-embedded-credential cases elsewhere, so classify to
-                  // a fixed set rather than logging any path segment (no-secrets).
-                  const endpoint = isMessagesEndpoint(upstreamPath)
-                    ? 'v1/messages'
-                    : upstreamPath.split('?')[0] ===
-                        '/api/oauth/claude_cli/create_api_key'
-                      ? 'oauth/create_api_key'
-                      : 'other';
-                  logger.info(
-                    {
-                      endpoint,
-                      method: req.method,
-                      authMode,
-                      hasAuthHeader: !!req.headers['authorization'],
-                      hasXApiKey: !!req.headers['x-api-key'],
-                      // Reflect what was actually applied: OneCLI only tunnels
-                      // the request when the upstream is HTTPS (a test-only HTTP
-                      // override never gets the agent/CA), so gate on isHttps too.
-                      oneCliUsed: !!(oneCli && isHttps),
-                      tier: containerCtx?.tier ?? null,
-                      upstreamStatus: upRes.statusCode ?? null,
-                    },
-                    'credproxy-auth-debug',
-                  );
-                }
-
                 if (!captureUsage || upRes.statusCode !== 200) {
                   upRes.pipe(res);
                   return;
