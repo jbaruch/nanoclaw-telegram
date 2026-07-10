@@ -303,7 +303,6 @@ open(f, 'w').write(''.join(lines))
 f = '$PUBLIC_DIR/scripts/promote-to-tile-repo.sh'
 code = open(f).read()
 code = code.replace('|sync_tripit|fetch_trakt', '')
-code = code.replace('|sessionize', '')
 open(f, 'w').write(code)
 
 print('  comments/scripts: removed private integration references')
