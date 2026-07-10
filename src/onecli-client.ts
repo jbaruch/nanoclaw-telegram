@@ -6,10 +6,15 @@
  * in the orchestrator environment. When unset (the default until the
  * operational sub-issue lands), every export is a graceful no-op.
  *
- * Stage 1's error policy is permissive: SDK errors are logged and treated as
- * "OneCLI not active for this spawn" so we never block a container start.
- * The Anthropic/OpenAI swap sub-issue (#637) tightens this to hard-fail once
- * OneCLI is the only credential path.
+ * The SDK-layer error policy is permissive: `ensureAgent`/config errors are
+ * logged and treated as "OneCLI not active for this spawn" (the wrapper just
+ * returns false), never throwing on its own. The CALLER then decides the
+ * response — a spawn that withheld `ONECLI_MANAGED_VARS` placeholders fails
+ * closed (#640, so no dead placeholder ships), while unconfigured /
+ * no-placeholder spawns proceed on the real-value credential-proxy path. So a
+ * gateway blip blocks only the spawns whose credentials were actually
+ * withheld. (Anthropic/OpenAI now route through OneCLI via the
+ * credential-proxy, #637.)
  */
 import { readFileSync } from 'fs';
 
@@ -35,8 +40,9 @@ const AGENT_IDENTIFIER_PREFIX = 'nanoclaw';
 /**
  * Tight per-call timeout so a configured-but-unreachable OneCLI gateway
  * degrades fast: 3 tiers × this ms cap at startup, plus this ms cap per
- * container spawn. The SDK falls through to the existing credential-proxy
- * path on timeout (Stage 1 stays additive).
+ * container spawn. On timeout the SDK call is treated as "not active" and
+ * returns false; the caller then falls back to the real-value path or fails
+ * closed (managed placeholders withheld) per its own contract.
  */
 const DEFAULT_TIMEOUT_MS = 1500;
 
@@ -83,21 +89,6 @@ function readEnvOptions(): OneCliEnvOptions | null {
 
 export function isOneCliConfigured(): boolean {
   return readEnvOptions() !== null;
-}
-
-/**
- * Gate for the agent-spawn proxy injection (`applyOneCliToSpawn`), SEPARATE
- * from `isOneCliConfigured`. #637 makes the credential-proxy route Anthropic
- * through OneCLI while agents themselves stay proxy-less — putting OneCLI in
- * front of agent traffic is #640 (external-cred swap), which also needs the
- * non-vault-passthrough validation. Without this split, re-enabling
- * `ONECLI_URL` for #637 would re-apply the agent proxy that broke the LLM
- * path (the agent's call to its local credential-proxy got routed through the
- * OneCLI gateway → ECONNRESET). Default OFF; #640 flips it on.
- */
-export function oneCliAgentProxyEnabled(): boolean {
-  const env = readEnvFile(['ONECLI_AGENT_PROXY']);
-  return env.ONECLI_AGENT_PROXY === '1';
 }
 
 /**
@@ -272,8 +263,13 @@ function removeInjectedEnvVar(
  * Returns whether OneCLI was applied to the spawn.
  *
  * A no-op (returns false) when OneCLI is unconfigured or the gateway is
- * unreachable. Stage 1 stays additive: a spawn that can't reach OneCLI still
- * runs with the existing credential-proxy path.
+ * unreachable. The `false` return is not itself an error, but the CALLER's
+ * response depends on what was already forwarded: a spawn that withheld
+ * `ONECLI_MANAGED_VARS` as `onecli-managed` placeholders MUST fail closed
+ * (the placeholders would go out as dead credentials on direct requests),
+ * while an unconfigured or no-placeholder spawn falls back to the existing
+ * real-value credential-proxy path. See `runContainerAgent`'s
+ * `managedPlaceholdersApplied` handling in `src/container-runner.ts`.
  */
 export async function applyOneCliToSpawn(
   args: string[],
@@ -306,9 +302,10 @@ export async function applyOneCliToSpawn(
     // applyContainerConfig just appended, so an api-key-mode placeholder the
     // caller set earlier (container-runner, host in api-key mode) is left
     // intact — so the agent keeps CLAUDE_CODE_OAUTH_TOKEN and its Anthropic
-    // traffic rides the cred-proxy → OneCLI vaulted Bearer, exactly as with the
-    // flag off. OPENAI_API_KEY is deliberately NOT stripped: OpenAI traffic DOES
-    // traverse the gateway, so its placeholder swap works as designed.
+    // traffic rides the cred-proxy → OneCLI vaulted Bearer, unaffected by the
+    // gateway proxy being in front of the agent's other outbound HTTPS.
+    // OPENAI_API_KEY is deliberately NOT stripped: OpenAI traffic DOES traverse
+    // the gateway, so its placeholder swap works as designed.
     removeInjectedEnvVar(args, preConfigLen, 'ANTHROPIC_API_KEY');
     // #640: preserve the agent's Anthropic path whenever the gateway proxy env
     // lands on the spawn. The SDK-applied config sets HTTP_PROXY + HTTPS_PROXY

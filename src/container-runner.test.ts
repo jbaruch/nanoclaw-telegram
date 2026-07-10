@@ -118,7 +118,6 @@ vi.mock('./credential-proxy.js', () => ({
 // to prove the image token still lands last.
 vi.mock('./onecli-client.js', () => ({
   isOneCliConfigured: vi.fn(() => false),
-  oneCliAgentProxyEnabled: vi.fn(() => false),
   applyOneCliToSpawn: vi.fn(async () => false),
   // Default to an available CA so any proxy-applied spawn path gets a valid
   // MITM bundle; tests that assert the CA-unavailable fail-closed override this.
@@ -198,7 +197,6 @@ import {
 import { logger } from './logger.js';
 import {
   isOneCliConfigured,
-  oneCliAgentProxyEnabled,
   applyOneCliToSpawn,
   getOneCliOutboundConfig,
 } from './onecli-client.js';
@@ -2850,7 +2848,6 @@ describe('#746 — OneCLI flags precede the image in spawn argv', () => {
     fakeProc = createFakeProcess();
     vi.mocked(spawn).mockClear();
     vi.mocked(isOneCliConfigured).mockReset();
-    vi.mocked(oneCliAgentProxyEnabled).mockReset();
     vi.mocked(applyOneCliToSpawn).mockReset();
   });
 
@@ -2858,13 +2855,11 @@ describe('#746 — OneCLI flags precede the image in spawn argv', () => {
     vi.useRealTimers();
     // Restore the file-wide default no-op so no later test sees OneCLI on.
     vi.mocked(isOneCliConfigured).mockReturnValue(false);
-    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(false);
     vi.mocked(applyOneCliToSpawn).mockResolvedValue(false);
   });
 
-  it('appends OneCLI -e/-v/--add-host before CONTAINER_IMAGE when configured and agent-proxy enabled', async () => {
+  it('appends OneCLI -e/-v/--add-host before CONTAINER_IMAGE when OneCLI is configured', async () => {
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
-    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
     // Mirror the SDK's append-only mutation of the argv.
     vi.mocked(applyOneCliToSpawn).mockImplementation(async (args: string[]) => {
       for (const [opt, val] of ONECLI_ARGS) args.push(opt, val);
@@ -2913,34 +2908,14 @@ describe('#746 — OneCLI flags precede the image in spawn argv', () => {
     expect(args).not.toContain(ONECLI_ARGS[0]![1]);
     expect(vi.mocked(applyOneCliToSpawn)).not.toHaveBeenCalled();
   });
-
-  // #637: OneCLI configured but the agent-proxy flag OFF — agents must stay
-  // proxy-less (OneCLI serves the credential-proxy's Anthropic hop, not agent
-  // traffic). This is the guard that stops re-enabling ONECLI_URL from
-  // re-applying the agent proxy that broke the LLM path.
-  it('does NOT apply the agent proxy when OneCLI is configured but ONECLI_AGENT_PROXY is off', async () => {
-    vi.mocked(isOneCliConfigured).mockReturnValue(true);
-    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(false);
-
-    const promise = runContainerAgent(testGroup, testInput, () => {});
-    fakeProc.emit('close', 0);
-    await vi.advanceTimersByTimeAsync(10);
-    await promise;
-
-    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
-    expect(args[args.length - 1]).toBe('nanoclaw-agent:latest');
-    expect(args).not.toContain(ONECLI_ARGS[0]![1]);
-    expect(vi.mocked(applyOneCliToSpawn)).not.toHaveBeenCalled();
-  });
 });
 
 // -------------------------------------------------------------------
 // #640 — OneCLI-managed credentials enter the container as a non-empty
 // placeholder (real value swapped in by the gateway), so the real
-// secret never reaches the agent environ. Gated on BOTH conjuncts of the
-// proxy-application condition — `isOneCliConfigured() &&
-// oneCliAgentProxyEnabled()` — since the placeholder is only correct when
-// the agent's outbound request actually traverses the gateway that swaps
+// secret never reaches the agent environ. Gated on the proxy-application
+// condition — `isOneCliConfigured()` — since the placeholder is only correct
+// when the agent's outbound request actually traverses the gateway that swaps
 // the real value back in. When the gate passes but the proxy cannot be
 // applied at spawn time, the spawn fails closed (covered below).
 // -------------------------------------------------------------------
@@ -2958,7 +2933,6 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     fakeProc = createFakeProcess();
     vi.mocked(spawn).mockClear();
     vi.mocked(isOneCliConfigured).mockReset();
-    vi.mocked(oneCliAgentProxyEnabled).mockReset();
     vi.mocked(applyOneCliToSpawn).mockReset();
     vi.mocked(applyOneCliToSpawn).mockResolvedValue(false);
     // Default: CA is available. When the proxy is applied, the spawn delivers
@@ -2974,7 +2948,6 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.mocked(isOneCliConfigured).mockReturnValue(false);
-    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(false);
     if (savedMapsKey === undefined) {
       delete process.env.GOOGLE_MAPS_API_KEY;
     } else {
@@ -2982,9 +2955,8 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     }
   });
 
-  it('forwards GOOGLE_MAPS_API_KEY as the onecli-managed placeholder, never the real value, when the agent proxy is enabled and applied', async () => {
+  it('forwards GOOGLE_MAPS_API_KEY as the onecli-managed placeholder, never the real value, when OneCLI is configured and the proxy is applied', async () => {
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
-    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
     // Proxy actually lands on the spawn — the swap will happen, so the
     // placeholder is safe.
     vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
@@ -3008,7 +2980,6 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     const saved = new Map(MANAGED.map((v) => [v, process.env[v]]));
     for (const v of MANAGED) process.env[v] = `REAL_${v}_must_not_reach`;
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
-    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
     vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
 
     try {
@@ -3033,14 +3004,13 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     }
   });
 
-  it('FAILS CLOSED when the proxy is enabled but applyOneCliToSpawn cannot apply it (never spawns a container with a dead placeholder key)', async () => {
-    // Both flags on → buildContainerArgs placeholders the Maps key (real value
-    // withheld). But the gateway is unreachable, so applyOneCliToSpawn resolves
-    // false: the proxy env never lands, and a direct request with the
+  it('FAILS CLOSED when OneCLI is configured but applyOneCliToSpawn cannot apply the proxy (never spawns a container with a dead placeholder key)', async () => {
+    // OneCLI configured → buildContainerArgs placeholders the Maps key (real
+    // value withheld). But the gateway is unreachable, so applyOneCliToSpawn
+    // resolves false: the proxy env never lands, and a direct request with the
     // placeholder would REQUEST_DENIED. The spawn must throw instead — the
     // queue retries with backoff, so a transient blip self-heals.
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
-    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
     vi.mocked(applyOneCliToSpawn).mockResolvedValue(false);
     process.env.GOOGLE_MAPS_API_KEY = REAL;
 
@@ -3051,7 +3021,7 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     // never momentarily unhandled — otherwise Vitest reports it as an
     // unhandled error even though the assertion passes.
     const rejected = expect(promise).rejects.toThrow(
-      /OneCLI agent proxy required/,
+      /OneCLI agent proxy could not be applied/,
     );
     await vi.advanceTimersByTimeAsync(1); // flush the applyOneCliToSpawn await
     await rejected;
@@ -3059,31 +3029,33 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     expect(vi.mocked(spawn)).not.toHaveBeenCalled();
   });
 
-  it('does NOT placeholder when OneCLI is configured but the agent proxy is OFF (prod-before-cutover: a placeholder here would ship a dead key on a DIRECT request)', async () => {
-    // The exact prod state the gate bug would have broken: OneCLI runs for the
-    // Anthropic credential-proxy (configured=true) but agents are proxy-less
-    // (agentProxy=false), so nothing swaps the key back in. The real value MUST
-    // still be forwarded (via the SECRET env-file), never the placeholder.
+  it('does NOT fail closed when the proxy cannot be applied but NO managed placeholder was withheld (untrusted / no-placeholder carve-out)', async () => {
+    // The other half of the cutover contract: OneCLI is configured and the
+    // gateway is unreachable (applyOneCliToSpawn → false), but this untrusted
+    // spawn forwards no `ONECLI_MANAGED_VARS`, so nothing was withheld and
+    // there is no dead placeholder credential to protect. It must fall through
+    // and run — the fail-closed throw is owed ONLY when a placeholder was
+    // actually applied (`managedPlaceholdersApplied`).
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
-    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(false);
-    process.env.GOOGLE_MAPS_API_KEY = REAL;
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(false);
 
-    const mainInput = { ...testInput, isMain: true };
-    const promise = runContainerAgent(testGroup, mainInput, () => {});
+    // testInput is untrusted (isMain:false, isTrusted unset) → no managed vars.
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    await vi.advanceTimersByTimeAsync(1); // flush the applyOneCliToSpawn await
     fakeProc.emit('close', 0);
     await vi.advanceTimersByTimeAsync(10);
-    await promise;
+    await promise; // resolves — no throw
 
+    // The container WAS spawned (fell through), carrying no managed placeholder.
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1);
     const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
-    expect(args).not.toContain('GOOGLE_MAPS_API_KEY=onecli-managed');
-    // Real value routes through the 0600 env-file (SECRET var), never a plain
-    // -e placeholder on the argv, and the real value never appears on argv.
-    expect(args.join(' ')).not.toContain(REAL);
+    for (const v of ONECLI_MANAGED_VARS) {
+      expect(args).not.toContain(`${v}=onecli-managed`);
+    }
   });
 
   it('does NOT placeholder when OneCLI is fully unconfigured (dev fallback keeps the real-value env-file path)', async () => {
     vi.mocked(isOneCliConfigured).mockReturnValue(false);
-    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(false);
     process.env.GOOGLE_MAPS_API_KEY = REAL;
 
     const mainInput = { ...testInput, isMain: true };
@@ -3101,7 +3073,6 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
 
   it('mounts the OneCLI CA + points every CA env var at it when the proxy is applied (#640 — SDK CA mount is broken under DooD)', async () => {
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
-    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
     vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
 
     const mainInput = { ...testInput, isMain: true };
@@ -3128,7 +3099,6 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
 
   it('FAILS CLOSED when the proxy is applied but the CA cannot be delivered (a proxied container with no trusted CA fails all external HTTPS)', async () => {
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
-    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
     vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
     // Gateway unreachable for the CA fetch → no CA content.
     vi.mocked(getOneCliOutboundConfig).mockResolvedValue(null);
@@ -3146,7 +3116,6 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     // collide across concurrent same-tier spawns and one could ENOENT on
     // rename. Two same-tier spawns must produce two distinct tmp paths.
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
-    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
     vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
     vi.mocked(fs.writeFileSync).mockClear();
 
@@ -3183,7 +3152,6 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     process.env.SESSIONIZE_SPEAKER_KEY = 'sz_secret_must_be_cleaned_up';
     vi.mocked(fs.unlinkSync).mockClear();
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
-    vi.mocked(oneCliAgentProxyEnabled).mockReturnValue(true);
     vi.mocked(applyOneCliToSpawn).mockResolvedValue(true);
     vi.mocked(getOneCliOutboundConfig).mockRejectedValue(
       new Error('gateway boom'),

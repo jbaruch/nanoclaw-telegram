@@ -56,7 +56,6 @@ import {
   applyOneCliToSpawn,
   getOneCliOutboundConfig,
   isOneCliConfigured,
-  oneCliAgentProxyEnabled,
 } from './onecli-client.js';
 import type { TrustTier } from './trust-tier.js';
 import { rebuildCadenceRegistryForGroup } from './db.js';
@@ -550,16 +549,15 @@ export const ONECLI_MANAGED_PLACEHOLDER = 'onecli-managed';
 /**
  * Credentials that migrate from real-value env-file injection to OneCLI
  * placeholder + gateway swap (umbrella #564, cleanup #640). When OneCLI is
- * configured AND the agent proxy is enabled (`isOneCliConfigured() &&
- * oneCliAgentProxyEnabled()` — the same gate the spawn uses to apply the
- * gateway proxy), the container receives `<VAR>=onecli-managed` instead of the
- * real value, and OneCLI's TLS-MITM injects the real secret for the vault
- * host-pattern (verified for header AND query-param injection). When either
- * conjunct is off (local dev, or prod before the cutover), the var falls back
- * to real-value forwarding via the normal `SECRET_CONTAINER_VARS` path. If the
- * gate passes but the gateway proxy cannot actually be applied at spawn time,
- * the caller fails the spawn closed (see `managedPlaceholdersApplied`) rather
- * than shipping a container with a dead placeholder credential.
+ * configured (`isOneCliConfigured()` — the same gate the spawn uses to apply
+ * the gateway proxy), the container receives `<VAR>=onecli-managed` instead of
+ * the real value, and OneCLI's TLS-MITM injects the real secret for the vault
+ * host-pattern (verified for header AND query-param injection). When OneCLI is
+ * unconfigured (local dev), the var falls back to real-value forwarding via the
+ * normal `SECRET_CONTAINER_VARS` path. If the gate passes but the gateway proxy
+ * cannot actually be applied at spawn time, the caller fails the spawn closed
+ * (see `managedPlaceholdersApplied`) rather than shipping a container with a
+ * dead placeholder credential.
  *
  * Preconditions to add a var here: (1) a OneCLI vault entry exists for its
  * host with the correct header/param injection config, (2) injection is
@@ -2894,9 +2892,9 @@ interface BuildContainerArgsResult {
   // The caller MUST fail the spawn closed if the gateway proxy is then not
   // actually applied (`applyOneCliToSpawn` returns false), because a withheld
   // credential would otherwise go out as a dead placeholder on a direct
-  // request (REQUEST_DENIED). Distinct from "the flag is on": untrusted
+  // request (REQUEST_DENIED). Distinct from "OneCLI is configured": untrusted
   // spawns forward no vars, so nothing is placeholdered and no fail-close is
-  // owed even with the flag set.
+  // owed even when OneCLI is configured.
   managedPlaceholdersApplied: boolean;
 }
 
@@ -3016,27 +3014,21 @@ function buildContainerArgs(
   // env-file (passed via `--env-file`) so they don't appear on the
   // docker process command line; non-secrets stay on `-e KEY=value`.
   // See the SECRET_CONTAINER_VARS docstring for the policy.
-  // #640: when the OneCLI agent proxy is live it swaps real secrets in at the
-  // gateway, so OneCLI-managed vars enter the container as a non-empty
+  // #640: when OneCLI is configured the gateway swaps real secrets in on the
+  // outbound request, so OneCLI-managed vars enter the container as a non-empty
   // placeholder and their real value never touches the container environ.
-  // Falls back to real-value forwarding otherwise.
+  // Falls back to real-value forwarding when OneCLI is unconfigured.
   //
   // The gate mirrors EXACTLY the condition that decides whether the gateway
-  // proxy is applied to the spawn (`isOneCliConfigured() &&
-  // oneCliAgentProxyEnabled()` at the call site). Both conjuncts are load-
-  // bearing:
-  //   - `oneCliAgentProxyEnabled()` alone is insufficient: in prod OneCLI is
-  //     configured for the Anthropic credential-proxy (#637) but the agent
-  //     proxy is OFF, so the agent's Maps call does not traverse the gateway.
-  //   - `isOneCliConfigured()` is the other half: with only the flag set (no
-  //     ONECLI_URL/API_KEY) `applyOneCliToSpawn` is never called, so a
-  //     placeholder would go out on a DIRECT request → REQUEST_DENIED.
-  // Matching the call-site gate means placeholdering happens iff the proxy-
-  // application branch runs. The remaining gap — `applyOneCliToSpawn` itself
-  // returning false (gateway unreachable) — is closed at the call site by
-  // failing the spawn when `managedPlaceholdersApplied` is true (see below).
-  const oneCliManagesSecrets =
-    isOneCliConfigured() && oneCliAgentProxyEnabled();
+  // proxy is applied to the spawn (`isOneCliConfigured()` at the call site):
+  // placeholdering must happen iff the proxy-application branch runs, else a
+  // placeholder would go out on a DIRECT request → REQUEST_DENIED. When OneCLI
+  // is unconfigured (dev, or `ONECLI_URL`/`ONECLI_API_KEY` unset) the proxy is
+  // never applied and vars fall back to real-value forwarding. The remaining
+  // gap — `applyOneCliToSpawn` itself returning false (gateway unreachable) —
+  // is closed at the call site by failing the spawn when
+  // `managedPlaceholdersApplied` is true (see below).
+  const oneCliManagesSecrets = isOneCliConfigured();
   let managedPlaceholdersApplied = false;
   const secretEnv: Record<string, string> = {};
   for (const varName of varsToForward) {
@@ -3541,12 +3533,16 @@ export async function runContainerAgent(
     // spawn path microtask-free when OneCLI is off — relevant for tests that
     // emit 'close' between `runContainerAgent` invocation and the spawn
     // registering its close handler.
-    // #637: agent-spawn proxy injection is gated on a SEPARATE flag, not just
-    // isOneCliConfigured. #637 enables OneCLI for the credential-proxy's
-    // Anthropic hop while agents stay proxy-less; putting OneCLI in front of
-    // agent traffic is #640. Without this split, re-enabling ONECLI_URL for
-    // #637 would re-apply the agent proxy that broke the LLM path.
-    if (isOneCliConfigured() && oneCliAgentProxyEnabled()) {
+    // #640: whenever OneCLI is configured, the agent's outbound traffic
+    // traverses the OneCLI gateway so external creds swap in at the MITM and
+    // never touch the agent environ. (The earlier INCIDENT-746 break — the
+    // agent's call to its local credential-proxy getting routed through the
+    // gateway → ECONNRESET — is prevented by the NO_PROXY host-gateway bypass
+    // in applyOneCliToSpawn; the LLM 401 break was the gateway-injected
+    // ANTHROPIC_API_KEY sentinel, stripped there too.) The synchronous
+    // isOneCliConfigured() gate keeps the spawn path microtask-free in dev
+    // where OneCLI is unconfigured.
+    if (isOneCliConfigured()) {
       // Any failure applying OneCLI must clean up the 0600 secret env-file that
       // buildContainerArgs already materialized — the close/error handlers that
       // otherwise clean it up aren't installed yet, so a bare throw here would
@@ -3579,11 +3575,11 @@ export async function runContainerAgent(
           // (index.ts catch → 'error'), so a transient gateway blip self-heals;
           // untrusted spawns forward no vars, so this path is skipped for them.
           throw new Error(
-            'OneCLI agent proxy required (ONECLI_AGENT_PROXY=1) but could not ' +
-              'be applied to this spawn — managed credentials were withheld as ' +
-              'placeholders and would fail on a direct request. Confirm the ' +
-              'OneCLI gateway is reachable (`curl -sf $ONECLI_URL/health` on the ' +
-              'NAS) and the tier agent exists (`onecli agents list`), then retry.',
+            'OneCLI agent proxy could not be applied to this spawn — managed ' +
+              'credentials were withheld as placeholders and would fail on a ' +
+              'direct request. Confirm the OneCLI gateway is reachable (`curl ' +
+              '-sf $ONECLI_URL/health` on the NAS) and the tier agent exists ' +
+              '(`onecli agents list`), then retry.',
           );
         }
       } catch (err) {

@@ -376,13 +376,15 @@ export function startCredentialProxy(
               (upRes) => {
                 res.writeHead(upRes.statusCode!, upRes.headers);
 
-                // #640 investigation: gated per-request auth-path trace. Pins
-                // why real agent-runner turns 401 under ONECLI_AGENT_PROXY=1
-                // while a bare `claude -p` under identical proxy+CA passes. The
-                // OneCLI-injection decision (`oneCli`) and the upstream status
-                // are both known here, for the same request. Booleans + status
-                // only — never token values (no-secrets). Enable with
-                // CREDPROXY_AUTH_DEBUG=1; default OFF, single-shot capture.
+                // #640: gated per-request auth-path trace, kept as a permanent
+                // diagnostic for the agent→cred-proxy→OneCLI auth path. (It
+                // pinned the cutover 401: under the gateway proxy the agent sent
+                // `x-api-key` with no Authorization, so the OneCLI-injection gate
+                // was skipped — fixed by stripping the gateway ANTHROPIC_API_KEY
+                // sentinel in applyOneCliToSpawn.) The OneCLI-injection decision
+                // (`oneCli`) and the upstream status are both known here, for the
+                // same request. Booleans + status only — never token values
+                // (no-secrets). Enable with CREDPROXY_AUTH_DEBUG=1; default OFF.
                 if (process.env.CREDPROXY_AUTH_DEBUG === '1') {
                   // Allowlisted endpoint label, never raw path material: this
                   // proxy only ever forwards to api.anthropic.com, but the repo
