@@ -143,15 +143,11 @@ echo "Scrubbing files..."
 PRIVATE_IPC_HANDLERS=(
   'sync_tripit'
   'fetch_trakt_history'
-  'sessionize_get_event'
-  'sessionize_open_cfps'
   'audible_backup'
 )
 PRIVATE_MCP_TOOLS=(
   'sync_tripit'
   'fetch_trakt_history'
-  'sessionize_get_event'
-  'sessionize_open_cfps'
   'audible_backup'
   'smarthome_status'
 )
@@ -265,12 +261,6 @@ code = open(f).read()
 code = code.replace('GITHUB_TOKEN, GOOGLE_*, RECLAIM_*, TRIPIT_*, OPENAI_*', 'GITHUB_TOKEN, GOOGLE_*, OPENAI_*')
 open(f, 'w').write(code)
 
-# ipc.ts: remove sessionize from comment
-f = '$PUBLIC_DIR/src/ipc.ts'
-code = open(f).read()
-code = code.replace('/ github_backup / promote_staging / sessionize', '/ github_backup / promote_staging')
-open(f, 'w').write(code)
-
 # telegram-sanitize.ts: the JSDoc attributes this module to a script
 # that lives inside the private nanoclaw-admin tile. A later step (#10)
 # strips that tile from tessl.json deps so public users never install
@@ -313,7 +303,6 @@ open(f, 'w').write(''.join(lines))
 f = '$PUBLIC_DIR/scripts/promote-to-tile-repo.sh'
 code = open(f).read()
 code = code.replace('|sync_tripit|fetch_trakt', '')
-code = code.replace('|sessionize', '')
 open(f, 'w').write(code)
 
 print('  comments/scripts: removed private integration references')
