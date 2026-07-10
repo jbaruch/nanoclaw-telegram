@@ -297,7 +297,8 @@ export async function applyOneCliToSpawn(
     // as api-key mode: it drops the OAuth flow and sends `x-api-key: <sentinel>`
     // with no Authorization header. The cred-proxy's OneCLI-injection gate needs
     // an Authorization header, so it forwards the sentinel raw → 401 on every
-    // real turn (the #640 cutover break, pinned via CREDPROXY_AUTH_DEBUG). Strip
+    // real turn (the #640 cutover break, pinned via a live auth-path capture).
+    // Strip
     // the gateway-injected ANTHROPIC_API_KEY — only from the tail
     // applyContainerConfig just appended, so an api-key-mode placeholder the
     // caller set earlier (container-runner, host in api-key mode) is left
