@@ -3014,10 +3014,10 @@ function buildContainerArgs(
   // env-file (passed via `--env-file`) so they don't appear on the
   // docker process command line; non-secrets stay on `-e KEY=value`.
   // See the SECRET_CONTAINER_VARS docstring for the policy.
-  // #640: when the OneCLI agent proxy is live it swaps real secrets in at the
-  // gateway, so OneCLI-managed vars enter the container as a non-empty
+  // #640: when OneCLI is configured the gateway swaps real secrets in on the
+  // outbound request, so OneCLI-managed vars enter the container as a non-empty
   // placeholder and their real value never touches the container environ.
-  // Falls back to real-value forwarding otherwise.
+  // Falls back to real-value forwarding when OneCLI is unconfigured.
   //
   // The gate mirrors EXACTLY the condition that decides whether the gateway
   // proxy is applied to the spawn (`isOneCliConfigured()` at the call site):

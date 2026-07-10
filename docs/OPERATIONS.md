@@ -175,7 +175,7 @@ sqlite3 ~/nanoclaw/store/messages.db "UPDATE scheduled_tasks SET prompt='new pro
 
 Forwarded-into-container credentials live in `src/container-runner.ts` (`CONTAINER_VARS` is the full forwarded list; `SECRET_CONTAINER_VARS` is the subset routed through a mode-0600 env-file rather than `-e` so it stays off `docker ps`; `ONECLI_MANAGED_VARS` is the subset whose real value is NOT forwarded).
 
-**OneCLI-managed (`ONECLI_MANAGED_VARS`)** — with OneCLI configured (`ONECLI_URL`/`ONECLI_API_KEY` set), every agent spawn routes through the gateway: the container receives an `onecli-managed` placeholder and OneCLI's MITM gateway injects the real vaulted value on the outbound request (real key never in the agent environ; falls back to real-value forwarding when OneCLI is unconfigured, e.g. dev):
+**OneCLI-managed (`ONECLI_MANAGED_VARS`)** — with OneCLI configured (`ONECLI_URL`/`ONECLI_API_KEY` set), each agent spawn attempts to route through the gateway: the container receives an `onecli-managed` placeholder and OneCLI's MITM gateway injects the real vaulted value on the outbound request (real key never in the agent environ). If the gateway can't be applied at spawn time, a spawn that withheld managed placeholders fails closed (retried with backoff) while one with no withheld credentials proceeds. Falls back to real-value forwarding when OneCLI is unconfigured (e.g. dev):
 
 - `GOOGLE_MAPS_API_KEY` — Distance Matrix (`maps.googleapis.com`, param `key`).
 - `TOMTOM_API_KEY` — TomTom geocode + `calculateRoute` (`api.tomtom.com`, param `key`; routing backup + `drive-planner`).

@@ -7,11 +7,13 @@
  * operational sub-issue lands), every export is a graceful no-op.
  *
  * The SDK-layer error policy is permissive: `ensureAgent`/config errors are
- * logged and treated as "OneCLI not active for this spawn" so a gateway blip
- * never blocks a container start. The CALLER then decides the response — a
- * spawn that withheld `ONECLI_MANAGED_VARS` placeholders fails closed (#640),
- * while unconfigured / no-placeholder spawns fall back to the real-value
- * credential-proxy path. (Anthropic/OpenAI now route through OneCLI via the
+ * logged and treated as "OneCLI not active for this spawn" (the wrapper just
+ * returns false), never throwing on its own. The CALLER then decides the
+ * response — a spawn that withheld `ONECLI_MANAGED_VARS` placeholders fails
+ * closed (#640, so no dead placeholder ships), while unconfigured /
+ * no-placeholder spawns proceed on the real-value credential-proxy path. So a
+ * gateway blip blocks only the spawns whose credentials were actually
+ * withheld. (Anthropic/OpenAI now route through OneCLI via the
  * credential-proxy, #637.)
  */
 import { readFileSync } from 'fs';

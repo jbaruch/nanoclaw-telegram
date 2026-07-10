@@ -3029,6 +3029,31 @@ describe('#640 — OneCLI-managed credential forwarding', () => {
     expect(vi.mocked(spawn)).not.toHaveBeenCalled();
   });
 
+  it('does NOT fail closed when the proxy cannot be applied but NO managed placeholder was withheld (untrusted / no-placeholder carve-out)', async () => {
+    // The other half of the cutover contract: OneCLI is configured and the
+    // gateway is unreachable (applyOneCliToSpawn → false), but this untrusted
+    // spawn forwards no `ONECLI_MANAGED_VARS`, so nothing was withheld and
+    // there is no dead placeholder credential to protect. It must fall through
+    // and run — the fail-closed throw is owed ONLY when a placeholder was
+    // actually applied (`managedPlaceholdersApplied`).
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(applyOneCliToSpawn).mockResolvedValue(false);
+
+    // testInput is untrusted (isMain:false, isTrusted unset) → no managed vars.
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    await vi.advanceTimersByTimeAsync(1); // flush the applyOneCliToSpawn await
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await promise; // resolves — no throw
+
+    // The container WAS spawned (fell through), carrying no managed placeholder.
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1);
+    const args = vi.mocked(spawn).mock.calls[0]![1] as string[];
+    for (const v of ONECLI_MANAGED_VARS) {
+      expect(args).not.toContain(`${v}=onecli-managed`);
+    }
+  });
+
   it('does NOT placeholder when OneCLI is fully unconfigured (dev fallback keeps the real-value env-file path)', async () => {
     vi.mocked(isOneCliConfigured).mockReturnValue(false);
     process.env.GOOGLE_MAPS_API_KEY = REAL;
