@@ -532,8 +532,8 @@ export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
   // Sessionize event API key — read by the same tile's
   // `verify-sessionize.py` for live per-slug CFP-deadline verification.
   // The container-side driver is now the sole consumer; forwarding the
-  // key lets it do the round-trip in-container without IPC. Same
-  // env-file treatment.
+  // key lets it do the round-trip in-container without IPC. Secret so
+  // the key stays off `ps`/`docker ps`, same as the other API keys.
   'SESSIONIZE_EVENT_API_KEY',
 ]);
 
