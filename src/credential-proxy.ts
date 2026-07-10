@@ -384,14 +384,27 @@ export function startCredentialProxy(
                 // only — never token values (no-secrets). Enable with
                 // CREDPROXY_AUTH_DEBUG=1; default OFF, single-shot capture.
                 if (process.env.CREDPROXY_AUTH_DEBUG === '1') {
+                  // Allowlisted endpoint label, never raw path material: this
+                  // proxy only ever forwards to api.anthropic.com, but the repo
+                  // has path-embedded-credential cases elsewhere, so classify to
+                  // a fixed set rather than logging any path segment (no-secrets).
+                  const endpoint = isMessagesEndpoint(upstreamPath)
+                    ? 'v1/messages'
+                    : upstreamPath.split('?')[0] ===
+                        '/api/oauth/claude_cli/create_api_key'
+                      ? 'oauth/create_api_key'
+                      : 'other';
                   logger.info(
                     {
-                      pathSuffix: upstreamPath.split('?')[0],
+                      endpoint,
                       method: req.method,
                       authMode,
                       hasAuthHeader: !!req.headers['authorization'],
                       hasXApiKey: !!req.headers['x-api-key'],
-                      oneCliUsed: !!oneCli,
+                      // Reflect what was actually applied: OneCLI only tunnels
+                      // the request when the upstream is HTTPS (a test-only HTTP
+                      // override never gets the agent/CA), so gate on isHttps too.
+                      oneCliUsed: !!(oneCli && isHttps),
                       tier: containerCtx?.tier ?? null,
                       upstreamStatus: upRes.statusCode ?? null,
                     },
