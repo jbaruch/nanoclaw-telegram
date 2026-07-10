@@ -247,15 +247,6 @@ export async function ensureAgentForTier(tier: TrustTier): Promise<void> {
 }
 
 /**
- * When OneCLI is configured, mutate the docker-spawn argv to add HTTPS_PROXY
- * env, mount the OneCLI CA bundle, and add the host.docker.internal mapping.
- * Returns whether OneCLI was applied to the spawn.
- *
- * A no-op (returns false) when OneCLI is unconfigured or the gateway is
- * unreachable. Stage 1 stays additive: a spawn that can't reach OneCLI still
- * runs with the existing credential-proxy path.
- */
-/**
  * Remove `-e <name>=<value>` pairs that `applyContainerConfig` appended to the
  * spawn argv at or after `fromIndex`. Scans only the appended tail, so an
  * identically-named `-e` the caller pushed earlier (e.g. the api-key-mode
@@ -275,6 +266,15 @@ function removeInjectedEnvVar(
   }
 }
 
+/**
+ * When OneCLI is configured, mutate the docker-spawn argv to add HTTPS_PROXY
+ * env, mount the OneCLI CA bundle, and add the host.docker.internal mapping.
+ * Returns whether OneCLI was applied to the spawn.
+ *
+ * A no-op (returns false) when OneCLI is unconfigured or the gateway is
+ * unreachable. Stage 1 stays additive: a spawn that can't reach OneCLI still
+ * runs with the existing credential-proxy path.
+ */
 export async function applyOneCliToSpawn(
   args: string[],
   tier: TrustTier,
