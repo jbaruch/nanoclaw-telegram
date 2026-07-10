@@ -547,38 +547,67 @@ export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
 export const ONECLI_MANAGED_PLACEHOLDER = 'onecli-managed';
 
 /**
+ * URL-valued managed credential: the sentinel rides INSIDE a syntactically
+ * valid URL (query param here) rather than being a bare scalar. The consuming
+ * skill reads a real-looking URL so its own URL parse/validation still passes;
+ * the gateway overwrites the `onecli-managed` sentinel with the vaulted secret
+ * on the outbound request (query-param injection for `api.byairapp.com`). Keep
+ * the host in sync with the vault entry's `hostPattern` and the `api_key` param
+ * name with its `paramName` (the `/mcp` path is not part of the match).
+ */
+export const BYAIR_MANAGED_PLACEHOLDER = `https://api.byairapp.com/mcp?api_key=${ONECLI_MANAGED_PLACEHOLDER}`;
+
+/**
  * Credentials that migrate from real-value env-file injection to OneCLI
  * placeholder + gateway swap (umbrella #564, cleanup #640). When OneCLI is
  * configured (`isOneCliConfigured()` — the same gate the spawn uses to apply
- * the gateway proxy), the container receives `<VAR>=onecli-managed` instead of
- * the real value, and OneCLI's TLS-MITM injects the real secret for the vault
- * host-pattern (verified for header AND query-param injection). When OneCLI is
- * unconfigured (local dev), the var falls back to real-value forwarding via the
- * normal `SECRET_CONTAINER_VARS` path. If the gate passes but the gateway proxy
- * cannot actually be applied at spawn time, the caller fails the spawn closed
- * (see `managedPlaceholdersApplied`) rather than shipping a container with a
- * dead placeholder credential.
+ * the gateway proxy), the container receives the var's mapped placeholder
+ * instead of the real value, and OneCLI's TLS-MITM injects the real secret for
+ * the vault host-pattern (the managed vars below use header and query-param
+ * injection; OneCLI also supports URL-path injection, used host-side by the
+ * TripIt sync in #748, not by any var here). When OneCLI is unconfigured (local
+ * dev), the var falls back to
+ * real-value forwarding via the normal `SECRET_CONTAINER_VARS` path. If the
+ * gate passes but the gateway proxy cannot actually be applied at spawn time,
+ * the caller fails the spawn closed (see `managedPlaceholdersApplied`) rather
+ * than shipping a container with a dead placeholder credential.
+ *
+ * The value is the placeholder to forward. Scalar creds (the secret IS the
+ * whole value) use the bare `onecli-managed` sentinel; URL-valued creds (the
+ * secret is one field of a URL the skill parses) use a URL-shaped placeholder
+ * that embeds the sentinel where the gateway swaps it (see
+ * `BYAIR_MANAGED_PLACEHOLDER`).
  *
  * Preconditions to add a var here: (1) a OneCLI vault entry exists for its
- * host with the correct header/param injection config, (2) injection is
- * probe-verified for that host (placeholder key/header through the gateway
+ * host with the correct header/param/path injection config, (2) injection is
+ * probe-verified for that host (placeholder key/header/path through the gateway
  * returns real data). A host-side reader does NOT disqualify a var: only the
  * CONTAINER is placeholdered here, so a var the host also reads (e.g.
  * `GITHUB_TOKEN` → the `github_backup` IPC handler's `git push`) keeps its real
  * value in `.env` for the host while agents get the placeholder + swap.
  *
  * All entries swap-verified through the gateway (placeholder → real data):
- * `GOOGLE_MAPS_API_KEY` — `maps.googleapis.com`, param `key` (Distance Matrix).
- * `TOMTOM_API_KEY`      — `api.tomtom.com`, param `key` (routing / geocode).
- * `YOUTUBE_API_KEY`     — `www.googleapis.com` path `/youtube/*`, param `key`.
- * `GITHUB_TOKEN`        — `api.github.com`, header `Authorization: Bearer` (gh);
- *                          host-side `github_backup` still reads the .env value.
+ * `GOOGLE_MAPS_API_KEY`      — `maps.googleapis.com`, param `key` (Distance Matrix).
+ * `TOMTOM_API_KEY`           — `api.tomtom.com`, param `key` (routing / geocode).
+ * `YOUTUBE_API_KEY`          — `www.googleapis.com` path `/youtube/*`, param `key`.
+ * `GITHUB_TOKEN`             — `api.github.com`, header `Authorization: Bearer` (gh);
+ *                              host-side `github_backup` still reads the .env value.
+ * `SESSIONIZE_SPEAKER_KEY`   — `sessionize.com` path `/api/universal/open-cfps`,
+ *                              header `X-API-KEY` (path-scoped so it never
+ *                              collides with the event key on the same host).
+ * `SESSIONIZE_EVENT_API_KEY` — `sessionize.com` path `/api/universal/event`,
+ *                              header `X-API-KEY` (path-scoped).
+ * `BYAIR_MCP_URL`            — `api.byairapp.com`, param `api_key`; URL-valued,
+ *                              forwarded as `BYAIR_MANAGED_PLACEHOLDER`.
  */
-export const ONECLI_MANAGED_VARS: ReadonlySet<string> = new Set([
-  'GOOGLE_MAPS_API_KEY',
-  'TOMTOM_API_KEY',
-  'YOUTUBE_API_KEY',
-  'GITHUB_TOKEN',
+export const ONECLI_MANAGED_VARS: ReadonlyMap<string, string> = new Map([
+  ['GOOGLE_MAPS_API_KEY', ONECLI_MANAGED_PLACEHOLDER],
+  ['TOMTOM_API_KEY', ONECLI_MANAGED_PLACEHOLDER],
+  ['YOUTUBE_API_KEY', ONECLI_MANAGED_PLACEHOLDER],
+  ['GITHUB_TOKEN', ONECLI_MANAGED_PLACEHOLDER],
+  ['SESSIONIZE_SPEAKER_KEY', ONECLI_MANAGED_PLACEHOLDER],
+  ['SESSIONIZE_EVENT_API_KEY', ONECLI_MANAGED_PLACEHOLDER],
+  ['BYAIR_MCP_URL', BYAIR_MANAGED_PLACEHOLDER],
 ]);
 
 /**
@@ -3032,8 +3061,11 @@ function buildContainerArgs(
   let managedPlaceholdersApplied = false;
   const secretEnv: Record<string, string> = {};
   for (const varName of varsToForward) {
-    if (oneCliManagesSecrets && ONECLI_MANAGED_VARS.has(varName)) {
-      args.push('-e', `${varName}=${ONECLI_MANAGED_PLACEHOLDER}`);
+    const managedPlaceholder = oneCliManagesSecrets
+      ? ONECLI_MANAGED_VARS.get(varName)
+      : undefined;
+    if (managedPlaceholder !== undefined) {
+      args.push('-e', `${varName}=${managedPlaceholder}`);
       managedPlaceholdersApplied = true;
       continue;
     }
