@@ -48,6 +48,7 @@ RUN apt-get update && apt-get install -y \
     git \
     poppler-utils \
     python3 \
+    sqlite3 \
  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       | tee /usr/share/keyrings/githubcli-archive-keyring.gpg > /dev/null \
  && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
