@@ -3,7 +3,27 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR } from './config.js';
+import { isFsErrorWithCode } from './fs-errors.js';
 import { logger } from './logger.js';
+
+// process.kill throws ESRCH when the target process is gone. EPERM (exists
+// but not signalable) is deliberately NOT in this set — a live-but-unsignalable
+// process must be distinguished from a dead one (see isProcessAlive) and a
+// teardown that can't signal its own child is surfaced, not swallowed.
+const PROCESS_GONE_CODES = ['ESRCH'];
+// Errno codes a best-effort state-file read/unlink may legitimately raise,
+// incl. path-shape ENOTDIR/ELOOP/ENAMETOOLONG. Anything else propagates.
+const STATE_FS_CODES = [
+  'ENOENT',
+  'EACCES',
+  'EPERM',
+  'EISDIR',
+  'ENOTDIR',
+  'ELOOP',
+  'ENAMETOOLONG',
+  'EROFS',
+  'EBUSY',
+];
 
 interface RemoteControlSession {
   pid: number;
@@ -30,9 +50,11 @@ function saveState(session: RemoteControlSession): void {
 function clearState(): void {
   try {
     fs.unlinkSync(STATE_FILE);
-  } catch (err: any) {
-    // ENOENT is expected (no state file to clear); anything else is a real bug.
-    if (err?.code !== 'ENOENT') {
+  } catch (err) {
+    // A missing file (ENOENT) is the normal case; other fs errnos are logged;
+    // a non-fs defect propagates.
+    if (!isFsErrorWithCode(err, STATE_FS_CODES)) throw err;
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
       logger.warn(
         { err, path: STATE_FILE },
         'Failed to clear remote-control state file',
@@ -45,8 +67,13 @@ function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    // EPERM: the process exists, we just can't signal it → still alive.
+    if (code === 'EPERM') return true;
+    // ESRCH: no such process → dead.
+    if (code === 'ESRCH') return false;
+    throw err;
   }
 }
 
@@ -58,7 +85,16 @@ export function restoreRemoteControl(): void {
   let data: string;
   try {
     data = fs.readFileSync(STATE_FILE, 'utf-8');
-  } catch {
+  } catch (err) {
+    if (!isFsErrorWithCode(err, STATE_FS_CODES)) throw err;
+    // ENOENT is the normal "no prior session" case; a persistent non-ENOENT
+    // fs error is worth surfacing so a stuck restore is diagnosable.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      logger.warn(
+        { err, path: STATE_FILE },
+        'Failed to read remote-control state file on startup',
+      );
+    }
     return;
   }
 
@@ -74,6 +110,7 @@ export function restoreRemoteControl(): void {
       clearState();
     }
   } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     logger.warn(
       { err, path: STATE_FILE },
       'Remote Control state file is corrupt; clearing',
@@ -124,7 +161,8 @@ export async function startRemoteControl(
       stdio: ['pipe', stdoutFd, stderrFd],
       detached: true,
     });
-  } catch (err: any) {
+  } catch (err) {
+    if (!(err instanceof Error)) throw err;
     fs.closeSync(stdoutFd);
     fs.closeSync(stderrFd);
     return { ok: false, error: `Failed to start: ${err.message}` };
@@ -163,7 +201,8 @@ export async function startRemoteControl(
       let content = '';
       try {
         content = fs.readFileSync(STDOUT_FILE, 'utf-8');
-      } catch {
+      } catch (err) {
+        if (!isFsErrorWithCode(err, STATE_FS_CODES)) throw err;
         // File might not have content yet
       }
 
@@ -191,10 +230,13 @@ export async function startRemoteControl(
       if (Date.now() - startTime >= URL_TIMEOUT_MS) {
         try {
           process.kill(-pid, 'SIGTERM');
-        } catch {
+        } catch (err) {
+          if (!isFsErrorWithCode(err, PROCESS_GONE_CODES)) throw err;
           try {
             process.kill(pid, 'SIGTERM');
-          } catch {
+          } catch (innerErr) {
+            if (!isFsErrorWithCode(innerErr, PROCESS_GONE_CODES))
+              throw innerErr;
             // already dead
           }
         }
@@ -224,7 +266,8 @@ export function stopRemoteControl():
   const { pid } = activeSession;
   try {
     process.kill(pid, 'SIGTERM');
-  } catch {
+  } catch (err) {
+    if (!isFsErrorWithCode(err, PROCESS_GONE_CODES)) throw err;
     // already dead
   }
   activeSession = null;

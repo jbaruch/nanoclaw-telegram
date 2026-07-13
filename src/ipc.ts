@@ -13,7 +13,11 @@ import {
   STORE_DIR,
   TIMEZONE,
 } from './config.js';
+import { SqliteError } from 'better-sqlite3';
+import { GrammyError, HttpError } from 'grammy';
+
 import { syncBackupRepo, type SyncResult } from './backup-sync.js';
+import { isFsErrorWithCode } from './fs-errors.js';
 import { sendPoolMessage } from './channels/telegram.js';
 import { coerceTaskTextField } from './coerce-task-prompt.js';
 import {
@@ -60,6 +64,70 @@ import {
   type ScheduleType,
 } from './timezone.js';
 import { RegisteredGroup, TriggerPattern } from './types.js';
+
+// Errno codes the IPC poller's best-effort fs ops (readdir, stat, unlink,
+// rename over group IPC dirs) may legitimately raise, incl. path-shape
+// ENOTDIR/ELOOP/ENAMETOOLONG. Anything else is a real defect and propagates.
+const IPC_FS_CODES = [
+  'ENOENT',
+  'EACCES',
+  'EPERM',
+  'EISDIR',
+  'EBUSY',
+  'EROFS',
+  'ENOSPC',
+  'ENOTDIR',
+  'ELOOP',
+  'ENAMETOOLONG',
+];
+
+/**
+ * Recoverable failures when processing one IPC message/task file: a
+ * malformed payload (SyntaxError), a persistence failure (SqliteError), a
+ * Telegram send/transport failure (GrammyError / HttpError), or an fs errno.
+ * Those quarantine the one bad file and let the poller continue. Anything
+ * else (a TypeError or other programming defect) is not data-poison and
+ * propagates so the bug surfaces.
+ */
+function isRecoverableIpcError(err: unknown): boolean {
+  return (
+    err instanceof SyntaxError ||
+    // Only constraint-class SQLite errors are per-file data poison (a bad
+    // payload violating a NOT NULL / UNIQUE / FK). Infrastructure faults
+    // (SQLITE_CORRUPT / BUSY / LOCKED / READONLY / SCHEMA) are NOT per-file
+    // recoverable and must propagate.
+    (err instanceof SqliteError &&
+      typeof err.code === 'string' &&
+      err.code.startsWith('SQLITE_CONSTRAINT')) ||
+    err instanceof GrammyError ||
+    err instanceof HttpError ||
+    isFsErrorWithCode(err, IPC_FS_CODES)
+  );
+}
+
+/**
+ * Best-effort quarantine of a bad IPC file into `errors/`. Wrapped so an fs
+ * failure during the move can't break the per-file boundary — the file
+ * simply stays and is retried next poll; a non-fs defect propagates.
+ */
+function moveIpcFileToErrors(
+  ipcBaseDir: string,
+  sourceGroup: string,
+  file: string,
+  filePath: string,
+): void {
+  try {
+    const errorDir = path.join(ipcBaseDir, 'errors');
+    fs.mkdirSync(errorDir, { recursive: true });
+    fs.renameSync(filePath, path.join(errorDir, `${sourceGroup}-${file}`));
+  } catch (err) {
+    if (!isFsErrorWithCode(err, IPC_FS_CODES)) throw err;
+    logger.error(
+      { err, file, sourceGroup },
+      '[ipc] Failed to move bad file to errors/ (will retry next poll)',
+    );
+  }
+}
 
 export interface IpcDeps {
   /**
@@ -699,6 +767,7 @@ export function startIpcWatcher(deps: IpcDeps): () => void {
         return stat.isDirectory() && f !== 'errors';
       });
     } catch (err) {
+      if (!isFsErrorWithCode(err, IPC_FS_CODES)) throw err;
       logger.error({ err }, 'Error reading IPC base directory');
       if (!stopped) pollTimer = setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
       return;
@@ -1127,6 +1196,9 @@ export function startIpcWatcher(deps: IpcDeps): () => void {
               }
               fs.unlinkSync(filePath);
             } catch (err) {
+              // Quarantine a bad file (recoverable data/transport failure) and
+              // continue; a programming defect propagates.
+              if (!isRecoverableIpcError(err)) throw err;
               // Catches anything thrown above (JSON.parse, auth, send, storeMessage).
               // If this fires AFTER the send already landed in Telegram, the
               // user sees a message with no DB row — exactly the ghost-heartbeat
@@ -1148,16 +1220,12 @@ export function startIpcWatcher(deps: IpcDeps): () => void {
                 },
                 '[ipc] Error processing IPC message — message may have been sent to the chat before the throw, in which case no DB row will exist',
               );
-              const errorDir = path.join(ipcBaseDir, 'errors');
-              fs.mkdirSync(errorDir, { recursive: true });
-              fs.renameSync(
-                filePath,
-                path.join(errorDir, `${sourceGroup}-${file}`),
-              );
+              moveIpcFileToErrors(ipcBaseDir, sourceGroup, file, filePath);
             }
           }
         }
       } catch (err) {
+        if (!isFsErrorWithCode(err, IPC_FS_CODES)) throw err;
         logger.error(
           { err, sourceGroup },
           'Error reading IPC messages directory',
@@ -1192,20 +1260,19 @@ export function startIpcWatcher(deps: IpcDeps): () => void {
               await processTaskIpc(data, sourceGroup, isMain, deps);
               fs.unlinkSync(filePath);
             } catch (err) {
+              // Quarantine a bad file (recoverable data/transport failure) and
+              // continue; a programming defect propagates.
+              if (!isRecoverableIpcError(err)) throw err;
               logger.error(
                 { file, sourceGroup, err },
                 'Error processing IPC task',
               );
-              const errorDir = path.join(ipcBaseDir, 'errors');
-              fs.mkdirSync(errorDir, { recursive: true });
-              fs.renameSync(
-                filePath,
-                path.join(errorDir, `${sourceGroup}-${file}`),
-              );
+              moveIpcFileToErrors(ipcBaseDir, sourceGroup, file, filePath);
             }
           }
         }
       } catch (err) {
+        if (!isFsErrorWithCode(err, IPC_FS_CODES)) throw err;
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
       }
     }
@@ -3468,6 +3535,15 @@ export async function processTaskIpc(
             }),
           }),
         );
+        // outer-boundary-process-contract (coding-policy: error-handling):
+        // IPC operation handler — the agent-runner's runHostOperation reads
+        // `result.error` as the tool-failure signal.
+        //   - Caller's silent-failure shape: a missing `error` field reads as
+        //     success, so a swallowed failure surfaces as a phantom success.
+        //   - What the catch emits: the error into `result.error` (below).
+        //   - Why propagation breaks the contract: an uncaught error would
+        //     skip the result envelope the caller polls for.
+        // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.error({ sourceGroup, targetJid, err }, 'nuke_chat failed');
@@ -3725,6 +3801,15 @@ export async function processTaskIpc(
             }),
           }),
         );
+        // outer-boundary-process-contract (coding-policy: error-handling):
+        // IPC operation handler — the agent-runner's runHostOperation reads
+        // `result.error` as the tool-failure signal.
+        //   - Caller's silent-failure shape: a missing `error` field reads as
+        //     success, so a swallowed failure surfaces as a phantom success.
+        //   - What the catch emits: the error into `result.error` (below).
+        //   - Why propagation breaks the contract: an uncaught error would
+        //     skip the result envelope the caller polls for.
+        // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.error(
@@ -3882,7 +3967,8 @@ export async function processTaskIpc(
             }
             try {
               fs.unlinkSync(tmpScript);
-            } catch {
+            } catch (err) {
+              if (!isFsErrorWithCode(err, IPC_FS_CODES)) throw err;
               /* best effort */
             }
           },
@@ -4049,7 +4135,8 @@ export async function processTaskIpc(
             }
             try {
               fs.unlinkSync(tmpScript);
-            } catch {
+            } catch (err) {
+              if (!isFsErrorWithCode(err, IPC_FS_CODES)) throw err;
               /* best effort */
             }
           },

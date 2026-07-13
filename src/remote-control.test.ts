@@ -178,7 +178,7 @@ describe('remote-control', () => {
       // Old process (11111) is dead, new process (22222) is alive
       killSpy.mockImplementation(((pid: number, sig: any) => {
         if (pid === 11111 && (sig === 0 || sig === undefined)) {
-          throw new Error('ESRCH');
+          throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
         }
         return true;
       }) as any);
@@ -200,7 +200,7 @@ describe('remote-control', () => {
 
       // Process is dead (poll will detect this)
       vi.spyOn(process, 'kill').mockImplementation((() => {
-        throw new Error('ESRCH');
+        throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
       }) as any);
 
       const result = await startRemoteControl('user1', 'tg:123', '/project');
@@ -313,7 +313,7 @@ describe('remote-control', () => {
         return '';
       }) as any);
       vi.spyOn(process, 'kill').mockImplementation((() => {
-        throw new Error('ESRCH');
+        throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
       }) as any);
 
       restoreRemoteControl();
