@@ -37,7 +37,24 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR } from './config.js';
+import { isFsErrorWithCode } from './fs-errors.js';
 import { logger } from './logger.js';
+
+// Errno codes reading/removing the handoff marker may legitimately raise —
+// including path-resolution errnos (ENOTDIR/ELOOP/ENAMETOOLONG). A missing
+// marker (ENOENT) is handled explicitly at the read site. Anything else is a
+// real defect and propagates.
+const MARKER_FS_CODES = [
+  'EACCES',
+  'EPERM',
+  'EISDIR',
+  'EROFS',
+  'EBUSY',
+  'ENOENT',
+  'ENOTDIR',
+  'ELOOP',
+  'ENAMETOOLONG',
+];
 
 /**
  * How long after a graceful shutdown the marker is still trusted.
@@ -148,6 +165,7 @@ export function readAndConsumeHandoffMarker(): HandoffMarker | null {
     raw = fs.readFileSync(MARKER_PATH, 'utf-8');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    if (!isFsErrorWithCode(err, MARKER_FS_CODES)) throw err;
     logger.warn({ err, path: MARKER_PATH }, 'handoff: failed to read marker');
     return null;
   }
@@ -157,12 +175,14 @@ export function readAndConsumeHandoffMarker(): HandoffMarker | null {
   try {
     fs.unlinkSync(MARKER_PATH);
   } catch (err) {
+    if (!isFsErrorWithCode(err, MARKER_FS_CODES)) throw err;
     logger.warn({ err, path: MARKER_PATH }, 'handoff: failed to delete marker');
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     logger.warn(
       { err },
       'handoff: marker is not valid JSON, treating as crash recovery',

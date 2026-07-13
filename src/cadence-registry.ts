@@ -290,7 +290,10 @@ export function validateCadenceDeclaration(
       // the scheduler validates it on fire.
       CronExpressionParser.parse(cron);
     } catch (err: unknown) {
-      const reason = err instanceof Error ? err.message : String(err);
+      // cron-parser throws Error on an invalid expression → collect it as a
+      // validation error; a non-Error throw is a defect and propagates.
+      if (!(err instanceof Error)) throw err;
+      const reason = err.message;
       errors.push(
         `${skillName}: 'cadence:' is not a valid cron expression — ${reason}`,
       );
@@ -556,7 +559,10 @@ export function rebuildCadenceRegistry(
     try {
       nextRun = deps.computeNextRun(cron, tz);
     } catch (err: unknown) {
-      const reason = err instanceof Error ? err.message : String(err);
+      // computeNextRun throws Error on an unparseable cron/tz → collect it and
+      // skip; a non-Error throw is a defect and propagates.
+      if (!(err instanceof Error)) throw err;
+      const reason = err.message;
       const msg = `${skillName}: computeNextRun failed for cadence ${JSON.stringify(declaration.cadence)} — ${reason}`;
       errors.push(msg);
       logger.warn(

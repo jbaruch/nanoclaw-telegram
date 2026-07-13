@@ -8,7 +8,25 @@ import {
   MAINTENANCE_SESSION_NAME,
   sessionInputDirName,
 } from './container-runner.js';
-import { isExpectedFsError } from './fs-errors.js';
+import { isExpectedFsError, isFsErrorWithCode } from './fs-errors.js';
+
+// Errno codes writing an IPC input file (mkdir-recursive, writeFile, rename)
+// may legitimately raise — incl. EEXIST and path-shape ENOTDIR/ELOOP/
+// ENAMETOOLONG. Broader than the shared IPC allowlist; anything else is a
+// real defect and propagates.
+const IPC_WRITE_FS_CODES = [
+  'EACCES',
+  'EPERM',
+  'ENOSPC',
+  'EROFS',
+  'ENOENT',
+  'EISDIR',
+  'EBUSY',
+  'EEXIST',
+  'ENOTDIR',
+  'ELOOP',
+  'ENAMETOOLONG',
+];
 import { logger } from './logger.js';
 
 // Re-export so callers that already imported these from group-queue keep
@@ -336,7 +354,8 @@ export class GroupQueue {
       fs.writeFileSync(tempPath, JSON.stringify(data));
       fs.renameSync(tempPath, filepath);
       return true;
-    } catch {
+    } catch (err) {
+      if (!isFsErrorWithCode(err, IPC_WRITE_FS_CODES)) throw err;
       return false;
     }
   }
@@ -480,6 +499,10 @@ export class GroupQueue {
         }
       }
     } catch (err) {
+      // Resilient per-group processing boundary: any Error marks the run
+      // failed and schedules a retry; a non-Error throw is a defect and
+      // propagates.
+      if (!(err instanceof Error)) throw err;
       runFailed = true;
       logger.error({ groupJid, err }, 'Error processing messages for group');
       this.scheduleRetry(groupJid, state);
@@ -522,6 +545,9 @@ export class GroupQueue {
     try {
       await task.fn();
     } catch (err) {
+      // Resilient per-task boundary: any Error marks the run failed; a
+      // non-Error throw is a defect and propagates.
+      if (!(err instanceof Error)) throw err;
       runFailed = true;
       logger.error(
         { groupJid, sessionName, taskId: task.id, err },

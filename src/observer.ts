@@ -68,6 +68,9 @@ export async function initObserver(
   try {
     isPrivate = await owner.isPrivateChat(jid);
   } catch (err) {
+    // Fail-closed security boundary: any verification error refuses to enable
+    // the observer. A non-Error throw is a defect and propagates.
+    if (!(err instanceof Error)) throw err;
     logger.error(
       { err, jid },
       'Observer disabled: failed to verify chat type — refusing to enable',

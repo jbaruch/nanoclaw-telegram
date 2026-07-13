@@ -172,8 +172,12 @@ describe('cleanupOrphans', () => {
   });
 
   it('warns and continues when ps fails', () => {
-    mockSpawnSync.mockImplementationOnce(() => {
-      throw new Error('docker not available');
+    // spawnSync reports a spawn failure via `.error`, not by throwing.
+    mockSpawnSync.mockReturnValueOnce({
+      error: new Error('docker not available'),
+      status: null,
+      stdout: undefined,
+      stderr: '',
     });
 
     cleanupOrphans(); // should not throw
@@ -184,22 +188,22 @@ describe('cleanupOrphans', () => {
     );
   });
 
-  it('continues stopping remaining containers when one stop fails', () => {
+  it('continues stopping remaining containers when one stop returns non-zero', () => {
     mockSpawnSync.mockReturnValueOnce({
       stdout: 'nanoclaw-a-1\nnanoclaw-b-2\n',
       stderr: '',
       status: 0,
     });
-    // First stop fails
-    mockSpawnSync.mockImplementationOnce(() => {
-      throw new Error('already stopped');
-    });
-    // Second stop succeeds
-    mockSpawnSync.mockReturnValueOnce({ stdout: '', stderr: '', status: 0 });
+    // First container: graceful stop exits non-zero → stopContainer force-kills
+    mockSpawnSync.mockReturnValueOnce({ stdout: '', stderr: '', status: 1 }); // stop a
+    mockSpawnSync.mockReturnValueOnce({ stdout: '', stderr: '', status: 0 }); // kill a
+    // Second container: stop succeeds
+    mockSpawnSync.mockReturnValueOnce({ stdout: '', stderr: '', status: 0 }); // stop b
 
     cleanupOrphans(); // should not throw
 
-    expect(mockSpawnSync).toHaveBeenCalledTimes(3);
+    // ps + (stop a + kill a) + stop b
+    expect(mockSpawnSync).toHaveBeenCalledTimes(4);
     expect(logger.info).toHaveBeenCalledWith(
       { count: 2, names: ['nanoclaw-a-1', 'nanoclaw-b-2'] },
       'Stopped orphaned containers',

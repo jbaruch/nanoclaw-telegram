@@ -13,6 +13,7 @@
 import { promises as fsp } from 'fs';
 import { dirname, join } from 'path';
 
+import { isFsErrorWithCode } from './fs-errors.js';
 import { logger } from './logger.js';
 
 /** Pricing in $ per 1M tokens. 5m and 1h cache writes are priced separately. */
@@ -344,8 +345,9 @@ export function parseUsageFromBody(
           durMs,
         );
       }
-    } catch {
-      // Fall through to SSE parse.
+    } catch (err) {
+      if (!(err instanceof SyntaxError)) throw err;
+      // Malformed JSON — fall through to SSE parse.
     }
   }
 
@@ -371,7 +373,8 @@ export function parseUsageFromBody(
     let parsed: unknown;
     try {
       parsed = JSON.parse(json);
-    } catch {
+    } catch (err) {
+      if (!(err instanceof SyntaxError)) throw err;
       continue;
     }
     if (!parsed || typeof parsed !== 'object') continue;
@@ -500,6 +503,26 @@ export async function appendUsageRecord(
     }
     await fsp.appendFile(path, JSON.stringify(record) + '\n', 'utf8');
   } catch (err) {
+    // best-effort usage-log append: tolerate the errno set mkdir/appendFile
+    // can raise (incl. EEXIST/ENOTDIR when a path component is a non-dir);
+    // a non-fs defect propagates.
+    if (
+      !isFsErrorWithCode(err, [
+        'EACCES',
+        'EPERM',
+        'ENOSPC',
+        'EROFS',
+        'ENOENT',
+        'EISDIR',
+        'EBUSY',
+        'EEXIST',
+        'ENOTDIR',
+        'ELOOP',
+        'ENAMETOOLONG',
+      ])
+    ) {
+      throw err;
+    }
     logger.warn({ err, path }, 'usage-log: append failed');
   }
 }

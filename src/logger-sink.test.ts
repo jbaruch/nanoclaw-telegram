@@ -143,7 +143,24 @@ describe('logger file sink', () => {
     // Force appendFileSync to fail. The sink's write loop must
     // swallow the error — propagating it would turn every log call
     // into a crash hazard during disk-full / permission scenarios.
-    const err = new Error('EACCES');
+    const err = Object.assign(new Error('EACCES: permission denied'), {
+      code: 'EACCES',
+    });
+    const spy = vi.spyOn(fs, 'appendFileSync').mockImplementation(() => {
+      throw err;
+    });
+    expect(() => logger.info('still ok')).not.toThrow();
+    spy.mockRestore();
+  });
+
+  it('does not throw for path-shape errnos (ENOTDIR) the IPC allowlist omits', () => {
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    // ENOTDIR (a parent path component is a file) is outside the shared
+    // isExpectedFsError allowlist but is a real fs-setup failure the sink
+    // must degrade on, not crash. Regression for the #778 review.
+    const err = Object.assign(new Error('ENOTDIR: not a directory'), {
+      code: 'ENOTDIR',
+    });
     const spy = vi.spyOn(fs, 'appendFileSync').mockImplementation(() => {
       throw err;
     });
@@ -194,7 +211,9 @@ describe('logger file sink', () => {
     let appendCalls = 0;
     const spy = vi.spyOn(fs, 'appendFileSync').mockImplementation(() => {
       appendCalls++;
-      throw new Error('EACCES');
+      throw Object.assign(new Error('EACCES: permission denied'), {
+        code: 'EACCES',
+      });
     });
 
     // Hammer the logger past the threshold (3 consecutive failures).

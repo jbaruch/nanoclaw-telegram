@@ -120,42 +120,46 @@ export function ensureContainerRuntimeRunning(): void {
  * right safety default when no graceful-shutdown marker was found.
  */
 export function cleanupOrphans(skipNames?: ReadonlySet<string>): void {
-  try {
-    const result = spawnSync(
-      CONTAINER_RUNTIME_BIN,
-      ['ps', '--format', '{{.Names}}'],
-      { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
+  const result = spawnSync(
+    CONTAINER_RUNTIME_BIN,
+    ['ps', '--format', '{{.Names}}'],
+    { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
+  );
+  // spawnSync reports failures through its return object, not by throwing:
+  // a spawn error (binary missing) sets `.error`; a non-zero exit sets
+  // `.status`. Either way we can't enumerate containers — warn and skip so
+  // best-effort cleanup never aborts startup.
+  if (result.error || result.status !== 0) {
+    logger.warn(
+      { err: result.error, status: result.status },
+      'Failed to clean up orphaned containers',
     );
-    const allNanoclaw = (result.stdout || '')
-      .split('\n')
-      .map((n) => n.trim())
-      .filter((n) => n.startsWith('nanoclaw-'));
-    const adopted = skipNames
-      ? allNanoclaw.filter((n) => skipNames.has(n))
-      : [];
-    const orphans = skipNames
-      ? allNanoclaw.filter((n) => !skipNames.has(n))
-      : allNanoclaw;
-    for (const name of orphans) {
-      try {
-        stopContainer(name);
-      } catch {
-        /* already stopped */
-      }
-    }
-    if (adopted.length > 0) {
-      logger.info(
-        { count: adopted.length, names: adopted },
-        'Adopted detached containers from graceful shutdown (not killed)',
-      );
-    }
-    if (orphans.length > 0) {
-      logger.info(
-        { count: orphans.length, names: orphans },
-        'Stopped orphaned containers',
-      );
-    }
-  } catch (err) {
-    logger.warn({ err }, 'Failed to clean up orphaned containers');
+    return;
+  }
+  const allNanoclaw = (result.stdout || '')
+    .split('\n')
+    .map((n) => n.trim())
+    .filter((n) => n.startsWith('nanoclaw-'));
+  const adopted = skipNames ? allNanoclaw.filter((n) => skipNames.has(n)) : [];
+  const orphans = skipNames
+    ? allNanoclaw.filter((n) => !skipNames.has(n))
+    : allNanoclaw;
+  // stopContainer handles its own spawnSync result (kills on non-zero stop);
+  // it does not throw for operational failures, so no per-item catch is
+  // needed and a genuine defect propagates.
+  for (const name of orphans) {
+    stopContainer(name);
+  }
+  if (adopted.length > 0) {
+    logger.info(
+      { count: adopted.length, names: adopted },
+      'Adopted detached containers from graceful shutdown (not killed)',
+    );
+  }
+  if (orphans.length > 0) {
+    logger.info(
+      { count: orphans.length, names: orphans },
+      'Stopped orphaned containers',
+    );
   }
 }

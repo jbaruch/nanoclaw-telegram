@@ -9,7 +9,9 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+
 import { MOUNT_ALLOWLIST_PATH } from './config.js';
+import { isFsErrorWithCode } from './fs-errors.js';
 import { logger } from './logger.js';
 import { AdditionalMount, AllowedRoot, MountAllowlist } from './types.js';
 
@@ -101,6 +103,23 @@ export function loadMountAllowlist(): MountAllowlist | null {
 
     return cachedAllowlist;
   } catch (err) {
+    // Fail-closed: a missing/unreadable file (the readFile errno set, incl.
+    // path-shape ENOTDIR/ELOOP/ENAMETOOLONG) or malformed JSON (SyntaxError)
+    // blocks all additional mounts. A non-fs, non-parse defect propagates.
+    if (
+      !(err instanceof SyntaxError) &&
+      !isFsErrorWithCode(err, [
+        'ENOENT',
+        'EACCES',
+        'EPERM',
+        'EISDIR',
+        'ENOTDIR',
+        'ELOOP',
+        'ENAMETOOLONG',
+      ])
+    ) {
+      throw err;
+    }
     allowlistLoadError = err instanceof Error ? err.message : String(err);
     logger.error(
       {
@@ -137,7 +156,20 @@ function expandPath(p: string): string {
 function getRealPath(p: string): string | null {
   try {
     return fs.realpathSync(p);
-  } catch {
+  } catch (err) {
+    // Unresolvable path → null; anything that isn't a path-resolution errno
+    // propagates.
+    if (
+      !isFsErrorWithCode(err, [
+        'ENOENT',
+        'ENOTDIR',
+        'ELOOP',
+        'ENAMETOOLONG',
+        'EACCES',
+      ])
+    ) {
+      throw err;
+    }
     return null;
   }
 }

@@ -6,7 +6,10 @@ export function isValidTimezone(tz: string): boolean {
   try {
     Intl.DateTimeFormat(undefined, { timeZone: tz });
     return true;
-  } catch {
+  } catch (err) {
+    // Intl throws RangeError for an invalid IANA zone; anything else is a real
+    // defect and propagates.
+    if (!(err instanceof RangeError)) throw err;
     return false;
   }
 }

@@ -3,6 +3,8 @@
  * Connects to ws://<hub-ip>/eventsocket, deduplicates events,
  * and inserts them into the smart_home_events table.
  */
+import Database from 'better-sqlite3';
+
 import { HUBITAT_HUB_IP } from './config.js';
 import { insertSmartHomeEvent } from './db.js';
 import { logger } from './logger.js';
@@ -88,9 +90,18 @@ function connect(): void {
         timestamp: new Date().toISOString(),
       });
     } catch (err) {
+      // WS message handler must not throw into the socket loop: a malformed
+      // payload (SyntaxError) or a DB insert error (SqliteError) is warned and
+      // dropped; anything else is a real defect and propagates.
+      if (
+        !(err instanceof SyntaxError) &&
+        !(err instanceof Database.SqliteError)
+      ) {
+        throw err;
+      }
       logger.warn(
         { err, data: String(event.data).slice(0, 200) },
-        'Failed to parse Hubitat event',
+        'Failed to handle Hubitat event (parse or DB insert)',
       );
     }
   });

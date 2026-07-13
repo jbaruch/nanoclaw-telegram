@@ -107,6 +107,10 @@ export async function writeShutdownCheckpoints(
         'Wrote pre-shutdown checkpoint',
       );
     } catch (err) {
+      // Resilient per-group loop: any Error from resolving the group folder or
+      // writing its checkpoint is logged and the loop moves to the next group;
+      // a non-Error throw is a defect and propagates.
+      if (!(err instanceof Error)) throw err;
       deps.logger.error(
         { group: c.groupFolder, err },
         'Pre-shutdown checkpoint write failed',

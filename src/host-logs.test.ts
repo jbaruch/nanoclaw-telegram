@@ -417,6 +417,21 @@ describe('pruneOldContainerLogs', () => {
     expect(() => pruneOldContainerLogs()).not.toThrow();
     expect(fs.existsSync(stray)).toBe(true);
   });
+
+  it('tolerates a path-shape errno (ENOTDIR) during the walk — degrades, no throw', () => {
+    ensureHostLogDirs();
+    // ENOTDIR (a path component replaced by a file mid-walk) is outside the
+    // shared isExpectedFsError allowlist but is a real fs condition the
+    // best-effort prune must degrade on, not crash. Regression for #778.
+    const err = Object.assign(new Error('ENOTDIR: not a directory'), {
+      code: 'ENOTDIR',
+    });
+    const spy = vi.spyOn(fs, 'readdirSync').mockImplementation(() => {
+      throw err;
+    });
+    expect(pruneOldContainerLogs()).toBe(0);
+    spy.mockRestore();
+  });
 });
 
 // --- ANSI stripping ---

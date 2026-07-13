@@ -1,5 +1,7 @@
 import fs from 'fs';
 
+import { isFsErrorWithCode } from './fs-errors.js';
+
 import {
   hostLogsDir,
   hostLogsOrchestratorFile,
@@ -122,13 +124,33 @@ const SIZE_CHECK_EVERY = 256;
 // fixture pattern) without thrashing on a permanent break.
 const MAX_CONSECUTIVE_WRITE_FAILURES = 3;
 
+// Errno codes the sink's fs ops (mkdir-recursive, appendFile, stat, unlink,
+// rename) may legitimately raise — broader than the shared IPC allowlist:
+// mkdir-recursive adds EEXIST/ENOTDIR when a path component is a file, and
+// path resolution adds ELOOP/ENAMETOOLONG. Anything outside this set (or a
+// non-errno defect) propagates so a real bug still surfaces.
+const SINK_FS_ERROR_CODES = [
+  'EACCES',
+  'EPERM',
+  'ENOSPC',
+  'EROFS',
+  'ENOENT',
+  'EISDIR',
+  'EBUSY',
+  'EEXIST',
+  'ENOTDIR',
+  'ELOOP',
+  'ENAMETOOLONG',
+];
+
 function initSink(): string | null {
   if (sinkPath !== null) return sinkPath || null;
   try {
     fs.mkdirSync(hostLogsDir(), { recursive: true });
     sinkPath = hostLogsOrchestratorFile();
     return sinkPath;
-  } catch {
+  } catch (err) {
+    if (!isFsErrorWithCode(err, SINK_FS_ERROR_CODES)) throw err;
     // Transient mkdir failures shouldn't permanently disable the sink:
     // a startup race where DATA_DIR is mounted late, a brief
     // permission denial, or a parent directory that exists but isn't
@@ -167,8 +189,10 @@ function writeToSink(line: string): void {
     fs.appendFileSync(p, line);
     appendOk = true;
     consecutiveWriteFailures = 0;
-  } catch {
-    // Sink write must NEVER throw. The directory was probably
+  } catch (err) {
+    if (!isFsErrorWithCode(err, SINK_FS_ERROR_CODES)) throw err;
+    // Sink write must NEVER throw for a filesystem failure. The directory
+    // was probably
     // deleted out from under us (operator cleanup, log-rotation
     // tooling, test wipe between runs). Reset cached sinkPath,
     // re-init to recreate the dir, and retry the write ONCE so the
@@ -189,7 +213,8 @@ function writeToSink(line: string): void {
       fs.appendFileSync(retryPath, line);
       appendOk = true;
       consecutiveWriteFailures = 0;
-    } catch {
+    } catch (err) {
+      if (!isFsErrorWithCode(err, SINK_FS_ERROR_CODES)) throw err;
       // Second failure on this call. Leave sinkPath as the
       // resurrected path so the next writeToSink retries init from
       // scratch, hitting the threshold check above on persistent
@@ -220,19 +245,22 @@ function writeToSink(line: string): void {
     const rotated = `${p}.1`;
     try {
       if (fs.existsSync(rotated)) fs.unlinkSync(rotated);
-    } catch {
+    } catch (err) {
+      if (!isFsErrorWithCode(err, SINK_FS_ERROR_CODES)) throw err;
       // Old rotation locked / vanished. The renameSync below will
       // either succeed (POSIX overwrite) or fail (Windows / locked
       // file) — either way the outer catch handles it.
     }
     try {
       fs.renameSync(p, rotated);
-    } catch {
+    } catch (err) {
+      if (!isFsErrorWithCode(err, SINK_FS_ERROR_CODES)) throw err;
       // Rename failed (cross-filesystem, dest still present on
       // Windows, EACCES). Leave the active file alone; try again
       // next size check.
     }
-  } catch {
+  } catch (err) {
+    if (!isFsErrorWithCode(err, SINK_FS_ERROR_CODES)) throw err;
     // statSync threw. Skip this rotation cycle silently — the
     // append already succeeded, and we'll re-check next interval.
   }

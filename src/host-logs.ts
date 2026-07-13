@@ -1,7 +1,23 @@
 import fs from 'fs';
 import path from 'path';
 
+import { isFsErrorWithCode } from './fs-errors.js';
+
 import { DATA_DIR, HOST_GID, HOST_UID } from './config.js';
+
+// Errno codes a best-effort log-dir walk/prune (readdir, stat, unlink) may
+// legitimately hit — including the path-resolution errnos (ENOTDIR/ELOOP/
+// ENAMETOOLONG) a component swap can raise. Anything else propagates.
+const LOG_FS_PROBE_CODES = [
+  'EACCES',
+  'EPERM',
+  'ENOENT',
+  'EISDIR',
+  'EBUSY',
+  'ENOTDIR',
+  'ELOOP',
+  'ENAMETOOLONG',
+];
 
 /**
  * Host log artifacts the admin tile reads via `/workspace/host-logs/`
@@ -236,7 +252,8 @@ export function pruneOldContainerLogs(now: Date = new Date()): number {
           try {
             fs.unlinkSync(filePath);
             deleted++;
-          } catch {
+          } catch (err) {
+            if (!isFsErrorWithCode(err, LOG_FS_PROBE_CODES)) throw err;
             // File raced with another prune or was renamed; skip.
           }
         }
@@ -249,7 +266,8 @@ export function pruneOldContainerLogs(now: Date = new Date()): number {
 function safeReaddir(p: string): string[] {
   try {
     return fs.readdirSync(p);
-  } catch {
+  } catch (err) {
+    if (!isFsErrorWithCode(err, LOG_FS_PROBE_CODES)) throw err;
     return [];
   }
 }
@@ -257,7 +275,8 @@ function safeReaddir(p: string): string[] {
 function safeIsDir(p: string): boolean {
   try {
     return fs.statSync(p).isDirectory();
-  } catch {
+  } catch (err) {
+    if (!isFsErrorWithCode(err, LOG_FS_PROBE_CODES)) throw err;
     return false;
   }
 }
@@ -265,7 +284,8 @@ function safeIsDir(p: string): boolean {
 function safeStat(p: string): fs.Stats | null {
   try {
     return fs.statSync(p);
-  } catch {
+  } catch (err) {
+    if (!isFsErrorWithCode(err, LOG_FS_PROBE_CODES)) throw err;
     return null;
   }
 }
