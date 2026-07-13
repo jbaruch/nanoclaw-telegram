@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { isExpectedFsError } from './fs-errors.js';
 import {
   decideExternalFileSummary,
   runExternalFileSummary,
@@ -123,8 +124,10 @@ function withTempFile(
   return fn(filePath).finally(() => {
     try {
       fs.rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup; tests must not throw on teardown
+    } catch (err) {
+      // best-effort temp-dir teardown: tolerate fs errno failures, rethrow a
+      // real defect so tests still surface bugs (not cleanup races).
+      if (!isExpectedFsError(err)) throw err;
     }
   });
 }

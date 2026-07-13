@@ -47,7 +47,11 @@ export function parseScriptOutput(stdout: string): ParseScriptOutcome {
   let parsed: unknown;
   try {
     parsed = JSON.parse(lastLine);
-  } catch {
+  } catch (err) {
+    // JSON.parse throws SyntaxError on malformed input — the contract's
+    // `invalid_json` case. Anything else (e.g. a RangeError on a
+    // pathological line) is an unexpected defect and rethrows.
+    if (!(err instanceof SyntaxError)) throw err;
     return { ok: false, reason: 'invalid_json', lastLine };
   }
   if (

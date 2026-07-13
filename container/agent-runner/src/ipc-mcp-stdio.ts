@@ -13,6 +13,7 @@ import { CronExpressionParser } from 'cron-parser';
 
 import { STABLE_TASK_ID_REGEX } from './stable-task-id.js';
 import { formatTaskRow, type RawTaskRow } from './format-task-row.js';
+import { isExpectedFsError } from './fs-errors.js';
 import {
   buildRegisterGroupContainerConfig,
   describeOverlayUpdate,
@@ -660,6 +661,12 @@ server.tool(
           { type: 'text' as const, text: `Scheduled tasks:\n${formatted}` },
         ],
       };
+      // outer-boundary-process-contract (coding-policy: error-handling):
+      // MCP tool handler — the agent reads the returned content; a thrown
+      // error would surface as an MCP protocol fault instead of a usable
+      // tool result. The catch converts any failure to an error-text
+      // content payload; propagation would break the tool-call contract.
+      // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
     } catch (err) {
       return {
         content: [
@@ -668,6 +675,7 @@ server.tool(
             text: `Error reading tasks: ${err instanceof Error ? err.message : String(err)}`,
           },
         ],
+        isError: true,
       };
     }
   },
@@ -1961,6 +1969,10 @@ print(json.dumps({"results": result, "count": len(result)}, indent=2))
 
     const { execSync } = await import('child_process');
     const tmpScript = '/tmp/smarthome_query.py';
+    let result: {
+      content: { type: 'text'; text: string }[];
+      isError?: boolean;
+    };
     try {
       fs.writeFileSync(tmpScript, pythonCode);
       const output = execSync(`python3 ${tmpScript}`, {
@@ -1968,22 +1980,30 @@ print(json.dumps({"results": result, "count": len(result)}, indent=2))
         maxBuffer: 2 * 1024 * 1024,
         encoding: 'utf-8',
       });
-      return { content: [{ type: 'text' as const, text: output }] };
+      result = { content: [{ type: 'text' as const, text: output }] };
+      // outer-boundary-process-contract (coding-policy: error-handling):
+      // MCP tool handler — a thrown query error would surface as an MCP
+      // protocol fault; the catch returns an `isError` content payload the
+      // agent reads instead. Propagation would break the tool-call contract.
+      // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      return {
+      result = {
         content: [
           { type: 'text' as const, text: `Smart home query failed: ${msg}` },
         ],
         isError: true,
       };
-    } finally {
-      try {
-        fs.unlinkSync(tmpScript);
-      } catch {
-        /* ignore */
-      }
     }
+    // Clean up the temp script outside the try/catch so an unexpected unlink
+    // failure propagates normally — a `finally` can't rethrow (no-unsafe-finally)
+    // without masking the result. An fs errno (absence, etc.) is expected.
+    try {
+      fs.unlinkSync(tmpScript);
+    } catch (err) {
+      if (!isExpectedFsError(err)) throw err;
+    }
+    return result;
   },
 );
 

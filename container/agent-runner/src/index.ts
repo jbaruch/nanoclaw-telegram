@@ -78,6 +78,7 @@ import {
   type PrecheckErrorReason,
 } from './precheck-emission.js';
 import { parseScriptOutput, type ScriptResult } from './script-output-parse.js';
+import { isExpectedFsError, isFsErrorWithCode } from './fs-errors.js';
 import {
   decideHardExitWatchdog,
   HARD_EXIT_IDLE_BUDGET_MS,
@@ -443,6 +444,10 @@ function getSessionSummary(
       return entry.summary;
     }
   } catch (err) {
+    // best-effort session-index read: a missing file (fs errno) or corrupt
+    // JSON (SyntaxError) yields no summary — caller falls back to a generated
+    // name. Anything else is a real defect and propagates.
+    if (!(err instanceof SyntaxError) && !isExpectedFsError(err)) throw err;
     log(
       `Failed to read sessions index: ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -507,6 +512,11 @@ function createPreCompactHook(assistantName?: string): HookCallback {
         log(`Archived conversation to ${filePath}`);
       }
     } catch (err) {
+      // best-effort transcript archive: tolerate fs errno failures (missing
+      // transcript, unwritable conversations dir) and log; a non-fs defect
+      // propagates. Must not block the provenance-sidecar persistence below
+      // (#327).
+      if (!isExpectedFsError(err)) throw err;
       log(
         `Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -1191,7 +1201,21 @@ function createEgressAllowlistWriteGate(): HookCallback {
   const safeRealpath = (p: string): string | null => {
     try {
       return fs.realpathSync(p);
-    } catch (_err) {
+    } catch (err) {
+      // safe-wrapper: an unresolvable path (missing, symlink loop, not a
+      // directory, over-long, or unreadable) resolves to null; anything else
+      // is a real defect and propagates.
+      if (
+        !isFsErrorWithCode(err, [
+          'ENOENT',
+          'ENOTDIR',
+          'ELOOP',
+          'ENAMETOOLONG',
+          'EACCES',
+        ])
+      ) {
+        throw err;
+      }
       return null;
     }
   };
@@ -2725,8 +2749,11 @@ function shouldClose(): boolean {
   if (fs.existsSync(IPC_INPUT_CLOSE_SENTINEL)) {
     try {
       fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL);
-    } catch {
-      /* ignore */
+    } catch (err) {
+      // best-effort removal of a sentinel we confirmed exists; a racing reader
+      // (ENOENT) or any fs errno is fine — shouldClose returns true regardless.
+      // A non-fs defect propagates.
+      if (!isExpectedFsError(err)) throw err;
     }
     return true;
   }
@@ -2770,6 +2797,26 @@ let latestPipedReplyTo: string | undefined;
 // regression of this class is visible at a glance in container logs.
 const readonlyWarner = createReadonlyWarner(log);
 
+/**
+ * Delete a consumed IPC input file, tolerating the benign races the mount
+ * exposes: ENOENT (host-side sweep or another reader won), and EROFS/EACCES
+ * (read-only mount for untrusted containers, #287) which are surfaced once
+ * via readonlyWarner. Any other errno — or a non-errno defect — propagates.
+ */
+function unlinkConsumedInputFile(filePath: string, file: string): void {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (unlinkErr) {
+    if (!isFsErrorWithCode(unlinkErr, ['EROFS', 'EACCES', 'ENOENT'])) {
+      throw unlinkErr;
+    }
+    const code = (unlinkErr as NodeJS.ErrnoException).code;
+    if (code === 'EROFS' || code === 'EACCES') {
+      readonlyWarner.warn(code, file);
+    }
+  }
+}
+
 function drainIpcInput(): string[] {
   try {
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
@@ -2787,52 +2834,44 @@ function drainIpcInput(): string[] {
     let latestReplyTo: string | undefined;
     for (const file of files) {
       const filePath = path.join(IPC_INPUT_DIR, file);
+      let data: unknown;
       try {
-        const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-        consumedInputFiles.add(file);
-        try {
-          fs.unlinkSync(filePath);
-        } catch (e: any) {
-          // ENOENT — file vanished between readFileSync and unlink
-          // (host-side sweep ran, or another race). Benign; matches the
-          // error-path catch below.
-          if (e.code !== 'EROFS' && e.code !== 'EACCES' && e.code !== 'ENOENT')
-            throw e;
-          if (e.code === 'EROFS' || e.code === 'EACCES') {
-            readonlyWarner.warn(e.code, file);
-          }
-        }
-        if (data.type === 'message' && data.text) {
-          messages.push(data.text);
-          if (data.replyToMessageId) {
-            latestReplyTo = data.replyToMessageId;
-            latestPipedReplyTo = data.replyToMessageId;
-          }
-          // Per-pipe addressed-ness for the react-first hook.
-          // Latest-wins is fine for the failure mode this fixes
-          // (an `@AyeAye` reply piped into a bystander-spawned
-          // container): the addressed pipe sets the flag true and
-          // the next UserPromptSubmit reads true. A subsequent
-          // non-addressed pipe would flip back to false; that's
-          // also correct — the agent can still reason about the
-          // message via observer's commit-gated emojis.
-          if (typeof data.addressedToUs === 'boolean') {
-            latestPipedAddressedToUs = data.addressedToUs;
-          }
-        }
+        data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       } catch (err) {
+        // Per-file input ingest is best-effort: tolerate fs errno failures
+        // while reading and malformed JSON payloads, then discard the bad
+        // file. Anything else is a real defect and propagates instead of
+        // being consumed silently.
+        if (!(err instanceof SyntaxError) && !isExpectedFsError(err)) throw err;
         log(
           `Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`,
         );
         consumedInputFiles.add(file);
-        try {
-          fs.unlinkSync(filePath);
-        } catch (e: any) {
-          if (e.code !== 'EROFS' && e.code !== 'EACCES' && e.code !== 'ENOENT')
-            throw e;
-          if (e.code === 'EROFS' || e.code === 'EACCES') {
-            readonlyWarner.warn(e.code, file);
-          }
+        unlinkConsumedInputFile(filePath, file);
+        continue;
+      }
+      consumedInputFiles.add(file);
+      unlinkConsumedInputFile(filePath, file);
+      const input =
+        typeof data === 'object' && data !== null
+          ? (data as Record<string, unknown>)
+          : null;
+      if (input?.type === 'message' && typeof input.text === 'string') {
+        messages.push(input.text);
+        if (typeof input.replyToMessageId === 'string') {
+          latestReplyTo = input.replyToMessageId;
+          latestPipedReplyTo = input.replyToMessageId;
+        }
+        // Per-pipe addressed-ness for the react-first hook.
+        // Latest-wins is fine for the failure mode this fixes
+        // (an `@AyeAye` reply piped into a bystander-spawned
+        // container): the addressed pipe sets the flag true and
+        // the next UserPromptSubmit reads true. A subsequent
+        // non-addressed pipe would flip back to false; that's
+        // also correct — the agent can still reason about the
+        // message via observer's commit-gated emojis.
+        if (typeof input.addressedToUs === 'boolean') {
+          latestPipedAddressedToUs = input.addressedToUs;
         }
       }
     }
@@ -2840,12 +2879,18 @@ function drainIpcInput(): string[] {
     if (latestReplyTo) {
       try {
         fs.writeFileSync(REPLY_TO_FILE, latestReplyTo);
-      } catch {
-        /* ignore */
+      } catch (err) {
+        // best-effort reply-to handoff: an fs write failure degrades to no
+        // reply target (advisory); a non-fs defect propagates.
+        if (!isExpectedFsError(err)) throw err;
       }
     }
     return messages;
   } catch (err) {
+    // The drain reads the IPC input dir best-effort (per-file read/parse/unlink
+    // failures are handled in the loop above): tolerate fs errno failures here
+    // and yield no messages this tick. A non-fs defect propagates.
+    if (!isExpectedFsError(err)) throw err;
     log(`IPC drain error: ${err instanceof Error ? err.message : String(err)}`);
     return [];
   }
@@ -4505,10 +4550,22 @@ async function main(): Promise<void> {
     containerInput = JSON.parse(stdinData);
     try {
       fs.unlinkSync('/tmp/input.json');
-    } catch {
-      /* may not exist */
+    } catch (err) {
+      // best-effort cleanup of the one-shot input file; absence (ENOENT) or
+      // any fs errno is fine. A non-fs defect propagates.
+      if (!isExpectedFsError(err)) throw err;
     }
     log(`Received input for group: ${containerInput.groupFolder}`);
+    // outer-boundary-process-contract (coding-policy: error-handling):
+    // the runner's top-level stdin-parse boundary.
+    //   - Caller's silent-failure shape: the host
+    //     (`src/container-runner.ts`) reads a non-zero container exit plus
+    //     the `status:'error'` stdout envelope as a failed run.
+    //   - What the catch emits: the error envelope on stdout, then exit 1.
+    //   - Why propagation breaks the contract: an uncaught parse error
+    //     would crash before writeOutput, denying the host the structured
+    //     error it distinguishes from a silent crash.
+    // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
   } catch (err) {
     writeOutput({
       status: 'error',
@@ -4539,8 +4596,10 @@ async function main(): Promise<void> {
   // Clean up stale _close sentinel from previous container runs
   try {
     fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL);
-  } catch {
-    /* ignore */
+  } catch (err) {
+    // best-effort removal of a stale close sentinel from a prior run; absence
+    // (ENOENT) or any fs errno is fine. A non-fs defect propagates.
+    if (!isExpectedFsError(err)) throw err;
   }
 
   // Build initial prompt (drain any pending IPC messages too)
@@ -4657,6 +4716,16 @@ async function main(): Promise<void> {
           resultEmitted = true;
         }
       }
+      // outer-boundary-process-contract (coding-policy: error-handling):
+      // the slash-command execution boundary.
+      //   - Caller's silent-failure shape: the host reads the stdout
+      //     result envelope; a missing or `error` status marks the run
+      //     failed.
+      //   - What the catch emits: `status:'error'` via writeOutput and
+      //     sets hadError so the run records as failed, not silently OK.
+      //   - Why propagation breaks the contract: an uncaught error would
+      //     skip the envelope, leaving the host no structured result.
+      // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
     } catch (err) {
       hadError = true;
       const errorMsg = err instanceof Error ? err.message : String(err);
@@ -4889,6 +4958,16 @@ async function main(): Promise<void> {
       log(`Got new message (${nextMessage.length} chars), starting new query`);
       prompt = nextMessage;
     }
+    // outer-boundary-process-contract (coding-policy: error-handling):
+    // the runner's top-level agent-loop boundary.
+    //   - Caller's silent-failure shape: the host reads a non-zero exit
+    //     plus the `status:'error'` stdout envelope as a failed run.
+    //   - What the catch emits: the error envelope (with newSessionId so
+    //     the session can resume), then exit 1.
+    //   - Why propagation breaks the contract: an uncaught error would
+    //     crash before the envelope, losing both the error detail and the
+    //     session id the host needs to continue.
+    // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     log(`Agent error: ${errorMessage}`);
