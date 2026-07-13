@@ -63,6 +63,21 @@ const ESTIMATED_OUTPUT_TOKENS_PER_CALL = 50;
 const ESTIMATED_CACHE_READ_FRACTION = 0.5;
 
 const HAIKU_TIMEOUT_MS = 10_000;
+// Transport-layer errno codes a raw network failure may carry. A closed set,
+// deliberately excluding Node programming-error codes (ERR_INVALID_ARG_TYPE,
+// …) so a defect is never mistaken for a recoverable network blip and
+// recorded as `pass`.
+const NETWORK_ERROR_CODES = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ECONNABORTED',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EPIPE',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+]);
 const PROGRESS_EVERY_N = 25;
 const DEFAULT_REPLY_WINDOW_MS = 120_000;
 const HAIKU_MODEL_ID = 'claude-haiku-4-5-20251001';
@@ -469,6 +484,9 @@ async function callHaiku(
     clearTimeout(timeout);
     const e = err instanceof Error ? err : new Error(String(err));
     const isAbort = e.name === 'AbortError' || controller.signal.aborted;
+    // An Anthropic API/network error or an abort/timeout degrades to a safe
+    // `pass`; a non-API defect propagates.
+    if (!isAbort && !(e instanceof Anthropic.APIError)) throw err;
     return {
       decision: 'pass',
       intent: null,
@@ -935,7 +953,8 @@ async function main(): Promise<void> {
             const isNetworkError =
               err instanceof Error &&
               'code' in err &&
-              typeof err.code === 'string';
+              typeof err.code === 'string' &&
+              NETWORK_ERROR_CODES.has(err.code);
             if (!isAbort && !isAnthropicApiError && !isNetworkError) {
               throw err;
             }

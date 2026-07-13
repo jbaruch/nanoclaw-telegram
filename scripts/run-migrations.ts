@@ -3,6 +3,8 @@ import { execFileSync, execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
+import { isSubprocessError } from '../src/subprocess-errors.js';
+
 function compareSemver(a: string, b: string): number {
   const partsA = a.split('.').map(Number);
   const partsB = b.split('.').map(Number);
@@ -21,7 +23,10 @@ function resolveTsx(): string {
   // Fall back to whichever tsx is in PATH
   try {
     return execSync('which tsx', { encoding: 'utf-8' }).trim();
-  } catch {
+  } catch (err) {
+    // `which tsx` subprocess failure → fall back to npx; a non-subprocess
+    // defect propagates.
+    if (!isSubprocessError(err)) throw err;
     return 'npx'; // last resort
   }
 }
@@ -90,6 +95,9 @@ for (const version of migrationVersions) {
     });
     results.push({ version, success: true });
   } catch (err) {
+    // a subprocess failure marks this migration failed; a non-subprocess
+    // defect propagates.
+    if (!isSubprocessError(err)) throw err;
     const message = err instanceof Error ? err.message : String(err);
     results.push({ version, success: false, error: message });
   }

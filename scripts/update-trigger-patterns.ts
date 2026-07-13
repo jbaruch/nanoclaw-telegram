@@ -227,17 +227,10 @@ if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href
 ) {
-  // Outer-boundary process contract per `coding-policy: error-handling`:
-  // entry-point catch formats a single-line FATAL diagnostic for the
-  // operator with a full stack still attached, then exits non-zero.
-  // No recovery — the next statement is `process.exit(1)` — so the
-  // bare catch here doesn't hide defects, it just produces nicer
-  // stderr than the default unhandled-rejection trace.
-  try {
-    main();
-  } catch (err: unknown) {
-    const e = err instanceof Error ? err : new Error(String(err));
-    process.stderr.write(`FATAL: ${e.message}\n${e.stack ?? ''}\n`);
-    process.exit(1);
-  }
+  // Entry point: main() is synchronous. An uncaught throw exits non-zero
+  // with a stack trace — the correct failure signal for a CLI script — so no
+  // top-level catch is needed. A catch here would only reformat stderr, not
+  // prevent a silent failure, so it would not qualify for the error-handling
+  // outer-boundary carve-out.
+  main();
 }
