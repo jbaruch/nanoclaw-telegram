@@ -67,8 +67,13 @@ const MOUNT_PATH_DEP_PATTERN = /tessl__([a-zA-Z0-9_-]+)\//g;
 function matchAll(pattern: RegExp, content: string, into: Set<string>): void {
   // Build a fresh RegExp per call — a module-level shared instance with the
   // `g` flag carries lastIndex state across calls and would skip matches on
-  // the second invocation.
-  const re = new RegExp(pattern.source, 'g');
+  // the second invocation. Preserve the pattern's own flags (so a future
+  // `i`/`m`/`u` isn't silently dropped) while guaranteeing `g`, which the
+  // `exec`-loop below needs to advance `lastIndex`.
+  const flags = pattern.flags.includes('g')
+    ? pattern.flags
+    : pattern.flags + 'g';
+  const re = new RegExp(pattern.source, flags);
   let match: RegExpExecArray | null;
   while ((match = re.exec(content)) !== null) {
     into.add(match[1]);
