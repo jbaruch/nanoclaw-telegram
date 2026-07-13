@@ -325,6 +325,41 @@ describe('runAuditSnapshot', () => {
     expect(t.gated_likely).toBe(3); // legacy + 2 canonical
   });
 
+  it("counts `status='skipped_out_of_window'` rows as gated_likely regardless of duration (#754)", () => {
+    // The host pre-spawn gate declines to spawn a windowed cadence task
+    // (e.g. flight-assist outside a trip window), writing a
+    // 'skipped_out_of_window' run with no container. It is a gate-out by
+    // construction like 'precheck_skipped', so it counts regardless of
+    // duration — otherwise these fires would inflate the denominator
+    // while showing as ungated, making a windowed task look hot.
+    makeFixtureDb();
+    insertTask('t1', 'g1', 'cron', '*/2 * * * *', 'active', null);
+
+    const now = new Date('2026-05-01T00:00:00Z');
+    // Host gate-out, short duration: counts.
+    insertRun('t1', '2026-04-16T07:00:00Z', 2_000, {
+      status: 'skipped_out_of_window',
+      result: null,
+    });
+    // Host gate-out, long duration (slow travel-db read): still counts —
+    // the status alone is ground truth.
+    insertRun('t1', '2026-04-17T07:00:00Z', 25_000, {
+      status: 'skipped_out_of_window',
+      result: null,
+    });
+    // A real spawn that succeeded: not gated.
+    insertRun('t1', '2026-04-18T07:00:00Z', 60_000, {
+      status: 'success',
+      result: 'did work',
+    });
+
+    const snap = runAuditSnapshot({ dbPath, now });
+
+    const t = snap.tasks.find((tt) => tt.task_id === 't1')!;
+    expect(t.fires).toBe(3);
+    expect(t.gated_likely).toBe(2); // both host gate-outs
+  });
+
   it('orders tasks deterministically by group_folder then schedule_type then id', () => {
     makeFixtureDb();
     insertTask('t-z-int', 'group_z', 'interval', '30m', 'active', null);

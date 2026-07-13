@@ -41,6 +41,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
+import { evaluateSpawnGate } from './spawn-gates.js';
 import { getPluginRegistryHash } from './plugin-content-hash.js';
 import {
   pruneSessionArtifacts,
@@ -996,6 +997,60 @@ async function runTask(
       result: null,
       error: `Group not found: ${task.group_folder}`,
     });
+    return;
+  }
+
+  // #754 pre-spawn eligibility gate. Windowed cadence skills
+  // (flight-assist) only do useful work inside a trip window; firing a
+  // container every couple of minutes off-window pays a full spawn for a
+  // precheck that would just skip. Evaluate a host-side predicate BEFORE
+  // any spawn work — out of window, record a distinct
+  // `skipped_out_of_window` run and return without spawning. Skills with
+  // no registered gate resolve to `null` and spawn unconditionally, as
+  // before. `startTime` is this fire's "now"; the recurring row's next
+  // fire is still scheduled by the caller's `finally`, so the task keeps
+  // ticking — it just doesn't spawn this time.
+  const gateVerdict = evaluateSpawnGate(
+    parseTaskSkill(task.prompt),
+    groupDir,
+    new Date(startTime),
+  );
+  if (gateVerdict && !gateVerdict.eligible) {
+    logger.info(
+      { taskId: task.id, group: task.group_folder, reason: gateVerdict.reason },
+      '[task-scheduler] pre-spawn gate skipped fire — no container spawned (#754)',
+    );
+    logTaskRun({
+      task_id: task.id,
+      run_at: new Date().toISOString(),
+      duration_ms: Date.now() - startTime,
+      status: 'skipped_out_of_window',
+      result: null,
+      error: null,
+    });
+    // Advance the recurring schedule exactly as the normal completion
+    // path does. This early return bypasses the post-run bookkeeping that
+    // is the SINGLE writer of `next_run` (#438) — without re-advancing
+    // here, the row stays due, the caller's `finally` clears it from
+    // `dispatchedTaskIds`, and the scheduler re-dispatches (and re-logs)
+    // the skip on every poll tick instead of at cadence. Re-fetch fresh
+    // so a concurrent `update_task` isn't clobbered, mirroring the
+    // race guard on the normal path.
+    const fresh = getTaskById(task.id) ?? task;
+    const computed = computeNextRunDetailed(fresh, getCurrentTz);
+    if (computed.remediation) {
+      applyComputeNextRunRemediation(
+        fresh.id,
+        computed.remediation,
+        fresh.schedule_value,
+        fresh.schedule_timezone,
+      );
+    }
+    updateTaskAfterRun(
+      fresh.id,
+      computed.nextRun,
+      `Skipped: ${gateVerdict.reason}`,
+    );
     return;
   }
 

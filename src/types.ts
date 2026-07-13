@@ -487,7 +487,20 @@ export interface TaskRunLog {
   // that left an empty result column (the original #581 silent-success
   // bug shape). A precheck script that crashes / emits non-JSON / omits
   // `wake_agent` is `'error'`, not `'precheck_skipped'`.
-  status: 'success' | 'error' | 'killed' | 'precheck_skipped';
+  //
+  // 'skipped_out_of_window' (#754) marks a fire the HOST declined to
+  // spawn at all, because a pre-spawn gate ruled the task ineligible
+  // (e.g. flight-assist firing outside any trip window). Distinct from
+  // 'precheck_skipped': there the container spawned and its in-container
+  // precheck said "nothing to do"; here no container ever spawned, so the
+  // status is the direct measure of spawns the gate saved. Non-error,
+  // non-alerting — a healthy quiet, like `precheck_skipped`.
+  status:
+    | 'success'
+    | 'error'
+    | 'killed'
+    | 'precheck_skipped'
+    | 'skipped_out_of_window';
   result: string | null;
   error: string | null;
 }

@@ -68,7 +68,7 @@ import {
   startOfTodayInTz,
   startSchedulerLoop,
 } from './task-scheduler.js';
-import type { ScheduledTask } from './types.js';
+import type { RegisteredGroup, ScheduledTask } from './types.js';
 import { GROUPS_DIR, TIMEZONE } from './config.js';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -4805,5 +4805,120 @@ describe('recomputeLocalSchedules error narrowing (#584 — error-handling)', ()
         stz: 'local',
       },
     ]);
+  });
+});
+
+// #754 — the pre-spawn trip-window gate short-circuits a flight-assist
+// fire before any container spawn when the group has no covering trip.
+describe('runTask pre-spawn gate (#754)', () => {
+  const GATE_GROUP: RegisteredGroup = {
+    name: 'Gate',
+    folder: 'gate-754-test',
+    trigger: 'always',
+    added_at: '2026-01-01T00:00:00.000Z',
+    isMain: true,
+  };
+  const groupDir = path.join(GROUPS_DIR, 'gate-754-test');
+
+  beforeEach(() => {
+    _initTestDatabase();
+    _resetSchedulerLoopForTests();
+    mockRunContainerAgent.mockClear();
+    fs.rmSync(groupDir, { recursive: true, force: true });
+    // Pinned clock: 2026-07-01 sits inside the in-window fixture trip
+    // (2026-06-26 .. 2026-07-13) and outside the out-of-window one.
+    vi.useFakeTimers({ now: new Date('2026-07-01T12:00:00.000Z') });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    fs.rmSync(groupDir, { recursive: true, force: true });
+  });
+
+  function createFlightAssistTask(): void {
+    createTask({
+      id: 'flight-assist-task',
+      group_folder: 'gate-754-test',
+      chat_jid: 'gate@g.us',
+      prompt: 'Skill(skill: "tessl__flight-assist")',
+      schedule_type: 'interval',
+      schedule_value: '120000',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+  }
+
+  function writeTravelDb(trips: Record<string, unknown>): void {
+    fs.mkdirSync(groupDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(groupDir, 'travel-db.json'),
+      JSON.stringify({ schema_version: 1, trips }),
+    );
+  }
+
+  async function fireOnce(): Promise<void> {
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({ status: 'success', result: 'ok' } as ContainerOutput);
+        return { status: 'success', result: 'ok' };
+      },
+    );
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'gate@g.us': GATE_GROUP }),
+      queue: {
+        enqueueTask: vi.fn(
+          (
+            _groupJid: string,
+            _taskId: string,
+            _sessionName: string,
+            fn: () => Promise<void>,
+          ) => {
+            void fn();
+          },
+        ),
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
+      onProcess: () => {},
+      sendMessage: async () => {},
+      wipeSessionJsonl: vi.fn(() => 1),
+    });
+    await vi.advanceTimersByTimeAsync(10);
+  }
+
+  function getRunLog(): { status: string } | undefined {
+    return _rawQueryForTests<{ status: string }>(
+      'SELECT status FROM task_run_logs WHERE task_id = ?',
+      ['flight-assist-task'],
+    )[0];
+  }
+
+  it('skips the spawn, logs skipped_out_of_window, and advances next_run', async () => {
+    createFlightAssistTask();
+    writeTravelDb({ past: { start: '2026-01-01', end: '2026-01-05' } });
+
+    await fireOnce();
+
+    expect(mockRunContainerAgent).not.toHaveBeenCalled();
+    expect(getRunLog()?.status).toBe('skipped_out_of_window');
+    // The skip path must advance the recurring schedule past now, else the
+    // row stays due and re-fires every poll tick instead of at cadence
+    // (#438 single-writer bypass). The task was seeded due (next_run in the
+    // past); after the skip it must sit in the future.
+    const after = getTaskById('flight-assist-task');
+    expect(new Date(after!.next_run!).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it('spawns as normal when a trip covers now', async () => {
+    createFlightAssistTask();
+    writeTravelDb({ current: { start: '2026-06-26', end: '2026-07-13' } });
+
+    await fireOnce();
+
+    expect(mockRunContainerAgent).toHaveBeenCalledTimes(1);
+    expect(getRunLog()?.status).toBe('success');
   });
 });

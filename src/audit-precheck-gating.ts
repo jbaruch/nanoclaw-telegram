@@ -15,12 +15,19 @@
  * small to detect duration-profile drift on the cron-weekly tasks
  * (only 4 fires per 30 days).
  *
- * `gated_likely` is a heuristic that ORs two signatures:
+ * `gated_likely` is a heuristic that ORs three signatures:
  *   1. Canonical (post-#581-followup): rows with
  *      `status='precheck_skipped'` — emitted by the agent-runner's
  *      `runScript` branch when the precheck script returned
  *      `wake_agent: false`. This is ground truth, not a heuristic;
  *      the row was a gate-out by construction.
+ *   1b. Host pre-spawn gate (#754): rows with
+ *      `status='skipped_out_of_window'` — the host's pre-spawn
+ *      eligibility gate declined to spawn at all (e.g. flight-assist
+ *      firing outside any trip window). Ground truth like (1), and an
+ *      even stronger gate-out: no container spawned. Without counting
+ *      it, these fires would inflate the denominator while showing as
+ *      ungated — making a windowed cadence look like a hot task.
  *   2. Legacy (pre-#581-followup): rows with `status='success' AND
  *      result IS NULL` paired with a short `duration_ms`. The
  *      agent-runner used to collapse every `wake_agent: false`
@@ -123,14 +130,18 @@ export function runAuditSnapshot(args: {
     //     does NOT require the duration cutoff or a NULL result. The
     //     status alone is the gate-out signal.
     //
+    //   - Host pre-spawn gate (#754): `status='skipped_out_of_window'`
+    //     regardless of duration — the host declined to spawn, so this
+    //     is a gate-out by construction like the canonical branch.
+    //
     // Counting every short run would conflate fast failures
     // (status='error') with genuine gate-outs and inflate the
     // heuristic, so the legacy branch keeps the duration + NULL gate
-    // and the canonical branch keys off the explicit status.
+    // and the ground-truth branches key off the explicit status.
     const statsStmt = db.prepare(
       `SELECT COUNT(*) AS fires,
               SUM(CASE
-                    WHEN status = 'precheck_skipped'
+                    WHEN status IN ('precheck_skipped', 'skipped_out_of_window')
                     THEN 1
                     WHEN duration_ms < ?
                      AND status = 'success'
