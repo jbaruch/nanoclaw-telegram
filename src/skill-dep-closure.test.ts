@@ -3,6 +3,7 @@ import { describe, it, expect } from 'vitest';
 import {
   computeEffectiveBlocklist,
   computeEffectiveSkillContext,
+  extractMountPathDeps,
   extractSkillDeps,
 } from './skill-dep-closure.js';
 
@@ -114,6 +115,50 @@ On hit:  \`Skill(skill: "tessl__check-cfps")\`
   });
 });
 
+describe('extractMountPathDeps (#441)', () => {
+  it('extracts a skill from a tessl__<name>/ mount-path reference', () => {
+    const script =
+      'subprocess.run(["python3", ' +
+      '"/home/node/.claude/skills/tessl__scheduler-timezone/scripts/compute-schedule-value.py"])';
+    expect(extractMountPathDeps(script)).toEqual(
+      new Set(['scheduler-timezone']),
+    );
+  });
+
+  it('extracts multiple distinct mount-path deps and dedups repeats', () => {
+    const text = `
+      .../tessl__scheduler-timezone/scripts/a.py
+      .../tessl__scheduler-timezone/scripts/b.py
+      .../tessl__check-calendar/references/x.md
+    `;
+    expect(extractMountPathDeps(text)).toEqual(
+      new Set(['scheduler-timezone', 'check-calendar']),
+    );
+  });
+
+  it('does NOT match a bare tessl__<name> mention without a trailing slash', () => {
+    // A doc-comment listing another skill by name (no path into its dir)
+    // must not falsely rescue it — the trailing `/` anchors the match to
+    // an actual file reference (heartbeat-precheck.py mentions
+    // `tessl__check-email` / `tessl__trusted-memory` in prose, #337 audit).
+    const comment =
+      'Other writers: tessl__check-email and tessl__trusted-memory';
+    expect(extractMountPathDeps(comment)).toEqual(new Set());
+  });
+
+  it('returns an empty set when there are no mount-path references', () => {
+    expect(extractMountPathDeps('plain text, no skill refs')).toEqual(
+      new Set(),
+    );
+  });
+
+  it('handles underscores and hyphens in the skill name', () => {
+    expect(extractMountPathDeps('tessl__a_b-c/scripts/x')).toEqual(
+      new Set(['a_b-c']),
+    );
+  });
+});
+
 describe('computeEffectiveBlocklist (#544)', () => {
   // The blocklist algebra under different reference shapes. The
   // contract: any skill REACHABLE from a non-blocklisted root is
@@ -143,6 +188,39 @@ describe('computeEffectiveBlocklist (#544)', () => {
       ['wiki', '# the wiki skill\n'],
     ]);
     expect(computeEffectiveBlocklist(original, sources)).toEqual(new Set());
+  });
+
+  it('exempts a blocked skill referenced via a tessl__<name>/ mount path (#441 morning-brief → scheduler-timezone)', () => {
+    // The 2026-07-12 failure shape: morning-brief (root, not blocked)
+    // shells out to scheduler-timezone's compute-schedule-value.py by
+    // mount path from a script — no `Skill()` call. scheduler-timezone is
+    // on the maintenance blocklist; the closure must rescue it from the
+    // mount-path reference folded into morning-brief's source blob.
+    const original = new Set(['scheduler-timezone']);
+    const sources = new Map([
+      [
+        'morning-brief',
+        '# morning-brief\nsubprocess: .../tessl__scheduler-timezone/scripts/compute-schedule-value.py\n',
+      ],
+      ['scheduler-timezone', '# scheduler-timezone\n'],
+    ]);
+    expect(computeEffectiveBlocklist(original, sources)).toEqual(new Set());
+  });
+
+  it('does NOT rescue a blocked skill referenced only by a bare (slashless) tessl__ mention', () => {
+    // A doc-comment naming another skill without a path into its dir is
+    // not a real dependency — it must stay blocked.
+    const original = new Set(['trusted-memory']);
+    const sources = new Map([
+      [
+        'heartbeat',
+        '# heartbeat\nother writer: tessl__trusted-memory (note)\n',
+      ],
+      ['trusted-memory', '# trusted-memory\n'],
+    ]);
+    expect(computeEffectiveBlocklist(original, sources)).toEqual(
+      new Set(['trusted-memory']),
+    );
   });
 
   it('exempts wiki when wiki-lint invokes it with args: (#652 outage)', () => {

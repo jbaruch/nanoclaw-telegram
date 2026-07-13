@@ -196,6 +196,45 @@ interface EffectiveSpawnSkillContext {
   reachableSkills: Set<string>;
 }
 
+/**
+ * #441 — read the text of a skill's `scripts/` and `references/` files so
+ * `extractMountPathDeps` can see cross-skill `tessl__<name>/` mount-path
+ * references that live in a subprocess call (not the SKILL.md prompt). The
+ * 2026-07-12 morning-brief Step-9 failure: `resolve-reminder-schedule.py`
+ * shells out to `tessl__scheduler-timezone/scripts/compute-schedule-value.py`,
+ * but `scheduler-timezone` is on the maintenance blocklist and the closure —
+ * scanning only SKILL.md for `Skill()` calls — never rescued it.
+ *
+ * Best-effort per `coding-policy: error-handling`: a missing subdir or file
+ * (ENOENT) contributes no text; any other errno (EACCES, EIO, ENOTDIR)
+ * propagates, matching `ingestSkillDir` — a perms/IO fault on the skill tree
+ * is operator-actionable, not silently degraded. Bounded to the two subdirs,
+ * one level deep (skill scripts/refs are flat); subdirectories (e.g.
+ * `__pycache__`) are skipped.
+ */
+function readAuxSkillText(skillPath: string): string {
+  const parts: string[] = [];
+  for (const sub of ['scripts', 'references']) {
+    const dir = path.join(skillPath, sub);
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      try {
+        parts.push(fs.readFileSync(path.join(dir, entry.name), 'utf8'));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+    }
+  }
+  return parts.join('\n');
+}
+
 function computeEffectiveSkillContextForSpawn(
   originalBlocklist: ReadonlySet<string>,
   tilesToInstall: readonly string[],
@@ -203,6 +242,16 @@ function computeEffectiveSkillContextForSpawn(
   groupDir: string,
 ): EffectiveSpawnSkillContext {
   const sources = new Map<string, string>();
+
+  // #441 — the aux (scripts/references) scan only affects the outcome when
+  // there IS a blocklist to rescue from. On a default-session spawn the
+  // blocklist is empty, so every present skill is already a root and
+  // `reachableSkills` = every skill regardless of mount-path deps; the scan
+  // would be pure wasted spawn I/O (and needless false-positive surface for
+  // `reachableSkills`). Gate it to non-empty blocklists (i.e. maintenance
+  // spawns), where a subprocess dep on a blocklisted skill actually needs the
+  // rescue.
+  const scanAux = originalBlocklist.size > 0;
 
   const ingestSkillDir = (skillsRoot: string) => {
     // Per `coding-policy: error-handling` the catches below are
@@ -234,14 +283,26 @@ function computeEffectiveSkillContextForSpawn(
       }
       if (!stat.isDirectory()) continue;
       const skillMdPath = path.join(skillPath, 'SKILL.md');
+      let skillMd: string;
       try {
-        sources.set(skillDir, fs.readFileSync(skillMdPath, 'utf8'));
+        skillMd = fs.readFileSync(skillMdPath, 'utf8');
       } catch (err) {
         // ENOENT on SKILL.md is normal for non-skill subdirs (rare
         // but possible). Other errno propagates per the same
         // rationale as readdir above.
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        continue;
       }
+      // #441 — a skill's cross-skill dependency can live in its scripts
+      // (a subprocess call to another skill's mount path), not just its
+      // SKILL.md. Fold the scripts/ + references/ text into the source blob
+      // (only when a blocklist exists, per `scanAux`) so
+      // `extractMountPathDeps` sees those `tessl__<name>/` references and the
+      // closure rescues the depended-on skill from the blocklist.
+      sources.set(
+        skillDir,
+        scanAux ? skillMd + '\n' + readAuxSkillText(skillPath) : skillMd,
+      );
     }
   };
 
