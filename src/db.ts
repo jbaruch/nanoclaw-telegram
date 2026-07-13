@@ -3542,6 +3542,39 @@ export function getRegisteredGroup(
   };
 }
 
+/**
+ * Retired `container_config` keys stripped on every write (#753).
+ *
+ * `stage2Enabled` backed the removed Stage-2 Haiku classifier. The
+ * `ContainerConfig` type no longer declares it and no reader consults
+ * it, but `parseContainerConfig` round-trips unknown keys verbatim — so
+ * a read-modify-write of a legacy row, or an IPC config blob from an
+ * older client, would re-persist the dead field that migration
+ * `state-016` scrubbed from stored blobs. `setRegisteredGroup` is the
+ * single write chokepoint for the row; stripping here closes the
+ * reintroduction path in one place.
+ */
+const RETIRED_CONTAINER_CONFIG_KEYS = ['stage2Enabled'] as const;
+
+/**
+ * Return a `container_config` JSON string with every retired key removed,
+ * or `null` when there is no config. Operates on a shallow copy so the
+ * caller's `ContainerConfig` object is never mutated. Only allocates a
+ * copy when a retired key is actually present.
+ */
+function serializeContainerConfigForColumn(
+  containerConfig: ContainerConfig | undefined,
+): string | null {
+  if (!containerConfig) return null;
+  const present = RETIRED_CONTAINER_CONFIG_KEYS.filter(
+    (key) => key in containerConfig,
+  );
+  if (present.length === 0) return JSON.stringify(containerConfig);
+  const cleaned = { ...containerConfig } as Record<string, unknown>;
+  for (const key of present) delete cleaned[key];
+  return JSON.stringify(cleaned);
+}
+
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   if (!isValidGroupFolder(group.folder)) {
     throw new Error(`Invalid group folder "${group.folder}" for JID ${jid}`);
@@ -3555,7 +3588,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.folder,
     serializeTriggerPatternForColumn(group),
     group.added_at,
-    group.containerConfig ? JSON.stringify(group.containerConfig) : null,
+    serializeContainerConfigForColumn(group.containerConfig),
     // Map TS `undefined` to SQL NULL (not 0). NULL and 0 are distinct
     // states elsewhere in the orchestrator: `index.ts` checks
     // `requiresTrigger === false` to decide whether to skip a group's

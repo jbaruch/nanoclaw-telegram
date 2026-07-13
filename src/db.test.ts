@@ -39,7 +39,7 @@ import {
   updateTask,
   walkTzSegments,
 } from './db.js';
-import type { TriggerPatternConfig } from './types.js';
+import type { ContainerConfig, TriggerPatternConfig } from './types.js';
 import { logger } from './logger.js';
 import { formatMessages } from './router.js';
 
@@ -1400,6 +1400,33 @@ describe('registered group trigger pattern JSON schema', () => {
       last_matched_at: null,
       last_updated_at: null,
     });
+  });
+
+  it('setRegisteredGroup strips retired container_config.stage2Enabled on write (#753)', () => {
+    // `stage2Enabled` is not a `ContainerConfig` field anymore, so an
+    // IPC blob or a hand-edited row carrying it reaches the write path
+    // only as an untyped extra key — cast to model that.
+    setRegisteredGroup('stage2@g.us', {
+      name: 'Stage2 Group',
+      folder: 'whatsapp_stage2',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+      containerConfig: {
+        stage2Enabled: true,
+        trusted: true,
+        agentModel: 'sonnet',
+      } as unknown as ContainerConfig,
+    });
+
+    // `getRegisteredGroup` parses the stored blob verbatim (unknown keys
+    // survive), so a surviving `stage2Enabled` would round-trip back —
+    // its absence proves the write-path guard excised it, while the
+    // sibling keys stay intact.
+    const group = getRegisteredGroup('stage2@g.us');
+    expect(group?.containerConfig).toBeDefined();
+    expect(group?.containerConfig).not.toHaveProperty('stage2Enabled');
+    expect(group?.containerConfig?.trusted).toBe(true);
+    expect(group?.containerConfig?.agentModel).toBe('sonnet');
   });
 
   it('getRegisteredGroup derives primary keyword from JSON config', () => {
