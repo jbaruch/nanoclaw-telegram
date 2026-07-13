@@ -38,6 +38,7 @@ import {
   hostLogsDir,
   stripAnsi,
 } from './host-logs.js';
+import { isErrnoCodedError, isFsErrorWithCode } from './fs-errors.js';
 import { logger } from './logger.js';
 import { computeEffectiveSkillContext } from './skill-dep-closure.js';
 import { shouldIncludeRule } from './rule-requires-filter.js';
@@ -64,6 +65,36 @@ import { sweepStaleInputs } from './ipc-input-sweep.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 import { readEnvFile } from './env.js';
+
+// Errno codes the spawn path's PRIMARY best-effort fs ops (chown/cp/unlink/
+// readdir/rename/write over mount-target trees) may legitimately raise —
+// including EEXIST/ERR_FS_CP_EEXIST/ENOTEMPTY from concurrent cpSync and the
+// path-shape errnos. Anything else surfaces the unexpected errno. Cleanup-
+// after-error paths use isErrnoCodedError instead (tolerate any fs errno so a
+// cleanup failure can't mask the primary error); the readlink probe uses
+// CR_READLINK_FS_CODES below.
+const CR_FS_CODES = [
+  'EACCES',
+  'EPERM',
+  'ENOENT',
+  'EISDIR',
+  'ENOTDIR',
+  'ELOOP',
+  'ENAMETOOLONG',
+  'EROFS',
+  'EBUSY',
+  'ENOSPC',
+  'EEXIST',
+  'ERR_FS_CP_EEXIST',
+  'ENOTEMPTY', // concurrent-race errno on cp/rename over a non-empty target
+];
+
+// readlinkSync raises EINVAL when the path exists but is not a symlink — an
+// expected outcome when probing whether a group-scripts dir is already a
+// symlink. EINVAL is NOT in the shared CR_FS_CODES set: for every other fs op
+// it signals a bad argument (a defect) and must propagate, so only the
+// readlink probe adds it.
+const CR_READLINK_FS_CODES = [...CR_FS_CODES, 'EINVAL'];
 
 /**
  * Select which tiles to install based on group trust tier, plus any
@@ -434,24 +465,17 @@ export function atomicPublishDir(srcDir: string, dstDir: string): void {
         try {
           fs.renameSync(backupDir, dstDir);
         } catch (restoreErr: unknown) {
-          // Per `coding-policy: error-handling`: narrow to typed
-          // errno; let other shapes propagate via the swallowing
-          // log here (we don't rethrow because the original publish
-          // error is the primary signal).
-          if (!(restoreErr instanceof Error) || !('code' in restoreErr)) {
-            logger.warn(
-              { err: restoreErr, dstDir, backupDir },
-              'atomic dir publish: restore from backup failed (non-errno); ' +
-                'backup sibling left for operator recovery',
-            );
-          } else {
-            const restoreCode = (restoreErr as NodeJS.ErrnoException).code;
-            logger.warn(
-              { err: restoreErr, code: restoreCode, dstDir, backupDir },
-              'atomic dir publish: restore from backup failed; ' +
-                'backup sibling left for operator recovery',
-            );
-          }
+          // Any fs/OS errno while restoring is logged (the original publish
+          // error remains the primary signal that propagates via the outer
+          // flow); only a non-errno defect (a real bug) propagates and could
+          // legitimately displace it.
+          if (!isErrnoCodedError(restoreErr)) throw restoreErr;
+          const restoreCode = (restoreErr as NodeJS.ErrnoException).code;
+          logger.warn(
+            { err: restoreErr, code: restoreCode, dstDir, backupDir },
+            'atomic dir publish: restore from backup failed; ' +
+              'backup sibling left for operator recovery',
+          );
         }
       } else {
         rmBestEffort(backupDir);
@@ -725,34 +749,33 @@ export function buildSecretEnvFile(
     fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
     0o600,
   );
-  // success flag drives finally-block cleanup without a catch-all:
-  // exceptions from writeFileSync/closeSync propagate naturally, and
-  // finally unlinks the on-disk tempfile if the write didn't fully
-  // succeed. Without this, a write failure (disk full, EIO, EDQUOT)
-  // would leak a partial-secret tempfile because the outer caller
-  // never sees a cleanup callback from a throwing buildSecretEnvFile.
-  let writeSucceeded = false;
   try {
-    fs.writeFileSync(fd, lines.join('\n') + '\n');
-    writeSucceeded = true;
-  } finally {
-    fs.closeSync(fd);
-    if (!writeSucceeded) {
-      // unlink failures other than ENOENT are logged but don't mask
-      // the original error — the outer try is propagating the real
-      // cause via finally semantics.
-      try {
-        fs.unlinkSync(tmpPath);
-      } catch (unlinkErr) {
-        const code = (unlinkErr as NodeJS.ErrnoException).code;
-        if (code !== 'ENOENT') {
-          logger.warn(
-            { err: unlinkErr, tmpPath },
-            'Failed to clean up secret env-file after write error',
-          );
-        }
+    // Inner try/finally closes the fd on every path FIRST; the outer catch
+    // then removes the partial-secret tempfile with the handle already closed
+    // (so the unlink can't fail on an open handle) before re-throwing the
+    // write error — the real cause. The unlink's narrow-and-rethrow is safe
+    // here because it sits in a catch, not a finally (no-unsafe-finally).
+    try {
+      fs.writeFileSync(fd, lines.join('\n') + '\n');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (writeErr) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch (unlinkErr) {
+      // Best-effort cleanup: tolerate ANY fs/OS errno (EIO, EDQUOT, …) so a
+      // cleanup failure never masks writeErr — the real cause, rethrown below.
+      if (!isErrnoCodedError(unlinkErr)) throw unlinkErr;
+      const code = (unlinkErr as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        logger.warn(
+          { err: unlinkErr, tmpPath },
+          'Failed to clean up secret env-file after write error',
+        );
       }
     }
+    throw writeErr;
   }
 
   let cleaned = false;
@@ -764,6 +787,10 @@ export function buildSecretEnvFile(
       try {
         fs.unlinkSync(tmpPath);
       } catch (err) {
+        // Best-effort teardown: tolerate ANY fs/OS errno; only a non-errno
+        // defect propagates. Worst case the 0600 tempfile is cleared on the
+        // next reboot via tmpdir.
+        if (!isErrnoCodedError(err)) throw err;
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
         logger.warn(
           { err, tmpPath },
@@ -1244,6 +1271,9 @@ export function createFilteredDb(
       try {
         fs.unlinkSync(tempPath);
       } catch (cleanupErr) {
+        // Best-effort cleanup: tolerate ANY fs/OS errno so it can't shadow the
+        // original rename/build error; only a non-errno defect propagates.
+        if (!isErrnoCodedError(cleanupErr)) throw cleanupErr;
         const code = (cleanupErr as NodeJS.ErrnoException).code;
         if (code !== 'ENOENT') {
           logger.warn(
@@ -1287,6 +1317,7 @@ export function createFilteredDb(
       fs.chownSync(filteredDir, uid, gid);
       fs.chownSync(filteredPath, uid, gid);
     } catch (err: unknown) {
+      if (!isFsErrorWithCode(err, CR_FS_CODES)) throw err;
       logger.warn({ err, filteredPath }, 'Failed to chown filtered DB');
     }
   }
@@ -1946,6 +1977,7 @@ export function buildVolumeMounts(
       try {
         fs.chownSync(trustedDir, trustedUid, trustedGid);
       } catch (err: unknown) {
+        if (!isFsErrorWithCode(err, CR_FS_CODES)) throw err;
         logger.warn({ err, trustedDir }, 'Failed to chown trusted dir');
       }
     }
@@ -2389,8 +2421,11 @@ export function buildVolumeMounts(
           previousVersionDir = path.isAbsolute(currentTarget)
             ? currentTarget
             : path.resolve(path.dirname(groupScriptsDir), currentTarget);
-        } catch {
-          /* ignore — if we can't read the link we just won't clean it up */
+        } catch (err) {
+          if (!isFsErrorWithCode(err, CR_READLINK_FS_CODES)) throw err;
+          /* ignore — if we can't read the link we just won't clean it up
+             (EINVAL covers a TOCTOU replace of the symlink by a regular file
+             between the lstat probe above and this readlink) */
         }
       }
 
@@ -2545,6 +2580,7 @@ export function buildVolumeMounts(
     try {
       chownRecursive(groupSessionsDir, sessionUid, sessionGid);
     } catch (err: unknown) {
+      if (!isFsErrorWithCode(err, CR_FS_CODES)) throw err;
       logger.warn(
         { err, groupSessionsDir },
         'Failed to chown .claude session dir',
@@ -2680,6 +2716,7 @@ export function buildVolumeMounts(
       try {
         chownRecursive(projectsDir, sessionUid, sessionGid);
       } catch (err: unknown) {
+        if (!isFsErrorWithCode(err, CR_FS_CODES)) throw err;
         logger.warn(
           { err, projectsDir },
           'Failed to chown projects/ overlay mount-target tree',
@@ -2713,7 +2750,8 @@ export function buildVolumeMounts(
       let entries: string[];
       try {
         entries = fs.readdirSync(perSessionMemoryDir);
-      } catch {
+      } catch (err) {
+        if (!isFsErrorWithCode(err, CR_FS_CODES)) throw err;
         continue;
       }
       for (const file of entries) {
@@ -2727,6 +2765,7 @@ export function buildVolumeMounts(
             'Migrated per-session memory file to shared-memory',
           );
         } catch (err: unknown) {
+          if (!isFsErrorWithCode(err, CR_FS_CODES)) throw err;
           const code = (err as NodeJS.ErrnoException).code;
           // EEXIST / ERR_FS_CP_EEXIST: another session spawning concurrently
           // won the cpSync — our copy is redundant, their content is valid
@@ -2758,6 +2797,7 @@ export function buildVolumeMounts(
       try {
         chownRecursive(sharedMemoryDir, sessionUid, sessionGid);
       } catch (err: unknown) {
+        if (!isFsErrorWithCode(err, CR_FS_CODES)) throw err;
         logger.warn(
           { err, sharedMemoryDir },
           'Failed to chown shared-memory dir',
@@ -2792,6 +2832,7 @@ export function buildVolumeMounts(
     try {
       fs.chownSync(claudeJsonPath, jsonUid, jsonGid);
     } catch (err: unknown) {
+      if (!isFsErrorWithCode(err, CR_FS_CODES)) throw err;
       logger.warn({ err, claudeJsonPath }, 'Failed to chown .claude.json');
     }
   }
@@ -2875,6 +2916,7 @@ export function buildVolumeMounts(
         fs.chownSync(path.join(groupIpcDir, sub), ipcUid, ipcGid);
       }
     } catch (err) {
+      if (!isFsErrorWithCode(err, CR_FS_CODES)) throw err;
       logger.warn({ folder: group.folder, err }, 'Failed to chown IPC dirs');
     }
   }
@@ -3423,7 +3465,8 @@ export async function runContainerAgent(
   );
   try {
     fs.unlinkSync(replyToFile);
-  } catch {
+  } catch (err) {
+    if (!isFsErrorWithCode(err, CR_FS_CODES)) throw err;
     /* file doesn't exist — fine */
   }
 
@@ -3763,6 +3806,7 @@ export async function runContainerAgent(
         ].join('\n'),
       );
     } catch (err) {
+      if (!isFsErrorWithCode(err, CR_FS_CODES)) throw err;
       logger.warn(
         { err, group: group.name, streamLogPath },
         'host-logs stream open failed; container will run without per-spawn stream',
@@ -3908,6 +3952,7 @@ export async function runContainerAgent(
               // so idle timers start even for "silent" query completions.
               outputChain = outputChain.then(() => onOutput(parsed));
             } catch (err) {
+              if (!(err instanceof SyntaxError)) throw err;
               logger.warn(
                 { group: group.name, error: err },
                 'Failed to parse streamed output chunk',
@@ -3999,6 +4044,7 @@ export async function runContainerAgent(
         try {
           stopContainer(containerName);
         } catch (err) {
+          if (!(err instanceof Error)) throw err;
           logger.warn(
             { group: group.name, containerName, err },
             'Graceful stop failed, force killing',
@@ -4039,7 +4085,8 @@ export async function runContainerAgent(
               `\n=== Container Exited ===\nCode: ${code}\nDuration: ${duration}ms\nEnd: ${new Date().toISOString()}\n`,
             );
             streamLog.end();
-          } catch {
+          } catch (err) {
+            if (!(err instanceof Error)) throw err;
             // Stream already errored / closed — nothing useful to do.
           }
         }
@@ -4336,6 +4383,7 @@ export async function runContainerAgent(
 
           resolve(output);
         } catch (err) {
+          if (!(err instanceof SyntaxError)) throw err;
           logger.error(
             {
               group: group.name,
@@ -4381,7 +4429,8 @@ export async function runContainerAgent(
               `\n=== Container Spawn Failed ===\nError: ${err.message}\nEnd: ${new Date().toISOString()}\n`,
             );
             streamLog.end();
-          } catch {
+          } catch (err) {
+            if (!(err instanceof Error)) throw err;
             // Stream already errored / closed — nothing to recover.
           }
         }
@@ -4468,7 +4517,11 @@ export function writeGroupsSnapshot(
   if (fs.existsSync(groupsFile)) {
     try {
       existing = JSON.parse(fs.readFileSync(groupsFile, 'utf-8'));
-    } catch {
+    } catch (err) {
+      // Corrupt JSON (SyntaxError) or an fs read error resets to empty; a
+      // non-fs, non-parse defect propagates.
+      if (!(err instanceof SyntaxError) && !isFsErrorWithCode(err, CR_FS_CODES))
+        throw err;
       existing = {};
     }
   }

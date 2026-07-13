@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 
-import { isExpectedFsError, isFsErrorWithCode } from './fs-errors.js';
+import {
+  isErrnoCodedError,
+  isExpectedFsError,
+  isFsErrorWithCode,
+} from './fs-errors.js';
 
 function fsError(code: string): NodeJS.ErrnoException {
   const err = new Error(`mock ${code}`) as NodeJS.ErrnoException;
@@ -85,5 +89,31 @@ describe('isFsErrorWithCode', () => {
 
   it('matches nothing against an empty code list', () => {
     expect(isFsErrorWithCode(fsError('ENOENT'), [])).toBe(false);
+  });
+});
+
+describe('isErrnoCodedError', () => {
+  it('returns true for ANY errno-coded Error, in or out of the shared set', () => {
+    // The whole point of the cleanup-path helper: tolerate every fs/OS
+    // errno so a secondary cleanup failure can't mask the primary error.
+    for (const code of ['ENOENT', 'EIO', 'EDQUOT', 'ENOTEMPTY', 'EFAULT']) {
+      expect(isErrnoCodedError(fsError(code))).toBe(true);
+    }
+  });
+
+  it('returns false for a defect Error without a `.code` (TypeError/plain)', () => {
+    // Genuine programmer defects have no `.code` and must propagate so the
+    // caller's `if (!isErrnoCodedError(err)) throw err;` path fires.
+    expect(isErrnoCodedError(new Error('oops'))).toBe(false);
+    expect(isErrnoCodedError(new TypeError('x is not a function'))).toBe(false);
+  });
+
+  it('returns false for a non-string `.code` and non-Error throws', () => {
+    const numeric = new Error('numeric') as NodeJS.ErrnoException;
+    (numeric as unknown as { code: number }).code = 13;
+    expect(isErrnoCodedError(numeric)).toBe(false);
+    expect(isErrnoCodedError({ code: 'EIO' })).toBe(false);
+    expect(isErrnoCodedError('EIO')).toBe(false);
+    expect(isErrnoCodedError(null)).toBe(false);
   });
 });

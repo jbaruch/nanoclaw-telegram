@@ -53,3 +53,21 @@ export function isFsErrorWithCode(
   const code = (err as NodeJS.ErrnoException).code;
   return typeof code === 'string' && codes.includes(code);
 }
+
+/**
+ * Returns true when `err` is any errno-coded system Error (an `Error` with a
+ * string `.code`), regardless of the specific code. Use this ONLY on
+ * cleanup-after-error and best-effort teardown paths, where the goal is to
+ * never let a secondary cleanup failure (EIO, EDQUOT, ENOTEMPTY, or any other
+ * fs/OS errno) mask the primary in-flight error. Genuine defects
+ * (`TypeError`, `ReferenceError` — no `.code`) still return false so the
+ * caller's `if (!isErrnoCodedError(err)) throw err;` path re-throws them.
+ *
+ * Primary best-effort fs operations (not masking another error) should keep
+ * using `isFsErrorWithCode` with an explicit per-syscall set so an unexpected
+ * errno surfaces.
+ */
+export function isErrnoCodedError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return typeof (err as NodeJS.ErrnoException).code === 'string';
+}
