@@ -12,6 +12,7 @@ import Database from 'better-sqlite3';
 
 import { STORE_DIR } from '../src/config.js';
 import { logger } from '../src/logger.js';
+import { isSubprocessError } from '../src/subprocess-errors.js';
 import { emitStatus } from './status.js';
 
 function parseArgs(args: string[]): { list: boolean; limit: number } {
@@ -93,6 +94,16 @@ async function syncGroups(projectRoot: string): Promise<void> {
     });
     buildOk = true;
     logger.info('Build succeeded');
+    // outer-boundary-process-contract (coding-policy: error-handling):
+    // sync-groups build boundary — the harness reads the SYNC_GROUPS status
+    // line and exit code as pass/fail.
+    //   - Caller's silent-failure shape: a non-zero exit or missing status
+    //     line reads as a failed step.
+    //   - What the catch emits: STATUS:'failed'/ERROR:'build_failed' via
+    //     emitStatus, then exit 1.
+    //   - Why propagation breaks the contract: an uncaught build error would
+    //     skip the status line, denying the harness the structured failure.
+    // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
   } catch {
     logger.error('Build failed');
     emitStatus('SYNC_GROUPS', {
@@ -192,6 +203,9 @@ sock.ev.on('connection.update', async (update) => {
     syncOk = output.includes('SYNCED:');
     logger.info({ output: output.trim() }, 'Sync output');
   } catch (err) {
+    // sync failure (subprocess) is recorded (syncOk stays false) and reported
+    // in the status below. A non-subprocess defect propagates.
+    if (!isSubprocessError(err)) throw err;
     logger.error({ err }, 'Sync failed');
   }
   // Cleanup outside the sync-outcome path: force absorbs the expected
@@ -213,8 +227,10 @@ sock.ev.on('connection.update', async (update) => {
         .get() as { count: number };
       groupsInDb = row.count;
       db.close();
-    } catch {
-      // DB may not exist yet
+    } catch (err) {
+      // best-effort read: a SqliteError (e.g. missing table) leaves groupsInDb
+      // at 0; a non-Sqlite defect propagates.
+      if (!(err instanceof Database.SqliteError)) throw err;
     }
   }
 

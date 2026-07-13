@@ -5,6 +5,9 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 
+import { isExpectedFsError } from '../src/fs-errors.js';
+import { isSubprocessError } from '../src/subprocess-errors.js';
+
 export type Platform = 'macos' | 'linux' | 'unknown';
 export type ServiceManager = 'launchd' | 'systemd' | 'none';
 
@@ -20,7 +23,10 @@ export function isWSL(): boolean {
   try {
     const release = fs.readFileSync('/proc/version', 'utf-8').toLowerCase();
     return release.includes('microsoft') || release.includes('wsl');
-  } catch {
+  } catch (err) {
+    // /proc/version read is a capability probe: an fs errno means "not WSL"; a
+    // non-fs defect propagates.
+    if (!isExpectedFsError(err)) throw err;
     return false;
   }
 }
@@ -44,7 +50,10 @@ export function hasSystemd(): boolean {
     // Check if systemd is PID 1
     const init = fs.readFileSync('/proc/1/comm', 'utf-8').trim();
     return init === 'systemd';
-  } catch {
+  } catch (err) {
+    // /proc/1/comm read is a capability probe: an fs errno means "no systemd";
+    // a non-fs defect propagates.
+    if (!isExpectedFsError(err)) throw err;
     return false;
   }
 }
@@ -77,13 +86,17 @@ export function openBrowser(url: string): boolean {
             stdio: 'ignore',
           });
           return true;
-        } catch {
-          // cmd.exe not available
+        } catch (err) {
+          // cmd.exe fallback probe: a subprocess failure means it is
+          // unavailable; a non-subprocess defect propagates.
+          if (!isSubprocessError(err)) throw err;
         }
       }
     }
-  } catch {
-    // Command failed
+  } catch (err) {
+    // openBrowser is best-effort: a subprocess launch failure returns false
+    // ("no method available"); a non-subprocess defect propagates.
+    if (!isSubprocessError(err)) throw err;
   }
   return false;
 }
@@ -101,7 +114,10 @@ export function getServiceManager(): ServiceManager {
 export function getNodePath(): string {
   try {
     return execSync('command -v node', { encoding: 'utf-8' }).trim();
-  } catch {
+  } catch (err) {
+    // `command -v node` subprocess failure falls back to process.execPath; a
+    // non-subprocess defect propagates.
+    if (!isSubprocessError(err)) throw err;
     return process.execPath;
   }
 }
@@ -110,7 +126,10 @@ export function commandExists(name: string): boolean {
   try {
     execSync(`command -v ${name}`, { stdio: 'ignore' });
     return true;
-  } catch {
+  } catch (err) {
+    // probe: a non-zero `command -v` (subprocess failure) means the command is
+    // absent; a non-subprocess defect propagates.
+    if (!isSubprocessError(err)) throw err;
     return false;
   }
 }
@@ -119,7 +138,10 @@ export function getNodeVersion(): string | null {
   try {
     const version = execSync('node --version', { encoding: 'utf-8' }).trim();
     return version.replace(/^v/, '');
-  } catch {
+  } catch (err) {
+    // `node --version` subprocess failure yields null (undeterminable); a
+    // non-subprocess defect propagates.
+    if (!isSubprocessError(err)) throw err;
     return null;
   }
 }

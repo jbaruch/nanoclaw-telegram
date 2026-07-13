@@ -3,6 +3,8 @@ import fs from 'fs';
 
 import Database from 'better-sqlite3';
 
+import { isExpectedFsError } from '../src/fs-errors.js';
+
 /**
  * Tests for the environment check step.
  *
@@ -109,7 +111,10 @@ describe('channel auth detection', () => {
     const hasAuth = (authDir: string) => {
       try {
         return fs.existsSync(authDir) && fs.readdirSync(authDir).length > 0;
-      } catch {
+      } catch (err) {
+        // probe helper: an fs errno (unreadable dir) counts as "no auth"; a
+        // non-fs defect propagates.
+        if (!isExpectedFsError(err)) throw err;
         return false;
       }
     };

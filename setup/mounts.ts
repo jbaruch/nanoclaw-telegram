@@ -74,6 +74,16 @@ export async function run(args: string[]): Promise<void> {
     let parsed: { allowedRoots?: unknown[]; nonMainReadOnly?: boolean };
     try {
       parsed = JSON.parse(json);
+      // outer-boundary-process-contract (coding-policy: error-handling):
+      // mount-config validation boundary — converts malformed input into the
+      // CONFIGURE_MOUNTS failure envelope the harness reads.
+      //   - Caller's silent-failure shape: a non-zero exit or missing status
+      //     line reads as a failed step.
+      //   - What the catch emits: STATUS:'failed'/ERROR:'invalid_json' via
+      //     emitStatus, then exit 4.
+      //   - Why propagation breaks the contract: an uncaught parse error would
+      //     skip the status line, denying the harness the structured failure.
+      // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
     } catch {
       logger.error('Invalid JSON input');
       emitStatus('CONFIGURE_MOUNTS', {
@@ -100,6 +110,16 @@ export async function run(args: string[]): Promise<void> {
     let parsed: { allowedRoots?: unknown[]; nonMainReadOnly?: boolean };
     try {
       parsed = JSON.parse(input);
+      // outer-boundary-process-contract (coding-policy: error-handling):
+      // mount-config validation boundary (stdin) — converts malformed input
+      // into the CONFIGURE_MOUNTS failure envelope the harness reads.
+      //   - Caller's silent-failure shape: a non-zero exit or missing status
+      //     line reads as a failed step.
+      //   - What the catch emits: STATUS:'failed'/ERROR:'invalid_json' via
+      //     emitStatus, then exit 4.
+      //   - Why propagation breaks the contract: an uncaught parse error would
+      //     skip the status line, denying the harness the structured failure.
+      // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
     } catch {
       logger.error('Invalid JSON from stdin');
       emitStatus('CONFIGURE_MOUNTS', {

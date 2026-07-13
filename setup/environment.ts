@@ -9,6 +9,7 @@ import Database from 'better-sqlite3';
 
 import { STORE_DIR } from '../src/config.js';
 import { logger } from '../src/logger.js';
+import { isSubprocessError } from '../src/subprocess-errors.js';
 import { commandExists, getPlatform, isHeadless, isWSL } from './platform.js';
 import { emitStatus } from './status.js';
 
@@ -34,7 +35,10 @@ export async function run(_args: string[]): Promise<void> {
       const { execSync } = await import('child_process');
       execSync('docker info', { stdio: 'ignore' });
       docker = 'running';
-    } catch {
+    } catch (err) {
+      // docker installed but `docker info` failed (subprocess) → not running. A
+      // non-subprocess defect propagates.
+      if (!isSubprocessError(err)) throw err;
       docker = 'installed_not_running';
     }
   }
@@ -60,8 +64,10 @@ export async function run(_args: string[]): Promise<void> {
           .get() as { count: number };
         if (row.count > 0) hasRegisteredGroups = true;
         db.close();
-      } catch {
-        // Table might not exist yet
+      } catch (err) {
+        // best-effort read: a SqliteError (e.g. missing table) leaves
+        // hasRegisteredGroups false; a non-Sqlite defect propagates.
+        if (!(err instanceof Database.SqliteError)) throw err;
       }
     }
   }

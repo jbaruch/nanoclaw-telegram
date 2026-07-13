@@ -6,6 +6,7 @@ import { execSync } from 'child_process';
 import path from 'path';
 
 import { logger } from '../src/logger.js';
+import { isSubprocessError } from '../src/subprocess-errors.js';
 import { commandExists } from './platform.js';
 import { emitStatus } from './status.js';
 
@@ -67,6 +68,16 @@ export async function run(args: string[]): Promise<void> {
     }
     try {
       execSync('docker info', { stdio: 'ignore' });
+      // outer-boundary-process-contract (coding-policy: error-handling):
+      // container-setup boundary — the harness reads the SETUP_CONTAINER
+      // status line and exit code as pass/fail.
+      //   - Caller's silent-failure shape: a non-zero exit or missing status
+      //     line reads as a failed step.
+      //   - What the catch emits: STATUS:'failed'/ERROR:'runtime_not_available'
+      //     via emitStatus, then exit 2.
+      //   - Why propagation breaks the contract: an uncaught error would skip
+      //     the status line, denying the harness the structured failure.
+      // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
     } catch {
       emitStatus('SETUP_CONTAINER', {
         RUNTIME: runtime,
@@ -109,6 +120,9 @@ export async function run(args: string[]): Promise<void> {
     buildOk = true;
     logger.info('Container build succeeded');
   } catch (err) {
+    // build failure (subprocess) is recorded (buildOk stays false) and reported
+    // in the status below. A non-subprocess defect propagates.
+    if (!isSubprocessError(err)) throw err;
     logger.error({ err }, 'Container build failed');
   }
 
@@ -123,7 +137,10 @@ export async function run(args: string[]): Promise<void> {
       );
       testOk = output.includes('Container OK');
       logger.info({ testOk }, 'Container test result');
-    } catch {
+    } catch (err) {
+      // test failure (subprocess) is recorded (testOk stays false) and reported
+      // in the status below. A non-subprocess defect propagates.
+      if (!isSubprocessError(err)) throw err;
       logger.error('Container test failed');
     }
   }

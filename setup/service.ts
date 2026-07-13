@@ -10,6 +10,7 @@ import os from 'os';
 import path from 'path';
 
 import { logger } from '../src/logger.js';
+import { isSubprocessError } from '../src/subprocess-errors.js';
 import {
   getPlatform,
   getNodePath,
@@ -34,6 +35,15 @@ export async function run(_args: string[]): Promise<void> {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     logger.info('Build succeeded');
+    // outer-boundary-process-contract (coding-policy: error-handling):
+    // setup-step boundary — the harness reads the emitted SETUP_SERVICE
+    // status line and exit code as the step's pass/fail signal.
+    //   - Caller's silent-failure shape: a non-zero exit or missing status
+    //     line reads as a failed step.
+    //   - What the catch emits: STATUS:'failed' via emitStatus, then exit 1.
+    //   - Why propagation breaks the contract: an uncaught build error would
+    //     skip the status line, denying the harness the structured failure.
+    // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
   } catch {
     logger.error('Build failed');
     emitStatus('SETUP_SERVICE', {
@@ -118,7 +128,10 @@ function setupLaunchd(
       stdio: 'ignore',
     });
     logger.info('launchctl load succeeded');
-  } catch {
+  } catch (err) {
+    // best-effort: a subprocess failure here usually means already-loaded; a
+    // non-subprocess defect propagates.
+    if (!isSubprocessError(err)) throw err;
     logger.warn('launchctl load failed (may already be loaded)');
   }
 
@@ -127,8 +140,10 @@ function setupLaunchd(
   try {
     const output = execSync('launchctl list', { encoding: 'utf-8' });
     serviceLoaded = output.includes('com.nanoclaw');
-  } catch {
-    // launchctl list failed
+  } catch (err) {
+    // verification probe: a subprocess failure leaves serviceLoaded false; a
+    // non-subprocess defect propagates.
+    if (!isSubprocessError(err)) throw err;
   }
 
   emitStatus('SETUP_SERVICE', {
@@ -163,12 +178,14 @@ function setupLinux(
  */
 function killOrphanedProcesses(projectRoot: string): void {
   try {
-    execSync(`pkill -f '${projectRoot}/dist/index\\.js' || true`, {
+    execSync(`pkill -f '${projectRoot}/dist/index\\.js'`, {
       stdio: 'ignore',
     });
     logger.info('Stopped any orphaned nanoclaw processes');
-  } catch {
-    // pkill not available or no orphans
+  } catch (err) {
+    // best-effort orphan cleanup: pkill exits non-zero when no process matches
+    // (subprocess failure); a non-subprocess defect propagates.
+    if (!isSubprocessError(err)) throw err;
   }
 }
 
@@ -188,12 +205,18 @@ function checkDockerGroupStale(): boolean {
       timeout: 10000,
     });
     return false; // Docker works from systemd session
-  } catch {
+  } catch (err) {
+    // systemd-session docker probe failed (subprocess); fall through to the
+    // shell-docker check below. A non-subprocess defect propagates.
+    if (!isSubprocessError(err)) throw err;
     // Check if docker works from the current shell (to distinguish stale group vs broken docker)
     try {
       execSync('docker info', { stdio: 'pipe', timeout: 5000 });
       return true; // Works in shell but not systemd session → stale group
-    } catch {
+    } catch (err) {
+      // docker unavailable in the shell too (subprocess failure); not a
+      // stale-group case. A non-subprocess defect propagates.
+      if (!isSubprocessError(err)) throw err;
       return false; // Docker itself is not working, different issue
     }
   }
@@ -218,7 +241,10 @@ function setupSystemd(
     // Check if user-level systemd session is available
     try {
       execSync('systemctl --user daemon-reload', { stdio: 'pipe' });
-    } catch {
+    } catch (err) {
+      // probe: a subprocess failure means no user systemd session, so fall
+      // back to the nohup wrapper. A non-subprocess defect propagates.
+      if (!isSubprocessError(err)) throw err;
       logger.warn(
         'systemd user session not available — falling back to nohup wrapper',
       );
@@ -271,6 +297,9 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
       execSync('loginctl enable-linger', { stdio: 'ignore' });
       logger.info('Enabled loginctl linger for current user');
     } catch (err) {
+      // best-effort: linger is optional (a subprocess failure); the service
+      // still starts without it. A non-subprocess defect propagates.
+      if (!isSubprocessError(err)) throw err;
       logger.warn(
         { err },
         'loginctl enable-linger failed — service may stop on SSH logout',
@@ -282,18 +311,27 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
   try {
     execSync(`${systemctlPrefix} daemon-reload`, { stdio: 'ignore' });
   } catch (err) {
+    // logged and non-fatal (subprocess failure); enable/start are still
+    // attempted. A non-subprocess defect propagates.
+    if (!isSubprocessError(err)) throw err;
     logger.error({ err }, 'systemctl daemon-reload failed');
   }
 
   try {
     execSync(`${systemctlPrefix} enable nanoclaw`, { stdio: 'ignore' });
   } catch (err) {
+    // logged and non-fatal (subprocess failure); start is still attempted. A
+    // non-subprocess defect propagates.
+    if (!isSubprocessError(err)) throw err;
     logger.error({ err }, 'systemctl enable failed');
   }
 
   try {
     execSync(`${systemctlPrefix} start nanoclaw`, { stdio: 'ignore' });
   } catch (err) {
+    // logged and non-fatal (subprocess failure); the verify step below records
+    // the real state. A non-subprocess defect propagates.
+    if (!isSubprocessError(err)) throw err;
     logger.error({ err }, 'systemctl start failed');
   }
 
@@ -302,8 +340,10 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
   try {
     execSync(`${systemctlPrefix} is-active nanoclaw`, { stdio: 'ignore' });
     serviceLoaded = true;
-  } catch {
-    // Not active
+  } catch (err) {
+    // verification probe: a non-zero is-active (subprocess failure) means not
+    // running. A non-subprocess defect propagates.
+    if (!isSubprocessError(err)) throw err;
   }
 
   emitStatus('SETUP_SERVICE', {

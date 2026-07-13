@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { isExpectedFsError } from './fs-errors.js';
+import { isExpectedFsError, isFsErrorWithCode } from './fs-errors.js';
 
 function fsError(code: string): NodeJS.ErrnoException {
   const err = new Error(`mock ${code}`) as NodeJS.ErrnoException;
@@ -62,5 +62,28 @@ describe('isExpectedFsError', () => {
     const err = new Error('numeric') as NodeJS.ErrnoException;
     (err as unknown as { code: number }).code = 13; // EACCES on Linux
     expect(isExpectedFsError(err)).toBe(false);
+  });
+});
+
+describe('isFsErrorWithCode', () => {
+  it('matches only the caller-supplied codes', () => {
+    expect(isFsErrorWithCode(fsError('ESRCH'), ['ESRCH', 'EPERM'])).toBe(true);
+    expect(isFsErrorWithCode(fsError('EPERM'), ['ESRCH', 'EPERM'])).toBe(true);
+    expect(isFsErrorWithCode(fsError('ENOENT'), ['ESRCH', 'EPERM'])).toBe(
+      false,
+    );
+  });
+
+  it('rejects a plain Error, a non-string code, and non-Error throws', () => {
+    expect(isFsErrorWithCode(new Error('oops'), ['ESRCH'])).toBe(false);
+    const numeric = new Error('numeric') as NodeJS.ErrnoException;
+    (numeric as unknown as { code: number }).code = 3;
+    expect(isFsErrorWithCode(numeric, ['ESRCH'])).toBe(false);
+    expect(isFsErrorWithCode({ code: 'ESRCH' }, ['ESRCH'])).toBe(false);
+    expect(isFsErrorWithCode(null, ['ESRCH'])).toBe(false);
+  });
+
+  it('matches nothing against an empty code list', () => {
+    expect(isFsErrorWithCode(fsError('ENOENT'), [])).toBe(false);
   });
 });

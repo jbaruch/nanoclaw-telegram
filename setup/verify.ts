@@ -14,6 +14,8 @@ import Database from 'better-sqlite3';
 import { STORE_DIR } from '../src/config.js';
 import { readEnvFile } from '../src/env.js';
 import { logger } from '../src/logger.js';
+import { isFsErrorWithCode } from '../src/fs-errors.js';
+import { isSubprocessError } from '../src/subprocess-errors.js';
 import { getServiceManager, isRoot } from './platform.js';
 import { emitStatus } from './status.js';
 
@@ -38,15 +40,20 @@ export async function run(_args: string[]): Promise<void> {
           service = pidField !== '-' && pidField ? 'running' : 'stopped';
         }
       }
-    } catch {
-      // launchctl not available
+    } catch (err) {
+      // launchctl probe: a subprocess failure leaves service "not_found"; a
+      // non-subprocess defect propagates.
+      if (!isSubprocessError(err)) throw err;
     }
   } else if (mgr === 'systemd') {
     const prefix = isRoot() ? 'systemctl' : 'systemctl --user';
     try {
       execSync(`${prefix} is-active nanoclaw`, { stdio: 'ignore' });
       service = 'running';
-    } catch {
+    } catch (err) {
+      // is-active probe failed (subprocess); fall through to the unit-files
+      // check below. A non-subprocess defect propagates.
+      if (!isSubprocessError(err)) throw err;
       try {
         const output = execSync(`${prefix} list-unit-files`, {
           encoding: 'utf-8',
@@ -54,8 +61,10 @@ export async function run(_args: string[]): Promise<void> {
         if (output.includes('nanoclaw')) {
           service = 'stopped';
         }
-      } catch {
-        // systemctl not available
+      } catch (err) {
+        // systemctl probe: a subprocess failure leaves service "not_found"; a
+        // non-subprocess defect propagates.
+        if (!isSubprocessError(err)) throw err;
       }
     }
   } else {
@@ -69,8 +78,17 @@ export async function run(_args: string[]): Promise<void> {
           process.kill(pid, 0);
           service = 'running';
         }
-      } catch {
-        service = 'stopped';
+      } catch (err) {
+        // kill(pid,0) throws ESRCH when the PID is gone → stopped; EPERM means
+        // the process exists but we can't signal it → still running. Any other
+        // errno or a non-errno defect propagates.
+        if (isFsErrorWithCode(err, ['EPERM'])) {
+          service = 'running';
+        } else if (isFsErrorWithCode(err, ['ESRCH'])) {
+          service = 'stopped';
+        } else {
+          throw err;
+        }
       }
     }
   }
@@ -81,12 +99,17 @@ export async function run(_args: string[]): Promise<void> {
   try {
     execSync('command -v container', { stdio: 'ignore' });
     containerRuntime = 'apple-container';
-  } catch {
+  } catch (err) {
+    // apple-container absent (subprocess failure); fall through to the docker
+    // check below. A non-subprocess defect propagates.
+    if (!isSubprocessError(err)) throw err;
     try {
       execSync('docker info', { stdio: 'ignore' });
       containerRuntime = 'docker';
-    } catch {
-      // No runtime
+    } catch (err) {
+      // neither runtime present (subprocess failure); containerRuntime stays
+      // "none". A non-subprocess defect propagates.
+      if (!isSubprocessError(err)) throw err;
     }
   }
 
@@ -144,8 +167,10 @@ export async function run(_args: string[]): Promise<void> {
         .get() as { count: number };
       registeredGroups = row.count;
       db.close();
-    } catch {
-      // Table might not exist
+    } catch (err) {
+      // best-effort read: a SqliteError (e.g. missing table) leaves
+      // registeredGroups at 0; a non-Sqlite defect propagates.
+      if (!(err instanceof Database.SqliteError)) throw err;
     }
   }
 

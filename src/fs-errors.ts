@@ -35,3 +35,21 @@ export function isExpectedFsError(err: unknown): boolean {
   const code = (err as NodeJS.ErrnoException).code;
   return typeof code === 'string' && EXPECTED_FS_ERROR_CODES.has(code);
 }
+
+/**
+ * Returns true when `err` is an `Error` carrying an errno `.code` that is
+ * one of `codes`. Unlike `isExpectedFsError` (which pins the shared
+ * best-effort set), this lets a caller state the exact codes it treats as
+ * recoverable for a specific syscall — e.g. `['ESRCH', 'EPERM']` for a
+ * `process.kill(pid, 0)` liveness probe. Any non-Error value, or a
+ * different (or absent) code, returns false so the caller's
+ * `if (!isFsErrorWithCode(err, [...])) throw err;` path re-throws it.
+ */
+export function isFsErrorWithCode(
+  err: unknown,
+  codes: readonly string[],
+): boolean {
+  if (!(err instanceof Error)) return false;
+  const code = (err as NodeJS.ErrnoException).code;
+  return typeof code === 'string' && codes.includes(code);
+}

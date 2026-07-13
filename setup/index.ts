@@ -45,6 +45,15 @@ async function main(): Promise<void> {
   try {
     const mod = await loader();
     await mod.run(stepArgs);
+    // outer-boundary-process-contract (coding-policy: error-handling):
+    // the setup CLI's top-level step dispatcher.
+    //   - Caller's silent-failure shape: the setup harness reads a non-zero
+    //     exit and the emitted <STEP> status line as a failed step.
+    //   - What the catch emits: STATUS:'failed' with the error message via
+    //     emitStatus, then exit 1.
+    //   - Why propagation breaks the contract: an uncaught step error would
+    //     crash before emitting the status line the harness parses.
+    // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err, step: stepName }, 'Setup step failed');
