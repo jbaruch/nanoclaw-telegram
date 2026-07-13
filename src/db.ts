@@ -8,6 +8,7 @@ import {
   type CadenceRegistryRebuildResult,
 } from './cadence-registry.js';
 import { ASSISTANT_NAME, DATA_DIR, GROUPS_DIR, STORE_DIR } from './config.js';
+import { isFsErrorWithCode } from './fs-errors.js';
 import { isValidGroupFolder } from './group-folder.js';
 import {
   handleConstraintViolationOrRethrow,
@@ -33,6 +34,42 @@ import {
   TriggerPattern,
   TriggerPatternConfig,
 } from './types.js';
+
+/**
+ * True for the SqliteError an idempotent `ALTER TABLE ... ADD COLUMN`
+ * migration raises when the column already exists ("duplicate column
+ * name"). Narrowed to that message so a different SqliteError (missing
+ * table, corruption) still propagates instead of being mistaken for an
+ * already-applied migration.
+ */
+function isDuplicateColumnError(err: unknown): boolean {
+  return (
+    err instanceof SqliteError && /duplicate column name/i.test(err.message)
+  );
+}
+
+/**
+ * Idempotently add one column. Guarding each `ADD COLUMN` independently
+ * (rather than grouping several under one try/catch) avoids the
+ * half-migration failure mode where a duplicate-column error on an early
+ * ALTER skips the remaining ALTERs. Returns `true` when the column was
+ * newly added, `false` when it already existed — callers gate a one-time
+ * backfill on that. A non-duplicate SqliteError (or any other defect)
+ * propagates.
+ */
+function addColumnIfMissing(
+  database: Database.Database,
+  table: string,
+  columnDef: string,
+): boolean {
+  try {
+    database.exec(`ALTER TABLE ${table} ADD COLUMN ${columnDef}`);
+    return true;
+  } catch (err) {
+    if (!isDuplicateColumnError(err)) throw err;
+    return false;
+  }
+}
 
 /**
  * #584 — SQLite error codes the `onTzFlipped` callback catches as
@@ -334,20 +371,14 @@ function createSchema(database: Database.Database): void {
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
-  try {
-    database.exec(
-      `ALTER TABLE scheduled_tasks ADD COLUMN context_mode TEXT DEFAULT 'isolated'`,
-    );
-  } catch {
-    /* column already exists */
-  }
+  addColumnIfMissing(
+    database,
+    'scheduled_tasks',
+    `context_mode TEXT DEFAULT 'isolated'`,
+  );
 
   // Add script column if it doesn't exist (migration for existing DBs)
-  try {
-    database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN script TEXT`);
-  } catch {
-    /* column already exists */
-  }
+  addColumnIfMissing(database, 'scheduled_tasks', 'script TEXT');
 
   // Add schedule_timezone column for #102 — IANA tz used to evaluate
   // cron expressions. NULL means "use TIMEZONE config at fire time"
@@ -525,35 +556,37 @@ function createSchema(database: Database.Database): void {
   }
 
   // Add is_bot_message column if it doesn't exist (migration for existing DBs)
-  try {
-    database.exec(
-      `ALTER TABLE messages ADD COLUMN is_bot_message INTEGER DEFAULT 0`,
-    );
+  if (
+    addColumnIfMissing(database, 'messages', 'is_bot_message INTEGER DEFAULT 0')
+  ) {
     // Backfill: mark existing bot messages that used the content prefix pattern
     database
       .prepare(`UPDATE messages SET is_bot_message = 1 WHERE content LIKE ?`)
       .run(`${ASSISTANT_NAME}:%`);
-  } catch {
-    /* column already exists */
   }
 
   // Add is_main column if it doesn't exist (migration for existing DBs)
-  try {
-    database.exec(
-      `ALTER TABLE registered_groups ADD COLUMN is_main INTEGER DEFAULT 0`,
-    );
+  if (
+    addColumnIfMissing(
+      database,
+      'registered_groups',
+      'is_main INTEGER DEFAULT 0',
+    )
+  ) {
     // Backfill: existing rows with folder = 'main' are the main group
     database.exec(
       `UPDATE registered_groups SET is_main = 1 WHERE folder = 'main'`,
     );
-  } catch {
-    /* column already exists */
   }
 
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
-  try {
-    database.exec(`ALTER TABLE chats ADD COLUMN channel TEXT`);
-    database.exec(`ALTER TABLE chats ADD COLUMN is_group INTEGER DEFAULT 0`);
+  const channelAdded = addColumnIfMissing(database, 'chats', 'channel TEXT');
+  const isGroupAdded = addColumnIfMissing(
+    database,
+    'chats',
+    'is_group INTEGER DEFAULT 0',
+  );
+  if (channelAdded || isGroupAdded) {
     // Backfill from JID patterns
     database.exec(
       `UPDATE chats SET channel = 'whatsapp', is_group = 1 WHERE jid LIKE '%@g.us'`,
@@ -567,20 +600,12 @@ function createSchema(database: Database.Database): void {
     database.exec(
       `UPDATE chats SET channel = 'telegram', is_group = 0 WHERE jid LIKE 'tg:%'`,
     );
-  } catch {
-    /* columns already exist */
   }
 
   // Add reply context columns if they don't exist (migration for existing DBs)
-  try {
-    database.exec(`ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT`);
-    database.exec(
-      `ALTER TABLE messages ADD COLUMN reply_to_message_content TEXT`,
-    );
-    database.exec(`ALTER TABLE messages ADD COLUMN reply_to_sender_name TEXT`);
-  } catch {
-    /* columns already exist */
-  }
+  addColumnIfMissing(database, 'messages', 'reply_to_message_id TEXT');
+  addColumnIfMissing(database, 'messages', 'reply_to_message_content TEXT');
+  addColumnIfMissing(database, 'messages', 'reply_to_sender_name TEXT');
 
   // `telegram_message_id` migration (PRAGMA-gated, no silent catch).
   // For bot-sent messages the `id` column holds our synthetic
@@ -3865,7 +3890,30 @@ function migrateJsonState(): void {
       const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       fs.renameSync(filePath, `${filePath}.migrated`);
       return data;
-    } catch {
+    } catch (err) {
+      // best-effort JSON-state migration: malformed JSON (SyntaxError) or an
+      // fs errno (read/rename) skips this file; a non-fs, non-parse defect
+      // propagates.
+      if (
+        !(err instanceof SyntaxError) &&
+        !isFsErrorWithCode(err, [
+          'ENOENT',
+          'EACCES',
+          'EPERM',
+          'EISDIR',
+          'ENOTDIR',
+          'ELOOP',
+          'ENAMETOOLONG',
+          'EROFS',
+          'EBUSY',
+        ])
+      ) {
+        throw err;
+      }
+      logger.warn(
+        { filePath, err },
+        'Skipping malformed/unreadable JSON state file during migration',
+      );
       return null;
     }
   };
@@ -3907,14 +3955,17 @@ function migrateJsonState(): void {
   > | null;
   if (groups) {
     for (const [jid, group] of Object.entries(groups)) {
-      try {
-        setRegisteredGroup(jid, group);
-      } catch (err) {
+      // Pre-check the one recoverable case (invalid folder); a DB or
+      // programming error from setRegisteredGroup then propagates instead of
+      // being silently skipped by a broad catch.
+      if (!isValidGroupFolder(group.folder)) {
         logger.warn(
-          { jid, folder: group.folder, err },
+          { jid, folder: group.folder },
           'Skipping migrated registered group with invalid folder',
         );
+        continue;
       }
+      setRegisteredGroup(jid, group);
     }
   }
 
@@ -4809,6 +4860,7 @@ function migrateCalendarStateJsonFiles(): MigrationSummary {
         }
       });
       importFile();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- handleConstraintViolationOrRethrow rethrows non-constraint errors (see its JSDoc); the linter cannot see through the call
     } catch (err) {
       // Narrowed catch: only constraint-class SqliteError is the
       // recoverable per-file failure (NOT NULL on title/start, FK
@@ -4973,6 +5025,7 @@ function migrateHeartbeatStateJsonFiles(): MigrationSummary {
     let counts: { importedPhases: number };
     try {
       counts = importFile();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- handleConstraintViolationOrRethrow rethrows non-constraint errors (see its JSDoc); the linter cannot see through the call
     } catch (err) {
       // The helper either returns true (caller continues) or rethrows;
       // there's no third path. Match the calendar-state pattern.
@@ -5395,6 +5448,7 @@ function migrateTaskTzStateJsonFiles(): MigrationSummary {
         }
       });
       importFile();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- handleConstraintViolationOrRethrow rethrows non-constraint errors (see its JSDoc); the linter cannot see through the call
     } catch (err) {
       // Per `coding-policy: error-handling`: only constraint-class
       // SqliteError is recoverable here — those are the per-file
@@ -5640,6 +5694,7 @@ function migrateTrustedSessionStateJsonFiles(): MigrationSummary {
         }
       });
       importFile();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- handleConstraintViolationOrRethrow rethrows non-constraint errors (see its JSDoc); the linter cannot see through the call
     } catch (err) {
       if (handleConstraintViolationOrRethrow(err, folder, fileLabel, summary))
         continue;
@@ -6006,6 +6061,7 @@ function migrateNanoclawStateJsonFiles(): MigrationSummary {
         }
       });
       importFile();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- handleConstraintViolationOrRethrow rethrows non-constraint errors (see its JSDoc); the linter cannot see through the call
     } catch (err) {
       // Per-file isolation: a constraint violation on any of the three
       // writers rolls the whole transaction back, the file stays put
@@ -6241,6 +6297,7 @@ function migrateScheduledRemindersJsonFiles(): MigrationSummary {
         }
       });
       importFile();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- handleConstraintViolationOrRethrow rethrows non-constraint errors (see its JSDoc); the linter cannot see through the call
     } catch (err) {
       if (handleConstraintViolationOrRethrow(err, folder, fileLabel, summary))
         continue;
