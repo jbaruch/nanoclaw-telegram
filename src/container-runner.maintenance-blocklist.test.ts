@@ -492,6 +492,86 @@ describe('#337 maintenance blocklist filter', () => {
     }
   });
 
+  it('#441 — blocklisted skill referenced via a tessl__<name>/ mount path from a loaded skill SCRIPT is exempted (morning-brief → scheduler-timezone)', async () => {
+    // Reference incident: 2026-07-12 morning-brief Step 9 failed because
+    // `resolve-reminder-schedule.py` shells out to
+    // `.../tessl__scheduler-timezone/scripts/compute-schedule-value.py` by
+    // mount path — a SUBPROCESS dependency, not a `Skill()` invocation.
+    // scheduler-timezone is on the maintenance blocklist; pre-#441 the
+    // closure scanned only SKILL.md for `Skill()` calls, never saw the
+    // script's mount-path edge, and left scheduler-timezone's mount absent
+    // so the subprocess hit a missing path. Post-#441 the pre-scan folds
+    // each skill's scripts/references text into the source blob and the
+    // closure rescues scheduler-timezone from the mount-path reference.
+    ruleBlocklist = new Set();
+    skillBlocklist = new Set(['scheduler-timezone']);
+
+    fs.rmSync(path.join(registryRoot, 'tiles', 'test', 'nanoclaw-core'), {
+      recursive: true,
+    });
+    writeFakeTile(
+      'nanoclaw-core',
+      {},
+      {
+        // Root skill: NOT blocklisted. Its SKILL.md has no `Skill()` call;
+        // the only edge to scheduler-timezone lives in its script.
+        'morning-brief': {
+          'SKILL.md': '# morning-brief\n\nStep 9 schedules reminders.\n',
+          'scripts/resolve-reminder-schedule.py':
+            'import subprocess\n' +
+            'subprocess.run(["python3", ' +
+            '"/home/node/.claude/skills/tessl__scheduler-timezone/scripts/compute-schedule-value.py"])\n',
+        },
+        // Blocklisted dependency — its mount MUST still be present so the
+        // subprocess call resolves.
+        'scheduler-timezone': {
+          'SKILL.md':
+            '# scheduler-timezone\n\nThe blocklisted utility skill.\n',
+          'scripts/compute-schedule-value.py': 'print("ok")\n',
+        },
+      },
+    );
+
+    const { buildVolumeMounts } = await importSUT();
+    const group = makeGroup('test-maint-subproc');
+    buildVolumeMounts(group, false, jidFor(group.folder), 'maintenance');
+
+    const flatSkillsDst = path.join(
+      dataDir,
+      'sessions',
+      'test-maint-subproc',
+      'maintenance',
+      '.claude',
+      'skills',
+    );
+    // morning-brief (root) lands with the tessl__ prefix.
+    expect(
+      fs.existsSync(path.join(flatSkillsDst, 'tessl__morning-brief')),
+    ).toBe(true);
+    // scheduler-timezone is rescued from the script mount-path reference —
+    // its full skill mount (including scripts/) must be present, which is
+    // exactly what the subprocess call needs. Pre-#441 this was absent.
+    expect(
+      fs.existsSync(
+        path.join(
+          flatSkillsDst,
+          'tessl__scheduler-timezone',
+          'scripts',
+          'compute-schedule-value.py',
+        ),
+      ),
+    ).toBe(true);
+
+    // No filter log should claim scheduler-timezone was filtered.
+    const filterCalls = loggerCalls.filter(
+      (c) => c.msg === 'install_blocklist_filtered',
+    );
+    for (const call of filterCalls) {
+      const payload = call.payload as { filteredSkills: string[] };
+      expect(payload.filteredSkills).not.toContain('tessl__scheduler-timezone');
+    }
+  });
+
   it('#544b — blocklisted skill NOT referenced from any loaded skill stays blocked', async () => {
     // Negative case for the closure: a skill in the blocklist that
     // isn't reachable from any loaded skill should remain blocked.

@@ -47,6 +47,34 @@
 const SKILL_INVOCATION_PATTERN =
   /Skill\(\s*skill:\s*["'](?:tessl__)?([a-zA-Z0-9_-]+)["'][^)]*\)/g;
 
+// #441/#439 — cross-skill dependencies that are NOT `Skill()` invocations.
+// A skill can depend on another skill's *files* (not its prompt) by shelling
+// out to a script at that skill's mount path — e.g. `morning-brief`'s
+// `resolve-reminder-schedule.py` runs
+// `.../skills/tessl__scheduler-timezone/scripts/compute-schedule-value.py`
+// as a subprocess. The `Skill()` regex never sees that edge, so pre-#441 the
+// closure left `scheduler-timezone` blocklisted in the maintenance container
+// and the subprocess call hit a missing mount path (the 2026-07-12 morning-
+// brief Step-9 failure). This pattern captures the depended-on skill from any
+// `tessl__<name>/` mount-path reference — the trailing `/` anchors it to an
+// actual path INTO the skill's dir, so a bare `tessl__<name>` mention in a
+// doc-comment (no path) does not falsely rescue it. Extraction runs over the
+// caller's SKILL.md AND its scripts/references text (see
+// computeEffectiveSkillContextForSpawn), the only surfaces a mount-path
+// reference appears on. Over-inclusion stays the safe failure mode.
+const MOUNT_PATH_DEP_PATTERN = /tessl__([a-zA-Z0-9_-]+)\//g;
+
+function matchAll(pattern: RegExp, content: string, into: Set<string>): void {
+  // Build a fresh RegExp per call — a module-level shared instance with the
+  // `g` flag carries lastIndex state across calls and would skip matches on
+  // the second invocation.
+  const re = new RegExp(pattern.source, 'g');
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(content)) !== null) {
+    into.add(match[1]);
+  }
+}
+
 /**
  * Pure: extract every `Skill(skill: "...")` invocation target from a
  * SKILL.md content string. Returns the set of bare skill names
@@ -55,14 +83,19 @@ const SKILL_INVOCATION_PATTERN =
  */
 export function extractSkillDeps(skillMdContent: string): Set<string> {
   const deps = new Set<string>();
-  // Build a fresh RegExp per call — a module-level shared instance
-  // with the `g` flag carries lastIndex state across calls and would
-  // skip matches on the second invocation.
-  const re = new RegExp(SKILL_INVOCATION_PATTERN.source, 'g');
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(skillMdContent)) !== null) {
-    deps.add(match[1]);
-  }
+  matchAll(SKILL_INVOCATION_PATTERN, skillMdContent, deps);
+  return deps;
+}
+
+/**
+ * Pure: extract every `tessl__<name>/` mount-path dependency from a content
+ * string (SKILL.md, a script, or a reference doc). These are cross-skill
+ * *file* dependencies — one skill shelling out to another skill's script —
+ * that the `Skill()` extractor cannot see (#441). Returns bare skill names.
+ */
+export function extractMountPathDeps(content: string): Set<string> {
+  const deps = new Set<string>();
+  matchAll(MOUNT_PATH_DEP_PATTERN, content, deps);
   return deps;
 }
 
@@ -132,12 +165,18 @@ export function computeEffectiveSkillContext(
     }
   }
 
-  // BFS along the reference graph.
+  // BFS along the reference graph. Deps come from two surfaces: typed
+  // `Skill(skill: "...")` invocations (nested prompt loads) AND
+  // `tessl__<name>/` mount-path references (a skill shelling out to another
+  // skill's script — #441). Both mean "that skill's files must be present in
+  // this container", so both rescue the target from the blocklist.
   while (queue.length > 0) {
     const skill = queue.shift() as string;
     const md = skillSources.get(skill);
     if (md === undefined) continue;
-    for (const ref of extractSkillDeps(md)) {
+    const refs = extractSkillDeps(md);
+    for (const ref of extractMountPathDeps(md)) refs.add(ref);
+    for (const ref of refs) {
       if (!reachable.has(ref)) {
         reachable.add(ref);
         // Only enqueue if we have its SKILL.md — otherwise there's
