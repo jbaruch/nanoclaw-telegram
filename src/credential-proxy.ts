@@ -124,13 +124,10 @@ export function startCredentialProxy(
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
       req.on('end', async () => {
-        // outer-boundary-process-contract: the container reads a hung
-        // connection / missing response as a silent failure. Making this
-        // handler async turns any unexpected throw (wire-filter, TTL rewrite,
-        // OneCLI mint, request build) into an unobserved promise rejection, so
-        // the whole body is wrapped — on error emit a 502 (actionable for the
-        // container) instead of leaving the request to hang. Propagating out
-        // of this async callback would break that contract.
+        // The whole handler body is wrapped so any throw (wire-filter, TTL
+        // rewrite, OneCLI mint, request build) emits a 502 rather than an
+        // unobserved promise rejection. The outer-boundary-process-contract
+        // rationale sits at the catch below.
         try {
           const rawBody = Buffer.concat(chunks);
 
@@ -299,7 +296,8 @@ export function startCredentialProxy(
               const parsed = JSON.parse(body.toString('utf8'));
               if (parsed && typeof parsed.model === 'string')
                 requestModel = parsed.model;
-            } catch {
+            } catch (err) {
+              if (!(err instanceof SyntaxError)) throw err;
               // Body isn't JSON — leave model null; the response usually
               // carries it anyway.
             }
@@ -501,6 +499,17 @@ export function startCredentialProxy(
                         bodyBuffer = brotliDecompressSync(rawBuffer);
                       else bodyBuffer = inflateSync(rawBuffer);
                     } catch (err) {
+                      // zlib decompression of a malformed/misdeclared body
+                      // throws a Z_* coded error; fall back to the raw buffer.
+                      // Anything without a Z_ errno code is a non-zlib defect
+                      // and propagates.
+                      const zcode = (err as NodeJS.ErrnoException)?.code;
+                      if (
+                        typeof zcode !== 'string' ||
+                        !zcode.startsWith('Z_')
+                      ) {
+                        throw err;
+                      }
                       logger.warn(
                         {
                           err,
@@ -520,26 +529,24 @@ export function startCredentialProxy(
                     task_id: null,
                     message_id: null,
                   };
-                  try {
-                    const record = parseUsageFromBody(
-                      bodyText,
-                      ctx,
-                      Date.now() - requestStartMs,
-                      requestModel,
-                    );
-                    if (record) {
-                      noteCaptureWrite();
-                      // Fire-and-forget. appendUsageRecord swallows IO
-                      // errors internally so this can never reject.
-                      void appendUsageRecord(usageLogPath, record);
-                    }
-                  } catch (err) {
-                    // Defense in depth: parseUsageFromBody is designed not
-                    // to throw, but if it ever does, we MUST NOT propagate.
-                    logger.warn(
-                      { err, url: upstreamPath },
-                      'usage-log: parse failed',
-                    );
+                  // parseUsageFromBody is total by contract: it narrows its own
+                  // JSON.parse to SyntaxError and buildUsageRecord reads fields
+                  // defensively (resolvePricing falls back, never throws), so it
+                  // returns null rather than throwing on any malformed body. No
+                  // catch here — a future regression that made it throw is a
+                  // defect that must surface, and the client response is already
+                  // delivered on the independent pipe path, so nothing hangs.
+                  const record = parseUsageFromBody(
+                    bodyText,
+                    ctx,
+                    Date.now() - requestStartMs,
+                    requestModel,
+                  );
+                  if (record) {
+                    noteCaptureWrite();
+                    // Fire-and-forget. appendUsageRecord swallows IO
+                    // errors internally so this can never reject.
+                    void appendUsageRecord(usageLogPath, record);
                   }
                 });
                 upRes.on('error', (err) => {
@@ -592,32 +599,34 @@ export function startCredentialProxy(
               containerCtx?.tier === 'untrusted'
                 ? containerCtx.tier
                 : 'main';
-            try {
-              const cfg = await getOneCliOutboundConfig(tier);
-              if (cfg) {
-                // CA is applied on the request options in sendUpstreamRequest,
-                // not on the agent (https-proxy-agent ignores constructor ca).
-                oneCli = {
-                  agent: new HttpsProxyAgent(cfg.proxyUrl),
-                  ca: cfg.ca,
-                };
-              }
-            } catch {
-              // The handler is async now, so a thrown mint error would reject
-              // the promise and hang the request with no response. Swallow it to
-              // the fallback path (`.env` injection, or a hard 401 post-cutover)
-              // — the request always reaches sendUpstreamRequest below. No `err`
-              // in the payload (no-secrets): getOneCliOutboundConfig already
-              // logs its own gateway errors (statusCode only); anything reaching
-              // here is a local HttpsProxyAgent/readFileSync error whose message
-              // could echo the proxy URL's embedded gateway token.
-              logger.warn(
-                { url: upstreamPath },
-                'OneCLI outbound-config mint failed; falling back to .env token injection for this request',
-              );
+            // getOneCliOutboundConfig returns null on EVERY operational
+            // failure (gateway down, missing/incomplete config) and logs its
+            // own gateway errors (statusCode only, no token). A null result
+            // degrades to the .env fallback below via this `if`, so no catch is
+            // needed for the expected failure path. A residual throw (a
+            // getOneCliOutboundConfig defect, or a malformed proxyUrl that trips
+            // the HttpsProxyAgent constructor) is unexpected and propagates to
+            // the request handler's outer 502 boundary rather than being masked.
+            const cfg = await getOneCliOutboundConfig(tier);
+            if (cfg) {
+              // CA is applied on the request options in sendUpstreamRequest,
+              // not on the agent (https-proxy-agent ignores constructor ca).
+              oneCli = {
+                agent: new HttpsProxyAgent(cfg.proxyUrl),
+                ca: cfg.ca,
+              };
             }
           }
           sendUpstreamRequest(upstreamUrl, oneCli);
+          // outer-boundary-process-contract (coding-policy: error-handling):
+          // the request handler's outermost boundary — nothing catches a throw
+          // that escapes this async `req.on('end')` callback.
+          //   - Caller's silent-failure shape: the container reads a hung
+          //     connection / missing response as a silent failure.
+          //   - What the catch emits: a 502 (actionable for the container); the
+          //     request always gets a response instead of hanging.
+          //   - Why propagation breaks the contract: an unobserved promise
+          //     rejection from this callback would leave the request to hang.
           // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
         } catch (err) {
           logger.error(

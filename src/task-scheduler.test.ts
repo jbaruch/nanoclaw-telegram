@@ -341,7 +341,9 @@ describe('task scheduler', () => {
     };
 
     const result = computeNextRunDetailed(task, () => {
-      throw new Error('transient DB read failure');
+      // The resolver reads tz_state from SQLite; a transient read surfaces as a
+      // SqliteError, which must degrade to TIMEZONE rather than propagate.
+      throw new SqliteError('transient DB read failure', 'SQLITE_IOERR');
     });
 
     // Falls back to TIMEZONE, no remediation, no propagated throw.

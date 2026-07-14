@@ -95,6 +95,18 @@ export interface NextRunResult {
   remediation?: NextRunRemediation;
 }
 
+/**
+ * True for a cron-parser parse failure. cron-parser throws a plain base
+ * `Error` (constructor `Error`, no dedicated subclass) for an invalid
+ * expression. Match that shape positively: a programmer defect is always an
+ * `Error` subclass (`TypeError`, `RangeError`, …) whose `constructor` is not
+ * `Error`, so it fails this predicate and propagates rather than being
+ * mistaken for a bad expression.
+ */
+function isCronParseFailure(err: unknown): err is Error {
+  return err instanceof Error && err.constructor === Error;
+}
+
 export function computeNextRunDetailed(
   task: ScheduledTask,
   resolveLocalTz?: () => string | null,
@@ -127,22 +139,22 @@ export function computeNextRunDetailed(
     // DB row.
     let effectiveTz: string;
     if (task.schedule_timezone === 'local') {
-      // Wrap the resolver call: a transient throw from the underlying
-      // DB read (or any future resolver) must degrade to the TIMEZONE
-      // fallback rather than propagate out of the scheduler tick. Per
+      // Wrap the resolver call: a SqliteError from the underlying DB read
+      // degrades to the TIMEZONE fallback rather than propagating out of the
+      // scheduler tick; any other throw is a defect and propagates. Per
       // `coding-policy: error-handling` § Graceful Fallback.
       let resolved: string | null = null;
       if (resolveLocalTz) {
         try {
           resolved = resolveLocalTz() ?? null;
         } catch (resolverErr) {
+          // The resolver reads the local tz from the DB; a SqliteError degrades
+          // to the TIMEZONE fallback. Anything else is a defect and propagates.
+          if (!(resolverErr instanceof SqliteError)) throw resolverErr;
           logger.warn(
             {
               taskId: task.id,
-              err:
-                resolverErr instanceof Error
-                  ? resolverErr.message
-                  : String(resolverErr),
+              err: resolverErr.message,
             },
             'computeNextRun: resolveLocalTz threw — falling back to TIMEZONE',
           );
@@ -158,13 +170,16 @@ export function computeNextRunDetailed(
       });
       return { nextRun: interval.next().toISOString() };
     } catch (err) {
+      // An invalid cron expression retries with the server TIMEZONE below; a
+      // programmer defect propagates.
+      if (!isCronParseFailure(err)) throw err;
       logger.warn(
         {
           taskId: task.id,
           scheduleValue: task.schedule_value,
           scheduleTimezone: task.schedule_timezone,
           effectiveTz,
-          err: err instanceof Error ? err.message : String(err),
+          err: err.message,
         },
         'computeNextRun: cron parse failed — retrying with server TIMEZONE',
       );
@@ -189,12 +204,14 @@ export function computeNextRunDetailed(
           remediation: 'clear-bad-timezone',
         };
       } catch (retryErr) {
+        // Even the TIMEZONE fallback failed to parse → pause the cron; a
+        // programmer defect propagates.
+        if (!isCronParseFailure(retryErr)) throw retryErr;
         logger.error(
           {
             taskId: task.id,
             scheduleValue: task.schedule_value,
-            err:
-              retryErr instanceof Error ? retryErr.message : String(retryErr),
+            err: retryErr.message,
           },
           'computeNextRun: cron parse failed even with TIMEZONE fallback',
         );
@@ -1504,6 +1521,10 @@ async function runTask(
                   telegram_message_id: sentMsgId,
                 });
               } catch (dbErr) {
+                // Best-effort store of the sent message; a SqliteError is
+                // logged and the tick continues. A non-Sqlite defect
+                // propagates.
+                if (!(dbErr instanceof SqliteError)) throw dbErr;
                 logger.error(
                   {
                     taskId: task.id,
@@ -2038,23 +2059,19 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           throw err;
         }
       }
+      // outer-boundary-process-contract (coding-policy: error-handling): the
+      // scheduler's top-level tick boundary — a self-rescheduling setTimeout
+      // loop.
+      //   - Caller's silent-failure shape: an uncaught throw escapes the tick
+      //     callback as an unhandled rejection, killing the loop so NO further
+      //     scheduled task ever fires.
+      //   - What the catch emits: an error log; the loop reschedules the next
+      //     tick and keeps running.
+      //   - Why propagation breaks the contract: one task's bug would take down
+      //     the whole orchestrator scheduler.
+      // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
     } catch (err) {
-      // Terminal safety net for the scheduler loop. Inner code paths
-      // re-throw non-Error per `jbaruch/coding-policy: error-handling`;
-      // this catch is where they finally land. Re-throwing further
-      // here would crash the loop and stop every scheduled task — the
-      // explicit design choice is "log and keep ticking" so a single
-      // bug in one task can't take the orchestrator's whole scheduler
-      // down. Distinguishes Error from non-Error in the log so the
-      // bug source is identifiable downstream.
-      if (err instanceof Error) {
-        logger.error({ err }, 'Scheduler loop caught Error');
-      } else {
-        logger.error(
-          { err: String(err) },
-          'Scheduler loop caught non-Error throw — fix the upstream call site',
-        );
-      }
+      logger.error({ err }, 'Scheduler loop caught Error');
     }
 
     setTimeout(loop, SCHEDULER_POLL_INTERVAL);
