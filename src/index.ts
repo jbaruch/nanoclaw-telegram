@@ -104,7 +104,26 @@ import {
   GroupQueue,
   MAINTENANCE_SESSION_NAME,
 } from './group-queue.js';
-import { resolveGroupFolderPath } from './group-folder.js';
+import { isFsErrorWithCode } from './fs-errors.js';
+
+// Closed errno set the orchestrator's best-effort filesystem work
+// (session-nuke lstat/unlink/realpath/rmSync/opendir, group-folder chown,
+// log-prune, checkpoint/handoff writes over DATA_DIR trees) may legitimately
+// raise. Anything outside this set — or a non-errno defect — propagates.
+const BEST_EFFORT_FS_CODES = [
+  'ENOENT',
+  'EACCES',
+  'EPERM',
+  'EISDIR',
+  'ENOTDIR',
+  'ELOOP',
+  'ENAMETOOLONG',
+  'EROFS',
+  'EBUSY',
+  'ENOSPC',
+  'ENOTEMPTY',
+];
+import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
 import { writeFlightAssistLocation } from './flight-assist-location.js';
 import { initBotPool } from './channels/telegram.js';
 import { startIpcWatcher } from './ipc.js';
@@ -556,7 +575,8 @@ function loadState(): void {
   const agentTs = getRouterState('last_agent_timestamp');
   try {
     lastAgentTimestamp = agentTs ? JSON.parse(agentTs) : {};
-  } catch {
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
@@ -737,6 +757,7 @@ function unlinkJsonlInSlug(
   try {
     entryStat = fs.lstatSync(jsonlPath);
   } catch (err) {
+    if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return 0; // no such jsonl — fine
     logger.warn(
@@ -757,6 +778,7 @@ function unlinkJsonlInSlug(
       );
       return 1;
     } catch (err) {
+      if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') return 0;
       logger.warn(
@@ -776,6 +798,7 @@ function unlinkJsonlInSlug(
   try {
     realSlug = fs.realpathSync(slugPath);
   } catch (err) {
+    if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return 0;
     logger.warn(
@@ -787,6 +810,7 @@ function unlinkJsonlInSlug(
   try {
     realJsonl = fs.realpathSync(jsonlPath);
   } catch (err) {
+    if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return 0;
     logger.warn(
@@ -806,6 +830,7 @@ function unlinkJsonlInSlug(
     fs.unlinkSync(jsonlPath);
     return 1;
   } catch (err) {
+    if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return 0;
     logger.warn(
@@ -857,6 +882,7 @@ function removeToolResultsDirInSlug(
   try {
     entryStat = fs.lstatSync(dirPath);
   } catch (err) {
+    if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return 0;
     logger.warn(
@@ -875,6 +901,7 @@ function removeToolResultsDirInSlug(
       );
       return 1;
     } catch (err) {
+      if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') return 0;
       logger.warn(
@@ -905,6 +932,7 @@ function removeToolResultsDirInSlug(
   try {
     realSlug = fs.realpathSync(slugPath);
   } catch (err) {
+    if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return 0;
     logger.warn(
@@ -916,6 +944,7 @@ function removeToolResultsDirInSlug(
   try {
     realDir = fs.realpathSync(dirPath);
   } catch (err) {
+    if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return 0;
     logger.warn(
@@ -945,6 +974,7 @@ function removeToolResultsDirInSlug(
     fs.rmSync(dirPath, { recursive: true });
     return 1;
   } catch (err) {
+    if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return 0;
     logger.warn(
@@ -1019,6 +1049,7 @@ export function wipeSessionJsonl(
   try {
     projectsLstat = fs.lstatSync(projectsDir);
   } catch (err) {
+    if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return 0;
     logger.warn(
@@ -1062,6 +1093,7 @@ export function wipeSessionJsonl(
   try {
     fastPathLstat = fs.lstatSync(fastPathSlug);
   } catch (err) {
+    if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
     const code = (err as NodeJS.ErrnoException).code;
     if (code !== 'ENOENT') {
       logger.warn(
@@ -1118,6 +1150,7 @@ export function wipeSessionJsonl(
   try {
     dir = fs.opendirSync(projectsDir);
   } catch (err) {
+    if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return deleted;
     logger.warn(
@@ -1150,6 +1183,7 @@ export function wipeSessionJsonl(
       return deleted;
     }
   } catch (err) {
+    if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
     logger.warn(
       { err, groupFolder, sessionName, sessionId, projectsDir },
       'wipeSessionJsonl: realpath on projects/ failed — aborting',
@@ -1178,6 +1212,7 @@ export function wipeSessionJsonl(
       try {
         linkStat = fs.lstatSync(slugPath);
       } catch (err) {
+        if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
         const code = (err as NodeJS.ErrnoException).code;
         if (code === 'ENOENT') continue;
         logger.warn(
@@ -1270,16 +1305,18 @@ export function hydrateRegisteredGroupTriggerPatterns(
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
-  let groupDir: string;
-  try {
-    groupDir = resolveGroupFolderPath(group.folder);
-  } catch (err) {
+  // Pre-validate rather than catch resolveGroupFolderPath's throw: it raises
+  // a plain Error on an invalid/escaping folder, which a catch-all would not
+  // distinguish from a defect. isValidGroupFolder is the same predicate the
+  // resolver asserts on, so this rejects exactly the invalid-folder case.
+  if (!isValidGroupFolder(group.folder)) {
     logger.warn(
-      { jid, folder: group.folder, err },
+      { jid, folder: group.folder },
       'Rejecting group registration with invalid folder',
     );
     return;
   }
+  const groupDir = resolveGroupFolderPath(group.folder);
 
   setRegisteredGroup(jid, group);
   // Cache the group with its persisted trigger patterns, not the raw
@@ -1316,6 +1353,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     try {
       chownRecursive(groupDir, effectiveUid, effectiveGid ?? effectiveUid);
     } catch (err) {
+      if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
       logger.warn(
         { folder: group.folder, err },
         'Failed to chown group folder',
@@ -2252,6 +2290,7 @@ async function runAgent(
             groupName: group.name,
           });
         } catch (err) {
+          if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
           logger.error(
             { group: group.name, err },
             'Threshold-cross checkpoint write failed',
@@ -2303,6 +2342,25 @@ async function runAgent(
 
     return 'success';
   } catch (err) {
+    // runAgent must resolve to a typed 'success' | 'error': the caller
+    // (processGroupMessages) branches on 'error' for cursor-rollback (#428),
+    // so an OPERATIONAL agent failure (SDK/API/container error) is reported as
+    // 'error' rather than thrown. Programmer defects — TypeError, ReferenceError,
+    // RangeError, SyntaxError, and any non-Error throw — propagate to the
+    // queue's per-group boundary (group-queue.ts) so a bug surfaces instead of
+    // being masked as a routine agent failure. runContainerAgent throws plain
+    // Error for infrastructure failures by design, so plain-Error can't be
+    // classified as a defect here; #784 tracks giving it a typed error so this
+    // boundary can narrow to a closed set.
+    if (
+      !(err instanceof Error) ||
+      err instanceof TypeError ||
+      err instanceof ReferenceError ||
+      err instanceof RangeError ||
+      err instanceof SyntaxError
+    ) {
+      throw err;
+    }
     logger.error({ group: group.name, err }, 'Agent error');
     return 'error';
   }
@@ -2526,6 +2584,15 @@ async function startMessageLoop(): Promise<void> {
           }
         }
       }
+      // outer-boundary-process-contract (coding-policy: error-handling): the
+      // message poll loop's must-not-die boundary.
+      //   - Caller's silent-failure shape: an uncaught throw rejects the
+      //     startMessageLoop promise and stops ALL message processing until
+      //     the orchestrator restarts.
+      //   - What the catch emits: an error log; the loop sleeps and polls again.
+      //   - Why propagation breaks the contract: one tick's failure would take
+      //     down message processing for every group.
+      // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
     } catch (err) {
       logger.error({ err }, 'Error in message loop');
     }
@@ -2643,6 +2710,7 @@ async function main(): Promise<void> {
         'Wrote graceful-shutdown handoff marker',
       );
     } catch (err) {
+      if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
       logger.warn({ err }, 'Failed to write handoff marker');
     }
 
@@ -3216,6 +3284,7 @@ async function main(): Promise<void> {
         );
       }
     } catch (err) {
+      if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
       logger.warn({ err }, 'host-logs prune at startup failed');
     }
   })();
@@ -3235,6 +3304,7 @@ async function main(): Promise<void> {
         );
       }
     } catch (err) {
+      if (!isFsErrorWithCode(err, BEST_EFFORT_FS_CODES)) throw err;
       logger.warn({ err }, 'host-logs daily prune failed');
     }
   }, ONE_DAY_MS).unref();
