@@ -47,17 +47,19 @@ const botRef = vi.hoisted(() => ({ current: null as any }));
 // grammy implementation touches the filesystem, which our tests don't
 // stage — mock it to a passthrough wrapper so the sendDocument call
 // site is exercised without hitting disk.
-vi.mock('grammy', () => ({
-  InputFile: class MockInputFile {
-    constructor(public source: string | Buffer) {}
-  },
+vi.mock('grammy', () => {
+  // Error classes are declared as named classes INSIDE the factory so the
+  // mock is self-contained: the getFile default rejection below references
+  // `MockHttpError` directly rather than reaching the module-level `HttpError`
+  // import, which is in the temporal dead zone while this hoisted factory
+  // initializes. Tests construct instances via the `makeHttpError` /
+  // `makeParseError` helpers, which resolve to these same classes at runtime.
+
   // Minimal stand-in for grammy's GrammyError. Production code at
   // `src/channels/telegram.ts` narrows the HTML-fallback gate to
   // `err instanceof GrammyError && err.error_code === 400 && /can't
-  // parse entities/i.test(err.description)` (#414); tests construct
-  // instances of this class to exercise the gate without pulling
-  // real grammy's API surface.
-  GrammyError: class MockGrammyError extends Error {
+  // parse entities/i.test(err.description)` (#414).
+  class MockGrammyError extends Error {
     error_code: number;
     description: string;
     constructor(error_code: number, description: string) {
@@ -65,69 +67,102 @@ vi.mock('grammy', () => ({
       this.error_code = error_code;
       this.description = description;
     }
-  },
-  Bot: class MockBot {
-    token: string;
-    commandHandlers = new Map<string, Handler>();
-    filterHandlers = new Map<string, Handler[]>();
-    errorHandler: Handler | null = null;
-
-    api = {
-      sendMessage: vi.fn().mockResolvedValue({ message_id: 999 }),
-      sendChatAction: vi.fn().mockResolvedValue(undefined),
-      sendDocument: vi.fn().mockResolvedValue({ message_id: 1001 }),
-      // `config.use` is the hook the grammy API transformer attaches
-      // to. Real grammy exposes it on every Bot instance. Tests that
-      // want to simulate "hook unavailable" (older or future grammy,
-      // renamed surface) can delete `api.config` on the constructed
-      // bot before assertions.
-      config: { use: vi.fn() },
-      // `api.raw.setMessageReaction` is grammy's escape hatch for
-      // calling Bot API methods that the typed surface doesn't yet
-      // expose. `sendReaction` uses it because grammy's `setMessageReaction`
-      // wrapper on `api.*` shipped with stricter typing than our
-      // emoji union; the raw form bypasses that. Mock it so the
-      // sendReaction error-classification tests can exercise the
-      // catch path without hitting the network.
-      raw: {
-        setMessageReaction: vi.fn().mockResolvedValue(undefined),
-      },
-    };
-
-    constructor(token: string) {
-      this.token = token;
-      botRef.current = this;
+  }
+  // Stand-in for grammy's HttpError (transport/network failures). Real grammy
+  // raises it for DNS hiccups, resets, timeouts, and wraps 429s; production
+  // narrows best-effort Telegram boundaries to `GrammyError | HttpError` and
+  // classifies by message via `_isUnactionableTelegramError`.
+  // Message-passthrough so tests keep the exact grammy-style error strings.
+  class MockHttpError extends Error {
+    constructor(message: string) {
+      super(message);
     }
+  }
+  return {
+    InputFile: class MockInputFile {
+      constructor(public source: string | Buffer) {}
+    },
+    GrammyError: MockGrammyError,
+    HttpError: MockHttpError,
+    Bot: class MockBot {
+      token: string;
+      commandHandlers = new Map<string, Handler>();
+      filterHandlers = new Map<string, Handler[]>();
+      errorHandler: Handler | null = null;
 
-    command(name: string, handler: Handler) {
-      this.commandHandlers.set(name, handler);
-    }
+      api = {
+        sendMessage: vi.fn().mockResolvedValue({ message_id: 999 }),
+        sendChatAction: vi.fn().mockResolvedValue(undefined),
+        sendDocument: vi.fn().mockResolvedValue({ message_id: 1001 }),
+        // Media download entry point. Rejects with a realistic operational
+        // (network) failure by default so the media handlers exercise their
+        // best-effort catch path (placeholder content) without a real network
+        // call; a test wanting a successful download overrides per-call with
+        // `mockResolvedValueOnce`. Before the #735 narrowing this method was
+        // absent and the resulting TypeError was swallowed by the broad catch;
+        // a typed operational rejection is the faithful stand-in now that the
+        // boundary rethrows programmer defects.
+        getFile: vi
+          .fn()
+          .mockRejectedValue(
+            new MockHttpError("Network request for 'getFile' failed!"),
+          ),
+        // `config.use` is the hook the grammy API transformer attaches
+        // to. Real grammy exposes it on every Bot instance. Tests that
+        // want to simulate "hook unavailable" (older or future grammy,
+        // renamed surface) can delete `api.config` on the constructed
+        // bot before assertions.
+        config: { use: vi.fn() },
+        // `api.raw.setMessageReaction` is grammy's escape hatch for
+        // calling Bot API methods that the typed surface doesn't yet
+        // expose. `sendReaction` uses it because grammy's `setMessageReaction`
+        // wrapper on `api.*` shipped with stricter typing than our
+        // emoji union; the raw form bypasses that. Mock it so the
+        // sendReaction error-classification tests can exercise the
+        // catch path without hitting the network.
+        raw: {
+          setMessageReaction: vi.fn().mockResolvedValue(undefined),
+        },
+      };
 
-    on(filter: string, handler: Handler) {
-      const existing = this.filterHandlers.get(filter) || [];
-      existing.push(handler);
-      this.filterHandlers.set(filter, existing);
-    }
+      constructor(token: string) {
+        this.token = token;
+        botRef.current = this;
+      }
 
-    catch(handler: Handler) {
-      this.errorHandler = handler;
-    }
+      command(name: string, handler: Handler) {
+        this.commandHandlers.set(name, handler);
+      }
 
-    async start(opts: { onStart: (botInfo: any) => void }) {
-      // Real grammy Bot.start() returns a Promise; connect() attaches
-      // a `.catch(...)` to it. Returning void would throw TypeError on
-      // `.catch` access synchronously — tests pass today only because
-      // onStart resolves the outer Promise before the TypeError
-      // surfaces. Match the real API shape so stricter runtimes don't
-      // trip.
-      opts.onStart({ username: 'andy_ai_bot', id: 12345 });
-    }
+      on(filter: string, handler: Handler) {
+        const existing = this.filterHandlers.get(filter) || [];
+        existing.push(handler);
+        this.filterHandlers.set(filter, existing);
+      }
 
-    stop() {}
-  },
-}));
+      catch(handler: Handler) {
+        this.errorHandler = handler;
+      }
 
-import { GrammyError } from 'grammy';
+      async start(opts: { onStart: (botInfo: any) => void }) {
+        // Real grammy Bot.start() returns a Promise; connect() attaches
+        // a `.catch(...)` to it. Returning void would throw TypeError on
+        // `.catch` access synchronously — tests pass today only because
+        // onStart resolves the outer Promise before the TypeError
+        // surfaces. Match the real API shape so stricter runtimes don't
+        // trip.
+        opts.onStart({ username: 'andy_ai_bot', id: 12345 });
+      }
+
+      stop() {}
+    },
+  };
+});
+
+import https from 'https';
+import { EventEmitter } from 'events';
+
+import { GrammyError, HttpError } from 'grammy';
 
 import {
   TelegramChannel,
@@ -149,6 +184,15 @@ function makeParseError(): GrammyError {
     error_code: number,
     description: string,
   ) => GrammyError)(400, "can't parse entities");
+}
+
+// Construct a mocked grammy `HttpError` (transport/network failure) from a
+// message. The mock's MockHttpError is message-passthrough (1 arg); real
+// grammy's constructor takes `(message, error)`, so cast to the 1-arg shape
+// the mock actually uses. Keeps the exact grammy-style strings the
+// `_isUnactionableTelegramError` classifier matches on.
+function makeHttpError(message: string): HttpError {
+  return new (HttpError as unknown as new (m: string) => HttpError)(message);
 }
 
 // --- Test helpers ---
@@ -880,6 +924,45 @@ describe('TelegramChannel', () => {
       );
     });
 
+    it('stores voice placeholder when getFile succeeds but the https download stream fails (#735)', async () => {
+      // Regression: the narrowed media boundary must still swallow a raw Node
+      // network error from the `https.get` download leg (grammy does not wrap
+      // it), not just grammy getFile errors. getFile resolves; the request
+      // then emits ECONNRESET before any response.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      currentBot().api.getFile.mockResolvedValueOnce({
+        file_path: 'voice/v1.ogg',
+      });
+      const getSpy = vi.spyOn(https, 'get').mockImplementation(((
+        _url: string,
+      ) => {
+        const req = new EventEmitter();
+        queueMicrotask(() =>
+          req.emit(
+            'error',
+            Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+          ),
+        );
+        return req;
+      }) as unknown as typeof https.get);
+
+      try {
+        const ctx = createMediaCtx({ extra: { voice: { file_id: 'v1' } } });
+        await triggerMediaMessage('message:voice', ctx);
+
+        expect(opts.onMessage).toHaveBeenCalledWith(
+          'tg:100200300',
+          expect.objectContaining({
+            content: '[Voice message - transcription failed]',
+          }),
+        );
+      } finally {
+        getSpy.mockRestore();
+      }
+    });
+
     it('stores audio with placeholder', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
@@ -1332,7 +1415,7 @@ describe('TelegramChannel', () => {
 
       // Both Markdown and plain text fail
       currentBot().api.sendMessage.mockRejectedValue(
-        new Error('Network error'),
+        makeHttpError('Network error'),
       );
 
       // Should not throw — error is caught internally
@@ -1481,7 +1564,7 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       currentBot().api.sendMessage.mockRejectedValueOnce(
-        new Error('ECONNRESET'),
+        makeHttpError('ECONNRESET'),
       );
 
       await expect(
@@ -1900,7 +1983,7 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       currentBot().api.sendDocument.mockRejectedValueOnce(
-        new Error('ECONNRESET'),
+        makeHttpError('ECONNRESET'),
       );
 
       await channel.sendFile(
@@ -1941,7 +2024,9 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
 
-      currentBot().api.sendDocument.mockRejectedValue(new Error('ECONNRESET'));
+      currentBot().api.sendDocument.mockRejectedValue(
+        makeHttpError('ECONNRESET'),
+      );
 
       await expect(
         channel.sendFile('tg:100200300', '/tmp/nanoclaw-test.png'),
@@ -1975,7 +2060,7 @@ describe('TelegramChannel', () => {
       // fallback (payload would be identical). A retry would just
       // double API traffic on transient network errors.
       currentBot().api.sendDocument.mockRejectedValue(
-        new Error('network blip'),
+        makeHttpError('network blip'),
       );
 
       // Should not throw — outer catch swallows.
@@ -2114,7 +2199,7 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       currentBot().api.sendChatAction.mockRejectedValueOnce(
-        new Error('Rate limited'),
+        makeHttpError('Rate limited'),
       );
 
       await expect(
@@ -2193,7 +2278,7 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       await channel.connect();
       currentBot().api.raw.setMessageReaction.mockRejectedValueOnce(
-        new Error("Network request for 'setMessageReaction' failed!"),
+        makeHttpError("Network request for 'setMessageReaction' failed!"),
       );
       await channel.sendReaction('tg:100200300', '485', '👍');
       expect(logger.warn).toHaveBeenCalledWith(
@@ -2207,7 +2292,7 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       await channel.connect();
       currentBot().api.raw.setMessageReaction.mockRejectedValueOnce(
-        new Error(
+        makeHttpError(
           "Call to 'setMessageReaction' failed! (429: Too Many Requests: retry after 33)",
         ),
       );
@@ -2225,7 +2310,7 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       await channel.connect();
       currentBot().api.raw.setMessageReaction.mockRejectedValueOnce(
-        new Error(
+        makeHttpError(
           "Call to 'setMessageReaction' failed! (400: Bad Request: message to react not found)",
         ),
       );
@@ -2241,7 +2326,7 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       await channel.connect();
       currentBot().api.raw.setMessageReaction.mockRejectedValueOnce(
-        new Error(
+        makeHttpError(
           "Call to 'setMessageReaction' failed! (400: Bad Request: message is not modified)",
         ),
       );
@@ -2257,7 +2342,7 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       await channel.connect();
       currentBot().api.raw.setMessageReaction.mockRejectedValueOnce(
-        new Error(
+        makeHttpError(
           "Call to 'setMessageReaction' failed! (400: Bad Request: reactions are not available in chat)",
         ),
       );
@@ -2273,7 +2358,7 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       await channel.connect();
       currentBot().api.raw.setMessageReaction.mockRejectedValueOnce(
-        new Error('Internal Server Error'),
+        makeHttpError('Internal Server Error'),
       );
       await channel.sendReaction('tg:100200300', '485', '👍');
       expect(logger.error).toHaveBeenCalledWith(
@@ -2302,7 +2387,7 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       await channel.connect();
       currentBot().api.sendMessage.mockRejectedValue(
-        new Error(
+        makeHttpError(
           "Call to 'sendMessage' failed! (400: Bad Request: not enough rights to send text messages to the chat)",
         ),
       );
@@ -2329,7 +2414,7 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       await channel.connect();
       currentBot().api.sendMessage.mockRejectedValue(
-        new Error("Network request for 'sendMessage' failed!"),
+        makeHttpError("Network request for 'sendMessage' failed!"),
       );
       await channel.sendMessage('tg:100200300', 'hello');
       expect(logger.warn).toHaveBeenCalledWith(
@@ -2350,7 +2435,7 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       await channel.connect();
       currentBot().api.sendMessage.mockRejectedValue(
-        new Error('Internal Server Error'),
+        makeHttpError('Internal Server Error'),
       );
       await channel.sendMessage('tg:100200300', 'hello');
       const errorCalls = (logger.error as any).mock.calls.filter(
@@ -2372,7 +2457,7 @@ describe('TelegramChannel', () => {
     it('WARN log on dropped sendMessage is metadata-only, no user-text preview, original err preserved', async () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       await channel.connect();
-      const sentinel = new Error(
+      const sentinel = makeHttpError(
         "Call to 'sendMessage' failed! (400: Bad Request: not enough rights to send text messages to the chat)",
       );
       currentBot().api.sendMessage.mockRejectedValue(sentinel);
@@ -2395,7 +2480,7 @@ describe('TelegramChannel', () => {
     it('WARN log on skipped sendReaction keeps original err and adds classifiedMessage', async () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       await channel.connect();
-      const sentinel = new Error(
+      const sentinel = makeHttpError(
         "Call to 'setMessageReaction' failed! (400: Bad Request: message to react not found)",
       );
       currentBot().api.raw.setMessageReaction.mockRejectedValueOnce(sentinel);

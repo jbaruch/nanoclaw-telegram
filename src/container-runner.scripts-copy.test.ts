@@ -4,13 +4,16 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { copyTileScriptsToFlatDir } from './container-runner.js';
+import { isErrnoCodedError } from './fs-errors.js';
+import { isSubprocessError } from './subprocess-errors.js';
 
 function mkfifoAvailable(): boolean {
   // Probe by actually creating a FIFO in tmpdir — also exercises the
   // filesystem's FIFO support, not just the binary's presence. If
   // either is missing the test is irrelevant on this platform.
-  // Cleanup is best-effort in `finally` so the gate result reflects
-  // whether the probe succeeded, not whether we managed to remove it.
+  // Cleanup runs after the probe (not in `finally`) so its own catch can
+  // rethrow a non-errno defect; the gate result reflects whether the probe
+  // succeeded, not whether we managed to remove the FIFO.
   const probe = path.join(
     os.tmpdir(),
     `mkfifo-probe-${process.pid}-${Date.now()}`,
@@ -19,14 +22,17 @@ function mkfifoAvailable(): boolean {
   try {
     execFileSync('mkfifo', [probe], { stdio: 'ignore' });
     available = true;
-  } catch {
+  } catch (err) {
+    // mkfifo absent (ENOENT) or the FIFO create failed (non-zero exit) means
+    // the platform can't support this test; a non-subprocess defect propagates.
+    if (!isSubprocessError(err)) throw err;
     available = false;
-  } finally {
-    try {
-      fs.rmSync(probe, { force: true });
-    } catch {
-      // Best-effort cleanup only.
-    }
+  }
+  try {
+    fs.rmSync(probe, { force: true });
+  } catch (err) {
+    if (!isErrnoCodedError(err)) throw err;
+    // Best-effort cleanup only.
   }
   return available;
 }

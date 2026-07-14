@@ -58,6 +58,7 @@ vi.mock('https-proxy-agent', async () => {
 });
 
 import { startCredentialProxy } from './credential-proxy.js';
+import { isFsErrorWithCode } from './fs-errors.js';
 import {
   isOneCliConfigured,
   getOneCliOutboundConfig,
@@ -115,8 +116,10 @@ async function waitForUsageLines(
       const content = await fsp.readFile(usageLogPath, 'utf8');
       const lines = content.trim() ? content.trim().split('\n') : [];
       if (lines.length >= expectedLines) return lines;
-    } catch {
-      // File doesn't exist yet — keep polling.
+    } catch (err) {
+      // ENOENT — the proxy hasn't created the usage log yet; keep polling.
+      // Any other fs error (or a non-errno defect) surfaces.
+      if (!isFsErrorWithCode(err, ['ENOENT'])) throw err;
     }
     if (Date.now() - start > deadlineMs) {
       throw new Error(

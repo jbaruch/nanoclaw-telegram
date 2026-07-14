@@ -1,7 +1,7 @@
 import fs from 'fs';
 import https from 'https';
 import path from 'path';
-import { Api, Bot, GrammyError, InputFile } from 'grammy';
+import { Api, Bot, GrammyError, HttpError, InputFile } from 'grammy';
 import OpenAI from 'openai';
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
@@ -12,6 +12,7 @@ import {
   storeReaction,
 } from '../db.js';
 import { readEnvFile } from '../env.js';
+import { isFsErrorWithCode } from '../fs-errors.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import { sanitizeTelegramHtml } from './telegram-sanitize.js';
@@ -23,6 +24,61 @@ import {
   OnLocation,
   RegisteredGroup,
 } from '../types.js';
+
+/**
+ * Errno codes the media-save boundaries (`saveDocument`, `savePhoto`) may
+ * legitimately raise on the local `fs.writeFileSync` after a successful
+ * download. Anything outside this set — or a non-errno throw — is unexpected.
+ */
+const TELEGRAM_FS_CODES = [
+  'ENOENT',
+  'EACCES',
+  'EPERM',
+  'EISDIR',
+  'ENOTDIR',
+  'EROFS',
+  'ENOSPC',
+  'ENAMETOOLONG',
+];
+
+/**
+ * Raw Node network errno codes the `https.get` leg of `downloadTelegramFile`
+ * may raise (grammy does not wrap this direct download — only its own API
+ * calls). A media boundary tolerates these as a failed download; anything
+ * else propagates.
+ */
+const TELEGRAM_NETWORK_CODES = [
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EPIPE',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ECONNABORTED',
+  'ERR_STREAM_PREMATURE_CLOSE',
+];
+
+/** Download + local-write failure codes for the media-save boundaries. */
+const TELEGRAM_SAVE_CODES = [...TELEGRAM_FS_CODES, ...TELEGRAM_NETWORK_CODES];
+
+/**
+ * True for an operational failure a best-effort Telegram boundary expects and
+ * handles: a Bot API error (`GrammyError`), a transport/network error
+ * (`HttpError`), or an OpenAI transcription error (`OpenAI.APIError`, whose
+ * subclasses cover API and connection failures). Everything else — a
+ * programmer defect (`TypeError`/`ReferenceError`/…), a non-Error throw, or an
+ * unrelated error type — falls outside this set and propagates rather than
+ * being masked as a routine send/pin/typing failure.
+ */
+function isTelegramOperationalError(err: unknown): boolean {
+  return (
+    err instanceof GrammyError ||
+    err instanceof HttpError ||
+    err instanceof OpenAI.APIError
+  );
+}
 
 export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
@@ -917,12 +973,16 @@ async function downloadTelegramFile(bot: Bot, fileId: string): Promise<Buffer> {
   const url = `https://api.telegram.org/file/bot${token}/${filePath}`;
 
   return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
+    const req = https.get(url, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (chunk: Buffer) => chunks.push(chunk));
       res.on('end', () => resolve(Buffer.concat(chunks)));
       res.on('error', reject);
     });
+    // Request-level failures (DNS, connection refused/reset before a
+    // response) emit on the request, not the response — without this a raw
+    // Node network error would surface as an unhandled 'error' event.
+    req.on('error', reject);
   });
 }
 
@@ -949,6 +1009,13 @@ async function saveDocument(
     );
     return `/workspace/group/documents/${safeName}`;
   } catch (err) {
+    // Download (grammy) or the local fs.writeFileSync may fail; a non-errno,
+    // non-grammy throw is a defect and propagates.
+    if (
+      !isTelegramOperationalError(err) &&
+      !isFsErrorWithCode(err, TELEGRAM_SAVE_CODES)
+    )
+      throw err;
     logger.error({ err, fileName }, 'Failed to save Telegram document');
     return null;
   }
@@ -975,6 +1042,7 @@ async function transcribeVoice(audioBuffer: Buffer): Promise<string | null> {
     });
     return transcription.text;
   } catch (err) {
+    if (!isTelegramOperationalError(err)) throw err;
     logger.error({ err }, 'OpenAI transcription failed');
     return null;
   }
@@ -1006,6 +1074,13 @@ async function savePhoto(
     );
     return `/workspace/group/images/${filename}`;
   } catch (err) {
+    // Download (grammy) or the local fs.writeFileSync may fail; a non-errno,
+    // non-grammy throw is a defect and propagates.
+    if (
+      !isTelegramOperationalError(err) &&
+      !isFsErrorWithCode(err, TELEGRAM_SAVE_CODES)
+    )
+      throw err;
     logger.error({ err }, 'Failed to save Telegram photo');
     return null;
   }
@@ -1032,6 +1107,7 @@ export async function initBotPool(tokens: string[]): Promise<void> {
         'Pool bot initialized',
       );
     } catch (err) {
+      if (!isTelegramOperationalError(err)) throw err;
       logger.error({ err }, 'Failed to initialize pool bot');
     }
   }
@@ -1093,6 +1169,7 @@ export async function sendPoolMessage(
         'Assigned and renamed pool bot',
       );
     } catch (err) {
+      if (!isTelegramOperationalError(err)) throw err;
       logger.warn(
         { sender, err },
         'Failed to rename pool bot (sending anyway)',
@@ -1140,6 +1217,7 @@ export async function sendPoolMessage(
     );
     return lastMsgId?.toString();
   } catch (err) {
+    if (!isTelegramOperationalError(err)) throw err;
     // Swallowed — caller won't know. Log at ERROR so at least the
     // operator sees it. The message MAY have reached Telegram before
     // the failure (e.g. fallback succeeded but Grammy threw post-send);
@@ -1551,6 +1629,13 @@ export class TelegramChannel implements Channel {
           );
         }
       } catch (err) {
+        // Download (grammy getFile or the raw https.get leg) may fail; a
+        // non-operational, non-network throw is a defect and propagates.
+        if (
+          !isTelegramOperationalError(err) &&
+          !isFsErrorWithCode(err, TELEGRAM_NETWORK_CODES)
+        )
+          throw err;
         logger.error({ err }, 'Failed to process voice message');
         content = '[Voice message - transcription failed]';
       }
@@ -1951,6 +2036,7 @@ export class TelegramChannel implements Channel {
       );
       return lastMsgId?.toString();
     } catch (err) {
+      if (!isTelegramOperationalError(err)) throw err;
       // Err here only if sendTelegramMessage's fallback catch re-threw
       // (i.e. both HTML and plain-text sends failed). Return undefined
       // so the caller's `if (sentMsgId)` guards skip the post-send
@@ -2115,6 +2201,7 @@ export class TelegramChannel implements Channel {
       logger.info({ jid, filePath, caption }, 'Telegram file sent');
       return sentMsg?.message_id?.toString();
     } catch (err) {
+      if (!isTelegramOperationalError(err)) throw err;
       logger.error({ jid, filePath, err }, 'Failed to send Telegram file');
       return undefined;
     }
@@ -2127,6 +2214,7 @@ export class TelegramChannel implements Channel {
       await this.bot.api.pinChatMessage(numericId, parseInt(messageId, 10));
       logger.info({ jid, messageId }, 'Telegram message pinned');
     } catch (err) {
+      if (!isTelegramOperationalError(err)) throw err;
       logger.error({ jid, messageId, err }, 'Failed to pin Telegram message');
     }
   }
@@ -2164,6 +2252,7 @@ export class TelegramChannel implements Channel {
       const numericId = jid.replace(/^tg:/, '');
       await this.bot.api.sendChatAction(numericId, 'typing');
     } catch (err) {
+      if (!isTelegramOperationalError(err)) throw err;
       logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
     }
   }
@@ -2226,6 +2315,7 @@ export class TelegramChannel implements Channel {
         'Telegram reaction sent',
       );
     } catch (err) {
+      if (!isTelegramOperationalError(err)) throw err;
       // Reactions to deleted / forbidden messages, idempotent retries
       // on the same emoji ("message is not modified"), rate-limit
       // pushback, and transport blips are all known-unactionable —
