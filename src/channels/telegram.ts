@@ -1073,8 +1073,12 @@ function oneCliProxyDispatcher(proxyUrl: string, ca: string): ProxyAgent {
  * real key on disk), so transcription is reported unavailable rather than
  * silently retried with a dead placeholder. When OneCLI is unconfigured
  * (local dev), fall back to the real `.env` key on the direct path.
+ *
+ * Exported for tests.
  */
-async function transcribeVoice(audioBuffer: Buffer): Promise<string | null> {
+export async function transcribeVoice(
+  audioBuffer: Buffer,
+): Promise<string | null> {
   const clientOptions: ConstructorParameters<typeof OpenAI>[0] = {};
   if (isOneCliConfigured()) {
     const outbound = await getOneCliOutboundConfig('main');
