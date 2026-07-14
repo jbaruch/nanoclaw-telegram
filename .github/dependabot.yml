@@ -6,8 +6,9 @@
 # rather than silent cache drift.
 #
 # Scope is intentionally the `docker` ecosystem only. The npm ecosystems
-# (root `package.json`, `container/agent-runner/package.json`) are a
-# separate concern and would land in their own change.
+# (root `package.json`, `container/agent-runner/package.json`) are handled
+# by Renovate instead — see `.github/renovate.json` (`enabledManagers: npm`),
+# so the two tools cover disjoint ecosystems and never open duplicate PRs.
 version: 2
 updates:
   # Orchestrator image (Dockerfile.orchestrator, repo root).
