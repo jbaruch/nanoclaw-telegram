@@ -26,6 +26,18 @@ import { TRUST_TIERS, type TrustTier } from './trust-tier.js';
 export { TRUST_TIERS, type TrustTier };
 
 /**
+ * Placeholder value forwarded in place of a OneCLI-managed credential. Rides
+ * in the credential slot (a container env var, a header/param the skill sends,
+ * or the orchestrator's own outbound `Authorization`) so the consumer's
+ * "is the key set?" guards and URL/header parsing still pass; OneCLI's MITM
+ * gateway overwrites this sentinel with the vaulted secret on the outbound
+ * request, so the literal never authenticates anything and never reaches the
+ * upstream. Canonical home for the value used by `ONECLI_MANAGED_VARS`
+ * (container-runner) and the host-side OpenAI transcription swap (#770).
+ */
+export const ONECLI_MANAGED_PLACEHOLDER = 'onecli-managed';
+
+/**
  * Hosts the agent must reach WITHOUT going through the OneCLI gateway when the
  * agent proxy is applied (#640). Must include the container→host gateway
  * hostname (`CONTAINER_HOST_GATEWAY` in `container-runtime.ts`), which the

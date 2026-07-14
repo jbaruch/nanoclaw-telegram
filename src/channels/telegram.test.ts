@@ -168,6 +168,7 @@ import {
   TelegramChannel,
   TelegramChannelOpts,
   splitMessage,
+  _oneCliProxyAuth,
 } from './telegram.js';
 import { logger } from '../logger.js';
 import { _initTestDatabase, storeChatMetadata, storeMessage } from '../db.js';
@@ -2729,5 +2730,26 @@ describe('TelegramChannel.sendMessage — sanitize-then-split contract (#282)', 
       const closes = (chunk.match(/<\/a>/g) || []).length;
       expect(opens).toBe(closes);
     }
+  });
+});
+
+describe('_oneCliProxyAuth — OneCLI gateway proxy auth split (#770)', () => {
+  it('lifts URL userinfo into a Basic token and strips it from the uri', () => {
+    const { uri, token } = _oneCliProxyAuth('http://x:aoc_tok@gw:10255');
+    expect(uri).toBe('http://gw:10255');
+    expect(token).toBe(`Basic ${Buffer.from('x:aoc_tok').toString('base64')}`);
+  });
+
+  it('returns an undefined token when the proxy URL carries no userinfo', () => {
+    const { uri, token } = _oneCliProxyAuth('http://gw:10255');
+    expect(uri).toBe('http://gw:10255');
+    expect(token).toBeUndefined();
+  });
+
+  it('percent-decodes userinfo before encoding the Basic token', () => {
+    // A gateway token with URL-reserved bytes arrives percent-encoded in the
+    // userinfo; the Basic credential must carry the decoded value.
+    const { token } = _oneCliProxyAuth('http://x:a%40b%3Ac@gw:10255');
+    expect(token).toBe(`Basic ${Buffer.from('x:a@b:c').toString('base64')}`);
   });
 });

@@ -125,6 +125,9 @@ vi.mock('./onecli-client.js', () => ({
     proxyUrl: 'http://gw:10255',
     ca: 'CA-BUNDLE-CONTENT',
   })),
+  // Re-exported by container-runner (#770 relocated the canonical const here);
+  // the mock must carry it or the container-runner import fails to resolve.
+  ONECLI_MANAGED_PLACEHOLDER: 'onecli-managed',
 }));
 
 // #305 Phase 2a — runContainerAgent now invokes the cadence-registry
