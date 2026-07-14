@@ -8,6 +8,42 @@ vi.mock('./registry.js', () => ({ registerChannel: vi.fn() }));
 // Mock env reader (used by the factory, not needed in unit tests)
 vi.mock('../env.js', () => ({ readEnvFile: vi.fn(() => ({})) }));
 
+// Mock OneCLI client — transcribeVoice (#770) branches on isOneCliConfigured()
+// and getOneCliOutboundConfig(); the tests below drive both.
+const oneCliMock = vi.hoisted(() => ({
+  isOneCliConfigured: vi.fn(() => false),
+  getOneCliOutboundConfig: vi.fn(async () => ({
+    proxyUrl: 'http://x:aoc_tok@gw:10255',
+    ca: 'CA-BUNDLE',
+  })),
+}));
+vi.mock('../onecli-client.js', () => ({
+  ...oneCliMock,
+  ONECLI_MANAGED_PLACEHOLDER: 'onecli-managed',
+}));
+
+// Mock the OpenAI SDK — capture the client options so transcribeVoice's
+// credential path (placeholder Bearer + dispatcher vs. real .env key) is
+// assertable, and stub the transcription result.
+const openaiMock = vi.hoisted(() => ({
+  ctor: vi.fn(),
+  create: vi.fn(async () => ({ text: 'transcribed text' })),
+}));
+vi.mock('openai', () => {
+  // `isTelegramOperationalError` narrows on `OpenAI.APIError`, so the mock
+  // must expose a real class for that static or `instanceof` throws.
+  class MockAPIError extends Error {}
+  return {
+    default: class {
+      static APIError = MockAPIError;
+      audio = { transcriptions: { create: openaiMock.create } };
+      constructor(opts: unknown) {
+        openaiMock.ctor(opts);
+      }
+    },
+  };
+});
+
 // Mock config
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
@@ -168,7 +204,14 @@ import {
   TelegramChannel,
   TelegramChannelOpts,
   splitMessage,
+  transcribeVoice,
+  _oneCliProxyAuth,
 } from './telegram.js';
+import { readEnvFile } from '../env.js';
+import {
+  isOneCliConfigured,
+  getOneCliOutboundConfig,
+} from '../onecli-client.js';
 import { logger } from '../logger.js';
 import { _initTestDatabase, storeChatMetadata, storeMessage } from '../db.js';
 
@@ -2729,5 +2772,109 @@ describe('TelegramChannel.sendMessage — sanitize-then-split contract (#282)', 
       const closes = (chunk.match(/<\/a>/g) || []).length;
       expect(opens).toBe(closes);
     }
+  });
+});
+
+describe('_oneCliProxyAuth — OneCLI gateway proxy auth split (#770)', () => {
+  it('lifts URL userinfo into a Basic token and strips it from the uri', () => {
+    const { uri, token } = _oneCliProxyAuth('http://x:aoc_tok@gw:10255');
+    expect(uri).toBe('http://gw:10255');
+    expect(token).toBe(`Basic ${Buffer.from('x:aoc_tok').toString('base64')}`);
+  });
+
+  it('returns an undefined token when the proxy URL carries no userinfo', () => {
+    const { uri, token } = _oneCliProxyAuth('http://gw:10255');
+    expect(uri).toBe('http://gw:10255');
+    expect(token).toBeUndefined();
+  });
+
+  it('percent-decodes userinfo before encoding the Basic token', () => {
+    // A gateway token with URL-reserved bytes arrives percent-encoded in the
+    // userinfo; the Basic credential must carry the decoded value.
+    const { token } = _oneCliProxyAuth('http://x:a%40b%3Ac@gw:10255');
+    expect(token).toBe(`Basic ${Buffer.from('x:a@b:c').toString('base64')}`);
+  });
+});
+
+describe('transcribeVoice — OneCLI-aware credential path (#770)', () => {
+  const audio = Buffer.from('fake-ogg-bytes');
+
+  beforeEach(() => {
+    openaiMock.ctor.mockClear();
+    openaiMock.create.mockClear();
+    vi.mocked(isOneCliConfigured).mockReset();
+    vi.mocked(getOneCliOutboundConfig).mockReset();
+    vi.mocked(readEnvFile).mockReset();
+    // Neutralize any real OPENAI_API_KEY in the test process env (CI may
+    // export the secret) so the `.env`-fallback branch reads only the
+    // readEnvFile mock, not process.env.
+    vi.stubEnv('OPENAI_API_KEY', '');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('routes through the gateway with a placeholder Bearer + proxy dispatcher when OneCLI is configured', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(getOneCliOutboundConfig).mockResolvedValue({
+      proxyUrl: 'http://x:aoc_tok@gw:10255',
+      ca: 'CA-BUNDLE',
+    });
+
+    const result = await transcribeVoice(audio);
+
+    expect(result).toBe('transcribed text');
+    expect(getOneCliOutboundConfig).toHaveBeenCalledWith('main');
+    const opts = openaiMock.ctor.mock.calls[0][0] as {
+      apiKey: string;
+      fetchOptions?: { dispatcher?: unknown };
+    };
+    // Placeholder authenticates nothing — the gateway swaps the vaulted key.
+    expect(opts.apiKey).toBe('onecli-managed');
+    // A dispatcher tunnels the request through the OneCLI proxy.
+    expect(opts.fetchOptions?.dispatcher).toBeDefined();
+    // The real .env key is never read on the configured path.
+    expect(readEnvFile).not.toHaveBeenCalled();
+  });
+
+  it('reports unavailable (no OpenAI call) when OneCLI is configured but its gateway is unreachable', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(getOneCliOutboundConfig).mockResolvedValue(null);
+
+    const result = await transcribeVoice(audio);
+
+    expect(result).toBeNull();
+    // No client is constructed and no request is attempted with a dead
+    // placeholder — there is no real key on disk to fall back to.
+    expect(openaiMock.ctor).not.toHaveBeenCalled();
+    expect(openaiMock.create).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the real .env key on the direct path when OneCLI is unconfigured', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(false);
+    vi.mocked(readEnvFile).mockReturnValue({ OPENAI_API_KEY: 'sk-real-key' });
+
+    const result = await transcribeVoice(audio);
+
+    expect(result).toBe('transcribed text');
+    expect(getOneCliOutboundConfig).not.toHaveBeenCalled();
+    const opts = openaiMock.ctor.mock.calls[0][0] as {
+      apiKey: string;
+      fetchOptions?: unknown;
+    };
+    expect(opts.apiKey).toBe('sk-real-key');
+    // No gateway tunnel on the direct path.
+    expect(opts.fetchOptions).toBeUndefined();
+  });
+
+  it('returns null without constructing a client when unconfigured and no key is set', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(false);
+    vi.mocked(readEnvFile).mockReturnValue({});
+
+    const result = await transcribeVoice(audio);
+
+    expect(result).toBeNull();
+    expect(openaiMock.ctor).not.toHaveBeenCalled();
   });
 });

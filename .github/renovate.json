@@ -1,0 +1,21 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "npm renewal mechanism (coding-policy: dependency-management Freshness — 'Automate it where a scanner supports the ecosystem: a committed Dependabot or Renovate config'). Covers the two npm manifests (root package.json, container/agent-runner/package.json). Scoped to the npm manager via enabledManagers so it does not overlap the docker ecosystems handled by .github/dependabot.yml. Requires the Renovate GitHub App installed on the repo/org to run.",
+    "Package-rules mirror the repo's dependabot cadence: weekly, chore-typed commits, minor+patch grouped to keep the PR volume low; majors land as individual reviewable PRs."
+  ],
+  "extends": ["config:recommended"],
+  "enabledManagers": ["npm"],
+  "schedule": ["before 6am on monday"],
+  "semanticCommits": "enabled",
+  "semanticCommitType": "chore",
+  "semanticCommitScope": "deps",
+  "prConcurrentLimit": 5,
+  "packageRules": [
+    {
+      "matchManagers": ["npm"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "npm minor and patch"
+    }
+  ]
+}

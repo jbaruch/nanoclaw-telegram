@@ -3,6 +3,7 @@ import https from 'https';
 import path from 'path';
 import { Api, Bot, GrammyError, HttpError, InputFile } from 'grammy';
 import OpenAI from 'openai';
+import { ProxyAgent } from 'undici';
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import {
@@ -14,6 +15,11 @@ import {
 import { readEnvFile } from '../env.js';
 import { isFsErrorWithCode } from '../fs-errors.js';
 import { logger } from '../logger.js';
+import {
+  getOneCliOutboundConfig,
+  isOneCliConfigured,
+  ONECLI_MANAGED_PLACEHOLDER,
+} from '../onecli-client.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import { sanitizeTelegramHtml } from './telegram-sanitize.js';
 import {
@@ -1022,19 +1028,84 @@ async function saveDocument(
 }
 
 /**
+ * Split a OneCLI proxy URL into the userinfo-free `uri` and an explicit
+ * `Basic` Proxy-Authorization `token` (#770). The gateway proxy URL carries
+ * the agent-scoped token as URL userinfo (`http://x:<token>@host:port`), but
+ * undici's ProxyAgent does not derive Proxy-Authorization from the URI's
+ * userinfo — so lift it into a `Basic` token and strip it from the `uri`.
+ * Returns `token: undefined` when the URL has no userinfo. Exposed for tests.
+ */
+export function _oneCliProxyAuth(proxyUrl: string): {
+  uri: string;
+  token: string | undefined;
+} {
+  const u = new URL(proxyUrl);
+  const token = u.username
+    ? `Basic ${Buffer.from(
+        `${decodeURIComponent(u.username)}:${decodeURIComponent(u.password)}`,
+      ).toString('base64')}`
+    : undefined;
+  return { uri: `${u.protocol}//${u.host}`, token };
+}
+
+/**
+ * Build an undici dispatcher that tunnels the OpenAI request through the
+ * OneCLI MITM gateway (#770). `ca` (the OneCLI signing cert) goes on
+ * `requestTls`, NOT the proxy TLS: the MITM cert is presented for the
+ * DESTINATION (`api.openai.com`) after CONNECT, so trusting it is a
+ * request-TLS concern — the same split the credential-proxy makes with
+ * `http.request`'s `ca` option (#637).
+ */
+function oneCliProxyDispatcher(proxyUrl: string, ca: string): ProxyAgent {
+  const { uri, token } = _oneCliProxyAuth(proxyUrl);
+  return new ProxyAgent({ uri, token, requestTls: { ca } });
+}
+
+/**
  * Transcribe a voice message using OpenAI Whisper API.
  * Returns the transcript text, or null on failure.
+ *
+ * Credential path (#770): when OneCLI is configured (prod NAS), the real
+ * `OPENAI_API_KEY` is stripped from `.env` and lives only in the vault. Send a
+ * placeholder Bearer and tunnel through the OneCLI gateway, which swaps in the
+ * vaulted key on `api.openai.com` — the real value never touches host disk. A
+ * gateway that's configured-but-unreachable has nothing to fall back to (no
+ * real key on disk), so transcription is reported unavailable rather than
+ * silently retried with a dead placeholder. When OneCLI is unconfigured
+ * (local dev), fall back to the real `.env` key on the direct path.
+ *
+ * Exported for tests.
  */
-async function transcribeVoice(audioBuffer: Buffer): Promise<string | null> {
-  const envVars = readEnvFile(['OPENAI_API_KEY']);
-  const apiKey = process.env.OPENAI_API_KEY || envVars.OPENAI_API_KEY;
-  if (!apiKey) {
-    logger.warn('OPENAI_API_KEY not set, cannot transcribe voice');
-    return null;
+export async function transcribeVoice(
+  audioBuffer: Buffer,
+): Promise<string | null> {
+  const clientOptions: ConstructorParameters<typeof OpenAI>[0] = {};
+  if (isOneCliConfigured()) {
+    const outbound = await getOneCliOutboundConfig('main');
+    if (!outbound) {
+      logger.error(
+        'OneCLI is configured but its gateway is unreachable — cannot transcribe voice (OPENAI_API_KEY is vault-only; confirm `curl -sf $ONECLI_URL/health` on the NAS)',
+      );
+      return null;
+    }
+    clientOptions.apiKey = ONECLI_MANAGED_PLACEHOLDER;
+    clientOptions.fetchOptions = {
+      dispatcher: oneCliProxyDispatcher(outbound.proxyUrl, outbound.ca),
+    };
+  } else {
+    const envVars = readEnvFile(['OPENAI_API_KEY']);
+    const apiKey = process.env.OPENAI_API_KEY || envVars.OPENAI_API_KEY;
+    if (!apiKey) {
+      logger.warn(
+        'OPENAI_API_KEY not set and OneCLI unconfigured, cannot transcribe voice',
+      );
+      return null;
+    }
+    clientOptions.apiKey = apiKey;
   }
 
   try {
-    const openai = new OpenAI({ apiKey });
+    const openai = new OpenAI(clientOptions);
     const file = new File([audioBuffer], 'voice.ogg', { type: 'audio/ogg' });
     const transcription = await openai.audio.transcriptions.create({
       model: 'whisper-1',

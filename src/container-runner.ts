@@ -57,6 +57,7 @@ import {
   applyOneCliToSpawn,
   getOneCliOutboundConfig,
   isOneCliConfigured,
+  ONECLI_MANAGED_PLACEHOLDER,
 } from './onecli-client.js';
 import type { TrustTier } from './trust-tier.js';
 import { rebuildCadenceRegistryForGroup } from './db.js';
@@ -622,14 +623,11 @@ export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
   'SESSIONIZE_EVENT_API_KEY',
 ]);
 
-/**
- * Placeholder value forwarded into the container for OneCLI-managed
- * credentials (see `ONECLI_MANAGED_VARS`). Non-empty so consumer skills
- * that guard on "is the key set?" don't hard-fail; the real secret is
- * swapped in by OneCLI's MITM gateway on the outbound request, so this
- * literal never authenticates anything and never reaches the upstream.
- */
-export const ONECLI_MANAGED_PLACEHOLDER = 'onecli-managed';
+// `ONECLI_MANAGED_PLACEHOLDER` (the `onecli-managed` sentinel) now lives in
+// `onecli-client.ts` — its canonical OneCLI home, shared with the host-side
+// OpenAI transcription swap (#770). Imported above; re-exported here so
+// existing consumers of the container-runner surface keep resolving it.
+export { ONECLI_MANAGED_PLACEHOLDER };
 
 /**
  * URL-valued managed credential: the sentinel rides INSIDE a syntactically
