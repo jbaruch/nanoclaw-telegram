@@ -159,7 +159,11 @@ describe('onecli-client', () => {
     it('returns null when applyContainerConfig reports inactive', async () => {
       configure();
       applyContainerConfigMock.mockResolvedValue(false);
-      expect(await getOneCliOutboundConfig('main')).toBeNull();
+      const p = getOneCliOutboundConfig('main');
+      await vi.runAllTimersAsync(); // flush the #787 retry backoffs
+      expect(await p).toBeNull();
+      // A persistent false exhausts the bounded retry (#787).
+      expect(applyContainerConfigMock).toHaveBeenCalledTimes(3);
     });
 
     it('returns null when the argv has no CA mount (nothing to read)', async () => {
@@ -180,7 +184,34 @@ describe('onecli-client', () => {
           statusCode: 502,
         }),
       );
-      expect(await getOneCliOutboundConfig('main')).toBeNull();
+      const p = getOneCliOutboundConfig('main');
+      await vi.runAllTimersAsync(); // flush the #787 retry backoffs
+      expect(await p).toBeNull();
+      // 502 is transient — retried to exhaustion before returning null (#787).
+      expect(applyContainerConfigMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('retries a transient blip and recovers within the same call (#787)', async () => {
+      configure();
+      applyContainerConfigMock
+        .mockRejectedValueOnce(new FakeOneCLIError('connreset'))
+        .mockImplementationOnce((args: string[]) => {
+          args.push('-e', 'HTTPS_PROXY=http://x:aoc_tok@gw:10255');
+          args.push(
+            '-v',
+            '/host/onecli-combined-ca.pem:/tmp/onecli-combined-ca.pem:ro',
+          );
+          return Promise.resolve(true);
+        });
+
+      const p = getOneCliOutboundConfig('main');
+      await vi.runAllTimersAsync();
+      const cfg = await p;
+      expect(cfg).toEqual({
+        proxyUrl: 'http://x:aoc_tok@gw:10255',
+        ca: 'ca-file-contents',
+      });
+      expect(applyContainerConfigMock).toHaveBeenCalledTimes(2);
     });
 
     it('caches the config — a second call within TTL does not re-mint', async () => {
@@ -310,6 +341,17 @@ describe('onecli-client', () => {
   });
 
   describe('applyOneCliToSpawn', () => {
+    // The in-spawn retry (#787) sleeps between attempts; fake timers keep the
+    // false/throw paths deterministic and fast. Success-on-first-attempt tests
+    // schedule no timer and resolve through microtasks unaffected.
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     it('returns false and does not mutate args when unconfigured', async () => {
       const args = ['run', '-i', '--rm', 'image'];
       const snapshot = [...args];
@@ -405,11 +447,16 @@ describe('onecli-client', () => {
       });
 
       const args = ['run', '-i', '--rm', 'image'];
-      const active = await applyOneCliToSpawn(args, 'main');
+      const p = applyOneCliToSpawn(args, 'main');
+      await vi.runAllTimersAsync(); // flush the #787 retry backoffs
+      const active = await p;
 
       expect(active).toBe(false);
       // The cred-proxy bypass rides on the proxy env being present, not on the
       // return value — so the agent's Anthropic hop stays direct regardless.
+      // Truncation between retries means the final argv carries exactly one
+      // HTTPS_PROXY / NO_PROXY pair despite three attempts (#787).
+      expect(args.filter((a) => a.startsWith('HTTPS_PROXY='))).toHaveLength(1);
       expect(args).toContain(
         'NO_PROXY=host.docker.internal,localhost,127.0.0.1',
       );
@@ -424,7 +471,9 @@ describe('onecli-client', () => {
       applyContainerConfigMock.mockResolvedValue(false);
 
       const args = ['run', '-i', '--rm', 'image'];
-      const active = await applyOneCliToSpawn(args, 'main');
+      const p = applyOneCliToSpawn(args, 'main');
+      await vi.runAllTimersAsync(); // flush the #787 retry backoffs
+      const active = await p;
 
       expect(active).toBe(false);
       expect(args.some((a) => a.startsWith('NO_PROXY='))).toBe(false);
@@ -498,7 +547,9 @@ describe('onecli-client', () => {
       applyContainerConfigMock.mockResolvedValue(false);
 
       const args = ['run', '-i', '--rm', 'image'];
-      const active = await applyOneCliToSpawn(args, 'main');
+      const p = applyOneCliToSpawn(args, 'main');
+      await vi.runAllTimersAsync(); // flush the #787 retry backoffs
+      const active = await p;
 
       expect(active).toBe(false);
       const warnCalls = vi.mocked(logger.warn).mock.calls;
@@ -522,7 +573,9 @@ describe('onecli-client', () => {
       );
 
       const args = ['run', '-i', '--rm', 'image'];
-      const active = await applyOneCliToSpawn(args, 'main');
+      const p = applyOneCliToSpawn(args, 'main');
+      await vi.runAllTimersAsync(); // flush the #787 retry backoffs
+      const active = await p;
       expect(active).toBe(false);
     });
 
@@ -534,7 +587,9 @@ describe('onecli-client', () => {
       );
 
       const args = ['run', '-i', '--rm', 'image'];
-      const active = await applyOneCliToSpawn(args, 'trusted');
+      const p = applyOneCliToSpawn(args, 'trusted');
+      await vi.runAllTimersAsync(); // flush the #787 retry backoffs
+      const active = await p;
       expect(active).toBe(false);
     });
 
@@ -544,7 +599,127 @@ describe('onecli-client', () => {
       applyContainerConfigMock.mockRejectedValue(new TypeError('bad call'));
 
       const args = ['run', '-i', '--rm', 'image'];
+      // A non-OneCLI error is not retried — it propagates on the first attempt.
       await expect(applyOneCliToSpawn(args, 'main')).rejects.toThrow(TypeError);
+      expect(applyContainerConfigMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('truncates a partial argv append when the SDK appends then throws (Copilot #788 — no half-applied config leaks to the caller)', async () => {
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
+      // The SDK pushes proxy env, THEN rejects mid-way — every attempt.
+      applyContainerConfigMock.mockImplementation((args: string[]) => {
+        args.push('-e', 'HTTPS_PROXY=http://onecli');
+        return Promise.reject(
+          new FakeOneCLIRequestError('mid-append blowup', {
+            url: 'http://localhost:10254/v1/container-config',
+            statusCode: 503,
+          }),
+        );
+      });
+
+      const args = ['run', '-i', '--rm', 'image'];
+      const snapshot = [...args];
+      const p = applyOneCliToSpawn(args, 'main');
+      await vi.runAllTimersAsync();
+      const active = await p;
+
+      // Retryable 503 exhausts to false, and the partial HTTPS_PROXY the failed
+      // final attempt appended is gone — argv is exactly what the caller passed.
+      expect(active).toBe(false);
+      expect(args).toEqual(snapshot);
+    });
+
+    it('truncates a partial argv append on a non-retryable rejection (Copilot #788)', async () => {
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
+      applyContainerConfigMock.mockImplementation((args: string[]) => {
+        args.push('-e', 'HTTPS_PROXY=http://onecli');
+        return Promise.reject(
+          new FakeOneCLIRequestError('forbidden', {
+            url: 'http://localhost:10254/v1/container-config',
+            statusCode: 403,
+          }),
+        );
+      });
+
+      const args = ['run', '-i', '--rm', 'image'];
+      const snapshot = [...args];
+      const p = applyOneCliToSpawn(args, 'main');
+      await vi.runAllTimersAsync();
+      const active = await p;
+
+      expect(active).toBe(false);
+      // One attempt (403 is deterministic), and no stray proxy env left behind.
+      expect(applyContainerConfigMock).toHaveBeenCalledTimes(1);
+      expect(args).toEqual(snapshot);
+    });
+
+    it('retries a transient blip and recovers within the same spawn (#787)', async () => {
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
+      applyContainerConfigMock
+        .mockRejectedValueOnce(
+          new FakeOneCLIRequestError('gateway hiccup', {
+            url: 'http://localhost:10254/v1/container-config',
+            statusCode: 503,
+          }),
+        )
+        .mockImplementationOnce((args: string[]) => {
+          args.push('-e', 'HTTPS_PROXY=http://onecli');
+          return Promise.resolve(true);
+        });
+
+      const args = ['run', '-i', '--rm', 'image'];
+      const p = applyOneCliToSpawn(args, 'main');
+      await vi.runAllTimersAsync();
+      const active = await p;
+
+      expect(active).toBe(true);
+      expect(applyContainerConfigMock).toHaveBeenCalledTimes(2);
+      // The failed first attempt's would-be append never lands twice — argv
+      // carries exactly one HTTPS_PROXY (truncate-between-attempts, #787).
+      expect(args.filter((a) => a.startsWith('HTTPS_PROXY='))).toHaveLength(1);
+    });
+
+    it('recovers when the first attempt resolves false then the retry succeeds (#787)', async () => {
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
+      applyContainerConfigMock
+        .mockResolvedValueOnce(false)
+        .mockImplementationOnce((args: string[]) => {
+          args.push('-e', 'HTTPS_PROXY=http://onecli');
+          return Promise.resolve(true);
+        });
+
+      const args = ['run', '-i', '--rm', 'image'];
+      const p = applyOneCliToSpawn(args, 'main');
+      await vi.runAllTimersAsync();
+      const active = await p;
+
+      expect(active).toBe(true);
+      expect(applyContainerConfigMock).toHaveBeenCalledTimes(2);
+      expect(args.filter((a) => a.startsWith('HTTPS_PROXY='))).toHaveLength(1);
+    });
+
+    it('does NOT retry a deterministic 4xx rejection — fails fast (#787)', async () => {
+      envFileMock.ONECLI_URL = 'http://localhost:10254';
+      envFileMock.ONECLI_API_KEY = 'oc_test';
+      applyContainerConfigMock.mockRejectedValue(
+        new FakeOneCLIRequestError('unknown agent', {
+          url: 'http://localhost:10254/v1/container-config',
+          statusCode: 404,
+        }),
+      );
+
+      const args = ['run', '-i', '--rm', 'image'];
+      const p = applyOneCliToSpawn(args, 'main');
+      await vi.runAllTimersAsync();
+      const active = await p;
+
+      expect(active).toBe(false);
+      // 404 is deterministic — one attempt, no retry storm against a bad config.
+      expect(applyContainerConfigMock).toHaveBeenCalledTimes(1);
     });
   });
 

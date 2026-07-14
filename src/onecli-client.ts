@@ -38,13 +38,101 @@ const AGENT_PROXY_BYPASS_HOSTS = 'host.docker.internal,localhost,127.0.0.1';
 
 const AGENT_IDENTIFIER_PREFIX = 'nanoclaw';
 /**
- * Tight per-call timeout so a configured-but-unreachable OneCLI gateway
- * degrades fast: 3 tiers × this ms cap at startup, plus this ms cap per
- * container spawn. On timeout the SDK call is treated as "not active" and
- * returns false; the caller then falls back to the real-value path or fails
- * closed (managed placeholders withheld) per its own contract.
+ * Per-call timeout for a configured-but-unreachable OneCLI gateway. Bumped
+ * from the original 1500ms (#787): the NAS gateway has multi-second rough
+ * patches, and a sub-2s cap turned every slow-but-alive call into a hard
+ * "not active" that burned the whole scheduled spawn. On timeout the SDK call
+ * is treated as "not active" and returns false; `applyContainerConfigWithRetry`
+ * then retries within the same spawn (see below) before the caller falls back
+ * to the real-value path or fails closed (managed placeholders withheld).
+ * Worst-case spawn cost when the gateway is fully dead is
+ * `APPLY_CONFIG_MAX_ATTEMPTS × this + Σ(APPLY_CONFIG_RETRY_BACKOFF_MS)`;
+ * `ensureAgentForTier` (startup, un-retried) still pays only 3 tiers × this.
  */
-const DEFAULT_TIMEOUT_MS = 1500;
+const DEFAULT_TIMEOUT_MS = 3000;
+
+/**
+ * Bounded in-spawn retry for the gateway `applyContainerConfig` round-trip
+ * (#787). A single transient blip inside the timeout window would otherwise
+ * fail the spawn closed; the queue's documented "retry with backoff" is the
+ * NEXT cadence fire, so the current run is wasted rather than recovered in
+ * place. Both gateway call sites (`applyOneCliToSpawn`, `getOneCliOutboundConfig`)
+ * route through the retry so every round-trip is covered.
+ */
+const APPLY_CONFIG_MAX_ATTEMPTS = 3;
+/**
+ * Backoff before each retry, in ms. Length is `APPLY_CONFIG_MAX_ATTEMPTS - 1`
+ * (no wait after the final attempt). Short so a proxied interactive spawn stays
+ * responsive when the gateway recovers on the first retry, long enough that an
+ * immediate retry doesn't just re-hit the same in-flight failure.
+ */
+const APPLY_CONFIG_RETRY_BACKOFF_MS = [300, 900] as const;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Whether a thrown `applyContainerConfig` error is a transient gateway blip
+ * worth retrying. A OneCLIError with no status code is a pre-gateway failure
+ * (timeout, DNS, connection reset) — transient. A 5xx or 429 request rejection
+ * is a gateway hiccup / rate-limit — transient. A deterministic 4xx (bad key,
+ * unknown agent, forbidden) will not change on retry — NOT retryable. Unknown
+ * error types are not ours to swallow — NOT retryable, they propagate.
+ */
+function isRetryableApplyConfigError(err: unknown): boolean {
+  if (err instanceof OneCLIRequestError) {
+    const code = err.statusCode;
+    return code === undefined || code === 429 || code >= 500;
+  }
+  return err instanceof OneCLIError;
+}
+
+/**
+ * Call `applyContainerConfig` with a bounded in-spawn retry (#787). A transient
+ * failure surfaces two ways and both are retried: a thrown transient error (see
+ * `isRetryableApplyConfigError`), OR a falsy resolve — the SDK catches
+ * gateway/config fetch failures and returns `false` (no throw), which is the
+ * MAIN recoverable path. A deterministic 4xx and any unknown error type are not
+ * retried; they rethrow to the caller's own catch. `args` is truncated back to
+ * its pre-call length between attempts so a partial append from a failed attempt
+ * never double-lands on the spawn argv (the SDK only ever appends).
+ *
+ * On ANY thrown failure — the final retryable attempt, or a non-retryable error
+ * on any attempt — `args` is likewise truncated back before rethrowing: the SDK
+ * can append argv and then throw mid-way, and the caller (which catches and
+ * treats OneCLI as inactive) must not proceed with a half-applied proxy env /
+ * mount. A clean falsy RESOLVE on the final attempt is left as-is on purpose —
+ * the SDK may have pushed a complete proxy-env block the caller legitimately
+ * inspects (the #640 NO_PROXY decoupling in `applyOneCliToSpawn`).
+ */
+async function applyContainerConfigWithRetry(
+  client: OneCLI,
+  args: string[],
+  options: Parameters<OneCLI['applyContainerConfig']>[1],
+): Promise<boolean> {
+  const preLen = args.length;
+  for (let attempt = 1; attempt <= APPLY_CONFIG_MAX_ATTEMPTS; attempt++) {
+    const lastAttempt = attempt === APPLY_CONFIG_MAX_ATTEMPTS;
+    try {
+      const active = await client.applyContainerConfig(args, options);
+      if (active || lastAttempt) return active;
+    } catch (err) {
+      if (lastAttempt || !isRetryableApplyConfigError(err)) {
+        args.length = preLen; // drop a partial append so it can't leak downstream
+        throw err;
+      }
+      logger.warn(
+        { attempt, maxAttempts: APPLY_CONFIG_MAX_ATTEMPTS },
+        'OneCLI applyContainerConfig blipped — retrying within the spawn (#787)',
+      );
+    }
+    args.length = preLen; // drop any partial append before the next attempt
+    await sleep(APPLY_CONFIG_RETRY_BACKOFF_MS[attempt - 1]);
+  }
+  /* c8 ignore next 2 -- loop always returns or throws on the final attempt */
+  return false;
+}
 
 let cachedClient: OneCLI | null = null;
 
@@ -113,7 +201,7 @@ export async function getOneCliOutboundConfig(
   }
   try {
     const probe: string[] = [];
-    const active = await client.applyContainerConfig(probe, {
+    const active = await applyContainerConfigWithRetry(client, probe, {
       agent: agentIdentifierForTier(tier),
       combineCaBundle: true,
       addHostMapping: false,
@@ -279,7 +367,7 @@ export async function applyOneCliToSpawn(
   if (!client) return false;
   try {
     const preConfigLen = args.length;
-    const active = await client.applyContainerConfig(args, {
+    const active = await applyContainerConfigWithRetry(client, args, {
       agent: agentIdentifierForTier(tier),
       combineCaBundle: true,
       // #746: the spawn argv already carries `--add-host=host.docker.internal:
