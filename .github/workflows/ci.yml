@@ -30,6 +30,16 @@ jobs:
       - name: Format check
         run: npm run format:check
 
+      # Lint gate (before the slower typecheck/tests, per
+      # `coding-policy: code-formatting`). Covers src/, scripts/, setup/, and
+      # container/agent-runner/src (the `lint` script's scope). The parser is
+      # not type-aware (`tseslint.configs.recommended`), so this needs only the
+      # root `npm ci` above — no agent-runner deps. `no-catch-all/no-catch-all`
+      # is error-level (#735); `@typescript-eslint/no-explicit-any` stays a
+      # non-failing warning until its own burn-down lands.
+      - name: Lint
+        run: npm run lint
+
       - name: Typecheck
         run: npx tsc --noEmit
 

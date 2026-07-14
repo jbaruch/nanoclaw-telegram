@@ -45,7 +45,14 @@ export default [
           ignoreRestSiblings: true,
         },
       ],
-      'no-catch-all/no-catch-all': 'warn',
+      // Error-level gate (#735 burn-down complete: zero findings across the
+      // lint scope). A reintroduced catch-all fails CI. Narrow the catch to a
+      // specific exception type, or use the documented
+      // `outer-boundary-process-contract` carve-out
+      // (`jbaruch/coding-policy: error-handling`).
+      'no-catch-all/no-catch-all': 'error',
+      // Still advisory — the no-explicit-any track is a separate, un-started
+      // burn-down; flipping it to error is deferred until those sites clear.
       '@typescript-eslint/no-explicit-any': 'warn',
     },
   },
