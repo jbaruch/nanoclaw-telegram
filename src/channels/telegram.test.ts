@@ -2828,12 +2828,18 @@ describe('transcribeVoice — OneCLI-aware credential path (#770)', () => {
     expect(getOneCliOutboundConfig).toHaveBeenCalledWith('main');
     const opts = openaiMock.ctor.mock.calls[0][0] as {
       apiKey: string;
+      fetch?: unknown;
       fetchOptions?: { dispatcher?: unknown };
     };
     // Placeholder authenticates nothing — the gateway swaps the vaulted key.
     expect(opts.apiKey).toBe('onecli-managed');
     // A dispatcher tunnels the request through the OneCLI proxy.
     expect(opts.fetchOptions?.dispatcher).toBeDefined();
+    // undici's own fetch is supplied so its dispatcher's handler interface
+    // matches (Node's global fetch rejects a foreign-version dispatcher with
+    // UND_ERR_INVALID_ARG). Assert it's a callable — a non-function value
+    // would pass a bare toBeDefined() while still breaking at runtime.
+    expect(typeof opts.fetch).toBe('function');
     // The real .env key is never read on the configured path.
     expect(readEnvFile).not.toHaveBeenCalled();
   });
@@ -2861,11 +2867,13 @@ describe('transcribeVoice — OneCLI-aware credential path (#770)', () => {
     expect(getOneCliOutboundConfig).not.toHaveBeenCalled();
     const opts = openaiMock.ctor.mock.calls[0][0] as {
       apiKey: string;
+      fetch?: unknown;
       fetchOptions?: unknown;
     };
     expect(opts.apiKey).toBe('sk-real-key');
-    // No gateway tunnel on the direct path.
+    // No gateway tunnel on the direct path — global fetch, no dispatcher.
     expect(opts.fetchOptions).toBeUndefined();
+    expect(opts.fetch).toBeUndefined();
   });
 
   it('returns null without constructing a client when unconfigured and no key is set', async () => {
