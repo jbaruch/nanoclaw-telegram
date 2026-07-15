@@ -3,7 +3,7 @@ import https from 'https';
 import path from 'path';
 import { Api, Bot, GrammyError, HttpError, InputFile } from 'grammy';
 import OpenAI from 'openai';
-import { ProxyAgent } from 'undici';
+import { ProxyAgent, fetch as undiciFetch } from 'undici';
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import {
@@ -1089,6 +1089,16 @@ export async function transcribeVoice(
       return null;
     }
     clientOptions.apiKey = ONECLI_MANAGED_PLACEHOLDER;
+    // Use undici's OWN fetch, not Node's global fetch. The dispatcher below
+    // is an undici ProxyAgent from the `undici` package; Node's bundled fetch
+    // implements a DIFFERENT internal dispatcher-handler interface, so handing
+    // it a foreign-version dispatcher throws `UND_ERR_INVALID_ARG: invalid
+    // onRequestStart method` at request time (a dual-undici mismatch the mocked
+    // unit tests can't see). Pairing undici.fetch with undici.ProxyAgent keeps
+    // both on the same interface. The signature matches the SDK's `Fetch`;
+    // cast through unknown because undici's Request/Response nominal types
+    // differ from the global lib.dom ones.
+    clientOptions.fetch = undiciFetch as unknown as typeof globalThis.fetch;
     clientOptions.fetchOptions = {
       dispatcher: oneCliProxyDispatcher(outbound.proxyUrl, outbound.ca),
     };
