@@ -42,8 +42,7 @@ import {
   buildStalenessReminder,
   classifyTrustedRead,
 } from './memory-staleness-reminder.js';
-import { validateComposioArgs } from './composio-arg-validator.js';
-import { detectComposioFidelity } from './composio-fidelity.js';
+import { detectMcpFidelity } from './mcp-fidelity.js';
 import { byairMcpServer } from './byair-mcp.js';
 import {
   createTerminalDeliveryTracker,
@@ -119,11 +118,7 @@ import {
   shouldIncludeSubagentDefinitions,
 } from './subagent-prompt.js';
 import { wrapUntrustedInput } from './untrusted-input-sources.js';
-import {
-  inferReadSource,
-  wrapMcpToolResult,
-  type SummariseBodyOptions,
-} from './untrusted-input-wrap.js';
+import { inferReadSource, wrapMcpToolResult } from './untrusted-input-wrap.js';
 import { formatSentinel, inferSentinelSource } from './provenance-sentinel.js';
 import {
   decideExternalFileSummary,
@@ -628,7 +623,7 @@ function createTaskOutputBlockGateHook(): HookCallback {
  * Scope: MCP tools only. The SDK's `updatedMCPToolOutput` field is the
  * only documented mutation surface for tool results post-fact, and it
  * is MCP-tool-scoped. Built-in tools (WebFetch, Bash) keep their raw
- * output — accepted gap; the triggering incident was Composio (MCP).
+ * output — accepted gap; the triggering incident was on an MCP tool.
  */
 function createMcpToolResultSanitizerHook(): HookCallback {
   const byteCap = (() => {
@@ -686,24 +681,10 @@ function createMcpToolResultSanitizerHook(): HookCallback {
  * envelope is added so it doesn't mistake wrap tags for fabricated IDs.
  */
 /**
- * #319 — body summarisation options for the wrap hook. Returns
- * `undefined` when `SUMMARISE_COMPOSIO_BODIES !== '1'`, in which case
- * the wrap hook keeps its pre-#319 envelope-only behaviour. The
- * Anthropic client is constructed lazily on first call and cached so
- * per-runQuery reads share one TCP keepalive pool — the SDK picks up
- * `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` from env, populated by
- * the OneCLI proxy at container startup.
- *
- * Default-off per acceptance: per-group enablement is decoupled from
- * the deploy that ships this code path. Flip per-group after observing
- * the `summary_latencies_ms=...` log telemetry.
- */
-/**
- * Shared lazy-cached Anthropic SDK client. Used by both the #319
- * Composio body summariser and the #392 external-file summariser —
- * keeping one client instance per process so the underlying agent
- * (and TCP keepalive pool, retry budget, etc.) isn't duplicated when
- * both flags are enabled. The SDK picks up `ANTHROPIC_API_KEY` /
+ * Shared lazy-cached Anthropic SDK client. Used by the #392
+ * external-file summariser — one client instance per process so the
+ * underlying agent (and TCP keepalive pool, retry budget, etc.) isn't
+ * duplicated. The SDK picks up `ANTHROPIC_API_KEY` /
  * `ANTHROPIC_BASE_URL` from env, populated by the OneCLI proxy at
  * container startup.
  */
@@ -715,45 +696,16 @@ function getAnthropicClient(): Anthropic {
   return cachedAnthropicClient;
 }
 
-let cachedSummariseBodyOpts: SummariseBodyOptions | null | undefined;
-function getSummariseBodyOpts(): SummariseBodyOptions | undefined {
-  if (cachedSummariseBodyOpts !== undefined) {
-    return cachedSummariseBodyOpts ?? undefined;
-  }
-  if (process.env.SUMMARISE_COMPOSIO_BODIES !== '1') {
-    cachedSummariseBodyOpts = null;
-    return undefined;
-  }
-  cachedSummariseBodyOpts = { client: getAnthropicClient() };
-  return cachedSummariseBodyOpts;
-}
-
-function createUntrustedInputWrapHook(
-  summariseOpts?: SummariseBodyOptions,
-): HookCallback {
+function createUntrustedInputWrapHook(): HookCallback {
   return async (input, _toolUseId, _context) => {
     const post = input as PostToolUseHookInput;
     if (!post.tool_name?.startsWith('mcp__')) return {};
-    const { wrapped, mutated, summaryLatenciesMs, summaryOutcomes } =
-      await wrapMcpToolResult(
-        post.tool_name,
-        post.tool_response,
-        summariseOpts,
-      );
+    const { wrapped, mutated } = wrapMcpToolResult(
+      post.tool_name,
+      post.tool_response,
+    );
     if (!mutated) return {};
-    if (summaryLatenciesMs.length > 0) {
-      // Telemetry per acceptance: per-tool latency + outcome metadata
-      // so per-group `SUMMARISE_COMPOSIO_BODIES` flag tuning can be
-      // data-driven. Logs metadata only (no body bytes) per
-      // `no-secrets` — external content can carry tokens.
-      log(
-        `untrusted_input_wrap tool=${post.tool_name} ` +
-          `summary_latencies_ms=${summaryLatenciesMs.join(',')} ` +
-          `summary_outcomes=${summaryOutcomes.join(',')}`,
-      );
-    } else {
-      log(`untrusted_input_wrap tool=${post.tool_name}`);
-    }
+    log(`untrusted_input_wrap tool=${post.tool_name}`);
     return {
       hookSpecificOutput: {
         hookEventName: 'PostToolUse' as const,
@@ -2057,36 +2009,6 @@ function createBashSafetyNetHook(): HookCallback {
 }
 
 /**
- * #326 — Composio outbound argument validator. Checks per-field
- * constraints on the way out (header-injection guard on `subject`/
- * `to`/`cc`/`bcc`/`channel`/`user`, byte cap + control-char guard on
- * `body`/`text`) before the bytes leave the container. Tool-only —
- * does not look at provenance, because header injection and oversize
- * bodies are wrong regardless of who issued the call. Symmetric
- * counterpart to #117's incoming-result sanitizer.
- *
- * Logged-deny field is the field name (not the value) per `no-secrets`
- * — a body or recipient string can carry tokens or PII.
- */
-function createComposioArgValidatorHook(): HookCallback {
-  return async (input, _toolUseId, _context) => {
-    const pre = input as PreToolUseHookInput;
-    const decision = validateComposioArgs(pre.tool_name, pre.tool_input);
-    if (decision.kind === 'allow') return {};
-    log(
-      `PreToolUse: composio_arg_validator DENY tool=${pre.tool_name} field=${decision.field} violation=${decision.violation}`,
-    );
-    return {
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse' as const,
-        permissionDecision: 'deny' as const,
-        permissionDecisionReason: decision.reason,
-      },
-    };
-  };
-}
-
-/**
  * Predicate for the narrow fail-closed path in the memory-
  * quarantine redirect step (#325). Filesystem errors from
  * `mkdirSync` / `writeFileSync` / `renameSync` are operationally
@@ -2306,8 +2228,8 @@ function createMemoryQuarantineHook(
 
 /**
  * #226 (tracks #214) — authoritative-source-nudge. Intercept entity-
- * lookup tool calls (Composio search/list, raw `SELECT FROM chats
- * LIMIT`, reads of the `available_groups.json` snapshot) and inject a
+ * lookup tool calls (WebSearch, raw `SELECT FROM chats LIMIT`,
+ * reads of the `available_groups.json` snapshot) and inject a
  * `systemMessage` pointing the agent at the canonical source. The
  * tool call is NOT denied — this is a nudge, because some entity
  * lookups legitimately need search when no pointer exists. Catalogue
@@ -2450,7 +2372,7 @@ function createLazyVerificationDetectorHook(): HookCallback {
 const FIDELITY_AUDIT_LOG = '/workspace/host-logs/fidelity-alerts.log';
 
 /**
- * #140 — composio-fidelity. Background sub-agents that wrap Composio
+ * #140 — mcp-fidelity. Background sub-agents that wrap MCP
  * tool calls sometimes return synthetic data with fabricated IDs
  * (sequential `email_01..email_18`, `pr1_notif`, `promo_001`) when
  * the upstream API hiccups. Pure text rules can't catch it — the
@@ -2464,17 +2386,17 @@ const FIDELITY_AUDIT_LOG = '/workspace/host-logs/fidelity-alerts.log';
  * tool result — that would mask the failure mode from the agent and
  * downstream observability.
  */
-function createComposioFidelityHook(): HookCallback {
+function createMcpFidelityHook(): HookCallback {
   return async (input, _toolUseId, _context) => {
     const post = input as PostToolUseHookInput;
-    // Limit to MCP tools — Composio is the documented driver of the
-    // bug. Built-in tools (Bash, Read, etc.) generate their own kinds
+    // Limit to MCP tools — an MCP sub-agent wrap is the documented
+    // driver. Built-in tools (Bash, Read, etc.) generate their own kinds
     // of output that would false-positive on the regexes (sequential
     // file numbering in `ls`, etc.).
     if (!post.tool_name?.startsWith('mcp__')) {
       return {};
     }
-    const decision = detectComposioFidelity(post.tool_response);
+    const decision = detectMcpFidelity(post.tool_response);
     if (!decision.fabricated) {
       return {};
     }
@@ -2501,11 +2423,11 @@ function createComposioFidelityHook(): HookCallback {
         throw err;
       }
       log(
-        `composio-fidelity: failed to append to audit log (${errno.code}): ${errno.message}`,
+        `mcp-fidelity: failed to append to audit log (${errno.code}): ${errno.message}`,
       );
     }
     log(
-      `PostToolUse: composio-fidelity flagged ${post.tool_name} — rules=${decision.findings.map((f) => f.rule).join(',')}`,
+      `PostToolUse: mcp-fidelity flagged ${post.tool_name} — rules=${decision.findings.map((f) => f.rule).join(',')}`,
     );
     return {
       systemMessage: decision.reinjection,
@@ -3398,13 +3320,6 @@ async function runQuery(
   // pins servers whose tools fire on most turns, so they bypass the
   // discovery hop. See https://github.com/jbaruch/nanoclaw/issues/30.
 
-  // Hoisted so the truthiness gate narrows them to `string` inside the
-  // registration block below (TS doesn't narrow `process.env.X` across an
-  // object-literal boundary).
-  const composioMcpUrl = process.env.COMPOSIO_MCP_URL;
-  const composioApiKey = process.env.COMPOSIO_API_KEY;
-  const composioUserId = process.env.COMPOSIO_USER_ID;
-
   const mcpServersConfig = {
     nanoclaw: {
       command: 'node',
@@ -3428,30 +3343,6 @@ async function runQuery(
       // before every reply.
       alwaysLoad: true,
     },
-    ...(composioMcpUrl && composioApiKey && composioUserId
-      ? {
-          composio: {
-            type: 'http' as const,
-            // Composio's headless custom-MCP-server endpoint, authenticated
-            // with the project-scoped `ak_*` key via `x-api-key`. This is
-            // NOT the consumer "Connect" gateway (connect.composio.dev/mcp),
-            // which migrated to interactive AuthKit-JWT OAuth and cannot run
-            // in an unattended container. The server's tool surface
-            // (allowed_tools + bound toolkits) is configured in the Composio
-            // dashboard/API; COMPOSIO_MCP_URL carries its `/v3/mcp/<id>/mcp`
-            // URL and `user_id` selects the connected accounts. `.trim()`
-            // guards a stray trailing space in COMPOSIO_USER_ID. See
-            // `SECRET_CONTAINER_VARS` in src/container-runner.ts for the
-            // operator contract.
-            url: `${composioMcpUrl}?user_id=${encodeURIComponent(
-              composioUserId.trim(),
-            )}`,
-            headers: {
-              'x-api-key': composioApiKey,
-            },
-          },
-        }
-      : {}),
     // byAir on-demand flight lookup (#645). Registered raw (the URL
     // carries the API key inline) and deferred — NOT alwaysLoad — so it
     // stays behind a ToolSearch hop and off the proactive precheck/wake
@@ -3468,30 +3359,6 @@ async function runQuery(
         }
       : {}),
   };
-
-  // Config guard: warn when Composio is partially configured. The
-  // registration above needs all three of COMPOSIO_MCP_URL, COMPOSIO_API_KEY,
-  // and COMPOSIO_USER_ID; with any missing it falls through to `{}` and
-  // mcp__composio__* tools disappear with no error in the agent turn.
-  const composioVars = [
-    'COMPOSIO_MCP_URL',
-    'COMPOSIO_API_KEY',
-    'COMPOSIO_USER_ID',
-  ] as const;
-  const composioPresent = composioVars.filter((v) => process.env[v]);
-  if (
-    composioPresent.length > 0 &&
-    composioPresent.length < composioVars.length
-  ) {
-    const missing = composioVars.filter((v) => !process.env[v]);
-    console.error(
-      `[agent-runner] Composio MCP partially configured — present: ${composioPresent.join(
-        ', ',
-      )}; missing: ${missing.join(
-        ', ',
-      )}. mcp__composio__* tools are disabled until all three are set in .env.`,
-    );
-  }
 
   // General-purpose subagent definition. Built only when this spawn may
   // actually fan out to a subagent — maintenance spawns skip the whole
@@ -3769,14 +3636,11 @@ async function runQuery(
           // #226 (tracks #214) — nudge the agent toward known
           // authoritative pointers when it's about to run a fresh
           // entity-lookup. Matcher restricts the regex sweep to the
-          // tool families documented in the incident table, and
-          // includes only the Composio tools whose names indicate
-          // lookup-style search/list operations; the catalogue further
-          // narrows by tool input shape so unrelated calls inside this
-          // family don't pay the cost.
+          // tool families documented in the incident table; the
+          // catalogue further narrows by tool input shape so unrelated
+          // calls inside this family don't pay the cost.
           {
-            matcher:
-              '^(Bash|Read|Grep|Glob|WebSearch|mcp__composio__.*(?:search|list).*)$',
+            matcher: '^(Bash|Read|Grep|Glob|WebSearch)$',
             hooks: [createAuthoritativeSourceNudgeHook()],
           },
           {
@@ -3800,31 +3664,16 @@ async function runQuery(
             matcher: 'mcp__nanoclaw__(react_to_message|send_message)',
             hooks: [createSilentTurnTrackingHook(silentTurnState)],
           },
-          // #326 — Composio outbound arg validator. Per-field shape
-          // checks (header-injection guard on subject/to/cc/bcc/
-          // channel/user, byte cap + control-char guard on body/text)
-          // before the bytes leave the container. Runs BEFORE the
-          // egress allowlist so a malformed arg is rejected without
-          // paying the transcript-walk cost. Tool-only — does not
-          // look at provenance. Matcher restricts the sweep to the
-          // Composio outbound family; the validator's internal rule
-          // table is the source of truth (matcher is a perf hint).
-          {
-            matcher:
-              '^mcp__composio__(gmail_(send|reply)|slack_(post|send))\\w*$',
-            hooks: [createComposioArgValidatorHook()],
-          },
           // #320 — egress allowlist. Destination-level filter for
-          // outbound tools (Composio gmail.send, slack.post,
-          // send_message_to_chat). Reads /workspace/trusted/
-          // egress_allowlist.json. Operator-originated chains bypass
-          // by default; under untrusted-provenance, destination must
-          // match an entry. Anchored alternation matcher to fire only
-          // on the gated sinks — the sink classification inside the
-          // hook is the source of truth, the matcher is a perf hint.
+          // outbound tools (send_message_to_chat). Reads
+          // /workspace/trusted/egress_allowlist.json. Operator-
+          // originated chains bypass by default; under untrusted-
+          // provenance, destination must match an entry. Anchored
+          // matcher to fire only on the gated sinks — the sink
+          // classification inside the hook is the source of truth,
+          // the matcher is a perf hint.
           {
-            matcher:
-              '^(mcp__composio__(gmail_(send|reply)|slack_(post|send))\\w*|mcp__nanoclaw__send_message_to_chat)$',
+            matcher: '^mcp__nanoclaw__send_message_to_chat$',
             hooks: [createEgressAllowlistHook(fs)],
           },
           // #320 — block agent-side mutations to the allowlist file.
@@ -3921,8 +3770,8 @@ async function runQuery(
         // only tool family `updatedMCPToolOutput` can mutate.
         // #140 — flag fabricated-ID signatures (sequential email_01..,
         // pr1_notif, promo_001) in MCP tool returns.
-        // #321 PR 2 — wrap MCP read-tool results (Composio gmail/
-        // calendar/slack/github reads) in `<untrusted-input source>` so
+        // #321 PR 2 — wrap MCP read-tool results in
+        // `<untrusted-input source>` so
         // #322's walk-back has a single in-band signal to grep for.
         // SDK invokes hooks in registration order: sanitizer normalises
         // bytes first, fidelity inspects raw text before the envelope
@@ -3936,8 +3785,8 @@ async function runQuery(
             matcher: 'mcp__.*',
             hooks: [
               createMcpToolResultSanitizerHook(),
-              createComposioFidelityHook(),
-              createUntrustedInputWrapHook(getSummariseBodyOpts()),
+              createMcpFidelityHook(),
+              createUntrustedInputWrapHook(),
               // #325 — flag-flip on MCP read-tool emission. Reuses
               // `inferReadSource` so a future allowlist row that
               // adds a new prefix flips the flag automatically
@@ -4664,7 +4513,7 @@ async function main(): Promise<void> {
                 matcher: 'mcp__.*',
                 hooks: [
                   createMcpToolResultSanitizerHook(),
-                  createComposioFidelityHook(),
+                  createMcpFidelityHook(),
                 ],
               },
             ],

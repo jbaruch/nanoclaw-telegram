@@ -63,11 +63,10 @@ const ENTITIES: AuthoritativeEntity[] = [
     id: 'nanoclaw-repo',
     label: 'the canonical NanoClaw repo target',
     pointer: '/workspace/trusted/memory/reference_nanoclaw_repo.md',
-    // Composio search/list tools and WebSearch are the documented
-    // misroute surface — the agent searches GitHub or the web for
-    // "nanoclaw" and grabs the upstream/qwibitai fork instead of the
-    // canonical jbaruch fork.
-    toolNames: [/^mcp__composio__.*(search|list).*/i, /^WebSearch$/],
+    // WebSearch is the documented misroute surface — the agent
+    // searches the web for "nanoclaw" and grabs the upstream/qwibitai
+    // fork instead of the canonical jbaruch fork.
+    toolNames: [/^WebSearch$/],
     inputPattern: /\bnanoclaw\b/i,
   },
   {

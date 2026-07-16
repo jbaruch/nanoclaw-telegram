@@ -6,37 +6,27 @@ import {
 } from './authoritative-source.js';
 
 describe('detectAuthoritativeLookup', () => {
-  describe('nanoclaw-repo via composio search/list', () => {
-    const matchedTools = [
-      'mcp__composio__GITHUB_SEARCH_REPOSITORIES',
-      'mcp__composio__github_search_issues',
-      'mcp__composio__github_list_pull_requests',
-      'WebSearch',
-    ];
-    for (const toolName of matchedTools) {
-      it(`nudges when ${toolName} queries for "nanoclaw"`, () => {
-        const result = detectAuthoritativeLookup(toolName, {
-          query: 'nanoclaw upgrade node 25',
-        });
-        expect(result.nudge).toBe(true);
-        expect(result.matched?.id).toBe('nanoclaw-repo');
-        expect(result.systemMessage).toContain('reference_nanoclaw_repo.md');
+  describe('nanoclaw-repo via WebSearch', () => {
+    it('nudges when WebSearch queries for "nanoclaw"', () => {
+      const result = detectAuthoritativeLookup('WebSearch', {
+        query: 'nanoclaw upgrade node 25',
       });
-    }
+      expect(result.nudge).toBe(true);
+      expect(result.matched?.id).toBe('nanoclaw-repo');
+      expect(result.systemMessage).toContain('reference_nanoclaw_repo.md');
+    });
 
     it('is silent when the search has no nanoclaw mention', () => {
-      const result = detectAuthoritativeLookup(
-        'mcp__composio__github_search_issues',
-        { query: 'react useEffect cleanup pattern' },
-      );
+      const result = detectAuthoritativeLookup('WebSearch', {
+        query: 'react useEffect cleanup pattern',
+      });
       expect(result.nudge).toBe(false);
     });
 
-    it('is silent on a composio call that is not search/list', () => {
-      const result = detectAuthoritativeLookup(
-        'mcp__composio__github_create_issue',
-        { repo: 'nanoclaw', title: 'foo' },
-      );
+    it('is silent on an MCP tool outside the nudge families', () => {
+      const result = detectAuthoritativeLookup('mcp__tessl__search', {
+        query: 'nanoclaw',
+      });
       expect(result.nudge).toBe(false);
     });
   });

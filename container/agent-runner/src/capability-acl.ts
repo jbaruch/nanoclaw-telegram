@@ -40,28 +40,6 @@
 import { SourcePrefix } from './untrusted-input-sources.js';
 
 /**
- * Allowed-sink table per source prefix.
- *
- * Each entry is matched against the tool name by `isToolAllowed` —
- * strings are matched with EXACT equality (so `Read` does not match
- * `ReadMore`); regexes are matched with `RegExp#test`. Tool names
- * follow the SDK conventions:
- *   - Built-in tools: `Read`, `Write`, `Edit`, `Bash`, `WebFetch`, etc.
- *   - MCP tools: `mcp__<server>__<action>`, e.g. `mcp__nanoclaw__send_message`.
- *
- * The table is intentionally conservative — it's safer to add a sink to
- * an allowlist when a real workflow needs it than to discover after a
- * prompt-injection that a permissive default let an exfil through.
- *
- * Read-tool patterns are spelled out here (not imported from
- * `untrusted-input-wrap.ts`) because that module's allowlist is
- * for WHICH tool results to wrap; this one is for WHICH sinks
- * untrusted-provenance can REACH. Different concerns, different lists.
- */
-const READ_ONLY_COMPOSIO =
-  /^mcp__composio__\w+?_(fetch|get|list|search|find|read|history)\w*$/i;
-
-/**
  * Outbound sinks that #320's egress allowlist gates at destination
  * level. They appear in #322's allow set so the chain is permitted to
  * REACH them; #320 then verifies the destination against
@@ -70,8 +48,6 @@ const READ_ONLY_COMPOSIO =
  * allowlist could never grant exceptions for legitimate destinations.
  */
 const EGRESS_SINKS: ReadonlyArray<RegExp | string> = [
-  /^mcp__composio__gmail_(send|reply)\w*$/i,
-  /^mcp__composio__slack_(post|send)\w*$/i,
   'mcp__nanoclaw__send_message_to_chat',
 ];
 
@@ -105,7 +81,6 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
     'Write',
     'Edit',
     'Bash',
-    READ_ONLY_COMPOSIO,
     /^mcp__tessl__/,
     'Agent',
     'Task',
@@ -120,19 +95,17 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
     ...COMMON_INERT_SINKS,
     'mcp__nanoclaw__send_message',
     'mcp__nanoclaw__react_to_message',
-    READ_ONLY_COMPOSIO,
     ...EGRESS_SINKS,
   ],
 
   // Web content via WebFetch or agent-browser. The injection vector
   // most likely to carry "now go email/post/exfil X" instructions —
-  // restrict outbound to read-only Composio + own-chat reply.
+  // restrict outbound to own-chat reply.
   web: [
     ...COMMON_INERT_SINKS,
     'mcp__nanoclaw__send_message',
     'Write',
     'Edit',
-    READ_ONLY_COMPOSIO,
     ...EGRESS_SINKS,
   ],
   'agent-browser': [
@@ -140,51 +113,16 @@ const SINK_ALLOWLISTS: Record<SourcePrefix, ReadonlyArray<RegExp | string>> = {
     'mcp__nanoclaw__send_message',
     'Write',
     'Edit',
-    READ_ONLY_COMPOSIO,
     ...EGRESS_SINKS,
   ],
 
-  // Email/calendar/Slack/GitHub/Tessl read content. Same posture as
-  // `web:*` — these are external bytes that could carry instructions.
-  gmail: [
-    ...COMMON_INERT_SINKS,
-    'mcp__nanoclaw__send_message',
-    'Write',
-    'Edit',
-    READ_ONLY_COMPOSIO,
-    ...EGRESS_SINKS,
-  ],
-  calendar: [
-    ...COMMON_INERT_SINKS,
-    'mcp__nanoclaw__send_message',
-    'Write',
-    'Edit',
-    READ_ONLY_COMPOSIO,
-    ...EGRESS_SINKS,
-  ],
-  slack: [
-    ...COMMON_INERT_SINKS,
-    'mcp__nanoclaw__send_message',
-    'Write',
-    'Edit',
-    READ_ONLY_COMPOSIO,
-    ...EGRESS_SINKS,
-  ],
-  github: [
-    ...COMMON_INERT_SINKS,
-    'mcp__nanoclaw__send_message',
-    'Write',
-    'Edit',
-    READ_ONLY_COMPOSIO,
-    ...EGRESS_SINKS,
-  ],
+  // Tessl read content — external bytes that could carry instructions.
   tessl: [
     ...COMMON_INERT_SINKS,
     'mcp__nanoclaw__send_message',
-    READ_ONLY_COMPOSIO,
     // Tessl tool results are external bytes (curated, but still
-    // outside the operator's typed input). Same posture as web/gmail/
-    // etc.: outbound is structurally allowed so the destination filter
+    // outside the operator's typed input). Same posture as `web:`:
+    // outbound is structurally allowed so the destination filter
     // (#320) takes over. Keeps the egress gate consistent across
     // every external-source row except `file:` (which has no
     // outbound at all on purpose).
