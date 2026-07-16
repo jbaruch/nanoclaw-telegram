@@ -538,7 +538,7 @@ echo ""
 #   1. `source = 'schedule-task'` — never touches cadence-registry
 #      rows that this script's later container restart will manage.
 #   2. `schedule_type` matches the legacy shape: `'interval'` for
-#      heartbeat/composio-fetch (30-min cadences), `'cron'` for
+#      heartbeat/google-fetch (30-min cadences), `'cron'` for
 #      morning-brief (`0 7 * * *`). Pinned per-skill so that an
 #      owner-scheduled row of the OTHER shape that happens to invoke
 #      the same skill (rare but legal) stays untouched.
@@ -567,7 +567,6 @@ const db = new Database("/app/store/messages.db");
 // false-positive deletion.
 const MIGRATED = [
     ["tessl__heartbeat", "interval"],
-    ["tessl__composio-fetch", "interval"],
     ["tessl__morning-brief", "cron"],
     ["tessl__memory-rotation", "cron"],
     ["tessl__nightly-backup", "cron"],

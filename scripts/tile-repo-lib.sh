@@ -196,9 +196,9 @@ validate_placement() {
 
   local admin_pattern
   if [ "$tile" = "nanoclaw-untrusted" ]; then
-    admin_pattern='composio|gmail|calendar|tasks|schedule_task|promote|host_script|sync_tripit|fetch_trakt'
+    admin_pattern='gmail|calendar|tasks|schedule_task|promote|host_script|sync_tripit|fetch_trakt'
   else
-    admin_pattern='composio|gmail|googlecalendar|googletasks|sessionize|sync_tripit|fetch_trakt|promote_staging|github_backup|register_group'
+    admin_pattern='gmail|googlecalendar|googletasks|sessionize|sync_tripit|fetch_trakt|promote_staging|github_backup|register_group'
   fi
 
   if ! $skip_admin_regex; then

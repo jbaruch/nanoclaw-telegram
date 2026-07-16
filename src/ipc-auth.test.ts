@@ -2617,7 +2617,7 @@ describe('set_task_agent_model', () => {
       id,
       group_folder: groupFolder,
       chat_jid: groupFolder === 'whatsapp_main' ? 'main@g.us' : 'other@g.us',
-      prompt: 'Skill(skill: "tessl__composio-fetch")',
+      prompt: 'Skill(skill: "tessl__google-fetch")',
       schedule_type: 'cron',
       schedule_value: '*/30 * * * *',
       context_mode: 'isolated',
@@ -2789,10 +2789,10 @@ describe('set_task_agent_model', () => {
       `INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, status, created_at, created_by_role, source, agent_model)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'cadence-registry', NULL)`,
       [
-        'cadence-registry::other-group::tessl__composio-fetch',
+        'cadence-registry::other-group::tessl__google-fetch',
         'other-group',
         'other@g.us',
-        'Skill(skill: "tessl__composio-fetch")',
+        'Skill(skill: "tessl__google-fetch")',
         'cron',
         '*/30 * * * *',
         'active',
@@ -2804,7 +2804,7 @@ describe('set_task_agent_model', () => {
     await processTaskIpc(
       {
         type: 'set_task_agent_model',
-        taskId: 'cadence-registry::other-group::tessl__composio-fetch',
+        taskId: 'cadence-registry::other-group::tessl__google-fetch',
         agentModel: 'haiku',
       },
       'whatsapp_main',
@@ -2813,7 +2813,7 @@ describe('set_task_agent_model', () => {
     );
 
     const task = getTaskById(
-      'cadence-registry::other-group::tessl__composio-fetch',
+      'cadence-registry::other-group::tessl__google-fetch',
     );
     expect(task).toBeDefined();
     // Refused — column unchanged. Operator must change SKILL.md

@@ -10,9 +10,8 @@ describe('container/Dockerfile', () => {
     // The cost-monitor dashboard skills (precheck-gating-monitor,
     // session-cap-monitor, daily-spend-rollup) shell out to `gh` for
     // dashboard-issue edits. Without `gh` on PATH inside the container,
-    // GITHUB_TOKEN forwarding is dead weight — the skills would fall
-    // back to the Composio MCP tool-schema cache_create tax the
-    // forwarding exists to avoid.
+    // GITHUB_TOKEN forwarding is dead weight — the skills would have no
+    // way to reach the GitHub API at all.
     expect(contents).toMatch(/apt-get install -y[^\n]*\bgh\b/);
   });
 });

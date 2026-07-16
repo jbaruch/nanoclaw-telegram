@@ -6,7 +6,7 @@ import type { StateMigration } from '../db.js';
  *
  * Today `tz_state.current_tz` is written by the LLM-side `task-tz-sync`
  * skill, which derives TZ from a parallel pipeline (Flighty Google
- * Calendar via `composio-fetch` + `travel-schedule.json` fallback).
+ * Calendar via `google-fetch` + `travel-schedule.json` fallback).
  * That pipeline disagreed with the host-side `sync_tripit` (the actual
  * canonical source) on 2026-05-09 and produced
  * jbaruch/nanoclaw-admin#224.
