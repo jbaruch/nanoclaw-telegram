@@ -8,7 +8,7 @@
  *    hook. Blocking polls (`block !== false`) leak a raw chunk of the
  *    sub-agent's JSONL transcript on timeout, which is how the
  *    2026-04-24 maintenance session was poisoned with invisible-Unicode
- *    padding from a Composio Gmail body.
+ *    padding from a Gmail body.
  *
  *  - `sanitizeToolResponse`       — sanitizer for the MCP `PostToolUse`
  *    hook. Strips Cf-category (invisible) characters and caps each
@@ -186,7 +186,7 @@ export function shouldDenyTaskOutputBlock(toolInput: unknown): {
       'TaskOutput(block=true) leaks the raw sub-agent JSONL transcript ' +
       'into this session on timeout — the exact mechanism that poisoned ' +
       'the maintenance session on 2026-04-24 with invisible-Unicode ' +
-      'padding from a Composio Gmail body. Call TaskOutput with ' +
+      'padding from a Gmail body. Call TaskOutput with ' +
       '`block: false` and poll status, or have the sub-agent write its ' +
       'final JSON to a known path under /workspace/group and read it ' +
       'with the Read tool.',

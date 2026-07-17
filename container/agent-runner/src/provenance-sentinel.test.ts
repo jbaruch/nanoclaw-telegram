@@ -258,9 +258,7 @@ describe('inferSentinelSource — other tools', () => {
     expect(inferSentinelSource('Edit', {})).toBeNull();
     expect(inferSentinelSource('Glob', { pattern: '**' })).toBeNull();
     expect(inferSentinelSource('Grep', { pattern: 'foo' })).toBeNull();
-    expect(
-      inferSentinelSource('mcp__composio__gmail_fetch_emails', {}),
-    ).toBeNull();
+    expect(inferSentinelSource('mcp__tessl__search', {})).toBeNull();
   });
 
   it('returns null for empty / non-object input', () => {

@@ -1300,7 +1300,7 @@ server.tool(
   'set_maintenance_agent_model',
   `Change a registered group's per-session-slot maintenanceAgentModel override without re-stating other containerConfig fields.
 
-Use this to demote the maintenance session (scheduled-task fires: heartbeat, composio-fetch, morning-brief, housekeeping) to a cheaper model while keeping the user-facing default session on the higher tier. Sits between per-task overrides (winner) and per-group overrides (loser) in the \`resolveSessionAgentModel\` ladder. Other containerConfig fields are preserved verbatim. Non-main tiers may call this on their own group only; cross-folder writes are rejected by the host's owner-of-bill check.`,
+Use this to demote the maintenance session (scheduled-task fires: heartbeat, google-fetch, morning-brief, housekeeping) to a cheaper model while keeping the user-facing default session on the higher tier. Sits between per-task overrides (winner) and per-group overrides (loser) in the \`resolveSessionAgentModel\` ladder. Other containerConfig fields are preserved verbatim. Non-main tiers may call this on their own group only; cross-folder writes are rejected by the host's owner-of-bill check.`,
   {
     groupFolder: z
       .string()
@@ -2178,7 +2178,7 @@ const TILE_NAMES = [
 if (isMain) {
   server.tool(
     'promote_staging',
-    'Promote staged skills and rules to a tile repo. Copies staging into a fresh clone, runs a read-only `tessl skill review` pass on each promoted skill when `tessl` is on PATH (reports score; never mutates content; skipped with a warning when unavailable — Copilot + the post-merge GHA review still gate the PR), pushes a timestamped `promote/<utc>-<tile>-<rand>` branch, opens a PR on the tile repo, and summons Copilot review via GraphQL. Does NOT merge, push to main, or publish to the registry — merge is manual (or via Composio), publish fires in GHA at merge time, and the agent calls `tessl_update` afterwards to pull the new version. Main group only.',
+    'Promote staged skills and rules to a tile repo. Copies staging into a fresh clone, runs a read-only `tessl skill review` pass on each promoted skill when `tessl` is on PATH (reports score; never mutates content; skipped with a warning when unavailable — Copilot + the post-merge GHA review still gate the PR), pushes a timestamped `promote/<utc>-<tile>-<rand>` branch, opens a PR on the tile repo, and summons Copilot review via GraphQL. Does NOT merge, push to main, or publish to the registry — merge is manual, publish fires in GHA at merge time, and the agent calls `tessl_update` afterwards to pull the new version. Main group only.',
     {
       tileName: z.enum(TILE_NAMES).describe('Target tile repo.'),
       skillName: z
@@ -2598,7 +2598,7 @@ if (isMain) {
 // containers (see `src/container-runner.ts`); on untrusted containers
 // the mount isn't writable (in most setups, it isn't mounted at all),
 // so a call from untrusted would fail at the OS level with a
-// structured error. The Composio / web / cross-group / email
+// structured error. The web / cross-group / external-content
 // provenance ACL (`capability-acl.ts`) does NOT list this tool as an
 // allowed sink under any external-content prefix, so chains carrying
 // untrusted-provenance markers are denied at the ACL layer before

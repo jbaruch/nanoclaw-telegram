@@ -159,9 +159,6 @@ sqlite3 ~/nanoclaw/store/messages.db "UPDATE scheduled_tasks SET prompt='new pro
 | `TELEGRAM_BOT_TOKEN` | @BotFather | Orchestrator (main bot) |
 | `TELEGRAM_BOT_POOL` | @BotFather (6 bots) | Orchestrator (agent swarm) |
 | `OPENAI_API_KEY` | platform.openai.com | Voice transcription (Whisper) |
-| `COMPOSIO_API_KEY` | app.composio.dev | Agent containers, main/trusted only. Project-scoped `ak_*` key; sent as `x-api-key` to BOTH Composio surfaces — REST (`composio-fetch` precheck) and the headless custom MCP server (`mcp__composio__*`: Gmail, Calendar, Tasks). |
-| `COMPOSIO_MCP_URL` | app.composio.dev (custom MCP server) | Agent containers, main/trusted only. URL of the headless custom MCP server (`backend.composio.dev/v3/mcp/<id>/mcp`); the agent runner appends `?user_id=$COMPOSIO_USER_ID` and authenticates with `x-api-key`. Replaced the retired `COMPOSIO_MCP_KEY` after Composio's consumer "Connect" gateway moved to interactive OAuth. Account-identifying server id → env-file 0600 like the key. |
-| `COMPOSIO_USER_ID` | app.composio.dev (connected-accounts list) | Agent containers, main/trusted only (binds Composio REST + MCP calls to the user's connected accounts; account-identifying, treated like the API key) |
 | `GITHUB_TOKEN` | github.com/settings/tokens | Host scripts (git push via IPC) with the real `.env` value; **and** the `gh` CLI in main/trusted containers via OneCLI placeholder + gateway swap (`ONECLI_MANAGED_VARS`) — cost-monitor dashboard skills run `gh issue edit/comment` |
 | `BYAIR_MCP_URL` | byairapp.com/mcp (Pro) | Agent containers, main/trusted only. byAir flight-status polling (`jbaruch/nanoclaw-travel` flight-assist precheck); API key inline in the URL → forwarded real (env-file 0600; query-embedded, injection-gap) |
 | `GOOGLE_MAPS_API_KEY` | console.cloud.google.com | Agent containers, main/trusted only. Distance Matrix traffic-aware time-to-leave (same tile). OneCLI-managed (placeholder + swap) |
@@ -184,11 +181,10 @@ Forwarded-into-container credentials live in `src/container-runner.ts` (`CONTAIN
 
 **Still forwarded as real** (env-file 0600) — OneCLI can't vault these yet or they're retiring:
 
-- The three Composio values — `COMPOSIO_API_KEY` (`x-api-key` for both Composio REST and the headless custom MCP server), `COMPOSIO_MCP_URL` (the account-specific `/v3/mcp/<id>/mcp` URL), and `COMPOSIO_USER_ID` (account-identifying). Retiring with #639.
 - `BYAIR_MCP_URL` — byAir flight-status polling; token inline in the query string (OneCLI query-param injection not yet available).
 - `SESSIONIZE_*` — CFP discovery/verification; key embedded in the URL path (OneCLI path-segment injection not yet available).
 
-All forward to main/trusted tiers only, **never** untrusted. Everything else stays host-side and is reached through host scripts invoked via IPC. `docs/SECURITY.md` §4 is the authoritative per-tier view. Finishing the OneCLI migration (#564) — retiring Composio and growing OneCLI path/query injection — is the remaining work.
+All forward to main/trusted tiers only, **never** untrusted. Google (Gmail, Calendar, Tasks, Drive) needs no container credential — the OneCLI gateway injects and refreshes the OAuth Bearer on the wire (#638). Everything else stays host-side and is reached through host scripts invoked via IPC. `docs/SECURITY.md` §4 is the authoritative per-tier view. Finishing the OneCLI migration (#564) — growing OneCLI path/query injection — is the remaining work.
 
 ## Agent Container Capabilities
 
@@ -198,7 +194,6 @@ Installed in the agent image (`container/Dockerfile`):
 - **poppler-utils** (`pdftotext` for PDF text extraction)
 - **Whisper** (voice transcription via OpenAI API, runs in orchestrator)
 - **Tessl** (tile skills, library docs MCP)
-- **Composio** (Google Calendar, Gmail, etc. via HTTP MCP)
 
 Media handling in orchestrator (`telegram.ts`):
 - **Photos**: downloaded to `/workspace/group/images/`, path passed to agent

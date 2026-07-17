@@ -85,7 +85,7 @@ describe('classifyTool', () => {
     expect(classifyTool('mcp__nanoclaw__send_message')).toBeNull();
     expect(classifyTool('TaskOutput')).toBeNull();
     expect(classifyTool('TaskStop')).toBeNull();
-    expect(classifyTool('mcp__composio__gmail_send_email')).toBeNull();
+    expect(classifyTool('mcp__tessl__search')).toBeNull();
   });
 });
 

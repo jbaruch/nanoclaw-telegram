@@ -175,7 +175,7 @@ function buildReinjection(matches: LazyVerificationMatch[]): string {
     'Before reporting unverifiable, try at least one real verification ' +
     'tool in this priority order: ' +
     '(1) a JS-capable browser (Cloudflare Browser Rendering / Playwright), ' +
-    '(2) a domain API (Composio / MCP), ' +
+    '(2) a domain API (MCP / REST), ' +
     '(3) WebFetch for static HTML, ' +
     '(4) code execution. ' +
     'If genuinely unverifiable, report the explicit "Tried X — got Y; ' +

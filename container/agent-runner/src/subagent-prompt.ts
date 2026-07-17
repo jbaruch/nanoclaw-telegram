@@ -20,7 +20,7 @@
  * installed skill's name plus the full rule/behavior chain — as agent
  * context on session creation, so it is re-created on every cold cache.
  *
- * Maintenance-session spawns (cadence tasks: heartbeat, composio-fetch,
+ * Maintenance-session spawns (cadence tasks: heartbeat, google-fetch,
  * morning-brief, nightly-*) provably never call `Task`/`TeamCreate` —
  * 0 of 7869 production maintenance runs over the audit window spawned a
  * subagent — yet they fire on short cadences (e.g. every 30 min) that
