@@ -9,6 +9,7 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
+    "typecheck:agent-runner": "tsc --noEmit -p container/agent-runner/tsconfig.test.json",
     "format": "prettier --write \"src/**/*.ts\" \"scripts/**/*.ts\" \"setup/**/*.ts\" \"container/agent-runner/src/**/*.ts\"",
     "format:fix": "prettier --write \"src/**/*.ts\" \"scripts/**/*.ts\" \"setup/**/*.ts\" \"container/agent-runner/src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"scripts/**/*.ts\" \"setup/**/*.ts\" \"container/agent-runner/src/**/*.ts\"",
