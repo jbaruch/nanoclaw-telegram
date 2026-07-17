@@ -1,0 +1,22 @@
+{
+  // Typecheck-only config that INCLUDES `src/**/*.test.ts`.
+  //
+  // `tsconfig.json` excludes the tests because it also drives the
+  // emit-to-dist build (`rootDir: ./src`, `outDir: ./dist`) — compiling
+  // tests would ship them in the image. That exclusion meant no tsc run
+  // ever read a test file, so type errors in them shipped silently
+  // (jbaruch/nanoclaw#795).
+  //
+  // `vitest` is not a dependency of this package: its tests run under the
+  // ROOT vitest config (`vitest.config.ts` includes
+  // `container/agent-runner/src/**/*.test.ts`), and tsc resolves the import
+  // the same way node does — by walking up to the root `node_modules`. So
+  // the root's `npm ci` must have run before this config is used. CI does
+  // that earlier in the same job; locally, run `npm ci` at the repo root.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
