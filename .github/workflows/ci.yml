@@ -54,9 +54,21 @@ jobs:
         working-directory: container/agent-runner
         run: npm ci
 
-      - name: Typecheck (agent-runner)
-        working-directory: container/agent-runner
-        run: npx tsc --noEmit
+      # Two configs, deliberately:
+      #   tsconfig.json      — the package's build (emits to dist/), so it
+      #                        excludes `src/**/*.test.ts`; compiling tests
+      #                        would ship them in the image.
+      #   tsconfig.test.json — noEmit, includes the tests.
+      # A bare `tsc --noEmit` here silently reads the FIRST one, which is how
+      # test files went untypechecked while a step named "Typecheck
+      # (agent-runner)" passed (#795).
+      #
+      # Run from the repo root, not this package: the root vitest config owns
+      # these test files and the root manifest declares `vitest`, so the root
+      # owns their typecheck. Needs both installs — the root's (step above)
+      # and the agent-runner's (step directly above this one).
+      - name: Typecheck (agent-runner, incl. tests)
+        run: npm run typecheck:agent-runner
 
       # Python tests live alongside scripts that need them. Stdlib
       # unittest only — no pytest dependency to install. Wired here
