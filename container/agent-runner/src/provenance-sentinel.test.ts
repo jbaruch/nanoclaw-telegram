@@ -300,8 +300,8 @@ describe('formatSentinel', () => {
     ).toBe(
       'PROVENANCE_MARKER: source="web:https://x.io/?a=1&amp;b=2" tool_use_id="tu_1"',
     );
-    expect(formatSentinel({ prefix: 'gmail', value: '<msg>' }, 'tu_1')).toBe(
-      'PROVENANCE_MARKER: source="gmail:&lt;msg&gt;" tool_use_id="tu_1"',
+    expect(formatSentinel({ prefix: 'tessl', value: '<msg>' }, 'tu_1')).toBe(
+      'PROVENANCE_MARKER: source="tessl:&lt;msg&gt;" tool_use_id="tu_1"',
     );
   });
 

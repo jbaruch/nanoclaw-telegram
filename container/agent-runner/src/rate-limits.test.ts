@@ -37,12 +37,12 @@ describe('classifyProvenance', () => {
     expect(classifyProvenance(p(['web']), true)).toBe('untrusted-source');
   });
 
-  it('gmail → untrusted-source', () => {
-    expect(classifyProvenance(p(['gmail']), true)).toBe('untrusted-source');
+  it('tessl → untrusted-source', () => {
+    expect(classifyProvenance(p(['tessl']), true)).toBe('untrusted-source');
   });
 
   it('multiple untrusted-source prefixes → untrusted-source', () => {
-    expect(classifyProvenance(p(['web', 'gmail', 'tessl']), true)).toBe(
+    expect(classifyProvenance(p(['web', 'file', 'tessl']), true)).toBe(
       'untrusted-source',
     );
   });
@@ -52,7 +52,7 @@ describe('classifyProvenance', () => {
   });
 
   it('cross-group AND multiple untrusted-source → mixed', () => {
-    expect(classifyProvenance(p(['cross-group', 'web', 'gmail']), false)).toBe(
+    expect(classifyProvenance(p(['cross-group', 'web', 'tessl']), false)).toBe(
       'mixed',
     );
   });
@@ -270,7 +270,7 @@ describe('decideRate — untrusted-source (web injection scenario)', () => {
     };
     const decision = decideRate(
       'schedule_task',
-      p(['gmail']),
+      p(['tessl']),
       true,
       counters,
       DEFAULT_CAP_MATRIX,
@@ -552,7 +552,7 @@ describe('decideRate reason text', () => {
     };
     const decision = decideRate(
       'agent_spawn',
-      p(['web', 'gmail']),
+      p(['web', 'tessl']),
       true,
       counters,
       DEFAULT_CAP_MATRIX,
@@ -560,6 +560,6 @@ describe('decideRate reason text', () => {
     );
     if (decision.kind !== 'deny') throw new Error('expected deny');
     expect(decision.reason).toContain('web');
-    expect(decision.reason).toContain('gmail');
+    expect(decision.reason).toContain('tessl');
   });
 });

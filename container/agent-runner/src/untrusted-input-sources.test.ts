@@ -6,8 +6,8 @@ describe('formatSource', () => {
     expect(formatSource('web', 'https://example.com/page')).toBe(
       'web:https://example.com/page',
     );
-    expect(formatSource('gmail', 'msg_id=18f2a3b4c5d6e7f8')).toBe(
-      'gmail:msg_id=18f2a3b4c5d6e7f8',
+    expect(formatSource('tessl', 'search=nanoclaw')).toBe(
+      'tessl:search=nanoclaw',
     );
     expect(formatSource('untrusted-container', 'news-group')).toBe(
       'untrusted-container:news-group',
@@ -39,8 +39,8 @@ describe('wrapUntrustedInput', () => {
   });
 
   it('escapes < and > in source values', () => {
-    expect(wrapUntrustedInput('x', 'gmail', 'msg=<id>')).toBe(
-      '<untrusted-input source="gmail:msg=&lt;id&gt;">\nx\n</untrusted-input>',
+    expect(wrapUntrustedInput('x', 'tessl', 'q=<id>')).toBe(
+      '<untrusted-input source="tessl:q=&lt;id&gt;">\nx\n</untrusted-input>',
     );
   });
 
