@@ -68,7 +68,15 @@ ENV AGENT_BROWSER_SCREENSHOT_QUALITY=75
 
 # Install agent-browser and claude-code globally
 # (tessl is not needed — tiles are delivered host-side by the orchestrator)
-RUN npm install -g agent-browser @anthropic-ai/claude-code
+#
+# Pinned so two rebuilds of the same commit produce the same image
+# (`coding-policy: dependency-management` Pinning). Unpinned, the agent's
+# own runtime could change under a rebuild that carries no diff — including
+# a `deploy.sh --no-cache` run whose stated purpose was something else.
+# Renewal is a committed scanner, not memory: `.github/renovate.json`'s
+# `custom.regex` manager watches these two literals and opens a bump PR, so
+# a version change is reviewed rather than silently inherited (#796).
+RUN npm install -g agent-browser@0.32.1 @anthropic-ai/claude-code@2.1.212
 
 # Create app directory
 WORKDIR /app
