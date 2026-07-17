@@ -518,27 +518,12 @@ export function atomicPublishDir(srcDir: string, dstDir: string): void {
  * `-e KEY=value` is fine.
  *
  * What counts as "sensitive" for this set:
- *   - Real credentials (API keys, OAuth tokens, etc.). Composio uses
- *     the project-scoped `ak_*` key (`COMPOSIO_API_KEY`, header
- *     `x-api-key`, #107) for BOTH surfaces it exposes to us:
- *       - REST (`backend.composio.dev/api/v3`) — read by the
- *         inline-fetch path in `tessl__composio-fetch`'s precheck
- *         (admin tile).
- *       - A headless custom MCP server
- *         (`backend.composio.dev/v3/mcp/<id>/mcp`, also `x-api-key`)
- *         whose URL lives in `COMPOSIO_MCP_URL` — read by the agent
- *         runner's MCP server registration so `mcp__composio__*` tools
- *         authenticate.
- *     The consumer "Connect" gateway (`connect.composio.dev/mcp`)
- *     migrated to interactive AuthKit-JWT OAuth and can't run in an
- *     unattended container, so the old `ck_*` `COMPOSIO_MCP_KEY` is
- *     gone — both surfaces now share the one `ak_*` key.
+ *   - Real credentials (API keys, OAuth tokens, etc.).
  *   - Account-identifying values that aren't strictly credentials but
  *     would let an observer correlate the container to a specific user
- *     account at the upstream provider (`COMPOSIO_USER_ID` per #509 —
- *     binds Composio calls to a specific user's connected accounts;
- *     leaking it on `docker ps` would identify the account even
- *     though the value is not a credential on its own).
+ *     account at the upstream provider (an embedded server/account id
+ *     in a URL, say — leaking it on `docker ps` would identify the
+ *     account even though the value is not a credential on its own).
  * The unifying contract is "nothing the docker command line should
  * reveal", not "only literal credentials".
  *
@@ -561,29 +546,11 @@ export function atomicPublishDir(srcDir: string, dstDir: string): void {
  * the command line.
  */
 export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
-  'COMPOSIO_API_KEY',
-  // Composio headless custom-MCP-server URL (`/v3/mcp/<id>/mcp`). Read
-  // by the agent runner's MCP server registration; the embedded server
-  // id is account/project-identifying, so it gets the same env-file
-  // treatment as COMPOSIO_USER_ID to stay off `ps`/`docker ps`. Auth is
-  // COMPOSIO_API_KEY via `x-api-key` — there is no separate MCP key.
-  'COMPOSIO_MCP_URL',
-  // Composio user_id bound to the connected accounts in the project
-  // the COMPOSIO_API_KEY authenticates as. Not a credential per se —
-  // identifies WHICH user's connections to act against — but it's
-  // account-identifying and gets the same env-file treatment as the
-  // API key so it doesn't appear on `ps`/`docker ps` output. Required
-  // by `tessl__composio-fetch`'s precheck (admin tile, jbaruch/nanoclaw#509)
-  // to do the fetch inline via Composio REST instead of waking the LLM.
-  'COMPOSIO_USER_ID',
   // Fine-grained GitHub PAT for the `gh` CLI inside main/trusted-tier
   // containers. Same .env entry the host-side `github_backup` IPC
   // handler uses for `git push`; forwarding it into the container lets
-  // skills run `gh issue list/edit/comment` directly without going
-  // through Composio's MCP catalog (avoids cache_create on the GitHub
-  // tool schemas for high-fire-count skills like the cost-monitor
-  // dashboard family — `precheck-gating-monitor`, `session-cap-monitor`,
-  // `daily-spend-rollup`). `gh` reads `GITHUB_TOKEN` automatically —
+  // skills run `gh issue list/edit/comment` directly. `gh` reads
+  // `GITHUB_TOKEN` automatically —
   // no `gh auth login` needed inside the container. The fact that this
   // still lives in the container's environ for the spawn lifetime is
   // the OneCLI-proxy migration target tracked in jbaruch/nanoclaw#564.
@@ -603,9 +570,8 @@ export const SECRET_CONTAINER_VARS: ReadonlySet<string> = new Set([
   // Secret so the key stays off `ps`/`docker ps`, same as the Maps key.
   'TOMTOM_API_KEY',
   // YouTube Data API v3 key — read by the admin tile's
-  // `youtube-comment-check` skill (Composio's YouTube toolkit has no
-  // comment-threads tool, so it calls the native API directly per
-  // jbaruch/nanoclaw-admin#339). Standard `AIzaSy...` key; goes through
+  // `youtube-comment-check` skill, which calls the native API directly
+  // per jbaruch/nanoclaw-admin#339. Standard `AIzaSy...` key; goes through
   // the env-file rather than `-e` so it stays off `ps`/`docker ps`.
   'YOUTUBE_API_KEY',
   // Sessionize speaker-profile API key — read by the conferences tile's
@@ -3076,12 +3042,11 @@ function buildContainerArgs(
   args.push('-e', `TZ=${TIMEZONE}`);
 
   // Credential tiers:
-  //   Main/Trusted: Composio + GitHub. Composio handles Gmail, Calendar,
-  //                 Tasks, and GitHub-via-OAuth; GITHUB_TOKEN handles
-  //                 GitHub-via-`gh`-CLI for high-fire-count automation
-  //                 (the cost-monitor dashboard skills) that would
-  //                 otherwise pay cache_create on the Composio GitHub
-  //                 tool schemas every cold maintenance spawn.
+  //   Main/Trusted: GITHUB_TOKEN for GitHub-via-`gh`-CLI, plus the
+  //                 per-tile API keys below. Google (Gmail, Calendar,
+  //                 Tasks, Drive) needs no container credential — the
+  //                 OneCLI gateway injects and refreshes the Bearer on
+  //                 the wire (jbaruch/nanoclaw#638).
   //   Other:        nothing (Anthropic via proxy only).
   //
   // All other host-side credentials (GOOGLE_*, RECLAIM_*, TRIPIT_*,
@@ -3090,9 +3055,6 @@ function buildContainerArgs(
   const isTrusted = group.containerConfig?.trusted === true;
 
   const CONTAINER_VARS = [
-    'COMPOSIO_API_KEY',
-    'COMPOSIO_MCP_URL',
-    'COMPOSIO_USER_ID',
     // Forwarded into main/trusted containers so the `gh` CLI authenticates
     // automatically. Same PAT the host-side github_backup handler uses
     // — the operator must expand its scope to cover `Contents: write`
@@ -3123,8 +3085,7 @@ function buildContainerArgs(
     'TOMTOM_API_KEY',
     // YouTube Data API v3 key — read by the admin tile's
     // `youtube-comment-check` skill, which calls the native API
-    // (commentThreads.list + videos.list) directly because Composio's
-    // YouTube toolkit has no comment-threads tool
+    // (commentThreads.list + videos.list) directly
     // (jbaruch/nanoclaw-admin#339). Marked SECRET below.
     'YOUTUBE_API_KEY',
     // Sessionize keys for the `jbaruch/nanoclaw-conferences` tile's

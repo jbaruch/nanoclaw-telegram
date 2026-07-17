@@ -87,13 +87,13 @@ describe('extractCompactProvenance', () => {
           content: [
             {
               type: 'tool_result',
-              content: sentinel('gmail', 'msg=abc123'),
+              content: sentinel('tessl', 'msg=abc123'),
             },
           ],
         },
       },
     ]);
-    expect([...extractCompactProvenance(jsonl)]).toEqual(['gmail:msg=abc123']);
+    expect([...extractCompactProvenance(jsonl)]).toEqual(['tessl:msg=abc123']);
   });
 
   it('extracts both encodings across the same transcript', () => {
@@ -103,13 +103,13 @@ describe('extractCompactProvenance', () => {
         type: 'user',
         message: {
           content: [
-            { type: 'tool_result', content: sentinel('calendar', 'evt=xyz') },
+            { type: 'tool_result', content: sentinel('file', 'evt=xyz') },
           ],
         },
       },
     ]);
     expect([...extractCompactProvenance(jsonl)].sort()).toEqual([
-      'calendar:evt=xyz',
+      'file:evt=xyz',
       'web:https://a.io',
     ]);
   });
@@ -132,12 +132,12 @@ describe('extractCompactProvenance', () => {
 
   it('preserves distinct sources even when they share a prefix', () => {
     const jsonl = jsonlOf([
-      { type: 'user', message: { content: wrap('gmail', 'msg=1', 'a') } },
-      { type: 'user', message: { content: wrap('gmail', 'msg=2', 'b') } },
+      { type: 'user', message: { content: wrap('tessl', 'msg=1', 'a') } },
+      { type: 'user', message: { content: wrap('tessl', 'msg=2', 'b') } },
     ]);
     expect([...extractCompactProvenance(jsonl)].sort()).toEqual([
-      'gmail:msg=1',
-      'gmail:msg=2',
+      'tessl:msg=1',
+      'tessl:msg=2',
     ]);
   });
 
@@ -152,11 +152,11 @@ describe('extractCompactProvenance', () => {
       '{"type":"user", malformed garbage',
       JSON.stringify({
         type: 'user',
-        message: { content: wrap('gmail', 'b', 'y') },
+        message: { content: wrap('tessl', 'b', 'y') },
       }),
     ].join('\n');
     expect([...extractCompactProvenance(lines)].sort()).toEqual([
-      'gmail:b',
+      'tessl:b',
       'web:a',
     ]);
   });
@@ -285,14 +285,14 @@ describe('buildPostCompactReminder', () => {
 
   it('emits one PROVENANCE_MARKER line per source', () => {
     const result = buildPostCompactReminder(
-      new Set(['web:https://a.io', 'gmail:msg=1']),
+      new Set(['web:https://a.io', 'tessl:msg=1']),
     );
     expect(result).not.toBeNull();
     expect(result).toMatch(
       /PROVENANCE_MARKER: source="web:https:\/\/a\.io" tool_use_id="compact-laundering-defence"/,
     );
     expect(result).toMatch(
-      /PROVENANCE_MARKER: source="gmail:msg=1" tool_use_id="compact-laundering-defence"/,
+      /PROVENANCE_MARKER: source="tessl:msg=1" tool_use_id="compact-laundering-defence"/,
     );
   });
 
@@ -300,10 +300,10 @@ describe('buildPostCompactReminder', () => {
     // The whole point: the reminder must round-trip through the
     // walk-back's prefix extractor and produce the same prefixes the
     // pre-compaction transcript carried.
-    const sources = new Set(['web:https://x.io', 'calendar:evt=1']);
+    const sources = new Set(['web:https://x.io', 'file:evt=1']);
     const reminder = buildPostCompactReminder(sources)!;
     const prefixes = extractMarkerPrefixes(reminder);
-    expect([...prefixes].sort()).toEqual(['calendar', 'web']);
+    expect([...prefixes].sort()).toEqual(['file', 'web']);
   });
 
   it('reminder text uses the canonical Encoding B regex form', () => {
@@ -624,14 +624,14 @@ describe('persistCompactProvenance', () => {
           type: 'user',
           message: { content: wrap('web', 'https://a.io', 'x') },
         },
-        { type: 'user', message: { content: wrap('gmail', 'msg=1', 'y') } },
+        { type: 'user', message: { content: wrap('tessl', 'msg=1', 'y') } },
       ]),
     );
     const stateDir = path.join(tmpRoot, 'state');
     const count = persistCompactProvenance(transcriptPath, stateDir, 'sess-A');
     expect(count).toBe(2);
     const sources = readAndClearSidecar(stateDir, 'sess-A');
-    expect([...sources].sort()).toEqual(['gmail:msg=1', 'web:https://a.io']);
+    expect([...sources].sort()).toEqual(['tessl:msg=1', 'web:https://a.io']);
   });
 
   it('returns 0 and skips sidecar when transcript has no markers', () => {
@@ -684,11 +684,11 @@ describe('end-to-end roundtrip', () => {
           type: 'user',
           message: {
             content: [
-              { type: 'tool_result', content: sentinel('gmail', 'msg=1') },
+              { type: 'tool_result', content: sentinel('tessl', 'msg=1') },
             ],
           },
         },
-        { type: 'user', message: { content: wrap('calendar', 'evt=q', 'y') } },
+        { type: 'user', message: { content: wrap('file', 'evt=q', 'y') } },
       ]),
     );
 
@@ -700,6 +700,6 @@ describe('end-to-end roundtrip', () => {
     // Walk-back-style prefix extraction over the synthetic reminder
     // returns the union of prefixes the pre-compaction transcript had.
     const prefixes = extractMarkerPrefixes(reminder);
-    expect([...prefixes].sort()).toEqual(['calendar', 'gmail', 'web']);
+    expect([...prefixes].sort()).toEqual(['file', 'tessl', 'web']);
   });
 });

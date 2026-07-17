@@ -108,7 +108,7 @@ export function buildStalenessReminder(resolvedPath: string): string {
     `MEMORY STALENESS: the bytes you just read came from ` +
     `${safePath}, which is a last-seen snapshot, not ground ` +
     `truth. Before mutating any external state (sending messages, ` +
-    `scheduling tasks, calling APIs, posting to Composio sinks) ` +
+    `scheduling tasks, calling APIs, posting to external sinks) ` +
     `based on this content, verify the value against the live ` +
     `source — current message, fresh API call, fresh DB query. ` +
     `Stale state is the default; never act on a memory file as ` +

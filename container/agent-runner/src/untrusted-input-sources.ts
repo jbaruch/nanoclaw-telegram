@@ -16,10 +16,6 @@ export type SourcePrefix =
   | 'untrusted-container'
   | 'cross-group'
   | 'web'
-  | 'gmail'
-  | 'calendar'
-  | 'slack'
-  | 'github'
   | 'tessl'
   | 'file'
   | 'agent-browser';

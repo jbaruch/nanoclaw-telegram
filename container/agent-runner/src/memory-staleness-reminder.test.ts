@@ -211,7 +211,7 @@ describe('buildStalenessReminder', () => {
     const reminder = buildStalenessReminder('/workspace/trusted/highlights.md');
     expect(reminder).toMatch(/sending messages/i);
     expect(reminder).toMatch(/scheduling tasks/i);
-    expect(reminder).toMatch(/composio/i);
+    expect(reminder).toMatch(/external sinks/i);
   });
 
   it("uses the literal phrase 'MEMORY STALENESS' as a recognizable header", () => {

@@ -1,22 +1,22 @@
 import { describe, it, expect } from 'vitest';
 
-import { detectComposioFidelity } from './composio-fidelity.js';
+import { detectMcpFidelity } from './mcp-fidelity.js';
 
-describe('detectComposioFidelity', () => {
+describe('detectMcpFidelity', () => {
   it('returns clean for null / empty / non-string input', () => {
-    expect(detectComposioFidelity(null).fabricated).toBe(false);
-    expect(detectComposioFidelity(undefined).fabricated).toBe(false);
-    expect(detectComposioFidelity('').fabricated).toBe(false);
+    expect(detectMcpFidelity(null).fabricated).toBe(false);
+    expect(detectMcpFidelity(undefined).fabricated).toBe(false);
+    expect(detectMcpFidelity('').fabricated).toBe(false);
   });
 
-  it('passes legitimate Composio results with hash-style ids', () => {
+  it('passes legitimate tool results with hash-style ids', () => {
     const result = {
       messages: [
         { id: 'gmail_thread_a3f12c91d4', subject: 'Hello' },
         { id: 'gmail_thread_b7e29d40f1', subject: 'Hi' },
       ],
     };
-    expect(detectComposioFidelity(result).fabricated).toBe(false);
+    expect(detectMcpFidelity(result).fabricated).toBe(false);
   });
 
   it('flags 18 sequential email_NN ids — the heartbeat 2026-04-26 case', () => {
@@ -25,7 +25,7 @@ describe('detectComposioFidelity', () => {
       (_, i) => `email_${String(i + 1).padStart(2, '0')}`,
     );
     const result = ids.map((id) => ({ id, subject: 'fake' }));
-    const decision = detectComposioFidelity(result);
+    const decision = detectMcpFidelity(result);
     expect(decision.fabricated).toBe(true);
     const finding = decision.findings.find(
       (f) => f.rule === 'sequential-prefix-ids',
@@ -41,7 +41,7 @@ describe('detectComposioFidelity', () => {
         id: `task_${String(i + 1).padStart(3, '0')}`,
       })),
     );
-    expect(detectComposioFidelity(text).fabricated).toBe(true);
+    expect(detectMcpFidelity(text).fabricated).toBe(true);
   });
 
   it('does NOT flag 5 hash-suffix ids (not numeric)', () => {
@@ -58,14 +58,14 @@ describe('detectComposioFidelity', () => {
         'task_92b310',
       ].map((id) => ({ id })),
     );
-    expect(detectComposioFidelity(result).fabricated).toBe(false);
+    expect(detectMcpFidelity(result).fabricated).toBe(false);
   });
 
   it('does NOT flag 4 sequential ids — below threshold', () => {
     const result = JSON.stringify(
       ['email_01', 'email_02', 'email_03', 'email_04'].map((id) => ({ id })),
     );
-    expect(detectComposioFidelity(result).fabricated).toBe(false);
+    expect(detectMcpFidelity(result).fabricated).toBe(false);
   });
 
   it('does NOT flag 6 NON-sequential numeric ids', () => {
@@ -79,7 +79,7 @@ describe('detectComposioFidelity', () => {
         'email_999',
       ].map((id) => ({ id })),
     );
-    expect(detectComposioFidelity(result).fabricated).toBe(false);
+    expect(detectMcpFidelity(result).fabricated).toBe(false);
   });
 
   it('flags pr_notif fabrication shape', () => {
@@ -90,7 +90,7 @@ describe('detectComposioFidelity', () => {
         { id: 'pr3_notif' },
       ],
     });
-    const decision = detectComposioFidelity(result);
+    const decision = detectMcpFidelity(result);
     expect(decision.fabricated).toBe(true);
     expect(
       decision.findings.find((f) => f.rule === 'pr-notif-style'),
@@ -99,7 +99,7 @@ describe('detectComposioFidelity', () => {
 
   it('flags promo_NNN fabrication shape', () => {
     const result = 'promo_001 promo_002 promo_003';
-    const decision = detectComposioFidelity(result);
+    const decision = detectMcpFidelity(result);
     expect(decision.fabricated).toBe(true);
     expect(
       decision.findings.find((f) => f.rule === 'promo-numbered'),
@@ -115,7 +115,7 @@ describe('detectComposioFidelity', () => {
       ) +
       ' ' +
       'pr1_notif pr2_notif pr3_notif';
-    const decision = detectComposioFidelity(text);
+    const decision = detectMcpFidelity(text);
     expect(decision.fabricated).toBe(true);
     expect(decision.findings.length).toBeGreaterThanOrEqual(2);
   });
@@ -125,7 +125,7 @@ describe('detectComposioFidelity', () => {
       { length: 6 },
       (_, i) => `event_${String(i + 1).padStart(2, '0')}`,
     );
-    const decision = detectComposioFidelity(ids.join(' '));
+    const decision = detectMcpFidelity(ids.join(' '));
     expect(decision.reinjection).toContain('sequential-prefix-ids');
     expect(decision.reinjection).toContain('event_01');
     expect(decision.reinjection).toContain('untrusted');

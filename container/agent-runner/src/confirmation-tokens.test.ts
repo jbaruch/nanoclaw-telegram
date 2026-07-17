@@ -98,9 +98,7 @@ describe('classifyDestructiveOp', () => {
     expect(classifyDestructiveOp('mcp__nanoclaw__send_message', {})).toBeNull();
     expect(classifyDestructiveOp('Read', {})).toBeNull();
     expect(classifyDestructiveOp('Bash', {})).toBeNull();
-    expect(
-      classifyDestructiveOp('mcp__composio__gmail_send_email', {}),
-    ).toBeNull();
+    expect(classifyDestructiveOp('mcp__tessl__search', {})).toBeNull();
   });
 
   it('returns null for empty / non-string tool names', () => {

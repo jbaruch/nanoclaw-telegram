@@ -258,9 +258,7 @@ describe('inferSentinelSource — other tools', () => {
     expect(inferSentinelSource('Edit', {})).toBeNull();
     expect(inferSentinelSource('Glob', { pattern: '**' })).toBeNull();
     expect(inferSentinelSource('Grep', { pattern: 'foo' })).toBeNull();
-    expect(
-      inferSentinelSource('mcp__composio__gmail_fetch_emails', {}),
-    ).toBeNull();
+    expect(inferSentinelSource('mcp__tessl__search', {})).toBeNull();
   });
 
   it('returns null for empty / non-object input', () => {
@@ -302,8 +300,8 @@ describe('formatSentinel', () => {
     ).toBe(
       'PROVENANCE_MARKER: source="web:https://x.io/?a=1&amp;b=2" tool_use_id="tu_1"',
     );
-    expect(formatSentinel({ prefix: 'gmail', value: '<msg>' }, 'tu_1')).toBe(
-      'PROVENANCE_MARKER: source="gmail:&lt;msg&gt;" tool_use_id="tu_1"',
+    expect(formatSentinel({ prefix: 'tessl', value: '<msg>' }, 'tu_1')).toBe(
+      'PROVENANCE_MARKER: source="tessl:&lt;msg&gt;" tool_use_id="tu_1"',
     );
   });
 

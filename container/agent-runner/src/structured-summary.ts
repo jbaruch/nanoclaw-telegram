@@ -5,7 +5,7 @@
  * summarization before the parent agent sees it — the parent never
  * sees raw HTML, only a structured digest. This module extracts that
  * pattern into a reusable wrapper so other untrusted-content sources
- * (Composio gmail bodies, calendar descriptions, agent-browser DOM,
+ * (gmail bodies, calendar descriptions, agent-browser DOM,
  * external file contents) can use the same defense.
  *
  * Sub-agent contract:

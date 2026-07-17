@@ -7,25 +7,11 @@ import {
   extractDestinations,
   loadEgressAllowlist,
   pathTargetsAllowlist,
-  splitRecipientList,
 } from './egress-allowlist.js';
 
 // ---- classifySink ----
 
 describe('classifySink', () => {
-  it('matches Composio Gmail send variants', () => {
-    expect(classifySink('mcp__composio__gmail_send_email')).toBe('gmail_send');
-    expect(classifySink('mcp__composio__gmail_reply_email')).toBe('gmail_send');
-    expect(classifySink('mcp__composio__gmail_send_draft')).toBe('gmail_send');
-  });
-
-  it('matches Composio Slack send/post variants', () => {
-    expect(classifySink('mcp__composio__slack_post_message')).toBe(
-      'slack_post',
-    );
-    expect(classifySink('mcp__composio__slack_send_dm')).toBe('slack_post');
-  });
-
   it('matches send_message_to_chat exactly', () => {
     expect(classifySink('mcp__nanoclaw__send_message_to_chat')).toBe(
       'send_message_to_chat',
@@ -33,8 +19,7 @@ describe('classifySink', () => {
   });
 
   it('returns null for non-egress tools', () => {
-    expect(classifySink('mcp__composio__gmail_fetch_emails')).toBeNull();
-    expect(classifySink('mcp__composio__slack_list_messages')).toBeNull();
+    expect(classifySink('mcp__tessl__search')).toBeNull();
     expect(classifySink('mcp__nanoclaw__send_message')).toBeNull();
     expect(classifySink('Read')).toBeNull();
     expect(classifySink('WebFetch')).toBeNull();
@@ -48,63 +33,7 @@ describe('classifySink', () => {
 
 // ---- extractDestinations ----
 
-describe('splitRecipientList', () => {
-  it('returns a single-element list when no separator is present', () => {
-    expect(splitRecipientList('a@x.io')).toEqual(['a@x.io']);
-  });
-
-  it('splits on commas, trimming whitespace', () => {
-    expect(splitRecipientList('a@x.io, b@y.io ,  c@z.io')).toEqual([
-      'a@x.io',
-      'b@y.io',
-      'c@z.io',
-    ]);
-  });
-
-  it('splits on semicolons too', () => {
-    expect(splitRecipientList('a@x.io;b@y.io')).toEqual(['a@x.io', 'b@y.io']);
-  });
-
-  it('drops empty entries (trailing commas, double separators)', () => {
-    expect(splitRecipientList('a@x.io,,b@y.io,')).toEqual(['a@x.io', 'b@y.io']);
-  });
-
-  it('returns empty for empty / non-string input', () => {
-    expect(splitRecipientList('')).toEqual([]);
-    expect(splitRecipientList(undefined as unknown as string)).toEqual([]);
-  });
-});
-
 describe('extractDestinations', () => {
-  it('extracts gmail recipient from common fields', () => {
-    expect(extractDestinations('gmail_send', { recipient: 'a@x.io' })).toEqual([
-      'a@x.io',
-    ]);
-    expect(extractDestinations('gmail_send', { to: 'b@x.io' })).toEqual([
-      'b@x.io',
-    ]);
-    expect(
-      extractDestinations('gmail_send', { recipient_email: 'c@x.io' }),
-    ).toEqual(['c@x.io']);
-  });
-
-  it('extracts gmail recipients from arrays', () => {
-    expect(
-      extractDestinations('gmail_send', {
-        recipients: ['a@x.io', 'b@x.io'],
-      }),
-    ).toEqual(['a@x.io', 'b@x.io']);
-  });
-
-  it('extracts slack channel', () => {
-    expect(extractDestinations('slack_post', { channel: '#general' })).toEqual([
-      '#general',
-    ]);
-    expect(extractDestinations('slack_post', { channel: 'C012ABC' })).toEqual([
-      'C012ABC',
-    ]);
-  });
-
   it('extracts send_message_to_chat jid from chat_id or chat_jid', () => {
     expect(
       extractDestinations('send_message_to_chat', {
@@ -119,8 +48,10 @@ describe('extractDestinations', () => {
   });
 
   it('returns empty for missing or non-string fields', () => {
-    expect(extractDestinations('gmail_send', {})).toEqual([]);
-    expect(extractDestinations('slack_post', { channel: 42 })).toEqual([]);
+    expect(extractDestinations('send_message_to_chat', {})).toEqual([]);
+    expect(
+      extractDestinations('send_message_to_chat', { chat_jid: 42 }),
+    ).toEqual([]);
     expect(extractDestinations('send_message_to_chat', null)).toEqual([]);
   });
 });
@@ -146,16 +77,14 @@ describe('loadEgressAllowlist', () => {
 
   it('parses a populated allowlist', () => {
     const json = JSON.stringify({
-      gmail_send: { allowed_recipients: ['a@x.io'] },
-      slack_post: { allowed_channels: ['#general'] },
+      send_message_to_chat: { allowed_chat_jids: ['tg:-100111'] },
     });
     const fs = {
       existsSync: () => true,
       readFileSync: () => json,
     };
     expect(loadEgressAllowlist(fs, '/x')).toEqual({
-      gmail_send: { allowed_recipients: ['a@x.io'] },
-      slack_post: { allowed_channels: ['#general'] },
+      send_message_to_chat: { allowed_chat_jids: ['tg:-100111'] },
     });
   });
 
@@ -176,15 +105,10 @@ describe('loadEgressAllowlist', () => {
   });
 
   it('drops invalid per-field shapes with a warning, keeps the valid ones', () => {
-    // operator typo: `allowed_channels` is a string instead of an
-    // array. Should be dropped silently (with a warn) rather than
-    // crashing every outbound call.
+    // operator typo: a non-string entry inside `allowed_chat_jids`.
+    // Should be dropped silently (with a warn) rather than crashing
+    // every outbound call.
     const json = JSON.stringify({
-      gmail_send: {
-        allowed_recipients: ['ok@x.io'],
-        allowed_domains: 'sadogursky.com', // bad shape
-      },
-      slack_post: { allowed_channels: '#general' }, // bad shape
       send_message_to_chat: { allowed_chat_jids: ['tg:1', 42, 'tg:2'] },
     });
     const fs = {
@@ -193,11 +117,8 @@ describe('loadEgressAllowlist', () => {
     };
     const out = loadEgressAllowlist(fs, '/x');
     expect(out).toEqual({
-      gmail_send: { allowed_recipients: ['ok@x.io'] },
-      // allowed_domains dropped, gmail_send entry kept
-      // slack_post dropped entirely (no valid keys remained)
-      send_message_to_chat: { allowed_chat_jids: ['tg:1', 'tg:2'] },
       // 42 filtered out
+      send_message_to_chat: { allowed_chat_jids: ['tg:1', 'tg:2'] },
     });
   });
 
@@ -227,13 +148,6 @@ describe('loadEgressAllowlist', () => {
 // ---- decideEgress (acceptance scenarios from #320) ----
 
 const FULL_ALLOWLIST: EgressAllowlist = {
-  gmail_send: {
-    allowed_recipients: ['jbaruch@sadogursky.com'],
-    allowed_domains: ['sadogursky.com', 'tessl.io'],
-  },
-  slack_post: {
-    allowed_channels: ['#general', '#tessl-internal', 'C012ABC'],
-  },
   send_message_to_chat: {
     allowed_chat_jids: ['tg:-100111', 'tg:-100222'],
   },
@@ -242,7 +156,7 @@ const FULL_ALLOWLIST: EgressAllowlist = {
 describe('decideEgress — pass (non-gated)', () => {
   it('passes for tools we do not gate', () => {
     const d = decideEgress({
-      toolName: 'mcp__composio__gmail_fetch_emails',
+      toolName: 'mcp__tessl__search',
       toolInput: {},
       hasUntrustedProvenance: true,
       allowlist: FULL_ALLOWLIST,
@@ -262,10 +176,10 @@ describe('decideEgress — pass (non-gated)', () => {
 });
 
 describe('decideEgress — operator bypass', () => {
-  it('allows gmail.send to a brand-new recipient when chain is operator-trusted', () => {
+  it('allows a send to a brand-new JID when chain is operator-trusted', () => {
     const d = decideEgress({
-      toolName: 'mcp__composio__gmail_send_email',
-      toolInput: { recipient: 'stranger@elsewhere.example' },
+      toolName: 'mcp__nanoclaw__send_message_to_chat',
+      toolInput: { chat_jid: 'tg:-100999' },
       hasUntrustedProvenance: false,
       allowlist: FULL_ALLOWLIST,
     });
@@ -275,8 +189,8 @@ describe('decideEgress — operator bypass', () => {
 
   it('still allows when allowlist is missing entirely (default-bypass)', () => {
     const d = decideEgress({
-      toolName: 'mcp__composio__gmail_send_email',
-      toolInput: { recipient: 'stranger@elsewhere.example' },
+      toolName: 'mcp__nanoclaw__send_message_to_chat',
+      toolInput: { chat_jid: 'tg:-100999' },
       hasUntrustedProvenance: false,
       allowlist: null,
     });
@@ -291,165 +205,19 @@ describe('decideEgress — operator opt-in tightening', () => {
       enforce_for_operator: true,
     };
     const allowed = decideEgress({
-      toolName: 'mcp__composio__gmail_send_email',
-      toolInput: { recipient: 'jbaruch@sadogursky.com' },
+      toolName: 'mcp__nanoclaw__send_message_to_chat',
+      toolInput: { chat_jid: 'tg:-100111' },
       hasUntrustedProvenance: false,
       allowlist: tightened,
     });
     expect(allowed.kind).toBe('allow');
     const denied = decideEgress({
-      toolName: 'mcp__composio__gmail_send_email',
-      toolInput: { recipient: 'stranger@elsewhere.example' },
+      toolName: 'mcp__nanoclaw__send_message_to_chat',
+      toolInput: { chat_jid: 'tg:-100999' },
       hasUntrustedProvenance: false,
       allowlist: tightened,
     });
     expect(denied.kind).toBe('deny');
-  });
-});
-
-describe('decideEgress — untrusted-provenance gate (gmail)', () => {
-  it('allows when recipient matches allowed_recipients', () => {
-    const d = decideEgress({
-      toolName: 'mcp__composio__gmail_send_email',
-      toolInput: { recipient: 'jbaruch@sadogursky.com' },
-      hasUntrustedProvenance: true,
-      allowlist: FULL_ALLOWLIST,
-    });
-    expect(d.kind).toBe('allow');
-  });
-
-  it('allows when recipient is in an allowed domain', () => {
-    const d = decideEgress({
-      toolName: 'mcp__composio__gmail_send_email',
-      toolInput: { recipient: 'someone@tessl.io' },
-      hasUntrustedProvenance: true,
-      allowlist: FULL_ALLOWLIST,
-    });
-    expect(d.kind).toBe('allow');
-  });
-
-  it('denies a non-allowlisted recipient (web-injection scenario)', () => {
-    const d = decideEgress({
-      toolName: 'mcp__composio__gmail_send_email',
-      toolInput: { recipient: 'attacker@evil.example' },
-      hasUntrustedProvenance: true,
-      allowlist: FULL_ALLOWLIST,
-    });
-    expect(d.kind).toBe('deny');
-    if (d.kind === 'deny') {
-      expect(d.sink).toBe('gmail_send');
-      expect(d.destination).toBe('attacker@evil.example');
-      expect(d.reason).toMatch(/aye-confirm/);
-    }
-  });
-
-  it('denies when ANY recipient in a multi-recipient call is unallowed', () => {
-    const d = decideEgress({
-      toolName: 'mcp__composio__gmail_send_email',
-      toolInput: {
-        recipients: ['jbaruch@sadogursky.com', 'attacker@evil.example'],
-      },
-      hasUntrustedProvenance: true,
-      allowlist: FULL_ALLOWLIST,
-    });
-    expect(d.kind).toBe('deny');
-    if (d.kind === 'deny') expect(d.destination).toBe('attacker@evil.example');
-  });
-
-  it('denies a comma-separated string recipient with mixed allowed+disallowed', () => {
-    // Pre-fix: the combined string went through `endsWith` once and
-    // matched the LAST address's `@allowed-domain` suffix, leaking
-    // the earlier addresses past the gate. Post-fix: split + per-
-    // entry validation; the disallowed entry trips deny.
-    const d = decideEgress({
-      toolName: 'mcp__composio__gmail_send_email',
-      toolInput: { to: 'attacker@evil.example, jbaruch@sadogursky.com' },
-      hasUntrustedProvenance: true,
-      allowlist: FULL_ALLOWLIST,
-    });
-    expect(d.kind).toBe('deny');
-    if (d.kind === 'deny') expect(d.destination).toBe('attacker@evil.example');
-  });
-
-  it('denies a semicolon-separated string recipient with mixed allowed+disallowed', () => {
-    const d = decideEgress({
-      toolName: 'mcp__composio__gmail_send_email',
-      toolInput: {
-        recipient: 'jbaruch@sadogursky.com; attacker@evil.example',
-      },
-      hasUntrustedProvenance: true,
-      allowlist: FULL_ALLOWLIST,
-    });
-    expect(d.kind).toBe('deny');
-    if (d.kind === 'deny') expect(d.destination).toBe('attacker@evil.example');
-  });
-
-  it('allows a comma-separated string when ALL recipients pass', () => {
-    const d = decideEgress({
-      toolName: 'mcp__composio__gmail_send_email',
-      toolInput: { to: 'jbaruch@sadogursky.com, foo@tessl.io' },
-      hasUntrustedProvenance: true,
-      allowlist: FULL_ALLOWLIST,
-    });
-    expect(d.kind).toBe('allow');
-  });
-
-  it('handles split-inside-array form (an array element is comma-list)', () => {
-    const d = decideEgress({
-      toolName: 'mcp__composio__gmail_send_email',
-      toolInput: {
-        recipients: [
-          'jbaruch@sadogursky.com',
-          'foo@tessl.io, attacker@evil.example',
-        ],
-      },
-      hasUntrustedProvenance: true,
-      allowlist: FULL_ALLOWLIST,
-    });
-    expect(d.kind).toBe('deny');
-    if (d.kind === 'deny') expect(d.destination).toBe('attacker@evil.example');
-  });
-
-  it('denies when allowlist is null under untrusted provenance', () => {
-    const d = decideEgress({
-      toolName: 'mcp__composio__gmail_send_email',
-      toolInput: { recipient: 'someone@tessl.io' },
-      hasUntrustedProvenance: true,
-      allowlist: null,
-    });
-    expect(d.kind).toBe('deny');
-  });
-
-  it('domain match is case-insensitive', () => {
-    const d = decideEgress({
-      toolName: 'mcp__composio__gmail_send_email',
-      toolInput: { recipient: 'foo@TESSL.IO' },
-      hasUntrustedProvenance: true,
-      allowlist: FULL_ALLOWLIST,
-    });
-    expect(d.kind).toBe('allow');
-  });
-});
-
-describe('decideEgress — untrusted-provenance gate (slack)', () => {
-  it('allows an allowlisted channel name', () => {
-    const d = decideEgress({
-      toolName: 'mcp__composio__slack_post_message',
-      toolInput: { channel: '#general' },
-      hasUntrustedProvenance: true,
-      allowlist: FULL_ALLOWLIST,
-    });
-    expect(d.kind).toBe('allow');
-  });
-
-  it('denies a non-allowlisted channel', () => {
-    const d = decideEgress({
-      toolName: 'mcp__composio__slack_post_message',
-      toolInput: { channel: '#secrets' },
-      hasUntrustedProvenance: true,
-      allowlist: FULL_ALLOWLIST,
-    });
-    expect(d.kind).toBe('deny');
   });
 });
 
@@ -488,8 +256,8 @@ describe('decideEgress — untrusted-provenance gate (send_message_to_chat)', ()
 describe('decideEgress — missing destination', () => {
   it('denies (with structured reason) when destination cannot be extracted', () => {
     const d = decideEgress({
-      toolName: 'mcp__composio__gmail_send_email',
-      toolInput: { subject: 'no recipient field' },
+      toolName: 'mcp__nanoclaw__send_message_to_chat',
+      toolInput: { text: 'no chat_jid field' },
       hasUntrustedProvenance: true,
       allowlist: FULL_ALLOWLIST,
     });

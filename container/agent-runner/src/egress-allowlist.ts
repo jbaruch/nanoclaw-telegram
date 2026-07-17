@@ -22,39 +22,16 @@
  * the file via the agent.
  *
  * Sinks gated by this module:
- *   - `mcp__composio__gmail_send_email` (and `gmail_send_*`, `gmail_reply_*`)
- *     → destination = `recipient` / `recipients` / `to`; checked against
- *       `gmail_send.allowed_recipients` (exact) AND `allowed_domains`
- *       (suffix match on `@<domain>`).
- *   - `mcp__composio__slack_post_message` / `slack_send_*` → destination =
- *     `channel`; checked against `slack_post.allowed_channels`.
  *   - `mcp__nanoclaw__send_message_to_chat` → destination = `chat_id`
  *     / `chat_jid`; checked against `send_message_to_chat.allowed_chat_jids`.
  *
- * Tools NOT in this map (e.g. `mcp__composio__github_create_issue`)
- * pass through this hook unchanged — #322's capability ACL is the
- * other line of defense.
+ * Tools NOT in this map pass through this hook unchanged — #322's
+ * capability ACL is the other line of defense.
  */
 
 import * as path from 'path';
 
 export interface EgressAllowlist {
-  /**
-   * Gmail send config. Recipients matched exactly; domains matched as
-   * `@<domain>` suffix (case-insensitive).
-   */
-  gmail_send?: {
-    allowed_recipients?: string[];
-    allowed_domains?: string[];
-  };
-  /**
-   * Slack post config. Channels matched exactly (case-insensitive on
-   * the leading `#`-prefix variants — Slack itself is case-sensitive
-   * on channel IDs but not on names; we accept both).
-   */
-  slack_post?: {
-    allowed_channels?: string[];
-  };
   /**
    * Cross-chat NanoClaw send. JIDs matched exactly.
    */
@@ -116,34 +93,6 @@ function validateAllowlist(
   path: string,
 ): EgressAllowlist {
   const out: EgressAllowlist = {};
-
-  const gmail = raw.gmail_send;
-  if (gmail && typeof gmail === 'object') {
-    const cfg: NonNullable<EgressAllowlist['gmail_send']> = {};
-    const recipients = pickStringArray(
-      gmail,
-      'allowed_recipients',
-      `${path} gmail_send`,
-    );
-    if (recipients) cfg.allowed_recipients = recipients;
-    const domains = pickStringArray(
-      gmail,
-      'allowed_domains',
-      `${path} gmail_send`,
-    );
-    if (domains) cfg.allowed_domains = domains;
-    if (Object.keys(cfg).length > 0) out.gmail_send = cfg;
-  }
-
-  const slack = raw.slack_post;
-  if (slack && typeof slack === 'object') {
-    const channels = pickStringArray(
-      slack,
-      'allowed_channels',
-      `${path} slack_post`,
-    );
-    if (channels) out.slack_post = { allowed_channels: channels };
-  }
 
   const sm = raw.send_message_to_chat;
   if (sm && typeof sm === 'object') {
@@ -265,16 +214,10 @@ export function decideEgress(args: {
   };
 }
 
-export type GatedSink = 'gmail_send' | 'slack_post' | 'send_message_to_chat';
+export type GatedSink = 'send_message_to_chat';
 
 export function classifySink(toolName: string): GatedSink | null {
   if (typeof toolName !== 'string') return null;
-  if (/^mcp__composio__gmail_(send|reply)\w*$/i.test(toolName)) {
-    return 'gmail_send';
-  }
-  if (/^mcp__composio__slack_(send|post)\w*$/i.test(toolName)) {
-    return 'slack_post';
-  }
   if (toolName === 'mcp__nanoclaw__send_message_to_chat') {
     return 'send_message_to_chat';
   }
@@ -282,9 +225,9 @@ export function classifySink(toolName: string): GatedSink | null {
 }
 
 /**
- * Pull the destination(s) out of the tool input. Returns a list because
- * gmail send commonly takes multiple recipients in one call — every
- * one must pass.
+ * Pull the destination(s) out of the tool input. Returns a list so a
+ * sink that carries several destinations in one call has every one
+ * checked independently.
  */
 export function extractDestinations(
   sink: GatedSink,
@@ -292,39 +235,6 @@ export function extractDestinations(
 ): string[] {
   if (!toolInput || typeof toolInput !== 'object') return [];
   const input = toolInput as Record<string, unknown>;
-
-  if (sink === 'gmail_send') {
-    const fields = ['recipient', 'recipients', 'to', 'recipient_email'];
-    const out: string[] = [];
-    for (const f of fields) {
-      const v = input[f];
-      if (typeof v === 'string' && v.length > 0) {
-        // Composio (and most mail APIs) accept comma- or semicolon-
-        // separated lists in a single string field — `"a@x.io,b@y.io"`.
-        // Without this split, `isDestinationAllowed` would evaluate
-        // the combined string once and could incorrectly pass via the
-        // `allowed_domains` suffix match on the LAST address, leaking
-        // the earlier addresses through the gate. Split, trim, drop
-        // empties; every parsed entry must pass independently.
-        for (const part of splitRecipientList(v)) out.push(part);
-      } else if (Array.isArray(v)) {
-        for (const item of v) {
-          if (typeof item === 'string' && item.length > 0) {
-            // Same split applies to per-element strings inside an
-            // array — some callers send `["a@x.io, b@y.io", "c@z.io"]`.
-            for (const part of splitRecipientList(item)) out.push(part);
-          }
-        }
-      }
-    }
-    return out;
-  }
-
-  if (sink === 'slack_post') {
-    const v = input.channel;
-    if (typeof v === 'string' && v.length > 0) return [v];
-    return [];
-  }
 
   if (sink === 'send_message_to_chat') {
     const v = input.chat_id ?? input.chat_jid;
@@ -409,50 +319,12 @@ function defaultPathLib() {
   };
 }
 
-/**
- * Split a string-valued recipient field into individual addresses.
- * Splits on `,` and `;` (the two separators every mail API accepts);
- * trims each entry and drops empties. Returns `[trimmed]` when no
- * separator is present (most calls).
- */
-export function splitRecipientList(raw: string): string[] {
-  if (typeof raw !== 'string' || raw.length === 0) return [];
-  return raw
-    .split(/[,;]/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-}
-
 function isDestinationAllowed(
   sink: GatedSink,
   destination: string,
   allowlist: EgressAllowlist | null,
 ): boolean {
   if (!allowlist) return false;
-
-  if (sink === 'gmail_send') {
-    const cfg = allowlist.gmail_send;
-    if (!cfg) return false;
-    const lower = destination.toLowerCase();
-    if (cfg.allowed_recipients) {
-      for (const r of cfg.allowed_recipients) {
-        if (r.toLowerCase() === lower) return true;
-      }
-    }
-    if (cfg.allowed_domains) {
-      for (const d of cfg.allowed_domains) {
-        if (lower.endsWith('@' + d.toLowerCase())) return true;
-      }
-    }
-    return false;
-  }
-
-  if (sink === 'slack_post') {
-    const cfg = allowlist.slack_post;
-    if (!cfg?.allowed_channels) return false;
-    const lower = destination.toLowerCase();
-    return cfg.allowed_channels.some((c) => c.toLowerCase() === lower);
-  }
 
   if (sink === 'send_message_to_chat') {
     const cfg = allowlist.send_message_to_chat;

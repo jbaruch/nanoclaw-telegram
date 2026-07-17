@@ -22,9 +22,8 @@ FROM node:24-trixie-slim@sha256:366fdef91728b1b7fa18c84fba63b6e79ed77b7e10cc2068
 # sources). Used inside main/trusted-tier containers by the cost-monitor
 # dashboard skills (precheck-gating-monitor, session-cap-monitor,
 # daily-spend-rollup) to edit dashboard issues and post anomaly comments
-# directly via `gh issue edit/comment`, avoiding the cache_create tax of
-# routing through Composio's MCP GitHub catalog on every cold maintenance
-# spawn. CLI authenticates from GITHUB_TOKEN automatically (orchestrator
+# directly via `gh issue edit/comment`. CLI authenticates from
+# GITHUB_TOKEN automatically (orchestrator
 # injects via --env-file per SECRET_CONTAINER_VARS in
 # src/container-runner.ts).
 RUN apt-get update && apt-get install -y \
@@ -67,9 +66,9 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 ENV AGENT_BROWSER_SCREENSHOT_FORMAT=jpeg
 ENV AGENT_BROWSER_SCREENSHOT_QUALITY=75
 
-# Install agent-browser, claude-code, and composio-mcp globally
+# Install agent-browser and claude-code globally
 # (tessl is not needed — tiles are delivered host-side by the orchestrator)
-RUN npm install -g agent-browser @anthropic-ai/claude-code @composio/mcp
+RUN npm install -g agent-browser @anthropic-ai/claude-code
 
 # Create app directory
 WORKDIR /app

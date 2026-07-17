@@ -7,11 +7,11 @@
 # existing branch, copy staging over it, validate placement, commit, push.
 # No new PR is opened.
 #
-# Rationale: Composio's GitHub toolkit can do single-file commits via
-# GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS, but multi-file fixes (which skill
-# reviews typically require) mean juggling the Git Data API by hand. The
-# orchestrator already has GITHUB_TOKEN and a working `git` — letting it
-# do the commit is shorter and avoids Composio's multi-file footgun.
+# Rationale: multi-file fixes (which skill reviews typically require)
+# are awkward through the GitHub contents API — they mean juggling the
+# Git Data API by hand. The orchestrator already has GITHUB_TOKEN and a
+# working `git`, so letting it do the commit is shorter and handles the
+# multi-file case directly.
 #
 # Usage:
 #   push-staged-to-branch.sh <staging-dir> <tile-name> <branch> <commit-msg> [skill-name|all|--rules-only]

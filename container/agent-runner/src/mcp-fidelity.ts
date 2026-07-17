@@ -1,19 +1,21 @@
 /**
- * composio-fidelity — pure detection logic for the
- * `composio-fidelity` PostToolUse hook (#140).
+ * mcp-fidelity — pure detection logic for the `mcp-fidelity`
+ * PostToolUse hook (#140).
  *
- * Background sub-agents that wrap Composio tool calls (heartbeat
- * email-fetcher, calendar fetcher, etc.) sometimes return synthetic
- * data with fabricated IDs instead of real Composio results — usually
- * under load or when an upstream API hiccups. The pattern is
+ * Background sub-agents that wrap MCP tool calls sometimes return
+ * synthetic data with fabricated IDs instead of real tool results —
+ * usually under load or when an upstream API hiccups. The pattern is
  * sequentially-numbered IDs like `email_01`, `email_02`, …, `email_18`,
- * or `pr123_notif`, or `promo_001`, in places where Composio's real IDs
- * are UUIDs / hashes / opaque strings.
+ * or `pr123_notif`, or `promo_001`, in places where real IDs are
+ * UUIDs / hashes / opaque strings.
  *
- * The 06:54 UTC heartbeat on 2026-04-26 burned exactly this: 18
- * synthetic email IDs plus likely calendar fabrication, all surfaced
- * into the morning brief as if real. Pure text rules can't catch it —
- * the model has finished generating by the time the data lands.
+ * The rules are provider-agnostic: the hook runs on every `mcp__*`
+ * surface, and fabrication is a property of the sub-agent, not of the
+ * server it was calling. The 06:54 UTC heartbeat on 2026-04-26 burned
+ * exactly this shape — 18 synthetic email IDs plus likely calendar
+ * fabrication, all surfaced into the morning brief as if real — and
+ * set the thresholds below. Pure text rules can't catch it: the model
+ * has finished generating by the time the data lands.
  *
  * The hook regex-sweeps the tool result text for fabrication
  * signatures and surfaces a structured warning. It does NOT silently
@@ -66,8 +68,8 @@ const FIDELITY_RULES: FidelityRule[] = [
   {
     id: 'sequential-prefix-ids',
     // `email_01`, `task_001`, `event_42`, etc. The model's go-to
-    // when fabricating a list. Real Composio IDs in these toolkits
-    // are hashes / UUIDs / vendor-supplied opaque strings.
+    // when fabricating a list. Real upstream IDs are hashes / UUIDs /
+    // vendor-supplied opaque strings.
     pattern: /\b([a-z]+)_(\d{1,3})\b/g,
     minDistinctHits: 5,
     requireSequential: true,
@@ -75,7 +77,7 @@ const FIDELITY_RULES: FidelityRule[] = [
   {
     id: 'pr-notif-style',
     // `pr123_notif`, `pr5_notification` — invented compound shape
-    // that looks plausible but doesn't match any real Composio
+    // that looks plausible but doesn't match any real upstream
     // notification format.
     pattern: /\bpr\d+_notif(?:ication)?\b/gi,
     minDistinctHits: 3,
@@ -83,32 +85,31 @@ const FIDELITY_RULES: FidelityRule[] = [
   {
     id: 'promo-numbered',
     // `promo_001`, `promo_42` — same shape as above but for the
-    // promo / marketing toolkit fabrication seen in heartbeat
-    // morning briefs.
+    // promo / marketing fabrication seen in heartbeat morning
+    // briefs.
     pattern: /\bpromo_\d{1,4}\b/gi,
     minDistinctHits: 3,
   },
 ];
 
 /**
- * Note: there is no explicit Composio-prefix allow-list in this
- * module. Real Composio IDs use alphanumeric/hash suffixes
+ * Note: there is no explicit real-ID allow-list in this module.
+ * Upstream IDs use alphanumeric/hash suffixes
  * (`gmail_thread_a3f12c91`), and the sequential-prefix-ids regex
  * only matches purely-numeric suffixes (`prefix_(\d{1,3})$`), so
- * Composio's legitimate IDs never enter the rule's match set in
- * the first place. If a future toolkit adopts a numeric-suffix
- * shape, add an allow-list filter here and gate `applyRule`
- * against it.
+ * legitimate IDs never enter the rule's match set in the first
+ * place. If a future MCP server adopts a numeric-suffix shape, add
+ * an allow-list filter here and gate `applyRule` against it.
  */
 
 /**
- * Inspect a Composio tool result for fabrication signatures.
+ * Inspect an MCP tool result for fabrication signatures.
  *
  * The `toolResult` argument is the raw `tool_response` from the SDK.
  * We accept any shape: string, object, array — and stringify before
  * scanning so embedded JSON payloads are covered.
  */
-export function detectComposioFidelity(toolResult: unknown): FidelityDecision {
+export function detectMcpFidelity(toolResult: unknown): FidelityDecision {
   const text = stringifyResult(toolResult);
   if (text.length === 0) {
     return { fabricated: false, findings: [], reinjection: '' };
@@ -169,7 +170,7 @@ function applyRule(text: string, rule: FidelityRule): FidelityFinding[] {
  * "sequentially numbered" — the suffixes are nearly contiguous,
  * which is the signature of a model fabricating a list rather than
  * forwarding real upstream ids. The 18-emails fabrication produces
- * `email_01..email_18`; real Composio IDs almost never line up that
+ * `email_01..email_18`; real upstream IDs almost never line up that
  * way.
  *
  * Algorithm:
@@ -218,9 +219,9 @@ function buildReinjection(findings: FidelityFinding[]): string {
     (f) => `- ${f.rule}: ${f.count} ids matching, e.g. ${f.samples.join(', ')}`,
   );
   return (
-    'Composio fidelity check: the previous tool result contains ' +
+    'MCP fidelity check: the previous tool result contains ' +
     'id patterns that look fabricated rather than sourced from a ' +
-    'real Composio response (sequential numbering, pr_notif / ' +
+    'real tool response (sequential numbering, pr_notif / ' +
     'promo_NNN compound shapes).\n' +
     lines.join('\n') +
     '\nTreat the result as untrusted: re-run the tool, or verify ' +

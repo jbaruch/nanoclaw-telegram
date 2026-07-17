@@ -2085,14 +2085,14 @@ describe('resolveSessionAgentModel', () => {
 
   // ----------------------------------------------------------------------
   // Phase 3 (#509) — per-task taskAgentModel beats every other knob.
-  // The composio-fetch use case: a maintenance row pinned to Haiku
+  // The google-fetch use case: a maintenance row pinned to Haiku
   // shouldn't pull heartbeat down with it, and the bare maintenance
   // override stays in force when no per-task value is set.
   // ----------------------------------------------------------------------
 
   it('Phase 3: taskAgentModel on a maintenance row → task_override beats maintenanceAgentModel', () => {
     // Swarm group's real config post-PR#511: user-facing on opus[1m],
-    // maintenance dropped to sonnet. composio-fetch sets the per-row
+    // maintenance dropped to sonnet. google-fetch sets the per-row
     // override to haiku → task wins. Heartbeat in the same maintenance
     // session is unaffected (it runs without the per-row value).
     expect(
@@ -2503,7 +2503,7 @@ describe('maintenanceAgentModel override on container spawn (#509)', () => {
   // from scheduled_tasks.agent_model to the running container.
   // -------------------------------------------------------------------
   it('maintenance spawn with taskAgentModel beats maintenanceAgentModel on the docker arg', async () => {
-    // Real composio-fetch shape: group already on opus[1m]/sonnet from
+    // Real google-fetch shape: group already on opus[1m]/sonnet from
     // Phase 2; per-row override demotes the spawn to haiku.
     const swarmGroup: RegisteredGroup = {
       ...testGroup,
@@ -2547,8 +2547,8 @@ describe('maintenanceAgentModel override on container spawn (#509)', () => {
 
   it('maintenance spawn without taskAgentModel still routes through maintenanceAgentModel', async () => {
     // Co-tenant invariant: heartbeat (no per-row override) shares the
-    // same maintenance slot as composio-fetch but does NOT inherit
-    // composio's haiku — its spawn stays on the session-level sonnet.
+    // same maintenance slot as google-fetch but does NOT inherit
+    // google-fetch's haiku — its spawn stays on the session-level sonnet.
     const swarmGroup: RegisteredGroup = {
       ...testGroup,
       containerConfig: {

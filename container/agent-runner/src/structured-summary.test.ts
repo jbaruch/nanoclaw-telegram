@@ -33,7 +33,7 @@ const baseReq = (
   over: Partial<ExtractRequest<unknown>> = {},
 ): ExtractRequest<unknown> => ({
   rawText: 'subject: hello\nfrom: alice@x.io\nbody: please review',
-  source: { kind: 'gmail', identifier: 'msg-123' },
+  source: { kind: 'tessl', identifier: 'msg-123' },
   extractionGoal: 'sender, subject, action requested',
   schema: SCHEMA,
   client: mockClient(async () => ({ content: [] })),

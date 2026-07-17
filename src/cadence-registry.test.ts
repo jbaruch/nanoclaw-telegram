@@ -313,7 +313,7 @@ describe('validateCadenceDeclaration', () => {
   it('extracts agentModel from frontmatter and trims whitespace', () => {
     const r = validateCadenceDeclaration(
       { cadence: '*/30 * * * *', agentModel: '  haiku  ' },
-      'tessl__composio-fetch',
+      'tessl__google-fetch',
     );
     expect(r.ok).toBe(true);
     if (r.ok && r.declaration) expect(r.declaration.agentModel).toBe('haiku');
@@ -331,11 +331,11 @@ describe('validateCadenceDeclaration', () => {
   it('rejects an empty agentModel: value with a skill-tagged error', () => {
     const r = validateCadenceDeclaration(
       { cadence: '*/30 * * * *', agentModel: '' },
-      'tessl__composio-fetch',
+      'tessl__google-fetch',
     );
     expect(r.ok).toBe(false);
     if (!r.ok) {
-      expect(r.errors[0]).toContain('tessl__composio-fetch');
+      expect(r.errors[0]).toContain('tessl__google-fetch');
       expect(r.errors[0]).toContain("'agentModel:' must be a non-empty string");
     }
   });
@@ -873,7 +873,7 @@ describe('rebuildCadenceRegistry', () => {
     const skills = path.join(tmpRoot, 'skills');
     writeSkill(
       skills,
-      'tessl__composio-fetch',
+      'tessl__google-fetch',
       'cadence: "*/30 * * * *"\nagentModel: "haiku"',
     );
     const db = makeDb();
@@ -890,7 +890,7 @@ describe('rebuildCadenceRegistry', () => {
     expect(r.errors).toEqual([]);
     const row = db
       .prepare('SELECT agent_model FROM scheduled_tasks WHERE id = ?')
-      .get('cadence-registry::g1::tessl__composio-fetch');
+      .get('cadence-registry::g1::tessl__google-fetch');
     expect(row).toEqual({ agent_model: 'haiku' });
   });
 
@@ -918,7 +918,7 @@ describe('rebuildCadenceRegistry', () => {
     // First rebuild — register with `agentModel: haiku`.
     writeSkill(
       skills,
-      'tessl__composio-fetch',
+      'tessl__google-fetch',
       'cadence: "*/30 * * * *"\nagentModel: "haiku"',
     );
     const db = makeDb();
@@ -935,14 +935,14 @@ describe('rebuildCadenceRegistry', () => {
     // Rewrite SKILL.md to bump agentModel → sonnet, then rebuild.
     writeSkill(
       skills,
-      'tessl__composio-fetch',
+      'tessl__google-fetch',
       'cadence: "*/30 * * * *"\nagentModel: "sonnet"',
     );
     const r2 = rebuildCadenceRegistry(deps);
     expect(r2).toMatchObject({ inserted: 0, updated: 1, preserved: 0 });
     const row = db
       .prepare('SELECT agent_model FROM scheduled_tasks WHERE id = ?')
-      .get('cadence-registry::g1::tessl__composio-fetch');
+      .get('cadence-registry::g1::tessl__google-fetch');
     expect(row).toEqual({ agent_model: 'sonnet' });
   });
 
@@ -950,7 +950,7 @@ describe('rebuildCadenceRegistry', () => {
     const skills = path.join(tmpRoot, 'skills');
     writeSkill(
       skills,
-      'tessl__composio-fetch',
+      'tessl__google-fetch',
       'cadence: "*/30 * * * *"\nagentModel: "haiku"',
     );
     const db = makeDb();
@@ -964,12 +964,12 @@ describe('rebuildCadenceRegistry', () => {
       now: () => PINNED_NOW,
     };
     rebuildCadenceRegistry(deps);
-    writeSkill(skills, 'tessl__composio-fetch', 'cadence: "*/30 * * * *"');
+    writeSkill(skills, 'tessl__google-fetch', 'cadence: "*/30 * * * *"');
     const r2 = rebuildCadenceRegistry(deps);
     expect(r2).toMatchObject({ inserted: 0, updated: 1, preserved: 0 });
     const row = db
       .prepare('SELECT agent_model FROM scheduled_tasks WHERE id = ?')
-      .get('cadence-registry::g1::tessl__composio-fetch');
+      .get('cadence-registry::g1::tessl__google-fetch');
     expect(row).toEqual({ agent_model: null });
   });
 
@@ -980,7 +980,7 @@ describe('rebuildCadenceRegistry', () => {
     const skills = path.join(tmpRoot, 'skills');
     writeSkill(
       skills,
-      'tessl__composio-fetch',
+      'tessl__google-fetch',
       'cadence: "*/30 * * * *"\nagentModel: "haiku"',
     );
     const db = makeDb();

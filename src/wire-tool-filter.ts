@@ -17,9 +17,10 @@
  * Default ON; gated by STRIP_DEAD_TOOLS env var. Set STRIP_DEAD_TOOLS=0 to
  * disable (full-catalog passthrough).
  *
- * Private uses Composio for Gmail/Calendar (not Superhuman MCP), so the
- * Superhuman filter shim that ships in `ligolnik#120` is intentionally
- * NOT cherry-picked here — there is no Superhuman tool catalog to filter.
+ * Private reaches Gmail/Calendar through native Google REST (not
+ * Superhuman MCP), so the Superhuman filter shim that ships in
+ * `ligolnik#120` is intentionally NOT cherry-picked here — there is no
+ * Superhuman tool catalog to filter.
  */
 
 /**
