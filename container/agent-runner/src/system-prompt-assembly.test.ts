@@ -167,13 +167,16 @@ describe('buildFrozenSystemPromptAppend', () => {
     );
   });
 
-  // Type-level pin — see the H2 comment block above. The directives
-  // document the intended signature; CI does not enforce them in this
-  // repo, so the runtime test above is the load-bearing check.
-  // Keeping the directives lets local `tsc --noEmit` runs catch a
-  // signature widening early and steers IDE autocomplete away from
-  // the volatile fields.
-  it('frozen builder type signature rejects volatile inputs (signature documentation, not CI-enforced)', () => {
+  // Type-level pin — see the H2 comment block above. Each directive sits
+  // on the offending PROPERTY, not on the call: `@ts-expect-error`
+  // suppresses only the line immediately after it, and the excess-property
+  // error is reported at the property, so a directive parked above the
+  // call neither suppresses anything nor pins anything (it just reports
+  // as unused). CI enforces these now — `npm run typecheck` in this
+  // package reads `tsconfig.test.json`, which includes test files
+  // (jbaruch/nanoclaw#795). A signature widening that admits a volatile
+  // field fails the build here, not just in an editor.
+  it('frozen builder type signature rejects volatile inputs (CI-enforced)', () => {
     const frozen: FrozenSystemPromptInputs = {
       identityPreamble: 'IDENTITY',
       soulMd: 'SOUL',
@@ -181,43 +184,43 @@ describe('buildFrozenSystemPromptAppend', () => {
     };
     expect(buildFrozenSystemPromptAppend(frozen)).toBeDefined();
 
-    // @ts-expect-error — `currentMessage` is volatile (per-message turn text).
     buildFrozenSystemPromptAppend({
       identityPreamble: 'IDENTITY',
       soulMd: 'SOUL',
       formattingMd: 'FORMATTING',
+      // @ts-expect-error — `currentMessage` is volatile (per-message turn text).
       currentMessage: 'shifts every turn',
     });
 
-    // @ts-expect-error — `gitStatus` is volatile (HEAD ref / dirty flag drift).
     buildFrozenSystemPromptAppend({
       identityPreamble: 'IDENTITY',
       soulMd: 'SOUL',
       formattingMd: 'FORMATTING',
+      // @ts-expect-error — `gitStatus` is volatile (HEAD ref / dirty flag drift).
       gitStatus: 'On branch main',
     });
 
-    // @ts-expect-error — `cwd` is volatile (changes when the agent cd's).
     buildFrozenSystemPromptAppend({
       identityPreamble: 'IDENTITY',
       soulMd: 'SOUL',
       formattingMd: 'FORMATTING',
+      // @ts-expect-error — `cwd` is volatile (changes when the agent cd's).
       cwd: '/workspace',
     });
 
-    // @ts-expect-error — `memoryMd` is volatile (group/CLAUDE.md / MEMORY.md edited per turn).
     buildFrozenSystemPromptAppend({
       identityPreamble: 'IDENTITY',
       soulMd: 'SOUL',
       formattingMd: 'FORMATTING',
+      // @ts-expect-error — `memoryMd` is volatile (group/CLAUDE.md / MEMORY.md edited per turn).
       memoryMd: 'group memory',
     });
 
-    // @ts-expect-error — `timestamp` is volatile (every call has a different now()).
     buildFrozenSystemPromptAppend({
       identityPreamble: 'IDENTITY',
       soulMd: 'SOUL',
       formattingMd: 'FORMATTING',
+      // @ts-expect-error — `timestamp` is volatile (every call has a different now()).
       timestamp: Date.now(),
     });
   });

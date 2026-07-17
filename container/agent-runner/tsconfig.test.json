@@ -1,0 +1,28 @@
+{
+  // Typecheck-only config that INCLUDES `src/**/*.test.ts`.
+  //
+  // `tsconfig.json` excludes the tests because it also drives the
+  // emit-to-dist build (`rootDir: ./src`, `outDir: ./dist`) — compiling
+  // tests would ship them in the image. That exclusion meant no tsc run
+  // ever read a test file, so type errors in them shipped silently
+  // (jbaruch/nanoclaw#795).
+  //
+  // Owned by the ROOT project, not this package: the root `vitest.config.ts`
+  // is what includes `container/agent-runner/src/**/*.test.ts`, and the root
+  // manifest is what declares `vitest`. So the root runs these tests and the
+  // root typechecks them — `npm run typecheck:agent-runner` from the repo
+  // root. This package's own manifest stays scoped to what the container
+  // actually ships (its `dependencies`) plus what its build needs.
+  //
+  // Resolution: tsc resolves each import relative to the importing file, so
+  // the agent-runner's own deps come from its `node_modules` and `vitest`
+  // comes from the root's — exactly how node resolves them when the tests
+  // run. Both installs must therefore exist: `npm ci` at the root AND in
+  // this directory. CI does both before invoking the gate.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
