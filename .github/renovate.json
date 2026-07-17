@@ -1,21 +1,41 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "description": [
-    "npm renewal mechanism (coding-policy: dependency-management Freshness — 'Automate it where a scanner supports the ecosystem: a committed Dependabot or Renovate config'). Covers the two npm manifests (root package.json, container/agent-runner/package.json). Scoped to the npm manager via enabledManagers so it does not overlap the docker ecosystems handled by .github/dependabot.yml. Requires the Renovate GitHub App installed on the repo/org to run.",
-    "Package-rules mirror the repo's dependabot cadence: weekly, chore-typed commits, minor+patch grouped to keep the PR volume low; majors land as individual reviewable PRs."
+    "npm renewal mechanism (coding-policy: dependency-management Freshness — 'Automate it where a scanner supports the ecosystem: a committed Dependabot or Renovate config'). Covers the two npm manifests (root package.json, container/agent-runner/package.json) plus the globally-installed npm packages pinned in container/Dockerfile (#796). Scoped via enabledManagers so it does not overlap the docker ecosystems handled by .github/dependabot.yml — Dependabot owns the base-image @sha256 pins in the same Dockerfile, Renovate owns the npm literals inside its RUN line; the two never touch the same text.",
+    "The custom.regex manager exists because no native manager reads `RUN npm install -g <pkg>@<version>`: Dependabot's docker ecosystem sees only FROM lines, and Renovate's npm manager sees only package.json. Without it those two pins would be unwatched — a pin with no scanner is rot, not reproducibility.",
+    "Package-rules mirror the repo's dependabot cadence: weekly, chore-typed commits, minor+patch grouped to keep the PR volume low; majors land as individual reviewable PRs. The agent-image globals are deliberately NOT grouped with the npm-manifest updates: a claude-code bump changes the agent's own runtime inside every container, so it is reviewed on its own rather than buried in a batch."
   ],
   "extends": ["config:recommended"],
-  "enabledManagers": ["npm"],
+  "enabledManagers": ["npm", "custom.regex"],
   "schedule": ["before 6am on monday"],
   "semanticCommits": "enabled",
   "semanticCommitType": "chore",
   "semanticCommitScope": "deps",
   "prConcurrentLimit": 5,
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Globally-installed npm packages in the agent image (container/Dockerfile `RUN npm install -g <pkg>@<version>`).",
+      "fileMatch": ["^container/Dockerfile$"],
+      "matchStringsStrategy": "any",
+      "matchStrings": [
+        "(?<depName>agent-browser)@(?<currentValue>[0-9][^\\s\\\\]*)",
+        "(?<depName>@anthropic-ai/claude-code)@(?<currentValue>[0-9][^\\s\\\\]*)"
+      ],
+      "datasourceTemplate": "npm",
+      "versioningTemplate": "npm"
+    }
+  ],
   "packageRules": [
     {
       "matchManagers": ["npm"],
       "matchUpdateTypes": ["minor", "patch"],
       "groupName": "npm minor and patch"
+    },
+    {
+      "matchManagers": ["custom.regex"],
+      "groupName": "agent image npm globals",
+      "commitMessageTopic": "{{depName}} in the agent image"
     }
   ]
 }
