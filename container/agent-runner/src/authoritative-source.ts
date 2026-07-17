@@ -34,8 +34,23 @@ export interface AuthoritativeEntity {
   pointer: string;
   /** Tool-name regexes; at least one must match the calling tool. */
   toolNames: RegExp[];
-  /** Regex tested against the JSON-stringified `tool_input`. */
+  /**
+   * Regex tested against the tool input. By default that is the
+   * JSON-stringified `tool_input`; when `inputField` is set, it is the raw
+   * string value of that field instead (see `inputField`).
+   */
   inputPattern: RegExp;
+  /**
+   * When set, `inputPattern` is tested against the RAW string value of this
+   * `tool_input` field (e.g. `command` for Bash, `url` for WebFetch) rather
+   * than the JSON-stringified whole. Matching the raw field avoids the
+   * JSON-escaping pitfalls of the serialized form — a real newline is an
+   * actual `\n` (not the two chars `\` + `n`), a quoted argument is a plain
+   * `"`, and a URL can be host-anchored with `^`. If the field is absent or
+   * not a string, the entity does not match. Entities without `inputField`
+   * keep testing against the serialized whole.
+   */
+  inputField?: string;
 }
 
 export interface AuthoritativeNudgeDecision {
@@ -68,6 +83,69 @@ const ENTITIES: AuthoritativeEntity[] = [
     // fork instead of the canonical jbaruch fork.
     toolNames: [/^WebSearch$/],
     inputPattern: /\bnanoclaw\b/i,
+  },
+  {
+    id: 'nanoclaw-repo-gh',
+    label: 'the canonical NanoClaw repo target',
+    pointer: '/workspace/trusted/memory/reference_nanoclaw_repo.md',
+    // Same misroute as `nanoclaw-repo`, different transport: GitHub repo
+    // lookups moved off Composio MCP tools onto the `gh` CLI over Bash
+    // (#797, #639). A bare `nanoclaw` match on Bash is unusable — the repo
+    // path itself is `~/nanoclaw`, so nearly every command mentions it — and
+    // decoupled lookaheads are just as bad: they'd fire when a lookup of one
+    // repo shares a command with an unrelated `~/nanoclaw` path. So the
+    // `nanoclaw` token must belong to the lookup itself, in the same command
+    // segment (no crossing `|`, `&&`, `;`, or a newline). Three shapes, each
+    // where nanoclaw is the ambiguous target:
+    //   - `gh search repos … nanoclaw` — a repo search (not a bare
+    //     `gh search`, which also covers issues/code/prs);
+    //   - `gh api …search/repositories…nanoclaw` — the REST equivalent;
+    //   - `gh repo view …nanoclaw` where the owner is NOT the canonical
+    //     `jbaruch/` — `gh repo view nanoclaw` / `gh repo view qwibitai/
+    //     nanoclaw` nudge; `gh repo view jbaruch/nanoclaw` already names the
+    //     fork and stays silent (the `(?<!jbaruch\/)` lookbehind).
+    // A scoped `gh issue list --repo jbaruch/nanoclaw` and ordinary
+    // path-bearing commands never match. `inputField: 'command'` runs this
+    // against the RAW command string (not `JSON.stringify(tool_input)`), so
+    // the segment class stops at an actual newline (`\n` / `\r`) and a
+    // double-quoted argument (`gh search repos "nanoclaw"`) reads as a plain
+    // `"` — no JSON-escape handling needed.
+    // The repo target is matched as the EXACT token `nanoclaw` —
+    // `(?<![\w-])nanoclaw(?![\w-])` — so a hyphenated sibling like
+    // `nanoclaw-tools` (a different repo) does not match (`\b` alone treats
+    // the `-` as a boundary). The canonical-owner exclusion uses a
+    // word-boundaried `(?<!\bjbaruch\/)`, so only the exact owner `jbaruch`
+    // is treated as canonical — an impersonator like `notjbaruch/nanoclaw`
+    // still nudges.
+    toolNames: [/^Bash$/],
+    inputField: 'command',
+    inputPattern:
+      /\bgh\s+(?:search\s+repos\b[^|&;\n\r`]*(?<![\w-])nanoclaw(?![\w-])|api\b[^|&;\n\r`]*search\/repositories[^|&;\n\r`]*(?<![\w-])nanoclaw(?![\w-])|repo\s+view\b[^|&;\n\r`]*?(?<!\bjbaruch\/)(?<![\w-])nanoclaw(?![\w-]))/i,
+  },
+  {
+    id: 'nanoclaw-repo-webfetch',
+    label: 'the canonical NanoClaw repo target',
+    pointer: '/workspace/trusted/memory/reference_nanoclaw_repo.md',
+    // The WebFetch arm of the same misroute (#797): reading a GitHub repo
+    // page for "nanoclaw" and landing on the upstream qwibitai fork. Scoped
+    // to a NON-canonical repo-page URL shape — `github.com/<owner>/nanoclaw`
+    // where the owner is not `jbaruch` — so reading the canonical
+    // `github.com/jbaruch/nanoclaw` page (already the right fork) stays
+    // silent, and a github.com *search* URL (`github.com/search?q=nanoclaw`)
+    // or an unrelated page never matches. The repo segment is the EXACT
+    // `nanoclaw` (`(?![\w-])` terminator), so a hyphenated sibling repo like
+    // `github.com/qwibitai/nanoclaw-tools` does not match; the canonical
+    // exclusion is anchored right after the host, so `notjbaruch/nanoclaw`
+    // still nudges. `inputField: 'url'` runs this against the RAW URL and the
+    // `^` anchors github.com to the FETCHED host — a non-github fetch that
+    // merely embeds a github.com URL in its query (`https://example.com/?u=
+    // https://github.com/qwibitai/nanoclaw`) does not match. A separate
+    // entity from `nanoclaw-repo-gh` so the github.com shape never fires on a
+    // Bash command that merely mentions a URL.
+    toolNames: [/^WebFetch$/],
+    inputField: 'url',
+    inputPattern:
+      /^https?:\/\/(?:www\.)?github\.com\/(?!jbaruch\/nanoclaw(?![\w-]))[^/\s"]+\/nanoclaw(?![\w-])/i,
   },
   {
     id: 'chat-jid',
@@ -125,7 +203,12 @@ export function detectAuthoritativeLookup(
     return { nudge: false, systemMessage: '' };
   }
   for (const entity of candidates) {
-    if (!entity.inputPattern.test(inputStr)) {
+    // Entities with `inputField` test against the raw field value (no JSON
+    // escaping); an absent/non-string field means the entity can't match.
+    const target = entity.inputField
+      ? rawInputField(toolInput, entity.inputField)
+      : inputStr;
+    if (target === null || !entity.inputPattern.test(target)) {
       continue;
     }
     return {
@@ -139,6 +222,20 @@ export function detectAuthoritativeLookup(
     };
   }
   return { nudge: false, systemMessage: '' };
+}
+
+/**
+ * Return the RAW string value of `field` on a tool-input object, or null when
+ * the input is not an object or the field is absent / not a string. Used by
+ * entities with `inputField` so `inputPattern` runs against the unescaped
+ * field (e.g. Bash `command`, WebFetch `url`) instead of the serialized whole.
+ */
+function rawInputField(input: unknown, field: string): string | null {
+  if (input === null || typeof input !== 'object') {
+    return null;
+  }
+  const value = (input as Record<string, unknown>)[field];
+  return typeof value === 'string' ? value : null;
 }
 
 function serialiseToolInput(input: unknown): string | null {
