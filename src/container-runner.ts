@@ -98,6 +98,74 @@ const CR_FS_CODES = [
 const CR_READLINK_FS_CODES = [...CR_FS_CODES, 'EINVAL'];
 
 /**
+ * Typed error for an infrastructure failure raised by `runContainerAgent`'s
+ * spawn setup — container spawn, docker, filesystem, OneCLI fail-closed.
+ * `runAgent` (`src/index.ts`) narrows on this to convert an operational
+ * agent-run failure into a typed `'error'` result (the caller branches on it
+ * for #428 cursor-rollback) while letting programmer defects propagate to the
+ * queue's per-group boundary. Introduced by #784 so that boundary is a closed
+ * `instanceof` set rather than a defect-blacklist.
+ *
+ * The clearly-operational NON-fs failures (the OneCLI fail-closed CA/proxy
+ * throws) construct this type directly at their throw sites; the fs failures
+ * are converted by `toContainerAgentError`. Everything else — validation,
+ * refuse-to-spawn, and init-guard `new Error`s (e.g. `resolveGroupFolderPath`'s
+ * escaping-folder check, `rebuildCadenceRegistryForGroup`'s
+ * `called before initDatabase` guard) — is a defect that must surface, so it is
+ * NOT converted.
+ */
+export class ContainerAgentError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'ContainerAgentError';
+  }
+}
+
+/**
+ * Re-raise a failure from `runContainerAgent`'s spawn setup: convert an
+ * infrastructure fs failure to a `ContainerAgentError`, or propagate
+ * everything else untouched. Always throws (`never`).
+ *
+ * Converts ONLY an fs `ErrnoException` whose code the spawn path treats as
+ * operational (`CR_FS_CODES` — EACCES/ENOSPC/EROFS/… on a mkdir/write). That is
+ * the sole "infrastructure failure by design" a caller can't otherwise
+ * distinguish. Everything else propagates so the bug surfaces instead of being
+ * retried as a routine agent failure:
+ *   - an `Error` subclass (`TypeError`, `ReferenceError`, …) — a defect;
+ *   - a non-`Error` throw;
+ *   - an fs `ErrnoException` with an UNEXPECTED code — the same signal the
+ *     module's `isFsErrorWithCode(err, CR_FS_CODES)` guards rethrow on;
+ *   - a code-less `new Error` — a validation / refuse-to-spawn / init-guard
+ *     defect (e.g. `rebuildCadenceRegistryForGroup`'s
+ *     `called before initDatabase`). The operational non-fs failures are typed
+ *     at their sites (OneCLI fail-closed), so they never rely on this path.
+ * An already-typed `ContainerAgentError` is re-raised as-is by the final
+ * `throw` (its code check is false — it carries no errno code).
+ */
+export function toContainerAgentError(err: unknown): never {
+  if (isFsErrorWithCode(err, CR_FS_CODES)) {
+    throw new ContainerAgentError((err as Error).message, { cause: err });
+  }
+  throw err;
+}
+
+/**
+ * Run one setup step of `runContainerAgent`'s pre-spawn path (before the
+ * container is registered / the spawn handlers are attached). Any failure is
+ * re-raised through `toContainerAgentError` so an infrastructure fault becomes
+ * a typed `ContainerAgentError` and a defect propagates. #784.
+ */
+function spawnSetup<T>(step: () => T): T {
+  try {
+    return step();
+  } catch (err) {
+    // toContainerAgentError always throws (returns `never`); the `throw`
+    // keyword is what re-raises here (and satisfies no-catch-all).
+    throw toContainerAgentError(err);
+  }
+}
+
+/**
  * Select which tiles to install based on group trust tier, plus any
  * per-chat overlay tiles (#305).
  *
@@ -3404,8 +3472,11 @@ export async function runContainerAgent(
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
-  const groupDir = resolveGroupFolderPath(group.folder);
-  fs.mkdirSync(groupDir, { recursive: true });
+  const groupDir = spawnSetup(() => {
+    const dir = resolveGroupFolderPath(group.folder);
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  });
 
   const sessionName = input.sessionName ?? DEFAULT_SESSION_NAME;
 
@@ -3417,10 +3488,12 @@ export async function runContainerAgent(
   // shared `input/` path would leave the real file in place, and a
   // scheduled task with no replyToMessageId would quote a random old
   // message from a prior run.
-  const replyToFile = path.join(
-    resolveGroupIpcPath(group.folder),
-    sessionInputDirName(sessionName),
-    '_reply_to',
+  const replyToFile = spawnSetup(() =>
+    path.join(
+      resolveGroupIpcPath(group.folder),
+      sessionInputDirName(sessionName),
+      '_reply_to',
+    ),
   );
   try {
     fs.unlinkSync(replyToFile);
@@ -3429,11 +3502,8 @@ export async function runContainerAgent(
     /* file doesn't exist — fine */
   }
 
-  const mounts = buildVolumeMounts(
-    group,
-    input.isMain,
-    input.chatJid,
-    sessionName,
+  const mounts = spawnSetup(() =>
+    buildVolumeMounts(group, input.isMain, input.chatJid, sessionName),
   );
 
   // #305 Phase 2a — cadence-registry rebuild. Walks the per-session
@@ -3467,21 +3537,23 @@ export async function runContainerAgent(
     // that point is a real fault (db corruption, fs walk fails on
     // EACCES, etc.) and should fail the spawn loudly per the no-error
     // -suppression rule.
-    const cadenceResult = rebuildCadenceRegistryForGroup({
-      groupFolder: group.folder,
-      chatJid: input.chatJid,
-      // Cadence-registry rows derive from tile content delivered via
-      // the staging→promote→publish→update pipeline (host-vetted,
-      // owner-trusted) rather than any in-container agent action — so
-      // they unwrap at fire time the same way legacy heartbeat seeders
-      // do. The trust-boundary semantics for fire-time wrapping live
-      // on `created_by_role`; the registry-vs-IPC provenance lives on
-      // the new `source` column. Two columns, two questions.
-      createdByRole: 'owner',
-      skillsDir,
-      computeNextRun: defaultComputeNextRun,
-      now: () => new Date(),
-    });
+    const cadenceResult = spawnSetup(() =>
+      rebuildCadenceRegistryForGroup({
+        groupFolder: group.folder,
+        chatJid: input.chatJid,
+        // Cadence-registry rows derive from tile content delivered via
+        // the staging→promote→publish→update pipeline (host-vetted,
+        // owner-trusted) rather than any in-container agent action — so
+        // they unwrap at fire time the same way legacy heartbeat seeders
+        // do. The trust-boundary semantics for fire-time wrapping live
+        // on `created_by_role`; the registry-vs-IPC provenance lives on
+        // the new `source` column. Two columns, two questions.
+        createdByRole: 'owner',
+        skillsDir,
+        computeNextRun: defaultComputeNextRun,
+        now: () => new Date(),
+      }),
+    );
     if (
       cadenceResult.inserted > 0 ||
       cadenceResult.updated > 0 ||
@@ -3654,7 +3726,9 @@ export async function runContainerAgent(
           // failure is fail-closed, same as a withheld managed credential.
           const caMounted = await mountOneCliAgentCa(containerArgs, trustTier);
           if (!caMounted) {
-            throw new Error(
+            // #784: an operational fail-closed failure (gateway down) — typed
+            // directly so runAgent returns 'error' and the queue retries.
+            throw new ContainerAgentError(
               'OneCLI agent proxy applied but its MITM CA could not be ' +
                 'delivered to the container — every external HTTPS call would ' +
                 'fail TLS. Confirm the OneCLI gateway is reachable (`curl -sf ' +
@@ -3669,7 +3743,8 @@ export async function runContainerAgent(
           // a dead-credentialed container. The queue retries with backoff
           // (index.ts catch → 'error'), so a transient gateway blip self-heals;
           // untrusted spawns forward no vars, so this path is skipped for them.
-          throw new Error(
+          // #784: operational fail-closed (gateway down) — typed directly.
+          throw new ContainerAgentError(
             'OneCLI agent proxy could not be applied to this spawn — managed ' +
               'credentials were withheld as placeholders and would fail on a ' +
               'direct request. Confirm the OneCLI gateway is reachable (`curl ' +
@@ -4402,9 +4477,13 @@ export async function runContainerAgent(
     });
   } catch (err) {
     // Sync throw before the spawn handlers wired up — handlers can't
-    // unregister, so do it here and propagate.
+    // unregister, so do it here and propagate. #784: re-raise through
+    // toContainerAgentError so an infrastructure fault (buildContainerArgs /
+    // buildSecretEnvFile, the OneCLI fail-closed throws, mkdirSync(logsDir))
+    // reaches runAgent as a typed ContainerAgentError, while a defect
+    // propagates untouched.
     unregisterContainer(attributionToken);
-    throw err;
+    throw toContainerAgentError(err);
   }
 }
 

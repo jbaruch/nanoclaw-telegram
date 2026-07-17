@@ -37,6 +37,7 @@ import {
   getRegisteredChannelNames,
 } from './channels/registry.js';
 import {
+  ContainerAgentError,
   ContainerOutput,
   runContainerAgent,
   writeGroupsSnapshot,
@@ -2344,21 +2345,16 @@ async function runAgent(
   } catch (err) {
     // runAgent must resolve to a typed 'success' | 'error': the caller
     // (processGroupMessages) branches on 'error' for cursor-rollback (#428),
-    // so an OPERATIONAL agent failure (SDK/API/container error) is reported as
-    // 'error' rather than thrown. Programmer defects — TypeError, ReferenceError,
-    // RangeError, SyntaxError, and any non-Error throw — propagate to the
-    // queue's per-group boundary (group-queue.ts) so a bug surfaces instead of
-    // being masked as a routine agent failure. runContainerAgent throws plain
-    // Error for infrastructure failures by design, so plain-Error can't be
-    // classified as a defect here; #784 tracks giving it a typed error so this
-    // boundary can narrow to a closed set.
-    if (
-      !(err instanceof Error) ||
-      err instanceof TypeError ||
-      err instanceof ReferenceError ||
-      err instanceof RangeError ||
-      err instanceof SyntaxError
-    ) {
+    // so an OPERATIONAL agent failure is reported as 'error' rather than
+    // thrown. #784: runContainerAgent now raises a typed ContainerAgentError
+    // for every infrastructure failure (container spawn, docker, fs, OneCLI
+    // fail-closed), so this boundary narrows to that closed set instead of the
+    // defect-blacklist it used to carry. Anything else — a programmer defect
+    // (TypeError, …) or a plain-Error defect in runAgent's own post-processing
+    // (checkpoint/threshold handling above, which the old blacklist masked) —
+    // propagates to the queue's per-group boundary (group-queue.ts) so the bug
+    // surfaces instead of being retried as a routine agent failure.
+    if (!(err instanceof ContainerAgentError)) {
       throw err;
     }
     logger.error({ group: group.name, err }, 'Agent error');
