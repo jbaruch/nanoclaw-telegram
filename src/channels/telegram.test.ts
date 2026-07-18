@@ -44,6 +44,36 @@ vi.mock('openai', () => {
   };
 });
 
+// Mock undici — transcribeVoice's OneCLI gateway path (#810) issues a
+// hand-built multipart POST via undici's own fetch + FormData, because the
+// OpenAI SDK builds its multipart body with the GLOBAL FormData, which
+// undici@8's fetch serializes to "[object FormData]" (the dual-undici mismatch
+// #770 introduced). Capture the call to assert URL, placeholder Bearer, proxy
+// dispatcher, and that the body is undici's FormData — the fix itself.
+const undiciMock = vi.hoisted(() => ({
+  fetch: vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ text: 'transcribed text' }),
+    text: async () => '',
+  })),
+}));
+vi.mock('undici', () => ({
+  fetch: undiciMock.fetch,
+  ProxyAgent: class {
+    constructor(public opts: unknown) {}
+  },
+  // Branded stand-in for undici's FormData so a test can prove the code built
+  // the multipart body with undici's class, not the global one.
+  FormData: class {
+    readonly __undici = true;
+    entries: Array<[string, unknown, string?]> = [];
+    append(name: string, value: unknown, filename?: string) {
+      this.entries.push([name, value, filename]);
+    }
+  },
+}));
+
 // Mock config
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
@@ -995,6 +1025,47 @@ describe('TelegramChannel', () => {
         const ctx = createMediaCtx({ extra: { voice: { file_id: 'v1' } } });
         await triggerMediaMessage('message:voice', ctx);
 
+        expect(opts.onMessage).toHaveBeenCalledWith(
+          'tg:100200300',
+          expect.objectContaining({
+            content: '[Voice message - transcription failed]',
+          }),
+        );
+      } finally {
+        getSpy.mockRestore();
+      }
+    });
+
+    it('delivers a fallback BEFORE re-raising a non-operational error, so the note is never dropped (#810)', async () => {
+      // Before #810 the handler re-threw a non-operational, non-network error
+      // *past* deliverInbound, so the voice note vanished — no DB row, no agent
+      // wake, total silence to the owner. Now the fallback row is delivered
+      // first; the defect still re-raises loudly (grammy's error boundary) but
+      // the note is already stored.
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      currentBot().api.getFile.mockResolvedValueOnce({
+        file_path: 'voice/v1.ogg',
+      });
+      const getSpy = vi.spyOn(https, 'get').mockImplementation(((
+        _url: string,
+      ) => {
+        const req = new EventEmitter();
+        // A plain TypeError with no `code` — a genuine defect shape, not a
+        // network hiccup. This is the class of error that used to propagate
+        // and drop the note.
+        queueMicrotask(() => req.emit('error', new TypeError('boom')));
+        return req;
+      }) as unknown as typeof https.get);
+
+      try {
+        const ctx = createMediaCtx({ extra: { voice: { file_id: 'v1' } } });
+        // The defect still surfaces to the grammy error boundary...
+        await expect(triggerMediaMessage('message:voice', ctx)).rejects.toThrow(
+          'boom',
+        );
+        // ...but the note was delivered before it did.
         expect(opts.onMessage).toHaveBeenCalledWith(
           'tg:100200300',
           expect.objectContaining({
@@ -2802,6 +2873,7 @@ describe('transcribeVoice — OneCLI-aware credential path (#770)', () => {
   beforeEach(() => {
     openaiMock.ctor.mockClear();
     openaiMock.create.mockClear();
+    undiciMock.fetch.mockClear();
     vi.mocked(isOneCliConfigured).mockReset();
     vi.mocked(getOneCliOutboundConfig).mockReset();
     vi.mocked(readEnvFile).mockReset();
@@ -2815,7 +2887,7 @@ describe('transcribeVoice — OneCLI-aware credential path (#770)', () => {
     vi.unstubAllEnvs();
   });
 
-  it('routes through the gateway with a placeholder Bearer + proxy dispatcher when OneCLI is configured', async () => {
+  it('POSTs multipart to the gateway with a placeholder Bearer + proxy dispatcher when OneCLI is configured', async () => {
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
     vi.mocked(getOneCliOutboundConfig).mockResolvedValue({
       proxyUrl: 'http://x:aoc_tok@gw:10255',
@@ -2826,35 +2898,118 @@ describe('transcribeVoice — OneCLI-aware credential path (#770)', () => {
 
     expect(result).toBe('transcribed text');
     expect(getOneCliOutboundConfig).toHaveBeenCalledWith('main');
-    const opts = openaiMock.ctor.mock.calls[0][0] as {
-      apiKey: string;
-      fetch?: unknown;
-      fetchOptions?: { dispatcher?: unknown };
-    };
+    // The OpenAI SDK is NOT used on the gateway path: it builds its multipart
+    // body with the global FormData, which undici@8's fetch can't serialize
+    // (#810). The request goes through undici directly instead.
+    expect(openaiMock.ctor).not.toHaveBeenCalled();
+    expect(undiciMock.fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = undiciMock.fetch.mock.calls[0] as unknown as [
+      string,
+      {
+        method: string;
+        headers: Record<string, string>;
+        dispatcher?: unknown;
+        body: {
+          __undici?: boolean;
+          entries: Array<[string, unknown, string?]>;
+        };
+      },
+    ];
+    expect(url).toBe('https://api.openai.com/v1/audio/transcriptions');
+    expect(init.method).toBe('POST');
     // Placeholder authenticates nothing — the gateway swaps the vaulted key.
-    expect(opts.apiKey).toBe('onecli-managed');
+    expect(init.headers.authorization).toBe('Bearer onecli-managed');
     // A dispatcher tunnels the request through the OneCLI proxy.
-    expect(opts.fetchOptions?.dispatcher).toBeDefined();
-    // undici's own fetch is supplied so its dispatcher's handler interface
-    // matches (Node's global fetch rejects a foreign-version dispatcher with
-    // UND_ERR_INVALID_ARG). Assert it's a callable — a non-function value
-    // would pass a bare toBeDefined() while still breaking at runtime.
-    expect(typeof opts.fetch).toBe('function');
+    expect(init.dispatcher).toBeDefined();
+    // The multipart body is undici's FormData (branded), not the global one —
+    // this is the actual #810 fix. It carries the model + audio file.
+    expect(init.body.__undici).toBe(true);
+    const fields = init.body.entries.map((e) => e[0]);
+    expect(fields).toContain('model');
+    expect(fields).toContain('file');
     // The real .env key is never read on the configured path.
     expect(readEnvFile).not.toHaveBeenCalled();
   });
 
-  it('reports unavailable (no OpenAI call) when OneCLI is configured but its gateway is unreachable', async () => {
+  it('reports unavailable (no request attempted) when OneCLI is configured but its gateway is unreachable', async () => {
     vi.mocked(isOneCliConfigured).mockReturnValue(true);
     vi.mocked(getOneCliOutboundConfig).mockResolvedValue(null);
 
     const result = await transcribeVoice(audio);
 
     expect(result).toBeNull();
-    // No client is constructed and no request is attempted with a dead
-    // placeholder — there is no real key on disk to fall back to.
+    // No request is attempted with a dead placeholder — there is no real key
+    // on disk to fall back to.
+    expect(undiciMock.fetch).not.toHaveBeenCalled();
     expect(openaiMock.ctor).not.toHaveBeenCalled();
-    expect(openaiMock.create).not.toHaveBeenCalled();
+  });
+
+  it('returns null (never throws) when the gateway responds non-2xx on the OneCLI path', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(getOneCliOutboundConfig).mockResolvedValue({
+      proxyUrl: 'http://x:aoc_tok@gw:10255',
+      ca: 'CA-BUNDLE',
+    });
+    undiciMock.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: async () => ({ text: '' }),
+      text: async () => 'unauthorized',
+    });
+
+    await expect(transcribeVoice(audio)).resolves.toBeNull();
+  });
+
+  it('propagates a genuine defect on the OneCLI path (the handler delivers the note before re-raising)', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(getOneCliOutboundConfig).mockResolvedValue({
+      proxyUrl: 'http://x:aoc_tok@gw:10255',
+      ca: 'CA-BUNDLE',
+    });
+    // A non-operational throw (TypeError/ReferenceError/…) is a defect, not a
+    // routine transcription miss, so it re-raises rather than being masked as
+    // null. The message:voice handler stores a fallback row BEFORE this
+    // propagates, so the note is never lost (see the handler test). This is the
+    // established media-boundary contract — #810 fixed the dual-undici TypeError
+    // that used to land here on every voice note.
+    undiciMock.fetch.mockRejectedValueOnce(new TypeError('undici failure'));
+
+    await expect(transcribeVoice(audio)).rejects.toThrow('undici failure');
+  });
+
+  it('degrades to null on an undici transport failure (fetch failed + errno cause) on the OneCLI path', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(getOneCliOutboundConfig).mockResolvedValue({
+      proxyUrl: 'http://x:aoc_tok@gw:10255',
+      ca: 'CA-BUNDLE',
+    });
+    // undici rejects a proxy/DNS/reset outage as a TypeError('fetch failed')
+    // wrapping the real errno on .cause. That's a routine gateway blip, not a
+    // defect — it must degrade to null so the handler stores a quiet fallback
+    // row instead of surfacing a grammy error on every transient outage.
+    const transportErr = new TypeError('fetch failed');
+    (transportErr as { cause?: unknown }).cause = Object.assign(
+      new Error('connect ECONNREFUSED'),
+      { code: 'ECONNREFUSED' },
+    );
+    undiciMock.fetch.mockRejectedValueOnce(transportErr);
+
+    await expect(transcribeVoice(audio)).resolves.toBeNull();
+  });
+
+  it('degrades to null on an undici UND_ERR_* transport failure on the OneCLI path', async () => {
+    vi.mocked(isOneCliConfigured).mockReturnValue(true);
+    vi.mocked(getOneCliOutboundConfig).mockResolvedValue({
+      proxyUrl: 'http://x:aoc_tok@gw:10255',
+      ca: 'CA-BUNDLE',
+    });
+    undiciMock.fetch.mockRejectedValueOnce(
+      Object.assign(new Error('connect timeout'), {
+        code: 'UND_ERR_CONNECT_TIMEOUT',
+      }),
+    );
+
+    await expect(transcribeVoice(audio)).resolves.toBeNull();
   });
 
   it('falls back to the real .env key on the direct path when OneCLI is unconfigured', async () => {

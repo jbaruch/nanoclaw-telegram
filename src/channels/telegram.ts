@@ -3,7 +3,11 @@ import https from 'https';
 import path from 'path';
 import { Api, Bot, GrammyError, HttpError, InputFile } from 'grammy';
 import OpenAI from 'openai';
-import { ProxyAgent, fetch as undiciFetch } from 'undici';
+import {
+  ProxyAgent,
+  fetch as undiciFetch,
+  FormData as UndiciFormData,
+} from 'undici';
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import {
@@ -83,6 +87,38 @@ function isTelegramOperationalError(err: unknown): boolean {
     err instanceof GrammyError ||
     err instanceof HttpError ||
     err instanceof OpenAI.APIError
+  );
+}
+
+/**
+ * True for an undici `fetch` transport failure — a proxy/TLS/DNS/timeout/reset
+ * outage the OneCLI transcription gateway path (#810) should degrade past, not
+ * treat as a defect. undici rejects these as a `TypeError('fetch failed')`
+ * whose `.cause` carries the real errno (`ECONNREFUSED`, `ENOTFOUND`, …) or an
+ * `UND_ERR_*` / TLS code; some reject directly with an errno-coded `Error`.
+ * A genuine programmer defect (a bare `TypeError` with no network cause) has
+ * neither shape, so it still propagates.
+ */
+function isUndiciTransportError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const codeOf = (e: unknown): string | undefined =>
+    e instanceof Error ? (e as NodeJS.ErrnoException).code : undefined;
+  const code = codeOf(err) ?? codeOf((err as { cause?: unknown }).cause);
+  if (
+    typeof code === 'string' &&
+    (code.startsWith('UND_ERR') ||
+      code.startsWith('ERR_TLS') ||
+      code.startsWith('ERR_SSL') ||
+      TELEGRAM_NETWORK_CODES.includes(code))
+  ) {
+    return true;
+  }
+  // undici surfaces a network failure as a plain TypeError('fetch failed')
+  // wrapping the underlying cause.
+  return (
+    err instanceof TypeError &&
+    err.message.includes('fetch failed') &&
+    (err as { cause?: unknown }).cause instanceof Error
   );
 }
 
@@ -1079,30 +1115,18 @@ function oneCliProxyDispatcher(proxyUrl: string, ca: string): ProxyAgent {
 export async function transcribeVoice(
   audioBuffer: Buffer,
 ): Promise<string | null> {
-  const clientOptions: ConstructorParameters<typeof OpenAI>[0] = {};
-  if (isOneCliConfigured()) {
-    const outbound = await getOneCliOutboundConfig('main');
-    if (!outbound) {
-      logger.error(
-        'OneCLI is configured but its gateway is unreachable — cannot transcribe voice (OPENAI_API_KEY is vault-only; confirm `curl -sf $ONECLI_URL/health` on the NAS)',
-      );
-      return null;
+  try {
+    if (isOneCliConfigured()) {
+      const outbound = await getOneCliOutboundConfig('main');
+      if (!outbound) {
+        logger.error(
+          'OneCLI is configured but its gateway is unreachable — cannot transcribe voice (OPENAI_API_KEY is vault-only; confirm `curl -sf $ONECLI_URL/health` on the NAS)',
+        );
+        return null;
+      }
+      return await transcribeVoiceViaGateway(audioBuffer, outbound);
     }
-    clientOptions.apiKey = ONECLI_MANAGED_PLACEHOLDER;
-    // Use undici's OWN fetch, not Node's global fetch. The dispatcher below
-    // is an undici ProxyAgent from the `undici` package; Node's bundled fetch
-    // implements a DIFFERENT internal dispatcher-handler interface, so handing
-    // it a foreign-version dispatcher throws `UND_ERR_INVALID_ARG: invalid
-    // onRequestStart method` at request time (a dual-undici mismatch the mocked
-    // unit tests can't see). Pairing undici.fetch with undici.ProxyAgent keeps
-    // both on the same interface. The signature matches the SDK's `Fetch`;
-    // cast through unknown because undici's Request/Response nominal types
-    // differ from the global lib.dom ones.
-    clientOptions.fetch = undiciFetch as unknown as typeof globalThis.fetch;
-    clientOptions.fetchOptions = {
-      dispatcher: oneCliProxyDispatcher(outbound.proxyUrl, outbound.ca),
-    };
-  } else {
+
     const envVars = readEnvFile(['OPENAI_API_KEY']);
     const apiKey = process.env.OPENAI_API_KEY || envVars.OPENAI_API_KEY;
     if (!apiKey) {
@@ -1111,11 +1135,7 @@ export async function transcribeVoice(
       );
       return null;
     }
-    clientOptions.apiKey = apiKey;
-  }
-
-  try {
-    const openai = new OpenAI(clientOptions);
+    const openai = new OpenAI({ apiKey });
     const file = new File([audioBuffer], 'voice.ogg', { type: 'audio/ogg' });
     const transcription = await openai.audio.transcriptions.create({
       model: 'whisper-1',
@@ -1123,10 +1143,70 @@ export async function transcribeVoice(
     });
     return transcription.text;
   } catch (err) {
-    if (!isTelegramOperationalError(err)) throw err;
+    // Operational failures degrade to null so the handler stores a visible
+    // fallback row: an OpenAI API error (SDK path), or an undici fetch
+    // transport failure (gateway path — proxy/TLS/DNS/timeout/reset, which
+    // undici rejects as a non-OpenAI TypeError). A genuine defect propagates
+    // so it isn't masked as a routine transcription miss; the handler delivers
+    // the note BEFORE re-raising, so nothing is lost either way (#810).
+    if (!isTelegramOperationalError(err) && !isUndiciTransportError(err))
+      throw err;
     logger.error({ err }, 'OpenAI transcription failed');
     return null;
   }
+}
+
+/**
+ * Transcribe via the OneCLI gateway with a hand-built multipart POST.
+ *
+ * The OpenAI SDK cannot be used on the gateway path (#810). The gateway
+ * dispatcher is an undici@8 `ProxyAgent`, so the request must run through
+ * undici@8's `fetch`; but the SDK builds its multipart body with the GLOBAL
+ * `FormData` (Node's bundled undici), and undici@8's fetch only serializes a
+ * FormData instance of its OWN class as multipart — a global one stringifies
+ * to `[object FormData]` and the SDK's own guard throws
+ * `The provided fetch function does not support file uploads ...`. So #770's
+ * fix for the JSON path (undici.fetch + undici.ProxyAgent) silently broke the
+ * multipart (transcription) path. Here we keep the whole multipart on undici@8:
+ * undici's `FormData`, tunneled through undici's `fetch` + the proxy dispatcher.
+ *
+ * A placeholder Bearer authenticates nothing — the OneCLI gateway swaps in the
+ * vaulted `OPENAI_API_KEY` on `api.openai.com` so the real key never touches
+ * host disk.
+ */
+async function transcribeVoiceViaGateway(
+  audioBuffer: Buffer,
+  outbound: { proxyUrl: string; ca: string },
+): Promise<string | null> {
+  const form = new UndiciFormData();
+  form.append('model', 'whisper-1');
+  form.append(
+    'file',
+    new Blob([audioBuffer], { type: 'audio/ogg' }),
+    'voice.ogg',
+  );
+
+  const res = await undiciFetch(
+    'https://api.openai.com/v1/audio/transcriptions',
+    {
+      method: 'POST',
+      headers: { authorization: `Bearer ${ONECLI_MANAGED_PLACEHOLDER}` },
+      body: form,
+      dispatcher: oneCliProxyDispatcher(outbound.proxyUrl, outbound.ca),
+    },
+  );
+
+  if (!res.ok) {
+    const detail = await res.text();
+    logger.error(
+      { status: res.status, detail: detail.slice(0, 500) },
+      'OpenAI transcription gateway returned a non-2xx response',
+    );
+    return null;
+  }
+
+  const body = (await res.json()) as { text?: string };
+  return body.text ?? null;
 }
 
 /**
@@ -1693,16 +1773,28 @@ export class TelegramChannel implements Channel {
         isGroup,
       );
 
-      let content: string;
+      const deliverVoice = (text: string) =>
+        this.deliverInbound(chatJid, {
+          id: msgId,
+          chat_jid: chatJid,
+          sender: ctx.from?.id?.toString() || '',
+          sender_name: senderName,
+          content: text,
+          timestamp,
+          is_from_me: false,
+        });
+
       try {
         const buffer = await downloadTelegramFile(
           this.bot!,
           ctx.message.voice.file_id,
         );
         const transcript = await transcribeVoice(buffer);
-        content = transcript
-          ? `[Voice: ${transcript}]`
-          : '[Voice message - transcription unavailable]';
+        deliverVoice(
+          transcript
+            ? `[Voice: ${transcript}]`
+            : '[Voice message - transcription unavailable]',
+        );
         if (transcript) {
           logger.info(
             { chatJid, senderName, chars: transcript.length },
@@ -1710,26 +1802,22 @@ export class TelegramChannel implements Channel {
           );
         }
       } catch (err) {
-        // Download (grammy getFile or the raw https.get leg) may fail; a
-        // non-operational, non-network throw is a defect and propagates.
+        // A voice note must never vanish. Deliver a fallback row FIRST so the
+        // agent wakes and the owner sees the note arrived, THEN classify:
+        // download (grammy getFile / the raw https.get leg) or transcription
+        // failures that are operational/network degrade quietly like the other
+        // media handlers, but a genuine defect still re-raises loudly. What
+        // broke voice in #810 was re-throwing *past* delivery — the note was
+        // lost before any row was written. Delivering before the re-raise
+        // closes that gap.
+        logger.error({ err }, 'Failed to process voice message');
+        deliverVoice('[Voice message - transcription failed]');
         if (
           !isTelegramOperationalError(err) &&
           !isFsErrorWithCode(err, TELEGRAM_NETWORK_CODES)
         )
           throw err;
-        logger.error({ err }, 'Failed to process voice message');
-        content = '[Voice message - transcription failed]';
       }
-
-      this.deliverInbound(chatJid, {
-        id: msgId,
-        chat_jid: chatJid,
-        sender: ctx.from?.id?.toString() || '',
-        sender_name: senderName,
-        content,
-        timestamp,
-        is_from_me: false,
-      });
 
       // No host-side reaction here either — see the matching block
       // in the message:text handler for the rationale.
