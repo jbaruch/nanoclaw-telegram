@@ -78,6 +78,19 @@ ENV AGENT_BROWSER_SCREENSHOT_QUALITY=75
 # a version change is reviewed rather than silently inherited (#796).
 RUN npm install -g agent-browser@0.32.1 @anthropic-ai/claude-code@2.1.212
 
+# #748: the TripIt → Reclaim timezone sync moves in-container (creds swapped at
+# the OneCLI gateway), so the agent runs `reclaim-tripit-timezones-sync` itself
+# instead of the host-op that runs it in the orchestrator today (that host-op is
+# removed in the #748 Phase 3 cutover, once this in-container path is verified).
+# Pinned to an
+# immutable tag (`coding-policy: dependency-management` Pinning) so a
+# `deploy.sh --no-cache` rebuild can't silently pull unreviewed upstream code —
+# a version change is a reviewed Dockerfile diff. Renewal is scanner-tracked,
+# not memory: `.github/renovate.json`'s `custom.regex` manager watches this
+# `#<tag>` pin (github-tags datasource) and opens a bump PR, same mechanism as
+# the two globals above (#796). Kept on its own layer.
+RUN npm install -g jbaruch/reclaim-tripit-timezones-sync#v0.3.3
+
 # Create app directory
 WORKDIR /app
 

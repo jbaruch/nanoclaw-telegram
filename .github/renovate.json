@@ -24,6 +24,17 @@
       ],
       "datasourceTemplate": "npm",
       "versioningTemplate": "npm"
+    },
+    {
+      "customType": "regex",
+      "description": "GitHub-sourced global in the agent image pinned to a tag (container/Dockerfile `RUN npm install -g <owner/repo>#<tag>`, #748). Watched via the github-tags datasource since the npm datasource above cannot resolve a GitHub ref.",
+      "fileMatch": ["^container/Dockerfile$"],
+      "matchStringsStrategy": "any",
+      "matchStrings": [
+        "(?<depName>jbaruch/reclaim-tripit-timezones-sync)#(?<currentValue>v[0-9][^\\s\\\\]*)"
+      ],
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver"
     }
   ],
   "packageRules": [

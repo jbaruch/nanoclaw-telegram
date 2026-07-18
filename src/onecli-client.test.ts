@@ -80,6 +80,7 @@ import {
   ensureAgentForTier,
   getOneCliOutboundConfig,
   isOneCliConfigured,
+  oneCliSpawnEnvArgs,
   TRUST_TIERS,
   _resetOneCliClient,
 } from './onecli-client.js';
@@ -725,5 +726,62 @@ describe('onecli-client', () => {
 
   it('TRUST_TIERS lists every tier exactly once', () => {
     expect([...TRUST_TIERS].sort()).toEqual(['main', 'trusted', 'untrusted']);
+  });
+});
+
+// -----------------------------------------------------------------
+// oneCliSpawnEnvArgs — the docker `-e` args that put an in-container
+// gateway CLI into OneCLI mode (#748). Pure: gated specifically on
+// HTTPS_PROXY landing on the argv (not any proxy), null-safe on env,
+// and it must NEVER surface ONECLI_API_KEY onto the spawn.
+// -----------------------------------------------------------------
+describe('oneCliSpawnEnvArgs', () => {
+  const envOptions = { url: 'http://host.docker.internal:8080' };
+  const withHttps = [
+    'run',
+    '-e',
+    'HTTPS_PROXY=http://host.docker.internal:9000',
+  ];
+
+  it('injects ONECLI_URL + ENABLE_OOO=1 when HTTPS_PROXY landed', () => {
+    expect(oneCliSpawnEnvArgs(withHttps, envOptions)).toEqual([
+      '-e',
+      'ONECLI_URL=http://host.docker.internal:8080',
+      '-e',
+      'ENABLE_OOO=1',
+    ]);
+  });
+
+  it('injects nothing when only HTTP_PROXY landed (not HTTPS_PROXY)', () => {
+    // The package fail-fasts when ONECLI_URL is set without HTTPS_PROXY, so a
+    // partial-config spawn must not receive it.
+    const httpOnly = [
+      'run',
+      '-e',
+      'HTTP_PROXY=http://host.docker.internal:9000',
+    ];
+    expect(oneCliSpawnEnvArgs(httpOnly, envOptions)).toEqual([]);
+  });
+
+  it('injects nothing when no proxy env landed', () => {
+    expect(
+      oneCliSpawnEnvArgs(['run', '-i', '--rm', 'image'], envOptions),
+    ).toEqual([]);
+  });
+
+  it('injects nothing when OneCLI is unconfigured (null env)', () => {
+    expect(oneCliSpawnEnvArgs(withHttps, null)).toEqual([]);
+  });
+
+  it('never forwards ONECLI_API_KEY onto the spawn', () => {
+    // Even if a key rides on the env-options object, only the URL may leave —
+    // the container authenticates with the agent-scoped token in HTTPS_PROXY.
+    const withKey = {
+      url: 'http://host.docker.internal:8080',
+      apiKey: 'sk-secret',
+    };
+    const out = oneCliSpawnEnvArgs(withHttps, withKey);
+    expect(out.join(' ')).not.toContain('ONECLI_API_KEY');
+    expect(out.join(' ')).not.toContain('sk-secret');
   });
 });

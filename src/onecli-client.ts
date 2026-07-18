@@ -358,6 +358,31 @@ function removeInjectedEnvVar(
 }
 
 /**
+ * #748 — the docker `-e` args that put an in-container OneCLI-gateway CLI
+ * (`reclaim-tripit-timezones-sync`) into gateway mode: `ONECLI_URL` (the
+ * gateway-mode gate) and `ENABLE_OOO=1` (keeps out-of-office on now that the
+ * GOOGLE_* vars are gone). Returns `[]` — injecting nothing — unless BOTH hold:
+ *
+ *  - `envOptions` is non-null (OneCLI is configured), and
+ *  - `HTTPS_PROXY` actually landed on the spawn argv.
+ *
+ * The `HTTPS_PROXY` check is deliberately specific, not "any proxy env": the
+ * package fail-fasts when `ONECLI_URL` is set without `HTTPS_PROXY`, so a
+ * partial-config spawn that only carried `HTTP_PROXY` must NOT receive
+ * `ONECLI_URL` (it would abort the CLI even though the gateway isn't engaged).
+ * `ONECLI_API_KEY` is never returned here — the container authenticates to the
+ * gateway with the agent-scoped token baked into `HTTPS_PROXY`, not the raw key.
+ */
+export function oneCliSpawnEnvArgs(
+  args: string[],
+  envOptions: { url: string } | null,
+): string[] {
+  if (!envOptions) return [];
+  if (!args.some((a) => a.startsWith('HTTPS_PROXY='))) return [];
+  return ['-e', `ONECLI_URL=${envOptions.url}`, '-e', 'ENABLE_OOO=1'];
+}
+
+/**
  * When OneCLI is configured, mutate the docker-spawn argv to add HTTPS_PROXY
  * env, mount the OneCLI CA bundle, and add the host.docker.internal mapping.
  * Returns whether OneCLI was applied to the spawn.
@@ -452,6 +477,25 @@ export async function applyOneCliToSpawn(
       ).join(',');
       args.push('-e', `NO_PROXY=${mergedHosts}`);
       args.push('-e', `no_proxy=${mergedHosts}`);
+      // #748: give the agent `ONECLI_URL` so an in-container CLI that speaks
+      // OneCLI gateway mode (`reclaim-tripit-timezones-sync`) enters it instead
+      // of silently falling back to a client-side OAuth refresh with the vars
+      // deleted. The package gates gateway mode on `ONECLI_URL` AND fails fast
+      // if it is set without `HTTPS_PROXY`. So gate this specifically on
+      // `HTTPS_PROXY` landing on the argv — NOT the broader `proxyEnvLanded`
+      // (which is also true for an HTTP_PROXY-only spawn): setting `ONECLI_URL`
+      // without HTTPS_PROXY would make the CLI abort even though the gateway
+      // isn't engaged (#748 review). The value is `.env`'s `ONECLI_URL`
+      // (`http://host.docker.internal:…`, container-reachable via the
+      // `--add-host=host.docker.internal:host-gateway` mapping the spawn already
+      // carries) — a URL, not a secret. `ONECLI_API_KEY` is NOT forwarded: the
+      // container authenticates to the gateway with the agent-scoped token
+      // `applyContainerConfig` bakes into HTTPS_PROXY. `ENABLE_OOO=1` preserves
+      // today's out-of-office behaviour: in non-gateway mode the package
+      // switched OOO on by the mere presence of the GOOGLE_* vars; those are
+      // being deleted, so under gateway mode OOO must be turned on explicitly or
+      // it silently stops. Gating + shape live in `oneCliSpawnEnvArgs` (tested).
+      args.push(...oneCliSpawnEnvArgs(args, readEnvOptions()));
     }
     if (active) {
       // Info (not debug): a debug-only success line is why the argv-order bug

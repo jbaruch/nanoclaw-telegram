@@ -888,6 +888,33 @@ server.tool(
 );
 
 if (isMain) {
+  // #748 — credential-free host ingestion of TripIt segments. The TripIt →
+  // Reclaim sync runs in-container now (creds swapped at the OneCLI gateway);
+  // this hands the parsed `segments[]` back to the host so it can update the
+  // owner's `tz_state` singleton exactly as the `sync_tripit` host-op does
+  // today (that host-op is removed in the #748 Phase 3 cutover). Main-group
+  // only: the handler writes owner-timezone state and
+  // invalidates local-tz schedule `next_run` values, so an untrusted/trusted
+  // agent must never be able to poison it with crafted segments.
+  server.tool(
+    'persist_tz_segments',
+    'Persist TripIt itinerary segments (from the in-container TripIt → Reclaim sync) to the host owner-timezone state. Main group only; credential-free.',
+    {
+      segments: z
+        .array(z.record(z.string(), z.unknown()))
+        // Bound the payload — a real itinerary is a handful of segments; the
+        // host persists the whole array into `tz_state.segments` and walks it,
+        // so cap it against a runaway payload. Lock-step with `MAX_TZ_SEGMENTS`
+        // in the host's `src/ipc.ts` persist_tz_segments handler.
+        .max(200)
+        .describe(
+          'The `segments` array from `reclaim-tripit-timezones-sync --output=json` stdout. Each element is a `{timezone, from, to, from_dt?, to_dt?, label}` object. Pass `[]` when the sync found no active trips.',
+        ),
+    },
+    async (args) =>
+      runHostOperation('persist_tz_segments', { segments: args.segments }),
+  );
+
   server.tool(
     'register_group',
     `Register a new chat/group so the agent can respond to messages there. Main group only.
