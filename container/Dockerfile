@@ -80,8 +80,8 @@ RUN npm install -g agent-browser@0.32.1 @anthropic-ai/claude-code@2.1.212
 
 # #748: the TripIt → Reclaim timezone sync moves in-container (creds swapped at
 # the OneCLI gateway), so the agent runs `reclaim-tripit-timezones-sync` itself
-# instead of the host-op that runs it in the orchestrator today (that host-op is
-# removed in the #748 Phase 3 cutover, once this in-container path is verified).
+# instead of the host-op that ran it in the orchestrator (removed in the #748
+# Phase 3 cutover, once the in-container path was verified).
 # Pinned to an
 # immutable tag (`coding-policy: dependency-management` Pinning) so a
 # `deploy.sh --no-cache` rebuild can't silently pull unreviewed upstream code —

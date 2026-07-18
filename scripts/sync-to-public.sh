@@ -141,12 +141,10 @@ echo "Scrubbing files..."
 # you forget to add a name here, the verifier catches it before the
 # export lands on public.
 PRIVATE_IPC_HANDLERS=(
-  'sync_tripit'
   'fetch_trakt_history'
   'audible_backup'
 )
 PRIVATE_MCP_TOOLS=(
-  'sync_tripit'
   'fetch_trakt_history'
   'audible_backup'
   'smarthome_status'
@@ -302,7 +300,7 @@ open(f, 'w').write(''.join(lines))
 # promote-to-tile-repo.sh: remove private integration names from grep patterns
 f = '$PUBLIC_DIR/scripts/promote-to-tile-repo.sh'
 code = open(f).read()
-code = code.replace('|sync_tripit|fetch_trakt', '')
+code = code.replace('|fetch_trakt', '')
 open(f, 'w').write(code)
 
 print('  comments/scripts: removed private integration references')
@@ -414,6 +412,7 @@ APPROVED_PUBLIC_IPC_HANDLERS=(
   'nuke_chat'
   'nuke_session'
   'pause_task'
+  'persist_tz_segments'
   'promote_staging'
   'push_staged_to_branch'
   'refresh_groups'
@@ -437,6 +436,7 @@ APPROVED_PUBLIC_MCP_TOOLS=(
   'nuke_chat'
   'nuke_session'
   'pause_task'
+  'persist_tz_segments'
   'promote_staging'
   'push_staged_to_branch'
   'react_to_message'

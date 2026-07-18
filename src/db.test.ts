@@ -2334,7 +2334,7 @@ describe('walkTzSegments (#542)', () => {
   it('falls back to date-only when from_dt is missing (legacy row in transient)', () => {
     // Row written by a pre-#229 `applyTripitSegmentsToTzState` carries
     // only `from` / `to`. The walker must keep working against it
-    // until the next `sync_tripit` run rewrites with the new shape.
+    // until the next TripIt sync (persist_tz_segments) rewrites with the new shape.
     const segments = [
       {
         timezone: 'America/New_York',
@@ -2878,7 +2878,7 @@ describe('runTzHeartbeatAdvisory — location-first cascade (#574 Phase 2)', () 
     // earlier draft of the resolver-composition called
     // `walkTzSegments(null, ...)` which returns `home_tz`, and on a
     // `current_tz !== home_tz` row would silently flip back to home
-    // — unwanted for zero-config installs before sync_tripit has
+    // — unwanted for zero-config installs before the TripIt sync (persist_tz_segments) has
     // run for the first time.
     _seedTzStateForTests({
       currentTz: 'Europe/Warsaw',

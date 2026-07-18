@@ -891,9 +891,8 @@ if (isMain) {
   // #748 — credential-free host ingestion of TripIt segments. The TripIt →
   // Reclaim sync runs in-container now (creds swapped at the OneCLI gateway);
   // this hands the parsed `segments[]` back to the host so it can update the
-  // owner's `tz_state` singleton exactly as the `sync_tripit` host-op does
-  // today (that host-op is removed in the #748 Phase 3 cutover). Main-group
-  // only: the handler writes owner-timezone state and
+  // owner's `tz_state` singleton exactly as the removed `sync_tripit` host-op
+  // did. Main-group only: the handler writes owner-timezone state and
   // invalidates local-tz schedule `next_run` values, so an untrusted/trusted
   // agent must never be able to poison it with crafted segments.
   server.tool(
@@ -1521,13 +1520,6 @@ server.tool(
 );
 
 // --- Named host operations ---
-
-server.tool(
-  'sync_tripit',
-  'Sync TripIt travel data to Reclaim timezone settings. Runs on the host with locked-down credentials.',
-  {},
-  async () => runHostOperation('sync_tripit'),
-);
 
 server.tool(
   'fetch_trakt_history',
@@ -2293,7 +2285,7 @@ skillName options:
 
       // Reuse runHostOperation for the write-IPC + poll-for-result
       // plumbing. Keeps timeout/poll cadence/result-file cleanup
-      // consistent across all host-operation MCP tools (sync_tripit,
+      // consistent across all host-operation MCP tools (persist_tz_segments,
       // tessl_update, push_staged_to_branch, etc.), so a future change
       // to (say) how result files are formatted doesn't require
       // updating each tool's poll loop.

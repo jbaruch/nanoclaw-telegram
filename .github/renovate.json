@@ -35,6 +35,15 @@
       ],
       "datasourceTemplate": "github-tags",
       "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "The tessl CLI pinned in the orchestrator image (Dockerfile.orchestrator `RUN npm install -g tessl@<version>`, #748 Phase 3). Same regex-manager mechanism as the agent-image globals; a separate fileMatch because Dockerfile.orchestrator is a distinct file.",
+      "fileMatch": ["^Dockerfile.orchestrator$"],
+      "matchStringsStrategy": "any",
+      "matchStrings": ["(?<depName>tessl)@(?<currentValue>[0-9][^\\s\\\\]*)"],
+      "datasourceTemplate": "npm",
+      "versioningTemplate": "npm"
     }
   ],
   "packageRules": [

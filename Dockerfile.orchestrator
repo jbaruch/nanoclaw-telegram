@@ -50,8 +50,18 @@ RUN npx tsc -p tsconfig.build.json
 # Copy container config (skills, build script, Dockerfile for agent image)
 COPY container/ ./container/
 
-# Install tessl CLI and host-side tools
-RUN npm install -g tessl jbaruch/reclaim-tripit-timezones-sync && tessl --version
+# Install tessl CLI. The `reclaim-tripit-timezones-sync` CLI moved to the agent
+# image (#748 Phase 2/3) — the TripIt → Reclaim sync now runs in-container via
+# the OneCLI gateway, so the orchestrator no longer runs it host-side.
+#
+# Pinned for reproducible orchestrator rebuilds (`coding-policy:
+# dependency-management` Pinning); this replaces the previously-unpinned
+# install carried over on this line. Renewal is scanner-tracked, not memory:
+# `.github/renovate.json`'s `custom.regex` manager watches this `tessl@<version>`
+# literal (npm datasource) and opens a bump PR, same mechanism as the agent-image
+# globals (#796). Note this is the tessl *CLI* pin — orthogonal to the floating
+# tessl *tile* manifests governed by `nanoclaw-host: tessl-version-floating`.
+RUN npm install -g tessl@0.92.0 && tessl --version
 
 # Scripts (promote-from-orchestrator, etc.)
 COPY scripts/ ./scripts/

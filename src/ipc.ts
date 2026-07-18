@@ -515,7 +515,7 @@ export function coerceTzSegments(raw: unknown): {
  *                not a "no trips" signal: persisting an empty set would clear
  *                `tz_state.segments` and could flip the owner's timezone +
  *                recompute local schedules off a malformed call. The legacy
- *                `sync_tripit` path skipped persistence on malformed stdout for
+ *                the removed host-op skipped persistence on malformed stdout for
  *                the same reason; an explicit `[]` is the only way to clear.
  *                Over-cap is refused (not truncated — truncation would silently
  *                drop later trips).
@@ -3922,156 +3922,15 @@ export async function processTaskIpc(
 
     // --- Named host operations ---
 
-    case 'sync_tripit':
-      if (data.requestId) {
-        const groupDir = path.resolve(process.cwd(), 'groups', sourceGroup);
-        const scriptPath = path.join(groupDir, 'scripts', 'sync-tripit.sh');
-        if (!fs.existsSync(scriptPath)) {
-          const errPath = scriptResultPath(sourceGroup, data);
-          fs.writeFileSync(
-            errPath,
-            JSON.stringify({ error: 'sync-tripit.sh not found' }),
-          );
-          break;
-        }
-
-        logger.info({ sourceGroup }, 'Running sync_tripit');
-
-        const { readEnvFile: readSyncEnv } = await import('./env.js');
-        const syncVars = readSyncEnv([
-          'TRIPIT_ICAL_URL',
-          'TRIPIT_IGNORE_TRIPS',
-          'TRIPIT_IGNORE_KEYWORDS',
-          'RECLAIM_API_TOKEN',
-          'GOOGLE_CLIENT_ID',
-          'GOOGLE_CLIENT_SECRET',
-          'GOOGLE_REFRESH_TOKEN',
-        ]);
-        const syncEnv: Record<string, string> = {
-          PATH: process.env.PATH || '/usr/bin:/bin',
-          HOME: process.env.HOME || '/root',
-          TZ: process.env.TZ || 'UTC',
-          ...Object.fromEntries(Object.entries(syncVars).filter(([, v]) => v)),
-        };
-
-        const scriptContent = fs.readFileSync(scriptPath, 'utf-8');
-        const patchedContent = scriptContent.replace(
-          /\/workspace\/group/g,
-          groupDir,
-        );
-        const tmpScript = path.join(groupDir, '.tmp_host_sync-tripit.sh');
-        fs.writeFileSync(tmpScript, patchedContent);
-
-        execFile(
-          'bash',
-          [tmpScript],
-          {
-            cwd: groupDir,
-            env: syncEnv,
-            timeout: 120_000,
-            maxBuffer: 1024 * 1024,
-          },
-          (error, stdout, stderr) => {
-            const resultPath = scriptResultPath(sourceGroup, data);
-            if (error) {
-              logger.error(
-                { sourceGroup, error: error.message, stderr },
-                'sync_tripit failed',
-              );
-              fs.writeFileSync(
-                resultPath,
-                JSON.stringify({
-                  error: error.message,
-                  stderr: stderr.slice(-500),
-                }),
-              );
-            } else {
-              logger.info(
-                { sourceGroup, stdoutLen: stdout.length },
-                'sync_tripit completed',
-              );
-              // #542 — Persist `segments[]` onto the singleton
-              // `tz_state` row before writing the script-result file
-              // so the agent caller's response and the host's
-              // tz_state row are coherent on the same wall-clock
-              // tick. The script invokes `node sync.mjs --output=json`
-              // (silences regular `console.log`, emits a single JSON
-              // payload); a malformed stdout is logged and skipped —
-              // the user's sync still succeeded from the upstream's
-              // POV, and the next heartbeat advisory will reconcile
-              // current_tz once the cache is good. Failures from the
-              // persistence helper itself (SqliteError, programming
-              // bugs) propagate per `coding-policy: error-handling`
-              // — they're separate from a parse failure and shouldn't
-              // be silently downgraded to a parse warning.
-              let parsed: { segments?: unknown } | null = null;
-              try {
-                parsed = JSON.parse(stdout) as { segments?: unknown };
-              } catch (parseErr) {
-                if (!(parseErr instanceof SyntaxError)) throw parseErr;
-                // Per `coding-policy: no-secrets`: the script runs
-                // with `TRIPIT_ICAL_URL` / `RECLAIM_API_TOKEN` /
-                // Google OAuth in its environment, and a malformed-
-                // stdout payload can carry credential-bearing URLs
-                // or token fragments (e.g. an unhandled-error stack
-                // that captured the full request context). Log only
-                // non-sensitive shape diagnostics — length and the
-                // SyntaxError's parser-reported position — so an
-                // operator has enough to triage without paging the
-                // script's raw bytes through structured logs.
-                logger.warn(
-                  {
-                    sourceGroup,
-                    err: parseErr.message,
-                    stdoutLen: stdout.length,
-                  },
-                  'sync_tripit: stdout did not parse as JSON — segments not persisted (heartbeat advisory will recover on next good run)',
-                );
-              }
-              if (parsed !== null) {
-                const segments: TripitSegment[] = Array.isArray(parsed.segments)
-                  ? (parsed.segments as TripitSegment[])
-                  : [];
-                // #584 — pass an `onTzFlipped` hook so a tz change
-                // resolved from the TripIt segment walk also
-                // invalidates cached `next_run` values on active
-                // `schedule_timezone='local'` rows. The recompute is
-                // wrapped inside the writer with a narrowed catch —
-                // only transient SQLite contention (`SQLITE_BUSY` /
-                // `SQLITE_LOCKED`) is swallowed-with-warn so the
-                // canonical `tz_state` UPDATE that already landed
-                // stays consistent; programming bugs, persistent DB
-                // failures, and unexpected throws propagate back to
-                // this IPC handler per `coding-policy: error-handling`.
-                applyTripitSegmentsToTzState({ segments }, new Date(), () => {
-                  recomputeLocalSchedules(getCurrentTz, new Date());
-                });
-              }
-              fs.writeFileSync(
-                resultPath,
-                JSON.stringify({ stdout, stderr: stderr || undefined }),
-              );
-            }
-            try {
-              fs.unlinkSync(tmpScript);
-            } catch (err) {
-              if (!isFsErrorWithCode(err, IPC_FS_CODES)) throw err;
-              /* best effort */
-            }
-          },
-        );
-      }
-      break;
-
     case 'persist_tz_segments': {
       // #748 — credential-free host ingestion for the in-container TripIt →
       // Reclaim sync. The sync itself runs in the agent container now (creds
       // swapped at the OneCLI gateway), so the host no longer runs the CLI or
       // holds TripIt/Reclaim/Google secrets. What stays host-side is the
       // `tz_state` write: the container hands back the parsed `segments[]` and
-      // the host persists them exactly as the `sync_tripit` success path does
-      // today (that host-op is removed in the #748 Phase 3 cutover) — same
-      // `applyTripitSegmentsToTzState` + `#584` `onTzFlipped`
+      // the host persists them exactly as the removed `sync_tripit` host-op's
+      // success path did — same `applyTripitSegmentsToTzState` + `#584`
+      // `onTzFlipped`
       // next_run invalidation, so the scheduler-timezone skill, the 30-min
       // heartbeat advisory walker, and the #574 location cascade keep their
       // owner-tz backbone. The deny (non-main) / reject (over-cap) / persist
@@ -4111,7 +3970,7 @@ export async function processTaskIpc(
         // Failures from the persistence helper (SqliteError, programming
         // bugs) propagate per `coding-policy: error-handling`; only the
         // #584 recompute's transient SQLITE_BUSY/LOCKED is swallowed-with-warn
-        // inside the writer, exactly as on the `sync_tripit` path it mirrors.
+        // inside the writer, exactly as the removed host-op did.
         const { segments } = decision;
         applyTripitSegmentsToTzState({ segments }, new Date(), () => {
           recomputeLocalSchedules(getCurrentTz, new Date());

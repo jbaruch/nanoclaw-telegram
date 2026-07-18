@@ -706,7 +706,7 @@ describe('classifyTzPersist', () => {
     (_label, raw) => {
       // A non-array is a caller bug, not a "no trips" signal. Persisting an empty
       // set would clear tz_state and could flip the owner tz — refuse instead, as
-      // the legacy sync_tripit path did. Only an explicit [] clears.
+      // the removed host-op path did. Only an explicit [] clears.
       expect(classifyTzPersist(true, raw)).toEqual({
         action: 'reject',
         error: 'segments must be an array (send [] to explicitly clear)',
