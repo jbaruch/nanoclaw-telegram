@@ -1134,7 +1134,17 @@ async function runTask(
   // hence two distinct SDK sessions — no slot-cache aliasing
   // possible. The `MAINTENANCE_SESSION_NAME` slot still routes maint
   // work into the parallel queue; the SDK session loaded inside that
-  // slot is now per-task. `context_mode` stays inert on the schema.
+  // slot is now per-task.
+  //
+  // `context_mode` gates resume (#801): only `'group'` recurring tasks
+  // resume their session across fires. `'isolated'` rows — every
+  // cadence-registry row and the maintenance heartbeat — wake stateless,
+  // starting a fresh SDK session each fire. Resuming an isolated row
+  // leaks a prior wake's narrative into a precheck that is stateless by
+  // design; a weak `agentModel` then treats its own earlier output as
+  // fact and ratchets it (the nanoclaw-travel#187 drive-engine
+  // false-alarm cascade). The heartbeat's own definition already
+  // documents this intent (src/index.ts) — this is where it is honored.
   //
   // Disk hygiene: the SDK writes one JSONL transcript per session id
   // under `data/sessions/<group>/maintenance/.claude/projects/<slug>/`.
@@ -1145,10 +1155,41 @@ async function runTask(
   // For once-tasks (not reusable) every observed id is wiped exactly
   // as #193 always did.
   const isReusable = task.schedule_type !== 'once';
-  let startingSessionId: string | undefined = isReusable
+  // Resume is opt-in via `context_mode: 'group'` (#801). A reusable but
+  // isolated row never resumes, never persists, and never retains a
+  // session — it wakes fresh every fire. Any non-`'group'` value
+  // (the schema default `'isolated'`, or a legacy NULL) stays stateless.
+  const resumesSession = isReusable && task.context_mode === 'group';
+  let startingSessionId: string | undefined = resumesSession
     ? (task.session_id ?? undefined)
     : undefined;
   const observedSessionIds = new Set<string>();
+
+  // A non-resuming row must not keep a stale pin (#801). If a row that
+  // does not resume still carries a `session_id` — a legacy pin from
+  // before this gate, or a manual set — clear it from the DB and queue
+  // its transcript for the post-run wipe. Otherwise the orphan JSONL
+  // accumulates on disk forever, and a later flip to
+  // `context_mode: 'group'` could resurrect and resume it. Same narrow
+  // SqliteError tolerance as the #710 rotation clear below: a transient
+  // DB hiccup leaves the id queued for wipe and retried next fire.
+  if (!resumesSession && task.session_id) {
+    observedSessionIds.add(task.session_id);
+    try {
+      clearTaskSessionId(task.id);
+    } catch (dbErr) {
+      if (!(dbErr instanceof SqliteError)) throw dbErr;
+      logger.error(
+        {
+          taskId: task.id,
+          staleSessionId: task.session_id,
+          sqliteCode: dbErr.code,
+          err: dbErr,
+        },
+        '[task-scheduler] clearTaskSessionId failed clearing a stale non-resuming pin — the id is still queued for wipe; next fire retries the clear',
+      );
+    }
+  }
 
   // Plugin-hash session invalidation (#710). Skill/rule content is
   // injected into the SDK session only at creation; a resumed session
@@ -1323,7 +1364,7 @@ async function runTask(
         if (streamedOutput.newSessionId) {
           observedSessionIds.add(streamedOutput.newSessionId);
           if (
-            isReusable &&
+            resumesSession &&
             streamedOutput.newSessionId !== persistedSessionId
           ) {
             const newId = streamedOutput.newSessionId;
@@ -1583,7 +1624,7 @@ async function runTask(
     // even though the run itself completed).
     if (output.newSessionId) {
       observedSessionIds.add(output.newSessionId);
-      if (isReusable && output.newSessionId !== persistedSessionId) {
+      if (resumesSession && output.newSessionId !== persistedSessionId) {
         const newId = output.newSessionId;
         // Same narrow catch as the streaming-path above — see that
         // comment for the rationale. Here the propagation target is
@@ -1814,11 +1855,12 @@ async function runTask(
   } finally {
     // Wipe orphan JSONL transcripts (#193 disk-hygiene + #336 session
     // reuse). For once-tasks every observed id is orphan — wipe all.
-    // For recurring tasks the LATEST persisted id is alive on disk so
-    // the next fire can resume; wipe everything else (any id the SDK
-    // rotated through mid-run plus the pre-existing `task.session_id`
-    // if it differs from the final persisted one — that latter case
-    // catches rotations where the SDK didn't re-emit the starting id).
+    // For resuming (group) recurring tasks the LATEST persisted id is
+    // alive on disk so the next fire can resume; wipe everything else
+    // (any id the SDK rotated through mid-run plus the pre-existing
+    // `task.session_id` if it differs from the final persisted one —
+    // that latter case catches rotations where the SDK didn't re-emit
+    // the starting id).
     // No try/catch wrapper: `wipeSessionJsonl` already swallows ENOENT
     // and other expected fs errors internally; anything that escapes
     // is a programming bug per `jbaruch/coding-policy: error-handling`,
@@ -1828,7 +1870,7 @@ async function runTask(
     if (startingSessionId && startingSessionId !== persistedSessionId) {
       idsToWipe.add(startingSessionId);
     }
-    if (isReusable && persistedSessionId) {
+    if (resumesSession && persistedSessionId) {
       idsToWipe.delete(persistedSessionId);
     }
     for (const sid of idsToWipe) {

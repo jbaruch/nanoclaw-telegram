@@ -821,11 +821,11 @@ describe('task scheduler', () => {
   });
 
   it('once-task does NOT persist newSessionId on its row (#336 out-of-scope guard)', async () => {
-    // The gating field for #336 reuse is `schedule_type` (recurring vs
-    // once), NOT `context_mode` (which is inert on the schema per
-    // #193's note). This test pins the once-task path: even when the
-    // SDK reports a newSessionId, no DB write to `session_id` should
-    // happen, and the slot cache stays untouched.
+    // Session reuse needs BOTH gates: `schedule_type !== 'once'` AND
+    // `context_mode === 'group'` (#801). A `once` task is out of scope
+    // on the first gate regardless of context_mode. This test pins that
+    // path: even when the SDK reports a newSessionId, no DB write to
+    // `session_id` should happen, and the slot cache stays untouched.
     const MAIN_GROUP = {
       name: 'Main',
       folder: 'main',
@@ -2358,9 +2358,11 @@ describe('per-task session_id reuse (#336)', () => {
   //      persisted for the next fire
   //   3. wipeSessionJsonl call args — which JSONL transcripts get
   //      cleaned up in the post-run finally
-  // Together these pin the contract: recurring tasks reuse the same
-  // session id across fires while orphans (rotated mid-run, or stale
-  // after a nuke) get cleaned up off disk.
+  // Together these pin the contract: `group` recurring tasks reuse the
+  // same session id across fires while orphans (rotated mid-run, or
+  // stale after a nuke) get cleaned up off disk. Resume is opt-in via
+  // `context_mode: 'group'` (#801) — `isolated` recurring tasks stay
+  // stateless per fire and are covered by their own block below.
 
   const RECURRING_GROUP = {
     name: 'Main',
@@ -2420,15 +2422,15 @@ describe('per-task session_id reuse (#336)', () => {
     return { containerInput, wipeSpy };
   }
 
-  it('first fire of a recurring task persists newSessionId for next fire', async () => {
+  it('first fire of a group recurring task persists newSessionId for next fire', async () => {
     createTask({
-      id: 'heartbeat-task',
+      id: 'recurring-task',
       group_folder: 'main',
       chat_jid: 'main@g.us',
-      prompt: 'Skill(skill: "tessl__heartbeat")',
+      prompt: 'Skill(skill: "tessl__nightly-housekeeping")',
       schedule_type: 'interval',
       schedule_value: '1800000',
-      context_mode: 'isolated',
+      context_mode: 'group',
       next_run: new Date(Date.now() - 1000).toISOString(),
       status: 'active',
       created_at: '2026-01-01T00:00:00.000Z',
@@ -2454,26 +2456,26 @@ describe('per-task session_id reuse (#336)', () => {
     // No prior id → fresh start (no resume).
     expect(containerInput.sessionId).toBeUndefined();
     // Newly-issued id persisted for next fire.
-    expect(getTaskById('heartbeat-task')?.session_id).toBe('sdk-issued-id-A');
+    expect(getTaskById('recurring-task')?.session_id).toBe('sdk-issued-id-A');
     // Live id is NOT wiped — the next fire needs it on disk.
     expect(wipeSpy).not.toHaveBeenCalled();
   });
 
-  it('subsequent fire of a recurring task resumes the persisted session_id', async () => {
+  it('subsequent fire of a group recurring task resumes the persisted session_id', async () => {
     createTask({
-      id: 'heartbeat-task',
+      id: 'recurring-task',
       group_folder: 'main',
       chat_jid: 'main@g.us',
-      prompt: 'Skill(skill: "tessl__heartbeat")',
+      prompt: 'Skill(skill: "tessl__nightly-housekeeping")',
       schedule_type: 'interval',
       schedule_value: '1800000',
-      context_mode: 'isolated',
+      context_mode: 'group',
       next_run: new Date(Date.now() - 1000).toISOString(),
       status: 'active',
       created_at: '2026-01-01T00:00:00.000Z',
       created_by_role: 'owner' as const,
     });
-    setTaskSessionId('heartbeat-task', 'persisted-id-X');
+    setTaskSessionId('recurring-task', 'persisted-id-X');
 
     mockRunContainerAgent.mockImplementation(
       async (_group, _input, _onProc, onOutput) => {
@@ -2496,7 +2498,7 @@ describe('per-task session_id reuse (#336)', () => {
     // Persisted id is passed as `resume:`.
     expect(containerInput.sessionId).toBe('persisted-id-X');
     // Row stays at the same id (no rotation).
-    expect(getTaskById('heartbeat-task')?.session_id).toBe('persisted-id-X');
+    expect(getTaskById('recurring-task')?.session_id).toBe('persisted-id-X');
     // The live id is NOT wiped — must survive for the next fire.
     expect(wipeSpy).not.toHaveBeenCalled();
   });
@@ -2507,19 +2509,19 @@ describe('per-task session_id reuse (#336)', () => {
     // is the new live one; X's is now orphan and must be wiped or
     // it leaks on disk forever.
     createTask({
-      id: 'heartbeat-task',
+      id: 'recurring-task',
       group_folder: 'main',
       chat_jid: 'main@g.us',
-      prompt: 'Skill(skill: "tessl__heartbeat")',
+      prompt: 'Skill(skill: "tessl__nightly-housekeeping")',
       schedule_type: 'interval',
       schedule_value: '1800000',
-      context_mode: 'isolated',
+      context_mode: 'group',
       next_run: new Date(Date.now() - 1000).toISOString(),
       status: 'active',
       created_at: '2026-01-01T00:00:00.000Z',
       created_by_role: 'owner' as const,
     });
-    setTaskSessionId('heartbeat-task', 'rotated-from-X');
+    setTaskSessionId('recurring-task', 'rotated-from-X');
 
     mockRunContainerAgent.mockImplementation(
       async (_group, _input, _onProc, onOutput) => {
@@ -2547,7 +2549,7 @@ describe('per-task session_id reuse (#336)', () => {
     // Started with X (passed as resume:).
     expect(containerInput.sessionId).toBe('rotated-from-X');
     // Row ends at Y (last-write-wins).
-    expect(getTaskById('heartbeat-task')?.session_id).toBe('rotated-to-Y');
+    expect(getTaskById('recurring-task')?.session_id).toBe('rotated-to-Y');
     // X's orphan transcript got wiped.
     expect(wipeSpy).toHaveBeenCalledWith(
       'main',
@@ -2571,7 +2573,7 @@ describe('per-task session_id reuse (#336)', () => {
       schedule_type: 'cron',
       schedule_value: '0 3 * * *',
       schedule_timezone: 'UTC',
-      context_mode: 'isolated',
+      context_mode: 'group',
       next_run: new Date(Date.now() - 1000).toISOString(),
       status: 'active',
       created_at: '2026-01-01T00:00:00.000Z',
@@ -2608,10 +2610,10 @@ describe('per-task session_id reuse (#336)', () => {
       id: 'task-A',
       group_folder: 'main',
       chat_jid: 'main@g.us',
-      prompt: 'Skill(skill: "tessl__heartbeat")',
+      prompt: 'Skill(skill: "tessl__nightly-housekeeping")',
       schedule_type: 'interval',
       schedule_value: '1800000',
-      context_mode: 'isolated',
+      context_mode: 'group',
       next_run: new Date(Date.now() - 1000).toISOString(),
       status: 'active',
       created_at: '2026-01-01T00:00:00.000Z',
@@ -2625,7 +2627,7 @@ describe('per-task session_id reuse (#336)', () => {
       schedule_type: 'cron',
       schedule_value: '0 7 * * *',
       schedule_timezone: 'UTC',
-      context_mode: 'isolated',
+      context_mode: 'group',
       next_run: new Date(Date.now() - 1000).toISOString(),
       status: 'active',
       created_at: '2026-01-01T00:00:00.000Z',
@@ -2638,7 +2640,7 @@ describe('per-task session_id reuse (#336)', () => {
         // Each task's fire emits a distinct id; assert the test mock
         // stays consistent so a regression where one task gets the
         // other's id surfaces here rather than as a quiet bleed.
-        const issuedId = input.prompt.includes('heartbeat')
+        const issuedId = input.prompt.includes('housekeeping')
           ? 'id-for-task-A'
           : 'id-for-task-B';
         await onOutput({
@@ -2671,6 +2673,106 @@ describe('per-task session_id reuse (#336)', () => {
     expect(callCount).toBe(2);
     expect(getTaskById('task-A')?.session_id).toBe('id-for-task-A');
     expect(getTaskById('task-B')?.session_id).toBe('id-for-task-B');
+  });
+
+  // --- isolated recurring tasks stay stateless per fire (#801) ---
+  //
+  // The mirror of the group-resume tests above. A cadence-registry row
+  // (all `isolated`) or the maintenance heartbeat must wake fresh every
+  // fire: no resume of a prior wake's session, and no persistence that
+  // would make the NEXT fire resume. Resuming leaks cross-wake narrative
+  // into a stateless precheck — the nanoclaw-travel#187 drive-engine
+  // false-alarm cascade, where a weak agentModel resumed and ratcheted
+  // its own hallucinated "engine is broken" alarm.
+
+  it('isolated recurring task starts fresh and never persists a session (#801)', async () => {
+    createTask({
+      id: 'isolated-recurring',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'Skill(skill: "tessl__heartbeat")',
+      schedule_type: 'interval',
+      schedule_value: '1800000',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result: 'ok',
+          newSessionId: 'isolated-sdk-id',
+        } as ContainerOutput);
+        return {
+          status: 'success',
+          result: 'ok',
+          newSessionId: 'isolated-sdk-id',
+        };
+      },
+    );
+
+    const { containerInput, wipeSpy } = await fireOnce();
+
+    // Fresh start — no resume target passed to the container.
+    expect(containerInput.sessionId).toBeUndefined();
+    // The SDK-issued id is NOT persisted, so the next fire starts fresh
+    // again — no session chain accumulates.
+    expect(getTaskById('isolated-recurring')?.session_id ?? null).toBeNull();
+    // And its transcript is wiped (not retained for a resume that will
+    // never come) — the #114 disk-accumulation guard.
+    expect(wipeSpy).toHaveBeenCalledWith(
+      'main',
+      MAINTENANCE_SESSION_NAME,
+      'isolated-sdk-id',
+    );
+  });
+
+  it('isolated recurring task clears and wipes a pre-pinned session_id instead of resuming it (#801)', async () => {
+    // A legacy row that still carries a pinned id from before the fix
+    // (or a manual set) must not be resumed — `isolated` overrides it —
+    // and the stale pin must be cleared from the DB and its transcript
+    // wiped, so it can't accumulate on disk or be resurrected if the row
+    // is later switched to `group`.
+    createTask({
+      id: 'isolated-recurring',
+      group_folder: 'main',
+      chat_jid: 'main@g.us',
+      prompt: 'Skill(skill: "tessl__heartbeat")',
+      schedule_type: 'interval',
+      schedule_value: '1800000',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+    setTaskSessionId('isolated-recurring', 'stale-pinned-id');
+
+    mockRunContainerAgent.mockImplementation(
+      async (_group, _input, _onProc, onOutput) => {
+        await onOutput({
+          status: 'success',
+          result: 'ok',
+          newSessionId: 'fresh-id',
+        } as ContainerOutput);
+        return { status: 'success', result: 'ok', newSessionId: 'fresh-id' };
+      },
+    );
+
+    const { containerInput, wipeSpy } = await fireOnce();
+
+    // The stale pinned id is NOT passed as `resume:` — the wake is fresh.
+    expect(containerInput.sessionId).toBeUndefined();
+    // The stale pin is cleared from the row (nothing to resurrect).
+    expect(getTaskById('isolated-recurring')?.session_id ?? null).toBeNull();
+    // Both the stale pin's transcript and this fire's fresh id are wiped
+    // — nothing retained for a resume that will never come.
+    const wiped = wipeSpy.mock.calls.map((c) => c[2]);
+    expect(wiped).toContain('stale-pinned-id');
+    expect(wiped).toContain('fresh-id');
   });
 
   it('clearTaskSessionIdsForGroup wipes all rows under one group, leaves other groups untouched', async () => {
@@ -2791,13 +2893,15 @@ describe('plugin-hash session rotation (#710)', () => {
 
   function createRecurringTask(): void {
     createTask({
-      id: 'heartbeat-task',
+      id: 'recurring-task',
       group_folder: 'main',
       chat_jid: 'main@g.us',
-      prompt: 'Skill(skill: "tessl__heartbeat")',
+      prompt: 'Skill(skill: "tessl__nightly-housekeeping")',
       schedule_type: 'interval',
       schedule_value: '1800000',
-      context_mode: 'isolated',
+      // Plugin-hash rotation only applies to a session that resumes —
+      // the `group` (resume) contract (#801).
+      context_mode: 'group',
       next_run: new Date(Date.now() - 1000).toISOString(),
       status: 'active',
       created_at: '2026-01-01T00:00:00.000Z',
@@ -2852,7 +2956,7 @@ describe('plugin-hash session rotation (#710)', () => {
 
   it('rotates to a fresh session when the registry hash changed since the pin', async () => {
     createRecurringTask();
-    setTaskSessionId('heartbeat-task', 'stale-id', 'hash-v1');
+    setTaskSessionId('recurring-task', 'stale-id', 'hash-v1');
     mockGetPluginRegistryHash.mockReturnValue('hash-v2');
     mockAgentIssuing('fresh-id');
 
@@ -2861,7 +2965,7 @@ describe('plugin-hash session rotation (#710)', () => {
     // No resume — the stale pin must not reach the container.
     expect(containerInput.sessionId).toBeUndefined();
     // New id persisted together with the hash it was created against.
-    const row = getTaskById('heartbeat-task');
+    const row = getTaskById('recurring-task');
     expect(row?.session_id).toBe('fresh-id');
     expect(row?.session_plugins_hash).toBe('hash-v2');
     // The stale transcript is orphan and gets wiped; the fresh one
@@ -2880,14 +2984,14 @@ describe('plugin-hash session rotation (#710)', () => {
 
   it('resumes the pinned session when the registry hash is unchanged', async () => {
     createRecurringTask();
-    setTaskSessionId('heartbeat-task', 'live-id', 'hash-v1');
+    setTaskSessionId('recurring-task', 'live-id', 'hash-v1');
     mockGetPluginRegistryHash.mockReturnValue('hash-v1');
     mockAgentIssuing('live-id');
 
     const { containerInput, wipeSpy } = await fireOnce();
 
     expect(containerInput.sessionId).toBe('live-id');
-    const row = getTaskById('heartbeat-task');
+    const row = getTaskById('recurring-task');
     expect(row?.session_id).toBe('live-id');
     expect(row?.session_plugins_hash).toBe('hash-v1');
     expect(wipeSpy).not.toHaveBeenCalled();
@@ -2896,7 +3000,7 @@ describe('plugin-hash session rotation (#710)', () => {
   it('rotates a pre-#710 pin (NULL stored hash) once under a live registry', async () => {
     createRecurringTask();
     // Two-arg call — the shape every pre-#710 write produced.
-    setTaskSessionId('heartbeat-task', 'pre-710-id');
+    setTaskSessionId('recurring-task', 'pre-710-id');
     mockGetPluginRegistryHash.mockReturnValue('hash-v1');
     mockAgentIssuing('fresh-id');
 
@@ -2905,7 +3009,7 @@ describe('plugin-hash session rotation (#710)', () => {
     // NULL stored vs live hash mismatches → the exact stale sessions
     // #710 describes rotate on their first post-deploy fire.
     expect(containerInput.sessionId).toBeUndefined();
-    const row = getTaskById('heartbeat-task');
+    const row = getTaskById('recurring-task');
     expect(row?.session_id).toBe('fresh-id');
     // Hash now stamped — the next fire under an unchanged registry
     // resumes instead of rotating again.
@@ -2919,7 +3023,7 @@ describe('plugin-hash session rotation (#710)', () => {
 
   it('does not rotate when the current hash is unknowable (null) mid-swap', async () => {
     createRecurringTask();
-    setTaskSessionId('heartbeat-task', 'live-id', 'hash-v1');
+    setTaskSessionId('recurring-task', 'live-id', 'hash-v1');
     // Registry vanished mid-walk (`tessl update` swap race) — content
     // state is unknowable this fire, so the pin must survive; rotating
     // here would burn the session spuriously and, with null persisted,
@@ -2930,7 +3034,7 @@ describe('plugin-hash session rotation (#710)', () => {
     const { containerInput, wipeSpy } = await fireOnce();
 
     expect(containerInput.sessionId).toBe('live-id');
-    const row = getTaskById('heartbeat-task');
+    const row = getTaskById('recurring-task');
     expect(row?.session_id).toBe('live-id');
     // The clean resume re-emits the same id, so the persist path is
     // skipped and the stored hash survives the race — the next fire
@@ -2943,13 +3047,13 @@ describe('plugin-hash session rotation (#710)', () => {
     createRecurringTask();
     // NULL stored hash + null current hash (mock default) — a
     // registry-less install must not rotate on every fire.
-    setTaskSessionId('heartbeat-task', 'live-id');
+    setTaskSessionId('recurring-task', 'live-id');
     mockAgentIssuing('live-id');
 
     const { containerInput, wipeSpy } = await fireOnce();
 
     expect(containerInput.sessionId).toBe('live-id');
-    expect(getTaskById('heartbeat-task')?.session_id).toBe('live-id');
+    expect(getTaskById('recurring-task')?.session_id).toBe('live-id');
     expect(wipeSpy).not.toHaveBeenCalled();
   });
 
@@ -3212,7 +3316,9 @@ describe('work-evidence post-check integration (#720)', () => {
       prompt: 'Skill(skill: "tessl__check-cfps")',
       schedule_type: 'interval',
       schedule_value: '1800000',
-      context_mode: 'isolated',
+      // The #720 evidence check clears a resumed session's pin; that
+      // pin only exists for the `group` (resume) contract (#801).
+      context_mode: 'group',
       next_run: new Date(Date.now() - 1000).toISOString(),
       status: 'active',
       created_at: '2026-01-01T00:00:00.000Z',
