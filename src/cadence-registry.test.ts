@@ -1,8 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import Database from 'better-sqlite3';
+
+import { logger } from './logger.js';
 
 import {
   parseSkillFrontmatter,
@@ -12,7 +14,13 @@ import {
   rebuildCadenceRegistry,
   defaultComputeNextRun,
   composePrecheckScript,
+  parseCadenceCapMs,
+  cronIntervalMs,
+  detectCadenceCapRace,
 } from './cadence-registry.js';
+
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
 
 // Pinned `next_run` so per-test assertions don't drift with wall clock.
 // Tests that exercise `defaultComputeNextRun` directly use a separate
@@ -75,6 +83,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
+  vi.restoreAllMocks();
 });
 
 describe('parseSkillFrontmatter', () => {
@@ -849,6 +858,91 @@ describe('rebuildCadenceRegistry', () => {
     });
   });
 
+  it('still registers a skill whose precheck cap races the cron (warn, not skip)', () => {
+    // jbaruch/nanoclaw#803: a CADENCE that is an exact multiple of the cron
+    // interval near-misses. The registry warns but MUST still register the
+    // row — a skip would stop the task firing entirely, worse than the
+    // near-miss. Daily cron + 48h cap is a 2x race.
+    const skills = path.join(tmpRoot, 'skills');
+    writeSkill(
+      skills,
+      'tessl__racy',
+      'cadence: "15 9 * * *"\nscript: "scripts/precheck-racy.py"',
+    );
+    fs.mkdirSync(path.join(skills, 'tessl__racy', 'scripts'), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(skills, 'tessl__racy', 'scripts', 'precheck-racy.py'),
+      'CADENCE = timedelta(hours=48)\n',
+    );
+    const warnSpy = vi.spyOn(logger, 'warn');
+    const db = makeDb();
+    const r = rebuildCadenceRegistry({
+      db,
+      groupFolder: 'g1',
+      chatJid: 'g1@chat',
+      createdByRole: 'owner',
+      skillsDir: skills,
+      computeNextRun: () => PINNED_NEXT_RUN,
+      now: () => PINNED_NOW,
+    });
+    // The advertised outcome is the near-miss WARNING — assert it fired,
+    // and that it named the racy skill and its 2x multiple, so deleting the
+    // `logger.warn` branch cannot leave this test green.
+    const raceWarn = warnSpy.mock.calls.find((c: unknown[]) =>
+      String(c[1]).includes('cadence cap is'),
+    );
+    expect(raceWarn).toBeDefined();
+    expect(raceWarn?.[0]).toMatchObject({
+      skill: 'tessl__racy',
+      multiple: 2,
+    });
+    // Warn-not-skip: the row lands and it is NOT counted as an error.
+    expect(r.inserted).toBe(1);
+    expect(r.errors).toEqual([]);
+    const row = db
+      .prepare('SELECT id FROM scheduled_tasks WHERE id = ?')
+      .get('cadence-registry::g1::tessl__racy');
+    expect(row).toEqual({ id: 'cadence-registry::g1::tessl__racy' });
+  });
+
+  it('registers a skill whose precheck cap is safely below the cron multiple', () => {
+    // The mirror of the race test: a 36h cap on a daily cron is not a
+    // multiple, so no warn fires — and the row still registers normally.
+    const skills = path.join(tmpRoot, 'skills');
+    writeSkill(
+      skills,
+      'tessl__safe',
+      'cadence: "15 9 * * *"\nscript: "scripts/precheck-safe.py"',
+    );
+    fs.mkdirSync(path.join(skills, 'tessl__safe', 'scripts'), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(skills, 'tessl__safe', 'scripts', 'precheck-safe.py'),
+      'CADENCE = timedelta(hours=36)\n',
+    );
+    const warnSpy = vi.spyOn(logger, 'warn');
+    const db = makeDb();
+    const r = rebuildCadenceRegistry({
+      db,
+      groupFolder: 'g1',
+      chatJid: 'g1@chat',
+      createdByRole: 'owner',
+      skillsDir: skills,
+      computeNextRun: () => PINNED_NEXT_RUN,
+      now: () => PINNED_NOW,
+    });
+    // Mirror of the race test: a non-multiple cap must NOT trip the guard.
+    const raceWarn = warnSpy.mock.calls.find((c: unknown[]) =>
+      String(c[1]).includes('cadence cap is'),
+    );
+    expect(raceWarn).toBeUndefined();
+    expect(r.inserted).toBe(1);
+    expect(r.errors).toEqual([]);
+  });
+
   it('leaves script NULL when frontmatter omits script:', () => {
     const skills = path.join(tmpRoot, 'skills');
     writeSkill(skills, 'tessl__heartbeat', 'cadence: "*/30 * * * *"');
@@ -1265,5 +1359,153 @@ describe('defaultComputeNextRun', () => {
     const a = defaultComputeNextRun('0 7 * * *', null);
     const b = defaultComputeNextRun('0 7 * * *', 'local');
     expect(a).toBe(b);
+  });
+});
+
+describe('parseCadenceCapMs', () => {
+  it('reads a days= cap', () => {
+    expect(parseCadenceCapMs('CADENCE = timedelta(days=6)\n')).toBe(6 * DAY_MS);
+  });
+
+  it('reads an hours= cap', () => {
+    expect(parseCadenceCapMs('CADENCE = timedelta(hours=60)\n')).toBe(
+      60 * HOUR_MS,
+    );
+  });
+
+  it('reads a weeks= cap', () => {
+    expect(parseCadenceCapMs('CADENCE = timedelta(weeks=2)\n')).toBe(
+      14 * DAY_MS,
+    );
+  });
+
+  it('sums multiple keyword args', () => {
+    expect(parseCadenceCapMs('CADENCE = timedelta(days=1, hours=12)\n')).toBe(
+      DAY_MS + 12 * HOUR_MS,
+    );
+  });
+
+  it('reads the cap through a leading comment block and surrounding source', () => {
+    const src = [
+      '# 6d, not the 168h weekly cron interval: near-miss note.',
+      'CADENCE = timedelta(days=6)',
+      'DEFAULT_CURSOR_PATH = "/workspace/group/state/x.json"',
+    ].join('\n');
+    expect(parseCadenceCapMs(src)).toBe(6 * DAY_MS);
+  });
+
+  it('returns null when no CADENCE binding is present (e.g. a .sh precheck)', () => {
+    expect(parseCadenceCapMs('#!/usr/bin/env bash\necho hi\n')).toBeNull();
+  });
+
+  it('returns null for a positional timedelta arg it cannot attribute to a unit', () => {
+    expect(parseCadenceCapMs('CADENCE = timedelta(6)\n')).toBeNull();
+  });
+
+  it('returns null for a mix of positional and keyword args', () => {
+    // `timedelta(1, hours=23)` — the leading positional day must not be
+    // silently dropped, leaving a wrong 23h cap.
+    expect(parseCadenceCapMs('CADENCE = timedelta(1, hours=23)\n')).toBeNull();
+    expect(parseCadenceCapMs('CADENCE = timedelta(days=6, 1)\n')).toBeNull();
+  });
+
+  it('returns null for an arithmetic expression argument', () => {
+    // `timedelta(hours=24 * 2)` must not read as 24h; the `* 2` fails the
+    // number-literal anchor.
+    expect(parseCadenceCapMs('CADENCE = timedelta(hours=24 * 2)\n')).toBeNull();
+  });
+
+  it('returns null for empty timedelta args', () => {
+    expect(parseCadenceCapMs('CADENCE = timedelta()\n')).toBeNull();
+  });
+
+  it('returns null for an unknown keyword arg', () => {
+    expect(parseCadenceCapMs('CADENCE = timedelta(fortnights=1)\n')).toBeNull();
+  });
+});
+
+describe('cronIntervalMs', () => {
+  const FROM = new Date('2026-05-01T00:00:00Z');
+
+  it('measures a daily cron as 24h', () => {
+    expect(cronIntervalMs('15 9 * * *', FROM)).toBe(DAY_MS);
+  });
+
+  it('measures a weekly cron as 168h', () => {
+    expect(cronIntervalMs('30 10 * * 0', FROM)).toBe(7 * DAY_MS);
+  });
+
+  it('measures an unevenly-spaced cron by its tightest gap', () => {
+    // Fires 09:00 and 17:00 daily → gaps of 8h and 16h; min is 8h.
+    expect(cronIntervalMs('0 9,17 * * *', FROM)).toBe(8 * HOUR_MS);
+  });
+
+  it('returns null on an unparseable cron', () => {
+    expect(cronIntervalMs('not a cron', FROM)).toBeNull();
+  });
+});
+
+describe('detectCadenceCapRace', () => {
+  it('flags a weekly cap equal to the weekly interval (multiple 1)', () => {
+    expect(detectCadenceCapRace(7 * DAY_MS, 7 * DAY_MS)).toEqual({
+      race: true,
+      multiple: 1,
+    });
+  });
+
+  it('flags a daily cap at twice the daily interval (multiple 2)', () => {
+    expect(detectCadenceCapRace(48 * HOUR_MS, DAY_MS)).toEqual({
+      race: true,
+      multiple: 2,
+    });
+  });
+
+  it('flags a biweekly cap at twice the weekly interval', () => {
+    expect(detectCadenceCapRace(14 * DAY_MS, 7 * DAY_MS)).toEqual({
+      race: true,
+      multiple: 2,
+    });
+  });
+
+  it('clears a weekly cap set below the interval (6d vs 7d)', () => {
+    expect(detectCadenceCapRace(6 * DAY_MS, 7 * DAY_MS)).toEqual({
+      race: false,
+      multiple: null,
+    });
+  });
+
+  it('clears a daily cap between the 1x and 2x fire (36h vs 24h)', () => {
+    expect(detectCadenceCapRace(36 * HOUR_MS, DAY_MS)).toEqual({
+      race: false,
+      multiple: null,
+    });
+  });
+
+  it('clears a 60h cap against a daily interval (not a multiple)', () => {
+    expect(detectCadenceCapRace(60 * HOUR_MS, DAY_MS)).toEqual({
+      race: false,
+      multiple: null,
+    });
+  });
+
+  it('clears a 13d biweekly cap against a weekly interval', () => {
+    expect(detectCadenceCapRace(13 * DAY_MS, 7 * DAY_MS)).toEqual({
+      race: false,
+      multiple: null,
+    });
+  });
+
+  it('suppresses the check when the cap could not be parsed', () => {
+    expect(detectCadenceCapRace(null, DAY_MS)).toEqual({
+      race: false,
+      multiple: null,
+    });
+  });
+
+  it('suppresses the check when the interval could not be computed', () => {
+    expect(detectCadenceCapRace(6 * DAY_MS, null)).toEqual({
+      race: false,
+      multiple: null,
+    });
   });
 });

@@ -452,6 +452,116 @@ export function composePrecheckScript(
   return `${interp} ${containerPath}\n`;
 }
 
+/**
+ * Extract a Python precheck's `CADENCE = timedelta(...)` cap as
+ * milliseconds. The cadence prechecks in the tile repos all express
+ * their filesystem cap as a single module-level `CADENCE` binding to a
+ * `timedelta(...)` literal (see e.g. `precheck-youtube-comment-check.py`),
+ * so a bounded regex over the enumerable `weeks|days|hours|minutes|seconds`
+ * keyword args is a faithful read — not a natural-language parse.
+ *
+ * Returns null (the "can't assert" signal) when no such binding is found
+ * or its args don't parse: a `.sh` precheck, a cap computed some other
+ * way, or a future shape the regex doesn't recognise. A null suppresses
+ * the race check rather than guessing.
+ */
+export function parseCadenceCapMs(precheckSource: string): number | null {
+  const m = precheckSource.match(/^\s*CADENCE\s*=\s*timedelta\(([^)]*)\)/m);
+  if (m === null) return null;
+  const args = m[1].trim();
+  // `timedelta()` (no args) is a zero cap — not a cadence gate; bail.
+  if (args === '') return null;
+  const unitMs: Record<string, number> = {
+    weeks: 7 * 24 * 60 * 60 * 1000,
+    days: 24 * 60 * 60 * 1000,
+    hours: 60 * 60 * 1000,
+    minutes: 60 * 1000,
+    seconds: 1000,
+  };
+  // The whole arg list must be comma-separated `keyword=<number literal>`
+  // pairs and nothing else. Validating each part end-to-end (anchored) is
+  // what makes this a fully-enumerable parse per `script-delegation`: a
+  // positional arg (`timedelta(6)`, `timedelta(1, hours=23)`) or an
+  // expression (`timedelta(hours=24 * 2)`) fails the anchor and returns
+  // null ("can't assert") rather than silently computing a wrong cap.
+  const partRe = /^\s*([a-z]+)\s*=\s*(\d+(?:\.\d+)?)\s*$/;
+  let total = 0;
+  for (const part of args.split(',')) {
+    const kw = part.match(partRe);
+    if (kw === null) return null;
+    const unit = unitMs[kw[1]];
+    if (unit === undefined) return null;
+    total += Number(kw[2]) * unit;
+  }
+  return total;
+}
+
+/**
+ * Nominal interval (ms) between consecutive fires of a bare cron
+ * expression, computed in UTC from `from`. The `tz: 'UTC'` option is
+ * required, not optional: cron-parser defaults to the host's local zone,
+ * so on a non-UTC runner a daily cron spanning a DST boundary would report
+ * a 23h/25h gap and perturb the exact-multiple comparison. Pinning UTC
+ * keeps the period nominal (daily = 24h, weekly = 168h).
+ *
+ * Samples several consecutive gaps and returns the minimum, so an
+ * unevenly-spaced cron (multiple fires per day) is measured against its
+ * tightest period rather than a coincidental wide gap. Returns null on an
+ * unparseable cron (the caller already validated it, so this is defensive).
+ */
+export function cronIntervalMs(cron: string, from: Date): number | null {
+  try {
+    const it = CronExpressionParser.parse(cron, {
+      currentDate: from,
+      tz: 'UTC',
+    });
+    let prev = it.next().toDate().getTime();
+    let min = Infinity;
+    for (let i = 0; i < 4; i++) {
+      const next = it.next().toDate().getTime();
+      const gap = next - prev;
+      if (gap > 0 && gap < min) min = gap;
+      prev = next;
+    }
+    return Number.isFinite(min) ? min : null;
+  } catch (err: unknown) {
+    // cron-parser throws Error on an invalid expression. The caller has
+    // already validated the cron, so a throw here is a defensive fallback —
+    // suppress the race check (return null) rather than crash the registry
+    // rebuild. A non-Error throw is a defect and propagates.
+    if (!(err instanceof Error)) throw err;
+    return null;
+  }
+}
+
+/**
+ * The near-miss race (`jbaruch/nanoclaw#803`): a filesystem cadence cap
+ * set to an exact integer multiple of the cron period wedges, because the
+ * cursor stamps at run *completion*. On a weekly cron a 168h cap leaves
+ * every same-time fire ~167.8h old and skips forever; on a daily cron an
+ * N-day-multiple cap slips the run by one whole period. A cap strictly
+ * between two multiples (e.g. 6d against a 7d cron) is safe.
+ *
+ * Returns `{ race, multiple }` — `multiple` is `capMs / intervalMs` when
+ * it divides evenly, else null. `race` is true only when the cap is a
+ * positive exact multiple of a positive interval.
+ */
+export function detectCadenceCapRace(
+  capMs: number | null,
+  intervalMs: number | null,
+): { race: boolean; multiple: number | null } {
+  if (
+    capMs === null ||
+    intervalMs === null ||
+    capMs <= 0 ||
+    intervalMs <= 0 ||
+    capMs % intervalMs !== 0
+  ) {
+    return { race: false, multiple: null };
+  }
+  return { race: true, multiple: capMs / intervalMs };
+}
+
 export interface CadenceRegistryRebuildResult {
   /** Cadence-registry rows DELETEd because the skill was uninstalled or dropped its cadence:. */
   deleted: number;
@@ -589,6 +699,45 @@ export function rebuildCadenceRegistry(
         continue;
       }
       script = composePrecheckScript(skillName, declaration.script);
+      // Near-miss guard (jbaruch/nanoclaw#803): a precheck cap set to an
+      // exact multiple of the cron period wedges because the cursor stamps
+      // at run completion. Warn loudly but STILL register — a runtime skip
+      // would stop the task firing entirely, strictly worse than the
+      // near-miss it's meant to surface. The author-time gate is each
+      // tile's per-skill near_miss regression test; this is the fleet-wide
+      // net for a skill shipped without one.
+      //
+      // The whole guard is advisory: any failure reading the precheck
+      // source leaves capMs null (cap unknown → no race check) so the row
+      // still registers. A `readFileSync` throw here (a directory at the
+      // `.py` path, a permission/read race) must not abort the rebuild.
+      let capMs: number | null = null;
+      try {
+        capMs = parseCadenceCapMs(fs.readFileSync(hostPath, 'utf-8'));
+      } catch (err: unknown) {
+        if (!(err instanceof Error)) throw err;
+        logger.warn(
+          { skill: skillName, hostPath, err },
+          'cadence-registry: could not read precheck for the cap-race check; registering anyway',
+        );
+      }
+      const intervalMs = cronIntervalMs(cron, deps.now());
+      const { race, multiple } = detectCadenceCapRace(capMs, intervalMs);
+      if (race) {
+        logger.warn(
+          {
+            skill: skillName,
+            capMs,
+            intervalMs,
+            multiple,
+            cadence: declaration.cadence,
+          },
+          `cadence-registry: ${skillName} cadence cap is ${String(multiple)}x the cron interval — ` +
+            'the cursor stamps at run completion, so this near-misses and skips a period ' +
+            '(jbaruch/nanoclaw#803). Set CADENCE strictly below the multiple; see ' +
+            'nanoclaw-host: rules/overlay-tile-authoring.md.',
+        );
+      }
     }
     desired.push({
       taskId,
