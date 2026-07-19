@@ -17,7 +17,6 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'node:crypto';
-import { execFile } from 'child_process';
 import {
   query,
   getSessionMessages,
@@ -74,9 +73,8 @@ import { rewriteMarkdownToHtml } from './markdown-to-html.js';
 import {
   buildPrecheckErrorOutput,
   buildPrecheckSkippedOutput,
-  type PrecheckErrorReason,
 } from './precheck-emission.js';
-import { parseScriptOutput, type ScriptResult } from './script-output-parse.js';
+import { runScript } from './run-script.js';
 import { isExpectedFsError, isFsErrorWithCode } from './fs-errors.js';
 import {
   decideHardExitWatchdog,
@@ -4327,70 +4325,6 @@ async function runQuery(
   };
 }
 
-const SCRIPT_TIMEOUT_MS = 30_000;
-
-// Discriminated return shape for `runScript` (#581 follow-up): on
-// success carries the parsed `ScriptResult`; on failure carries a
-// `PrecheckErrorReason` so `buildPrecheckErrorOutput` can name what
-// actually went wrong. Pre-fix the function returned `null` on every
-// failure mode and the call site emitted a generic diagnostic that
-// hard-coded the cause list — Copilot flagged this on PR #608
-// because `parseScriptOutput` returns more failure modes than the
-// pre-fix list named (`invalid_json` and `invalid_data_shape`
-// weren't in the diagnostic), making the persisted
-// `task_run_logs.error` misleading.
-type RunScriptResult =
-  | { ok: true; result: ScriptResult }
-  | { ok: false; reason: PrecheckErrorReason };
-
-async function runScript(script: string): Promise<RunScriptResult> {
-  const scriptPath = '/tmp/task-script.sh';
-  fs.writeFileSync(scriptPath, script, { mode: 0o755 });
-
-  return new Promise((resolve) => {
-    execFile(
-      'bash',
-      [scriptPath],
-      {
-        timeout: SCRIPT_TIMEOUT_MS,
-        maxBuffer: 1024 * 1024,
-        env: process.env,
-      },
-      (error, stdout, stderr) => {
-        if (stderr) {
-          log(`Script stderr: ${stderr.slice(0, 500)}`);
-        }
-
-        if (error) {
-          log(`Script error: ${error.message}`);
-          return resolve({ ok: false, reason: 'execfile-error' });
-        }
-
-        const outcome = parseScriptOutput(stdout);
-        if (!outcome.ok) {
-          const lastLine = (outcome.lastLine ?? '').slice(0, 200);
-          if (outcome.reason === 'empty') {
-            log('Script produced no output');
-            return resolve({ ok: false, reason: 'empty-output' });
-          } else if (outcome.reason === 'invalid_json') {
-            log(`Script output is not valid JSON: ${lastLine}`);
-            return resolve({ ok: false, reason: 'invalid-json' });
-          } else if (outcome.reason === 'invalid_data_shape') {
-            log(
-              `Script output 'data' must be a JSON object per coding-policy: script-delegation: ${lastLine}`,
-            );
-            return resolve({ ok: false, reason: 'invalid-data-shape' });
-          } else {
-            log(`Script output missing wake_agent boolean: ${lastLine}`);
-            return resolve({ ok: false, reason: 'missing-wake-agent' });
-          }
-        }
-        resolve({ ok: true, result: outcome.result });
-      },
-    );
-  });
-}
-
 async function main(): Promise<void> {
   let containerInput: ContainerInput;
 
@@ -4617,11 +4551,13 @@ async function main(): Promise<void> {
   // Script phase: run script before waking agent
   if (containerInput.script && containerInput.isScheduledTask) {
     log('Running task script...');
-    const scriptResult = await runScript(containerInput.script);
+    const scriptResult = await runScript(containerInput.script, { log });
 
     if (!scriptResult.ok) {
       log(`Script failed: ${scriptResult.reason}`);
-      writeOutput(buildPrecheckErrorOutput(scriptResult.reason));
+      writeOutput(
+        buildPrecheckErrorOutput(scriptResult.reason, scriptResult.detail),
+      );
       return;
     }
 

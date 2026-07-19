@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildPrecheckErrorOutput,
   buildPrecheckSkippedOutput,
+  formatExecErrorDetail,
 } from './precheck-emission.js';
 
 describe('buildPrecheckSkippedOutput', () => {
@@ -101,5 +102,84 @@ describe('buildPrecheckErrorOutput', () => {
 
     expect(typeof out.error).toBe('string');
     expect(out.error.length).toBeGreaterThan(0);
+  });
+
+  // #812 Bug A: an optional detail suffix disambiguates execfile-error.
+  it('appends a detail suffix to both error and result when provided', () => {
+    const out = buildPrecheckErrorOutput(
+      'execfile-error',
+      'timed out after 30s, signal=SIGKILL',
+    );
+
+    expect(out.error).toBe(
+      'precheck script failed: execfile-error (timed out after 30s, signal=SIGKILL)',
+    );
+    expect(out.result).toBe(
+      '<internal>precheck-error: execfile-error (timed out after 30s, signal=SIGKILL)</internal>',
+    );
+  });
+
+  it('is byte-identical to the no-detail form when detail is omitted (backward compatible)', () => {
+    expect(buildPrecheckErrorOutput('execfile-error')).toEqual(
+      buildPrecheckErrorOutput('execfile-error', undefined),
+    );
+    expect(buildPrecheckErrorOutput('execfile-error', '')).toEqual(
+      buildPrecheckErrorOutput('execfile-error'),
+    );
+  });
+});
+
+describe('formatExecErrorDetail', () => {
+  // The core #812 Bug A contract: a timeout-kill and a genuine non-zero
+  // exit produced the SAME persisted string before this — now they don't.
+  it('distinguishes a timeout-kill from a genuine non-zero exit', () => {
+    const timeout = formatExecErrorDetail({
+      exitCode: null,
+      signal: 'SIGKILL',
+      timedOut: true,
+      timeoutMs: 30_000,
+    });
+    const nonZeroExit = formatExecErrorDetail({
+      exitCode: 1,
+      signal: null,
+    });
+
+    expect(timeout).toContain('timed out after 30s');
+    expect(timeout).toContain('signal=SIGKILL');
+    expect(nonZeroExit).toContain('exit=1');
+    expect(timeout).not.toBe(nonZeroExit);
+  });
+
+  it('reports a spawn failure by its errno and nothing else', () => {
+    expect(formatExecErrorDetail({ spawnCode: 'ENOENT' })).toBe(
+      'spawn-failed: ENOENT',
+    );
+  });
+
+  it('never embeds child stderr and stays a controlled, envelope-safe string (no-secrets)', () => {
+    const detail = formatExecErrorDetail({
+      exitCode: 2,
+      signal: 'SIGTERM',
+      timedOut: true,
+      timeoutMs: 30_000,
+    });
+
+    // Only our literals, signal names, and integers — no untrusted text,
+    // so it can never leak stderr into the persisted error / operator
+    // alert, and no `<`/`>` that could break the `<internal>` envelope.
+    expect(detail).toBe('timed out after 30s, signal=SIGTERM, exit=2');
+    expect(detail).not.toMatch(/[<>]/);
+  });
+
+  it('omits exit= for a clean exit code and falls back when nothing is set', () => {
+    expect(formatExecErrorDetail({ exitCode: 0, signal: null })).toBe(
+      'unknown-failure',
+    );
+  });
+
+  it('names a bare signal kill with no exit code', () => {
+    expect(formatExecErrorDetail({ exitCode: null, signal: 'SIGSEGV' })).toBe(
+      'signal=SIGSEGV',
+    );
   });
 });

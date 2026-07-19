@@ -103,11 +103,56 @@ export type PrecheckErrorReason =
 
 export function buildPrecheckErrorOutput(
   reason: PrecheckErrorReason,
+  detail?: string,
 ): PrecheckErrorOutput {
-  const errorMsg = `precheck script failed: ${reason}`;
+  const suffix = detail ? ` (${detail})` : '';
+  const errorMsg = `precheck script failed: ${reason}${suffix}`;
   return {
     status: 'error',
-    result: `<internal>precheck-error: ${reason}</internal>`,
+    result: `<internal>precheck-error: ${reason}${suffix}</internal>`,
     error: errorMsg,
   };
+}
+
+// #812 Bug A: format the disambiguating cause of an `execfile-error` into
+// a single line for `task_run_logs.error`. Before this, every execFile
+// failure — timeout-kill, signal, genuine non-zero exit, spawn failure —
+// collapsed to the bare reason `execfile-error`, so a hung precheck killed
+// at the timeout was indistinguishable from a script that exited 1. The
+// runtime child fields (`killed`/`signal`/`code`) are exactly what
+// disambiguates them.
+//
+// The child's stderr is deliberately NOT included here: this string is
+// persisted to `task_run_logs.error` AND surfaced in the operator's chat
+// alert, so raw stderr could leak secret-bearing diagnostics into durable
+// logs (`coding-policy: no-secrets`). `runScript` discards child stderr
+// entirely (spawned with stderr `'ignore'`), so diagnosis rests on these
+// controlled fields. Excluding untrusted text also keeps the output a
+// controlled string (signal names, our literals, integers) that is always
+// safe to embed in the `<internal>` envelope. Pure so it is unit-tested
+// directly; `runScript` threads its output into `buildPrecheckErrorOutput`.
+export interface ExecErrorInfo {
+  exitCode?: number | null;
+  signal?: NodeJS.Signals | null;
+  timedOut?: boolean;
+  timeoutMs?: number;
+  spawnCode?: string; // e.g. 'ENOENT' when `bash` itself can't be spawned
+}
+
+export function formatExecErrorDetail(info: ExecErrorInfo): string {
+  const { exitCode, signal, timedOut, timeoutMs, spawnCode } = info;
+  if (spawnCode) {
+    return `spawn-failed: ${spawnCode}`;
+  }
+  const parts: string[] = [];
+  if (timedOut) {
+    parts.push(`timed out after ${Math.round((timeoutMs ?? 0) / 1000)}s`);
+  }
+  if (signal) {
+    parts.push(`signal=${signal}`);
+  }
+  if (typeof exitCode === 'number' && exitCode !== 0) {
+    parts.push(`exit=${exitCode}`);
+  }
+  return parts.join(', ') || 'unknown-failure';
 }
