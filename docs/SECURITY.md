@@ -59,7 +59,8 @@ With OneCLI configured (`ONECLI_URL`/`ONECLI_API_KEY` set, #640), the `ONECLI_MA
 | OneCLI-managed — `ONECLI_MANAGED_VARS` (`GOOGLE_MAPS_API_KEY`, `TOMTOM_API_KEY`, `YOUTUBE_API_KEY`, `GITHUB_TOKEN`) | Placeholder + gateway swap | Placeholder + gateway swap | **None** |
 | Still forwarded as real — `CONTAINER_VARS` minus managed (`BYAIR_MCP_URL`, `SESSIONIZE_*`) | Env-file (0600) | Env-file (0600) | **None** |
 | Google OAuth apps (Gmail, Calendar, Tasks, Drive) | Gateway-injected on the wire (no container credential) | Gateway-injected on the wire | **None** (`secretMode=selective`) |
-| Everything else (Trakt, Reclaim, channel tokens, …) | Via host scripts (IPC) | Via host scripts (IPC) | **None** |
+| Trakt (OneCLI gateway — custom-oauth Bearer + `trakt-api-key` header-injection) | Gateway-injected on the wire (no container credential) | Gateway-injected on the wire | **None** |
+| Everything else (Reclaim, channel tokens, …) | Via host scripts (IPC) | Via host scripts (IPC) | **None** |
 
 ### 5. Tile-Based Rule Enforcement
 

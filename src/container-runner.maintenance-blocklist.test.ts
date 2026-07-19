@@ -190,10 +190,9 @@ describe('#337 maintenance blocklist filter', () => {
         'skill-block': {
           'SKILL.md': 'name: skill-block\n',
           // #544 — even though `skill-block` is in the maintenance
-          // blocklist, host MCP handlers (e.g. `mcp__nanoclaw__
-          // fetch_trakt_history`) consume scripts directly from
-          // `groups/<folder>/scripts/` independently of the agent
-          // context. The script must land regardless.
+          // blocklist, in-container skills execute scripts from
+          // `groups/<folder>/scripts/` by filename independently of the
+          // agent context. The script must land regardless.
           'scripts/blocked-helper.py':
             '#!/usr/bin/env python3\nprint("still needed")\n',
         },
@@ -355,18 +354,15 @@ describe('#337 maintenance blocklist filter', () => {
     expect(payload.filteredSkills).toContain('nanoclaw-core/skill-block');
   });
 
-  it('#544 — blocklisted skill scripts still land in `groups/<folder>/scripts/` (host MCP path)', async () => {
+  it('#544 — blocklisted skill scripts still land in `groups/<folder>/scripts/` (in-container script path)', async () => {
     // Pre-#544 the blocklist filter at `container-runner.ts` excluded
     // BOTH the agent-context skill copies (intended) AND the
-    // `copyTileScriptsToFlatDir` call (unintended). When
-    // `entertainment-sync` Step 1 then called
-    // `mcp__nanoclaw__fetch_trakt_history()`, the host IPC handler in
-    // `src/ipc.ts` looked up `groups/<folder>/scripts/trakt-watch-
-    // history.py` and got ENOENT — entertainment-sync surfaced
-    // "trakt-watch-history.py not found" and stopped. The agent
-    // context cost of a script file is zero (scripts aren't loaded
-    // into the SDK's prompt surface), so excluding them was purely
-    // accidental.
+    // `copyTileScriptsToFlatDir` call (unintended). When a
+    // non-blocklisted skill then shelled out to a published script
+    // under `groups/<folder>/scripts/` by filename, the lookup got
+    // ENOENT and the operation stopped. The agent context cost of a
+    // script file is zero (scripts aren't loaded into the SDK's prompt
+    // surface), so excluding them was purely accidental.
     //
     // Post-#544 scripts publish unconditionally to the per-group
     // `scripts/` dir even when the owning skill's prompt is

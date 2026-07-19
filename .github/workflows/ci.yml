@@ -75,9 +75,6 @@ jobs:
       # so new coverage is exercised by the PR gate per
       # `coding-policy: ci-safety` ("Never Skip Tests") and
       # `coding-policy: testing-standards` ("Every module gets tests").
-      - name: Python tests (trakt-auth)
-        run: python3 -m unittest scripts.test_trakt_auth
-
       - name: Python tests (deploy agent-grep predicate)
         run: python3 -m unittest scripts.test_deploy_agent_grep
 

@@ -13,15 +13,12 @@ services:
       - ./data:/app/data
       - ./groups:/app/groups
       - ./logs:/app/logs
-      # Credentials (mounted, never baked into image). RW so the
-      # trakt autorefresh path (`src/ipc.ts` fetch_trakt_history →
-      # admin-tile watch-history script) can write rotated OAuth
-      # tokens back to .env on a successful refresh-grant. Without
-      # RW the persist step throws OSError 30 (Read-only file
-      # system); the in-flight request still succeeds via the
-      # in-memory bearer but the next IPC call burns another
-      # refresh-grant against a now-rotated refresh token, which
-      # eventually breaks.
+      # Credentials (mounted, never baked into image). RW so a host
+      # flow that refreshes an OAuth grant can persist the rotated
+      # token back to .env; without RW the persist step throws
+      # OSError 30 (Read-only file system). The original in-host
+      # autorefresh path that required this is retired (Trakt moved
+      # to the OneCLI gateway, #817) — revisit whether RO now suffices.
       - ./.env:/app/.env
       # Shared trusted directory (mounted into trusted + main agent containers)
       - ./trusted:/app/trusted

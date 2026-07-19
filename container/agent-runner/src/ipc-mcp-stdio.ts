@@ -1522,13 +1522,6 @@ server.tool(
 // --- Named host operations ---
 
 server.tool(
-  'fetch_trakt_history',
-  'Fetch Trakt.tv watch history (shows, movies, ratings) for recommendations.',
-  {},
-  async () => runHostOperation('fetch_trakt_history'),
-);
-
-server.tool(
   'fetch_markdown',
   `Fetch a web page and return clean Markdown via snitchmd (CloakBrowser + rs-trafilatura).
 

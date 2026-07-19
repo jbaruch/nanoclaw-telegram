@@ -35,7 +35,6 @@ EXCLUDES=(
   --exclude='.env'
   --exclude='scripts/heartbeat-external.conf'
   --exclude='scripts/heartbeat-external.state'
-  --exclude='scripts/trakt-auth.py'
   --exclude='scripts/audible-backup.sh'
   --exclude='src/hubitat-listener.ts'
 
@@ -141,11 +140,9 @@ echo "Scrubbing files..."
 # you forget to add a name here, the verifier catches it before the
 # export lands on public.
 PRIVATE_IPC_HANDLERS=(
-  'fetch_trakt_history'
   'audible_backup'
 )
 PRIVATE_MCP_TOOLS=(
-  'fetch_trakt_history'
   'audible_backup'
   'smarthome_status'
 )
@@ -297,11 +294,6 @@ if remaining:
     raise SystemExit(f'ERROR: private-tile JSDoc line still present in {f} after scrub')
 open(f, 'w').write(''.join(lines))
 
-# promote-to-tile-repo.sh: remove private integration names from grep patterns
-f = '$PUBLIC_DIR/scripts/promote-to-tile-repo.sh'
-code = open(f).read()
-code = code.replace('|fetch_trakt', '')
-open(f, 'w').write(code)
 
 print('  comments/scripts: removed private integration references')
 "
