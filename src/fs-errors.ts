@@ -71,3 +71,21 @@ export function isErrnoCodedError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   return typeof (err as NodeJS.ErrnoException).code === 'string';
 }
+
+// Closed errno set the orchestrator's best-effort filesystem work
+// (session-nuke lstat/unlink/realpath/rmSync/opendir, group-folder chown,
+// log-prune, checkpoint/handoff writes over DATA_DIR trees) may legitimately
+// raise. Anything outside this set — or a non-errno defect — propagates.
+export const BEST_EFFORT_FS_CODES = [
+  'ENOENT',
+  'EACCES',
+  'EPERM',
+  'EISDIR',
+  'ENOTDIR',
+  'ELOOP',
+  'ENAMETOOLONG',
+  'EROFS',
+  'EBUSY',
+  'ENOSPC',
+  'ENOTEMPTY',
+] as const;
