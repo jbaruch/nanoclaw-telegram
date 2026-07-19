@@ -455,6 +455,18 @@ export const HUBITAT_ALERT_SENSITIVITY = (process.env
 export const TILE_OWNER =
   process.env.TILE_OWNER || envConfig.TILE_OWNER || 'nanoclaw';
 
+// Clone URL for the orchestrator's own deploy-source repo. `persist_global_file`
+// (#471, regression of #393) commits the approved persona edits here and pushes
+// HEAD:main so `deploy.sh`'s `git pull origin main` keeps them across deploys.
+// The running orchestrator's cwd (`/app`) is the built image dir with no `.git`,
+// so persist can't commit in place — it operates on a dedicated clone of this
+// URL. Overridable for tests/forks; default is the private deploy source that
+// `deploy.sh`'s `origin` also points at.
+export const ORCHESTRATOR_REPO_URL =
+  process.env.ORCHESTRATOR_REPO_URL ||
+  envConfig.ORCHESTRATOR_REPO_URL ||
+  'https://github.com/jbaruch/nanoclaw.git';
+
 // Timezone for scheduled tasks, message formatting, etc.
 // Validates each candidate is a real IANA identifier before accepting.
 function resolveConfigTimezone(): string {

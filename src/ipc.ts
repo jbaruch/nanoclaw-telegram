@@ -10,6 +10,7 @@ import {
   GROUPS_DIR,
   HOST_PROJECT_ROOT,
   IPC_POLL_INTERVAL,
+  ORCHESTRATOR_REPO_URL,
   STORE_DIR,
   TIMEZONE,
 } from './config.js';
@@ -605,6 +606,148 @@ function runGit(
   });
 }
 
+// Commit identity for persona persist commits made inside the dedicated clone
+// (#471). A container has no ambient git author; without this `git commit`
+// fails with "empty ident name". The push itself carries the operator's
+// GITHUB_TOKEN, so this identity only labels the commit.
+const PERSONA_GIT_EMAIL = 'nanoclaw-bot@users.noreply.github.com';
+const PERSONA_GIT_NAME = 'NanoClaw';
+
+// Serialize persona persists in-process (#471 review). The `persist_global_file`
+// handler runs clone/reset + overlay + commit/push as a fire-and-forget task,
+// so two closely-timed requests would otherwise race on the shared
+// `data/persona-repo` (one `reset --hard`/`clean` while the other stages),
+// producing a garbled diff or a spurious failure. Each persist chains behind the
+// previous so they run strictly one at a time; `runSerializedPersonaPersist`
+// tolerates a rejected predecessor (the chain never stays poisoned).
+let personaPersistChain: Promise<void> = Promise.resolve();
+export function runSerializedPersonaPersist(task: () => Promise<void>): void {
+  // `.then(task, task)` runs the next persist regardless of whether the
+  // predecessor resolved or rejected, so a failed run never blocks the queue.
+  // The task writes its own result envelope and logs its own failures; the
+  // trailing `.catch` only surfaces a truly unexpected task-level crash (never a
+  // silent swallow) and resets the chain to resolved for the next persist.
+  personaPersistChain = personaPersistChain.then(task, task).catch((err) => {
+    logger.error({ err: String(err) }, 'persona persist task crashed');
+  });
+}
+
+/**
+ * Ensure a clean checkout of the orchestrator's deploy-source repo at `repoDir`,
+ * tracking `origin/main`, ready for a persona-file commit.
+ *
+ * Why this exists (#471, regression of #393): the running orchestrator's cwd
+ * (`/app`) is the built image directory, NOT a git worktree — `docker-compose.yml`
+ * bind-mounts `./groups`, `./data`, etc. but never the repo's `.git`. So
+ * `persist_global_file` cannot `git add` in place (it fails with the exact
+ * "fatal: not a git repository" this issue reports). Instead it operates on this
+ * dedicated clone, applies the runtime persona edits into it, and pushes
+ * `HEAD:main` so `deploy.sh`'s `git pull` keeps them.
+ *
+ * First run clones (shallow, single-branch `main`); later runs reconcile
+ * `origin` with `remoteUrl` (so a changed `ORCHESTRATOR_REPO_URL` takes effect),
+ * then fetch and hard-reset to `origin/main` so a stranded prior state — a
+ * rolled-back commit, a half-applied edit, a diverged local `main` — never
+ * blocks a fresh persist. The commit identity is (re)set on every successful
+ * run so a clone lacking one can still `git commit`. Never rejects — resolves
+ * `{ ok: true }` or an `{ ok: false, ...PersistGitResult }` failure envelope with
+ * a distinct `git clone` / `git fetch` / `git reset` stage label, so "no repo"
+ * is diagnosable separately from persist's "No changes" no-op (issue ask #2).
+ * Any push auth rides on `token` via `gitAuthEnv`.
+ */
+export async function ensurePersonaRepo(opts: {
+  repoDir: string;
+  remoteUrl: string;
+  token?: string;
+}): Promise<{ ok: true } | ({ ok: false } & PersistGitResult)> {
+  const { repoDir, remoteUrl, token } = opts;
+  // Always disable the interactive credential prompt, even without a token: a
+  // missing/misconfigured token must fail fast and deterministically, not hang
+  // on a terminal prompt until the 60s `runGit` timeout.
+  const auth = { GIT_TERMINAL_PROMPT: '0', ...gitAuthEnv(token) };
+
+  const fail = (
+    label: string,
+    r: { stdout: string; stderr: string },
+  ): { ok: false } & PersistGitResult => ({
+    ok: false,
+    error: redactGitToken(
+      `${label}: ${(r.stderr || r.stdout || 'failed').trim()}`,
+      token,
+    ),
+    stderr: redactGitToken(r.stderr, token).slice(-500),
+    stage: 'git',
+  });
+
+  const isRepo =
+    fs.existsSync(path.join(repoDir, '.git')) &&
+    (await runGit(repoDir, ['rev-parse', '--is-inside-work-tree'])).code === 0;
+
+  if (!isRepo) {
+    // Clear any partial dir from an interrupted earlier clone — `git clone`
+    // refuses a non-empty target — then clone fresh into it.
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(repoDir), { recursive: true });
+    const clone = await runGit(
+      path.dirname(repoDir),
+      [
+        'clone',
+        '--depth',
+        '1',
+        '--single-branch',
+        '--branch',
+        'main',
+        remoteUrl,
+        repoDir,
+      ],
+      auth,
+    );
+    if (clone.code !== 0) return fail('git clone', clone);
+  } else {
+    // Existing clone: reconcile `origin` with the configured `remoteUrl` first
+    // — an operator may have changed `ORCHESTRATOR_REPO_URL` (documented as
+    // overridable for a fork/alternate remote) since the clone was made, and
+    // fetch/push otherwise keep targeting the stale URL captured at clone time,
+    // silently persisting persona edits to the wrong repo. Then refresh to
+    // origin/main, discarding any local state so a prior run's leftovers can't
+    // ride along in the next persist's push. Use a bare `git fetch origin` —
+    // NOT `git fetch origin main`, which writes only FETCH_HEAD and leaves
+    // `refs/remotes/origin/main` pinned to the original shallow checkout. The
+    // clone's own `+refs/heads/main:refs/remotes/origin/main` refspec makes the
+    // bare fetch advance the tracking ref, so the following `reset --hard
+    // origin/main` lands on the real remote tip; otherwise the next `HEAD:main`
+    // push would be a non-fast-forward once main advanced upstream.
+    const setUrl = await runGit(repoDir, [
+      'remote',
+      'set-url',
+      'origin',
+      remoteUrl,
+    ]);
+    if (setUrl.code !== 0) return fail('git remote set-url', setUrl);
+    const fetch = await runGit(repoDir, ['fetch', 'origin'], auth);
+    if (fetch.code !== 0) return fail('git fetch', fetch);
+    const reset = await runGit(repoDir, ['reset', '--hard', 'origin/main']);
+    if (reset.code !== 0) return fail('git reset', reset);
+    const clean = await runGit(repoDir, ['clean', '-fd']);
+    if (clean.code !== 0) return fail('git clean', clean);
+  }
+
+  // Set the commit identity on EVERY successful run (idempotent), not just the
+  // initial clone: a clone made manually or with its local config stripped has
+  // no ambient git author, so `git commit` would later fail at the persist
+  // boundary with the "empty ident" error this guard exists to prevent. Fail
+  // loudly here instead.
+  const email = await runGit(repoDir, [
+    'config',
+    'user.email',
+    PERSONA_GIT_EMAIL,
+  ]);
+  if (email.code !== 0) return fail('git config user.email', email);
+  const name = await runGit(repoDir, ['config', 'user.name', PERSONA_GIT_NAME]);
+  if (name.code !== 0) return fail('git config user.name', name);
+  return { ok: true };
+}
+
 /**
  * Commit the allowlisted persona files in `repoRoot` and push `HEAD:main`,
  * resolving with the result envelope (never rejects — the caller always has
@@ -728,6 +871,129 @@ export async function persistGlobalFilesToGit(opts: {
     return fail('git push', push);
   }
   return { committed: true, stdout: 'Committed and pushed.' };
+}
+
+/**
+ * The `persist_global_file` work item (#471): ensure a clean clone, overlay the
+ * approved persona files from the live runtime mirror (`<groupsDir>/global/`)
+ * onto it, commit + push HEAD:main, and write a result envelope to `resultPath`.
+ * Runs as a fire-and-forget task off the IPC loop, serialized against other
+ * persists. ALWAYS writes an envelope: each step failure writes its own, and an
+ * outer-boundary catch guarantees an actionable envelope for any unexpected
+ * throw — a missing envelope reads as a silent hang to the polling caller.
+ * Never rejects for an operational failure; only a failure of the envelope
+ * write itself escapes (logged by the serializer). `groupsDir` is injected so
+ * tests can point it at a fixture instead of the live `GROUPS_DIR`.
+ */
+export async function runPersonaPersistTask(opts: {
+  personaRepoDir: string;
+  groupsDir: string;
+  relPaths: string[];
+  remoteUrl: string;
+  message: string;
+  token?: string;
+  resultPath: string;
+  sourceGroup: string;
+}): Promise<void> {
+  const {
+    personaRepoDir,
+    groupsDir,
+    relPaths,
+    remoteUrl,
+    message,
+    token,
+    resultPath,
+    sourceGroup,
+  } = opts;
+  // Guarded by an outer-boundary catch (see the `catch` below) so this
+  // fire-and-forget task always leaves the caller a result envelope. Per-step
+  // failures write their own specific envelopes; the catch is the last resort
+  // for an unexpected throw.
+  try {
+    const ready = await ensurePersonaRepo({
+      repoDir: personaRepoDir,
+      remoteUrl,
+      token,
+    });
+    if (!ready.ok) {
+      const { ok: _ok, ...envelope } = ready;
+      fs.writeFileSync(resultPath, JSON.stringify(envelope));
+      logger.error(
+        { sourceGroup, stage: envelope.stage, error: envelope.error },
+        'persist_global_file failed',
+      );
+      return;
+    }
+
+    // Overlay each approved persona file from the live runtime mirror
+    // (`<groupsDir>/global/<file>`, edited by the agent via its RW bind) onto
+    // the freshly-reset clone so the staged diff is exactly the edit.
+    try {
+      for (const rel of relPaths) {
+        const src = path.join(groupsDir, 'global', path.posix.basename(rel));
+        const dst = path.join(personaRepoDir, rel);
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.copyFileSync(src, dst);
+      }
+    } catch (e) {
+      // A non-Error throw indicates a bug, not a filesystem failure.
+      if (!(e instanceof Error)) throw e;
+      const code = (e as NodeJS.ErrnoException).code;
+      const envelope: PersistGitResult = {
+        error: `persist_global_file: copying persona files into the clone failed${code ? ` (${code})` : ''} — ${e.message}`,
+        stage: 'git',
+      };
+      fs.writeFileSync(resultPath, JSON.stringify(envelope));
+      logger.error(
+        { sourceGroup, code, error: e.message },
+        'persist_global_file failed',
+      );
+      return;
+    }
+
+    const persistResult = await persistGlobalFilesToGit({
+      repoRoot: personaRepoDir,
+      relPaths,
+      message,
+      token,
+    });
+    fs.writeFileSync(resultPath, JSON.stringify(persistResult));
+    if (persistResult.error) {
+      logger.error(
+        { sourceGroup, stage: persistResult.stage, error: persistResult.error },
+        'persist_global_file failed',
+      );
+    } else {
+      logger.info(
+        { sourceGroup, committed: persistResult.committed },
+        'persist_global_file completed',
+      );
+    }
+    // outer-boundary-process-contract (coding-policy: error-handling): the
+    // outermost boundary of this fire-and-forget persist task.
+    //   - Caller's silent-failure shape: the container-side caller polls
+    //     `resultPath` and reads its absence as a hang until its own timeout.
+    //   - What the catch emits: an actionable error envelope for THIS request,
+    //     so the caller always gets a result. (A failure of the envelope write
+    //     itself propagates to the serializer's `.catch`, which logs it — the
+    //     rare disk-failure edge case.)
+    //   - Why propagation breaks the contract: an escaping throw is absorbed by
+    //     the serializer with no envelope, hanging the poll.
+    // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    logger.error(
+      { sourceGroup, error: msg },
+      'persist_global_file failed (unexpected)',
+    );
+    fs.writeFileSync(
+      resultPath,
+      JSON.stringify({
+        error: `persist_global_file: unexpected failure — ${msg}`,
+        stage: 'git',
+      } satisfies PersistGitResult),
+    );
+  }
 }
 
 /**
@@ -4529,33 +4795,30 @@ export async function processTaskIpc(
         const { readEnvFile: readPersistEnv } = await import('./env.js');
         const persistGhToken = readPersistEnv(['GITHUB_TOKEN']).GITHUB_TOKEN;
 
-        // Run the commit+push off the IPC loop (like github_backup): the
-        // promise resolves with the result envelope; the loop never blocks
-        // on git. `persistGlobalFilesToGit` is the testable git boundary
-        // (commit/no-op/push, token-redacted failure envelope).
-        persistGlobalFilesToGit({
-          repoRoot: process.cwd(),
-          relPaths: persistRelPaths,
-          message: persistCommitMsg,
-          token: persistGhToken,
-        }).then((persistResult) => {
-          fs.writeFileSync(persistResultPath, JSON.stringify(persistResult));
-          if (persistResult.error) {
-            logger.error(
-              {
-                sourceGroup,
-                stage: persistResult.stage,
-                error: persistResult.error,
-              },
-              'persist_global_file failed',
-            );
-          } else {
-            logger.info(
-              { sourceGroup, committed: persistResult.committed },
-              'persist_global_file completed',
-            );
-          }
-        });
+        // The orchestrator's cwd (`/app`) is the built image dir, not a git
+        // worktree (#471), so persist can't commit in place. It operates on a
+        // dedicated self-provisioning clone of the deploy-source repo under
+        // `data/` (gitignored, mounted, persistent), applies the live runtime
+        // edits from `groups/global/` into it, then commits + pushes HEAD:main.
+        const personaRepoDir = path.join(DATA_DIR, 'persona-repo');
+
+        // Run clone + copy + commit + push off the IPC loop (like
+        // github_backup): the loop never blocks on git. `runPersonaPersistTask`
+        // is the testable boundary (ensure-clone → overlay → commit/push,
+        // always writing a result envelope). Serialized so two closely-timed
+        // persists can't race on the shared clone.
+        runSerializedPersonaPersist(() =>
+          runPersonaPersistTask({
+            personaRepoDir,
+            groupsDir: GROUPS_DIR,
+            relPaths: persistRelPaths,
+            remoteUrl: ORCHESTRATOR_REPO_URL,
+            message: persistCommitMsg,
+            token: persistGhToken,
+            resultPath: persistResultPath,
+            sourceGroup,
+          }),
+        );
       }
       break;
 

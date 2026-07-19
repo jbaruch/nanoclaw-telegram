@@ -19,7 +19,10 @@ import {
   backupCommitAndPush,
   classifyTzPersist,
   coerceTzSegments,
+  ensurePersonaRepo,
   persistGlobalFilesToGit,
+  runPersonaPersistTask,
+  runSerializedPersonaPersist,
   redactGitToken,
   validateGlobalFilesToPersist,
 } from './ipc.js';
@@ -446,6 +449,480 @@ describe('persistGlobalFilesToGit', () => {
     } finally {
       cleanup();
     }
+  });
+});
+
+describe('ensurePersonaRepo', () => {
+  // Real git in throwaway dirs — same deterministic real-fs/git pattern as the
+  // persist suite. A bare remote seeded with a `main` that carries the persona
+  // file stands in for the deploy-source repo the orchestrator clones (#471).
+  function git(cwd: string, args: string[]): string {
+    return execFileSync('git', args, {
+      cwd,
+      encoding: 'utf-8',
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+  }
+
+  function setupRemote(): {
+    remote: string;
+    seed: string;
+    workRoot: string;
+    cleanup: () => void;
+  } {
+    const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'persona-bare-'));
+    const seed = fs.mkdtempSync(path.join(os.tmpdir(), 'persona-seed-'));
+    // A separate scratch dir the clone target lives *inside* — the function
+    // creates/removes the target dir itself, so the parent must already exist.
+    const workRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'persona-work-'));
+    git(remote, ['init', '--bare', '--initial-branch=main']);
+    git(seed, ['init', '--initial-branch=main']);
+    git(seed, ['config', 'user.email', 'seed@example.com']);
+    git(seed, ['config', 'user.name', 'Seed']);
+    git(seed, ['remote', 'add', 'origin', remote]);
+    fs.mkdirSync(path.join(seed, 'groups', 'global'), { recursive: true });
+    fs.writeFileSync(path.join(seed, 'groups', 'global', 'SOUL.md'), 'seed\n');
+    git(seed, ['add', '-A']);
+    git(seed, ['commit', '-m', 'seed']);
+    git(seed, ['push', 'origin', 'HEAD:main']);
+    return {
+      remote,
+      seed,
+      workRoot,
+      cleanup: () => {
+        fs.rmSync(remote, { recursive: true, force: true });
+        fs.rmSync(seed, { recursive: true, force: true });
+        fs.rmSync(workRoot, { recursive: true, force: true });
+      },
+    };
+  }
+
+  // Advance the remote's `main` by one unrelated commit via the seed clone,
+  // returning the new tip SHA — stands in for another PR merging to main
+  // between two persist runs.
+  function advanceRemote(seed: string): string {
+    fs.writeFileSync(path.join(seed, 'README.md'), 'upstream advanced\n');
+    git(seed, ['add', '-A']);
+    git(seed, ['commit', '-m', 'upstream: unrelated advance']);
+    git(seed, ['push', 'origin', 'HEAD:main']);
+    return git(seed, ['rev-parse', 'HEAD']).trim();
+  }
+
+  // A second, independent bare remote whose `main` carries distinct SOUL
+  // content — stands in for an operator repointing ORCHESTRATOR_REPO_URL at a
+  // different deploy source (e.g. a fork) between persist runs.
+  function seedBareRemote(soulContent: string): {
+    remote: string;
+    cleanup: () => void;
+  } {
+    const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'persona-bare2-'));
+    const seed = fs.mkdtempSync(path.join(os.tmpdir(), 'persona-seed2-'));
+    git(remote, ['init', '--bare', '--initial-branch=main']);
+    git(seed, ['init', '--initial-branch=main']);
+    git(seed, ['config', 'user.email', 'seed2@example.com']);
+    git(seed, ['config', 'user.name', 'Seed2']);
+    git(seed, ['remote', 'add', 'origin', remote]);
+    fs.mkdirSync(path.join(seed, 'groups', 'global'), { recursive: true });
+    fs.writeFileSync(
+      path.join(seed, 'groups', 'global', 'SOUL.md'),
+      soulContent,
+    );
+    git(seed, ['add', '-A']);
+    git(seed, ['commit', '-m', 'seed2']);
+    git(seed, ['push', 'origin', 'HEAD:main']);
+    return {
+      remote,
+      cleanup: () => {
+        fs.rmSync(remote, { recursive: true, force: true });
+        fs.rmSync(seed, { recursive: true, force: true });
+      },
+    };
+  }
+
+  it('clones a fresh worktree tracking origin/main on first run', async () => {
+    const { remote, workRoot, cleanup } = setupRemote();
+    try {
+      const repoDir = path.join(workRoot, 'persona-repo');
+      const result = await ensurePersonaRepo({ repoDir, remoteUrl: remote });
+      expect(result).toEqual({ ok: true });
+      // It is a real git worktree — the exact thing `process.cwd()` (`/app`)
+      // was NOT, which is the whole #471 defect.
+      expect(git(repoDir, ['rev-parse', '--is-inside-work-tree']).trim()).toBe(
+        'true',
+      );
+      // Seeded content and an origin/main tracking ref are present.
+      expect(
+        fs.readFileSync(
+          path.join(repoDir, 'groups', 'global', 'SOUL.md'),
+          'utf-8',
+        ),
+      ).toContain('seed');
+      expect(git(repoDir, ['rev-parse', 'origin/main']).trim()).toBeTruthy();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('end-to-end: overlay a persona edit, then persist pushes only it to main', async () => {
+    const { remote, workRoot, cleanup } = setupRemote();
+    try {
+      const repoDir = path.join(workRoot, 'persona-repo');
+      const ready = await ensurePersonaRepo({ repoDir, remoteUrl: remote });
+      expect(ready).toEqual({ ok: true });
+      // The handler overlays the live runtime edit onto the clone, then persists.
+      fs.writeFileSync(
+        path.join(repoDir, 'groups', 'global', 'SOUL.md'),
+        'seed\nan approved change\n',
+      );
+      const result = await persistGlobalFilesToGit({
+        repoRoot: repoDir,
+        relPaths: ['groups/global/SOUL.md'],
+        message: 'soul: persist approved updates 2026-07-19',
+      });
+      expect(result).toMatchObject({ committed: true });
+      expect(git(remote, ['show', 'main:groups/global/SOUL.md'])).toContain(
+        'an approved change',
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('refreshes an existing clone to origin/main, discarding local cruft', async () => {
+    const { remote, workRoot, cleanup } = setupRemote();
+    try {
+      const repoDir = path.join(workRoot, 'persona-repo');
+      await ensurePersonaRepo({ repoDir, remoteUrl: remote });
+      // Simulate a stranded prior run: a stray local commit + dirty tree +
+      // an untracked file. A naive in-place persist would carry these along.
+      fs.writeFileSync(
+        path.join(repoDir, 'groups', 'global', 'SOUL.md'),
+        'seed\nhalf-applied\n',
+      );
+      git(repoDir, ['add', '-A']);
+      git(repoDir, ['commit', '-m', 'stray local commit']);
+      fs.writeFileSync(path.join(repoDir, 'stray-untracked.txt'), 'cruft\n');
+      const strayHead = git(repoDir, ['rev-parse', 'HEAD']).trim();
+
+      const result = await ensurePersonaRepo({ repoDir, remoteUrl: remote });
+      expect(result).toEqual({ ok: true });
+      // HEAD is back at origin/main, the half-applied edit is gone, and the
+      // untracked cruft is cleaned — a fresh persist starts from a clean base.
+      expect(git(repoDir, ['rev-parse', 'HEAD']).trim()).toBe(
+        git(repoDir, ['rev-parse', 'origin/main']).trim(),
+      );
+      expect(git(repoDir, ['rev-parse', 'HEAD']).trim()).not.toBe(strayHead);
+      expect(
+        fs.readFileSync(
+          path.join(repoDir, 'groups', 'global', 'SOUL.md'),
+          'utf-8',
+        ),
+      ).not.toContain('half-applied');
+      expect(fs.existsSync(path.join(repoDir, 'stray-untracked.txt'))).toBe(
+        false,
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('advances the tracking ref when the remote moves, so a later persist fast-forwards', async () => {
+    // Regression guard for the FETCH_HEAD-only refresh bug (PR #816 review):
+    // `git fetch origin main` writes only FETCH_HEAD, leaving
+    // refs/remotes/origin/main pinned to the first shallow checkout — so a
+    // persist after main advanced would push a non-fast-forward and fail.
+    const { remote, seed, workRoot, cleanup } = setupRemote();
+    try {
+      const repoDir = path.join(workRoot, 'persona-repo');
+      await ensurePersonaRepo({ repoDir, remoteUrl: remote });
+
+      // Another PR merges to main between persist runs.
+      const advancedTip = advanceRemote(seed);
+
+      const refreshed = await ensurePersonaRepo({ repoDir, remoteUrl: remote });
+      expect(refreshed).toEqual({ ok: true });
+      // The clone's tracking ref and HEAD both caught up to the new tip — not
+      // pinned to the stale original checkout.
+      expect(git(repoDir, ['rev-parse', 'origin/main']).trim()).toBe(
+        advancedTip,
+      );
+      expect(git(repoDir, ['rev-parse', 'HEAD']).trim()).toBe(advancedTip);
+
+      // A persist on the refreshed clone now fast-forwards cleanly onto the
+      // advanced main rather than being rejected as non-fast-forward.
+      fs.writeFileSync(
+        path.join(repoDir, 'groups', 'global', 'SOUL.md'),
+        'seed\npost-advance edit\n',
+      );
+      const result = await persistGlobalFilesToGit({
+        repoRoot: repoDir,
+        relPaths: ['groups/global/SOUL.md'],
+        message: 'soul: after main advanced',
+      });
+      expect(result).toMatchObject({ committed: true });
+      expect(git(remote, ['show', 'main:groups/global/SOUL.md'])).toContain(
+        'post-advance edit',
+      );
+      // The unrelated upstream advance is still present — the persist built on
+      // top of it, it didn't clobber it.
+      expect(git(remote, ['show', 'main:README.md'])).toContain(
+        'upstream advanced',
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('reconciles origin to a changed remoteUrl, so a later persist targets the new repo', async () => {
+    // Regression guard for the ORCHESTRATOR_REPO_URL drift (PR #816 review):
+    // an existing clone made from repo A must switch to repo B when
+    // ensurePersonaRepo is called with B's URL — otherwise fetch/push keep
+    // targeting A and persona edits land in the wrong repo.
+    const { remote: remoteA, workRoot, cleanup } = setupRemote();
+    const { remote: remoteB, cleanup: cleanupB } =
+      seedBareRemote('from repo B\n');
+    try {
+      const repoDir = path.join(workRoot, 'persona-repo');
+      await ensurePersonaRepo({ repoDir, remoteUrl: remoteA });
+
+      // Operator repoints ORCHESTRATOR_REPO_URL at repo B.
+      const result = await ensurePersonaRepo({ repoDir, remoteUrl: remoteB });
+      expect(result).toEqual({ ok: true });
+      // origin now points at B and the worktree carries B's content, not A's.
+      expect(git(repoDir, ['remote', 'get-url', 'origin']).trim()).toBe(
+        remoteB,
+      );
+      expect(
+        fs.readFileSync(
+          path.join(repoDir, 'groups', 'global', 'SOUL.md'),
+          'utf-8',
+        ),
+      ).toContain('from repo B');
+
+      // A persist now lands in B, and A is left untouched.
+      fs.writeFileSync(
+        path.join(repoDir, 'groups', 'global', 'SOUL.md'),
+        'from repo B\nedit after repoint\n',
+      );
+      const persisted = await persistGlobalFilesToGit({
+        repoRoot: repoDir,
+        relPaths: ['groups/global/SOUL.md'],
+        message: 'soul: after repoint',
+      });
+      expect(persisted).toMatchObject({ committed: true });
+      expect(git(remoteB, ['show', 'main:groups/global/SOUL.md'])).toContain(
+        'edit after repoint',
+      );
+      expect(
+        git(remoteA, ['show', 'main:groups/global/SOUL.md']),
+      ).not.toContain('edit after repoint');
+    } finally {
+      cleanupB();
+      cleanup();
+    }
+  });
+
+  it('returns a token-redacted git-stage envelope when the clone fails', async () => {
+    const { workRoot, cleanup } = setupRemote();
+    try {
+      const repoDir = path.join(workRoot, 'persona-repo');
+      const token = 'ghs_supersecretTOKEN';
+      const result = await ensurePersonaRepo({
+        repoDir,
+        remoteUrl: `${workRoot}/does-not-exist.git`,
+        token,
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error('expected failure');
+      expect(result.stage).toBe('git');
+      expect(result.error).toContain('git clone');
+      // The token must never survive into the envelope (no-secrets).
+      expect(JSON.stringify(result)).not.toContain(token);
+      // A failed clone leaves no partial worktree behind.
+      expect(fs.existsSync(path.join(repoDir, '.git'))).toBe(false);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe('runPersonaPersistTask', () => {
+  // Real git in throwaway dirs. Proves the task ALWAYS writes a result envelope
+  // to `resultPath` — a missing envelope reads as a silent hang to the polling
+  // caller (#816 review).
+  function git(cwd: string, args: string[]): string {
+    return execFileSync('git', args, {
+      cwd,
+      encoding: 'utf-8',
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+  }
+
+  function setup(): {
+    remote: string;
+    groupsDir: string;
+    personaRepoDir: string;
+    resultPath: string;
+    cleanup: () => void;
+  } {
+    const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'task-bare-'));
+    const seed = fs.mkdtempSync(path.join(os.tmpdir(), 'task-seed-'));
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'task-scratch-'));
+    git(remote, ['init', '--bare', '--initial-branch=main']);
+    git(seed, ['init', '--initial-branch=main']);
+    git(seed, ['config', 'user.email', 'seed@example.com']);
+    git(seed, ['config', 'user.name', 'Seed']);
+    git(seed, ['remote', 'add', 'origin', remote]);
+    fs.mkdirSync(path.join(seed, 'groups', 'global'), { recursive: true });
+    fs.writeFileSync(path.join(seed, 'groups', 'global', 'SOUL.md'), 'seed\n');
+    git(seed, ['add', '-A']);
+    git(seed, ['commit', '-m', 'seed']);
+    git(seed, ['push', 'origin', 'HEAD:main']);
+    // The live runtime mirror the task copies FROM (the agent's edited files).
+    const groupsDir = path.join(scratch, 'groups');
+    fs.mkdirSync(path.join(groupsDir, 'global'), { recursive: true });
+    return {
+      remote,
+      groupsDir,
+      personaRepoDir: path.join(scratch, 'persona-repo'),
+      resultPath: path.join(scratch, 'result.json'),
+      cleanup: () => {
+        fs.rmSync(remote, { recursive: true, force: true });
+        fs.rmSync(seed, { recursive: true, force: true });
+        fs.rmSync(scratch, { recursive: true, force: true });
+      },
+    };
+  }
+
+  const readEnvelope = (resultPath: string) =>
+    JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+
+  it('writes a committed envelope and pushes the edit on the happy path', async () => {
+    const { remote, groupsDir, personaRepoDir, resultPath, cleanup } = setup();
+    try {
+      fs.writeFileSync(
+        path.join(groupsDir, 'global', 'SOUL.md'),
+        'seed\nan approved change\n',
+      );
+      await runPersonaPersistTask({
+        personaRepoDir,
+        groupsDir,
+        relPaths: ['groups/global/SOUL.md'],
+        remoteUrl: remote,
+        message: 'soul: happy path',
+        resultPath,
+        sourceGroup: 'tg:1',
+      });
+      expect(readEnvelope(resultPath)).toMatchObject({ committed: true });
+      expect(git(remote, ['show', 'main:groups/global/SOUL.md'])).toContain(
+        'an approved change',
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('writes an error envelope (never nothing) when the clone step fails', async () => {
+    const { groupsDir, personaRepoDir, resultPath, cleanup } = setup();
+    try {
+      fs.writeFileSync(
+        path.join(groupsDir, 'global', 'SOUL.md'),
+        'seed\nedit\n',
+      );
+      await runPersonaPersistTask({
+        personaRepoDir,
+        groupsDir,
+        relPaths: ['groups/global/SOUL.md'],
+        remoteUrl: `${personaRepoDir}-does-not-exist.git`,
+        message: 'soul: clone fails',
+        resultPath,
+        sourceGroup: 'tg:1',
+      });
+      const envelope = readEnvelope(resultPath);
+      expect(envelope.stage).toBe('git');
+      expect(envelope.error).toContain('git clone');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('writes an error envelope when a source persona file is missing', async () => {
+    const { remote, groupsDir, personaRepoDir, resultPath, cleanup } = setup();
+    try {
+      // groupsDir/global has no SOUL.md — the overlay copy fails.
+      await runPersonaPersistTask({
+        personaRepoDir,
+        groupsDir,
+        relPaths: ['groups/global/SOUL.md'],
+        remoteUrl: remote,
+        message: 'soul: missing source',
+        resultPath,
+        sourceGroup: 'tg:1',
+      });
+      const envelope = readEnvelope(resultPath);
+      expect(envelope.stage).toBe('git');
+      expect(envelope.error).toContain('copying persona files');
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe('runSerializedPersonaPersist', () => {
+  // Deferred promise the test resolves by hand to control task timing.
+  function deferred(): { promise: Promise<void>; resolve: () => void } {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it('runs queued persists strictly one at a time, in order', async () => {
+    const order: string[] = [];
+    const gateA = deferred();
+    const aDone = deferred();
+    const bDone = deferred();
+
+    // Task A blocks until the test releases gateA; B must not start meanwhile.
+    runSerializedPersonaPersist(async () => {
+      order.push('A-start');
+      await gateA.promise;
+      order.push('A-end');
+      aDone.resolve();
+    });
+    runSerializedPersonaPersist(async () => {
+      order.push('B');
+      bDone.resolve();
+    });
+
+    // Let microtasks flush — B is still queued behind the blocked A.
+    await Promise.resolve();
+    expect(order).toEqual(['A-start']);
+
+    gateA.resolve();
+    await aDone.promise;
+    await bDone.promise;
+    expect(order).toEqual(['A-start', 'A-end', 'B']);
+  });
+
+  it('keeps the queue alive when a task rejects — the next persist still runs', async () => {
+    const order: string[] = [];
+    const done = deferred();
+
+    // A rejecting task must not poison the chain (a failed persist writes its
+    // own envelope; the queue keeps serving later persists).
+    runSerializedPersonaPersist(async () => {
+      order.push('boom');
+      throw new Error('task blew up');
+    });
+    runSerializedPersonaPersist(async () => {
+      order.push('after');
+      done.resolve();
+    });
+
+    await done.promise;
+    expect(order).toEqual(['boom', 'after']);
   });
 });
 
