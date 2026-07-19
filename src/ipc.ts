@@ -57,6 +57,7 @@ import type { ContainerStatus } from './group-queue.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { stripInternalTags } from './router.js';
+import { runSidecar } from './sidecar-runner.js';
 import { recomputeLocalSchedules } from './task-scheduler.js';
 import {
   isValidTimezone,
@@ -1441,7 +1442,11 @@ export async function processTaskIpc(
     // push_staged_to_branch
     branch?: string;
     commitMessage?: string;
-    dryRun?: boolean;
+    // For run_sidecar (#750): allowlisted flags the plugin appends to the
+    // named sidecar's command line. Image + mounts come from the trusted
+    // registry, never the payload. Typed `unknown` because IPC payloads
+    // arrive as raw JSON — the handler validates it is a string[] before use.
+    flags?: unknown;
     command?: string;
     payload?: string | Record<string, unknown>;
     confirm?: boolean;
@@ -4554,97 +4559,85 @@ export async function processTaskIpc(
       }
       break;
 
-    case 'audible_backup':
+    case 'run_sidecar':
       if (data.requestId) {
+        // Authorization: run_sidecar spawns a privileged docker sidecar with
+        // host bind-mounts defined in the trusted registry — same privilege
+        // class as the former audible_backup case, gated on `isMain`. The
+        // plugin supplies only the sidecar NAME and registry-allowlisted
+        // flags; the image and mount paths never come from the payload, so a
+        // compromised non-main container can't request `-v /:/…` (see
+        // src/sidecar-runner.ts).
         if (!isMain) {
-          logger.warn({ sourceGroup }, 'Unauthorized audible_backup attempt');
+          logger.warn(
+            { sourceGroup, name: data.name },
+            'Unauthorized run_sidecar attempt',
+          );
           break;
         }
 
-        const audibleResultPath = scriptResultPath(sourceGroup, data);
+        const sidecarResultPath = scriptResultPath(sourceGroup, data);
 
-        const dryRun = data.dryRun === true;
-        logger.info({ sourceGroup, dryRun }, 'Running audible_backup');
+        // IPC payloads are raw JSON, so validate the shape at the boundary and
+        // write an actionable error envelope rather than let a malformed
+        // request (e.g. `flags: "--dry-run"`) crash runSidecar or silently
+        // hang the polling MCP caller.
+        if (typeof data.name !== 'string' || data.name.length === 0) {
+          fs.writeFileSync(
+            sidecarResultPath,
+            JSON.stringify({
+              error: 'run_sidecar: "name" must be a non-empty string.',
+            }),
+          );
+          break;
+        }
+        if (
+          data.flags !== undefined &&
+          !(
+            Array.isArray(data.flags) &&
+            data.flags.every((f) => typeof f === 'string')
+          )
+        ) {
+          fs.writeFileSync(
+            sidecarResultPath,
+            JSON.stringify({
+              error: 'run_sidecar: "flags" must be an array of strings.',
+            }),
+          );
+          break;
+        }
 
-        const dockerArgs = [
-          'run',
-          '--rm',
-          '-v',
-          `${path.dirname(process.env.HOST_PROJECT_ROOT || process.cwd())}/.audible:/root/.audible`,
-          '-v',
-          '/volume1/Google Drive/Audio Books:/library',
-          'audible-backup:latest',
-          '--json',
-          ...(dryRun ? ['--dry-run'] : []),
-        ];
+        const sidecarName = data.name;
+        const sidecarFlags = data.flags as string[] | undefined;
 
-        execFile(
-          'docker',
-          dockerArgs,
-          {
-            cwd: process.cwd(),
-            env: {
-              PATH: process.env.PATH || '/usr/bin:/bin',
-              HOME: process.env.HOME || '/root',
-            },
-            timeout: 600_000,
-            maxBuffer: 10 * 1024 * 1024,
-          },
-          (error, stdout, stderr) => {
-            // backup.py exits non-zero when any book failed (#625
-            // silent-loop fix). The per-book breakdown still lives in
-            // its stdout JSON, so always try to parse stdout first and
-            // only fall back to a bare error payload if no JSON is
-            // available — otherwise a partial-success run with mixed
-            // ok/failed books would lose its books[] array.
-            if (error) {
-              logger.error(
-                { sourceGroup, error: error.message, stderr },
-                'audible_backup failed',
-              );
-            } else {
-              logger.info(
-                { sourceGroup, stdoutLen: stdout.length },
-                'audible_backup completed',
-              );
-            }
-            // Narrow exception scope per `coding-policy: error-handling`
-            // (catch specific types, let unexpected exceptions
-            // propagate). The fallback exists for the case where the
-            // script's stdout isn't valid JSON — JSON.parse only
-            // throws SyntaxError in that scenario, and any other
-            // failure here (filesystem write error, unexpected runtime
-            // issue) MUST propagate so the operator sees the real
-            // problem instead of silently writing a degraded payload.
-            let parsed: { logs?: string; exec_error?: string } | null = null;
-            try {
-              parsed = JSON.parse(stdout);
-            } catch (e) {
-              if (!(e instanceof SyntaxError)) throw e;
-              parsed = null;
-            }
-            if (parsed !== null) {
-              if (stderr) parsed.logs = stderr.slice(-2000);
-              // Don't overwrite a script-emitted top-level `error` —
-              // backup.py itself sets that field when a precondition
-              // fails (e.g. inventory missing) and its message is
-              // more useful than `execFile`'s generic non-zero-exit
-              // message. Surface the exec error in a sibling field so
-              // both signals are preserved.
-              if (error) parsed.exec_error = error.message;
-              fs.writeFileSync(audibleResultPath, JSON.stringify(parsed));
-            } else {
-              fs.writeFileSync(
-                audibleResultPath,
-                JSON.stringify({
-                  error: error?.message,
-                  raw: stdout,
-                  logs: stderr?.slice(-2000),
-                }),
-              );
-            }
-          },
-        );
+        // Fire-and-forget like github_backup / persist_global_file: a sidecar
+        // run can take up to its registry timeout (600s for audible) and must
+        // not block the IPC loop. runSidecar resolves an error envelope for
+        // operational failures (unknown sidecar, disallowed flag, non-zero
+        // docker exit); the #625 partial-success relay lives inside it.
+        runSidecar({ name: sidecarName, flags: sidecarFlags })
+          .then((payload) => {
+            fs.writeFileSync(sidecarResultPath, JSON.stringify(payload));
+          })
+          // outer-boundary-process-contract: the MCP caller polls for the
+          // result file and reads its absence as a silent hang until a 10-min
+          // timeout. This catch emits an `{ error }` envelope for a genuine
+          // relay bug (a non-SyntaxError stdout parse rejects runSidecar) so
+          // the caller gets an actionable failure instead of hanging; letting
+          // it propagate would write no file and break that contract.
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : String(err);
+            logger.error(
+              { sourceGroup, name: sidecarName, error: message },
+              'run_sidecar failed unexpectedly',
+            );
+            fs.writeFileSync(
+              sidecarResultPath,
+              JSON.stringify({
+                error: `run_sidecar failed unexpectedly: ${message}`,
+              }),
+            );
+          });
       }
       break;
 

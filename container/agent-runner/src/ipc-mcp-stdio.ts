@@ -1665,19 +1665,25 @@ Returns markdown prefixed with a 3-line header (title, source URL, char count, o
 
 if (isMain) {
   server.tool(
-    'audible_backup',
-    'Back up Audible audiobooks. Checks for new purchases not in the existing library, downloads and decrypts them to M4B. The host handles authentication and file storage. Use --dry-run to preview without downloading.',
+    'run_sidecar',
+    'Run a named privileged host sidecar — a Dockerized helper the agent container cannot run itself. The host holds the image and host mount paths in a trusted registry; you pass the sidecar NAME and optional allowlisted flags (never an image or mount). Registered sidecars: "audible-backup" — back up Audible audiobooks (checks for new purchases not in the existing library, downloads + decrypts them to M4B; the host handles authentication and file storage). Flag "--dry-run" previews new books without downloading.',
     {
-      dryRun: z
-        .boolean()
+      name: z
+        .string()
+        .describe('Registered sidecar name, e.g. "audible-backup".'),
+      flags: z
+        .array(z.string())
         .optional()
-        .describe('Preview new books without downloading (default: false)'),
+        .describe(
+          'Allowlisted flags to append to the sidecar command, e.g. ["--dry-run"]. Unknown flags are rejected by the host.',
+        ),
     },
     async (args) => {
       const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const data = {
-        type: 'audible_backup',
-        dryRun: args.dryRun ?? false,
+        type: 'run_sidecar',
+        name: args.name,
+        flags: args.flags ?? [],
         requestId,
         timestamp: new Date().toISOString(),
       };
@@ -1702,7 +1708,7 @@ if (isMain) {
               content: [
                 {
                   type: 'text' as const,
-                  text: `Audible backup failed: ${result.error}\n${result.stderr || ''}`,
+                  text: `Sidecar "${args.name}" failed: ${result.error}\n${result.logs || result.stderr || ''}`,
                 },
               ],
               isError: true,
@@ -1721,7 +1727,7 @@ if (isMain) {
         content: [
           {
             type: 'text' as const,
-            text: 'Audible backup timed out after 10 minutes',
+            text: `Sidecar "${args.name}" timed out after ${Math.round(timeoutMs / 60000)} minutes`,
           },
         ],
         isError: true,
