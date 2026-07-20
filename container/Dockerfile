@@ -15,7 +15,7 @@
 # digest is kept fresh by the `docker` ecosystem in `.github/dependabot.yml`,
 # which opens a PR when the tag is re-published; the tag stays in the ref
 # as the human-readable channel, the digest is authoritative.
-FROM node:24-trixie-slim@sha256:366fdef91728b1b7fa18c84fba63b6e79ed77b7e10cc206878e9705da4d7b169
+FROM node:26-trixie-slim@sha256:715e55e4b84e4bb0ff48e49b398a848f08e55daed8eb6a0ea1839ae53bc57583
 
 # Install system dependencies for Chromium + GitHub CLI.
 # `gh` ships from GitHub's official apt repo (not in default debian-slim
