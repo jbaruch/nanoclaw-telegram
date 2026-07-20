@@ -10,7 +10,7 @@
 # tradeoff for runtime infrastructure (OS + decoder) but NOT for the
 # Python application dependency below (audible-cli), where a version
 # bump can silently break the script contract.
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
