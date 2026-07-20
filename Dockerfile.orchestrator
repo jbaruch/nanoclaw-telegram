@@ -7,7 +7,7 @@
 # lock-step so orchestrator and agents share one reviewed Node/Debian
 # base. Debian 13 (trixie) → the explicitly-installed python3 below is
 # 3.13. Bumped via the `docker` ecosystem in `.github/dependabot.yml`.
-FROM node:24-trixie-slim@sha256:366fdef91728b1b7fa18c84fba63b6e79ed77b7e10cc206878e9705da4d7b169
+FROM node:26-trixie-slim@sha256:715e55e4b84e4bb0ff48e49b398a848f08e55daed8eb6a0ea1839ae53bc57583
 
 # Install Docker CLI, build tools for native modules (better-sqlite3),
 # the sqlite3 CLI (used by src/db-dump.ts for `.dump` per-table SQL
