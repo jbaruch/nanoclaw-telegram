@@ -49,12 +49,13 @@ const EXPECTED_FS_ERRNOS = new Set([
 ]);
 
 export function isExpectedFsError(err: unknown): err is NodeJS.ErrnoException {
+  // Narrow to Error BEFORE touching `.code` — this helper is exported
+  // for arbitrary plugin catch blocks, and a thrown non-object (null,
+  // string) would otherwise raise a TypeError inside the narrowing
+  // helper and mask the original exception.
+  if (!(err instanceof Error)) return false;
   const code = (err as NodeJS.ErrnoException).code;
-  return (
-    err instanceof Error &&
-    typeof code === 'string' &&
-    EXPECTED_FS_ERRNOS.has(code)
-  );
+  return typeof code === 'string' && EXPECTED_FS_ERRNOS.has(code);
 }
 
 /**
@@ -74,6 +75,18 @@ export function registerSpawnGate(skillName: string, gate: SpawnGate): void {
     throw new Error(`Spawn gate already registered: ${skillName}`);
   }
   spawnGates.set(skillName, gate);
+}
+
+/**
+ * Wipe the gate registry between tests. The registry is module-global
+ * shared state; `testing-standards` requires tests to clean it up so
+ * order never matters.
+ *
+ * @internal — test-only export, stripped from the public `.d.ts`
+ * surface (`stripInternal: true`).
+ */
+export function _resetSpawnGatesForTests(): void {
+  spawnGates.clear();
 }
 
 /**

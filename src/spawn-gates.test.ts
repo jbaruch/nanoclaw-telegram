@@ -5,7 +5,9 @@ import path from 'path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import {
+  _resetSpawnGatesForTests,
   evaluateSpawnGate,
+  isExpectedFsError,
   registerSpawnGate,
   type SpawnEligibility,
 } from './spawn-gates.js';
@@ -21,6 +23,9 @@ describe('spawn-gate registry', () => {
   });
 
   afterEach(() => {
+    // The gate registry is module-global shared state — wipe it so no
+    // test's registration leaks into another and order never matters.
+    _resetSpawnGatesForTests();
     fs.rmSync(groupDir, { recursive: true, force: true });
   });
 
@@ -67,5 +72,28 @@ describe('spawn-gate registry', () => {
         reason: 'y',
       })),
     ).toThrow(/already registered: test__dup-skill/);
+  });
+});
+
+describe('isExpectedFsError', () => {
+  it('matches an Error carrying an expected errno code', () => {
+    const err = Object.assign(new Error('boom'), { code: 'ENOENT' });
+    expect(isExpectedFsError(err)).toBe(true);
+  });
+
+  it('rejects an Error with an unexpected or missing code', () => {
+    expect(
+      isExpectedFsError(Object.assign(new Error('x'), { code: 'EIO' })),
+    ).toBe(false);
+    expect(isExpectedFsError(new Error('x'))).toBe(false);
+  });
+
+  it('returns false (does not throw) for non-Error throwables', () => {
+    // Exported for plugin catch blocks — must be resilient to arbitrary
+    // `unknown` values, not just Error instances.
+    expect(isExpectedFsError(null)).toBe(false);
+    expect(isExpectedFsError(undefined)).toBe(false);
+    expect(isExpectedFsError('ENOENT')).toBe(false);
+    expect(isExpectedFsError({ code: 'ENOENT' })).toBe(false);
   });
 });
