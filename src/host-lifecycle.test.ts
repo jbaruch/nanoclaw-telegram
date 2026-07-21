@@ -90,4 +90,36 @@ describe('host lifecycle hooks', () => {
     await expect(runStartupHooks()).resolves.toBeUndefined();
     await expect(runShutdownHooks()).resolves.toBeUndefined();
   });
+
+  it('propagates a non-Error throwable (programming defect, not a hook failure)', async () => {
+    registerStartupHook('throws-string', () => {
+      // A thrown non-Error is the defect shape under test.
+      throw 'not an Error instance';
+    });
+    await expect(runStartupHooks()).rejects.toBe('not an Error instance');
+  });
+
+  it('abandons a hung hook at the timeout and still runs the rest', async () => {
+    vi.useFakeTimers();
+    try {
+      const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => {});
+      const after = vi.fn();
+      registerStartupHook('wedged', () => new Promise<void>(() => {}));
+      registerStartupHook('after', after);
+      const run = runStartupHooks();
+      await vi.advanceTimersByTimeAsync(15_000);
+      await run;
+      expect(after).toHaveBeenCalledOnce();
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          hook: 'wedged',
+          phase: 'startup',
+          err: expect.objectContaining({ name: 'HookTimeoutError' }),
+        }),
+        'Lifecycle hook failed',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

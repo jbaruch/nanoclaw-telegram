@@ -10,14 +10,16 @@ import { logger } from './logger.js';
  *
  * Execution contract:
  *   - Hooks run in registration order.
- *   - Hooks are isolation boundaries: one hook's throw/rejection is
- *     logged (with the hook's name) and the remaining hooks still run.
- *     An optional integration must never take down platform startup,
- *     and a broken listener must never block the rest of shutdown
- *     (queue drain, channel disconnect). That isolation is the reason
- *     the per-hook catch below is intentionally unfiltered: whatever a
- *     plugin hook throws is its own failure, surfaced via the error
- *     log, never a reason to skip its peers.
+ *   - Hooks are isolation boundaries: one hook's thrown/rejected Error
+ *     is logged (with the hook's name) and the remaining hooks still
+ *     run. An optional integration must never take down platform
+ *     startup, and a broken listener must never block the rest of
+ *     shutdown (queue drain, channel disconnect). A non-Error throwable
+ *     is a programming defect, not a hook failure, and propagates per
+ *     `coding-policy: error-handling`.
+ *   - Each hook is bounded by `HOOK_TIMEOUT_MS`: a hook that hangs is
+ *     logged and abandoned so a wedged plugin cannot stall startup or
+ *     the platform teardown that follows the shutdown hooks.
  */
 
 export type LifecycleHook = () => void | Promise<void>;
@@ -47,12 +49,49 @@ export function registerShutdownHook(name: string, fn: LifecycleHook): void {
   register(shutdownHooks, 'Shutdown', { name, fn });
 }
 
+/**
+ * Per-hook execution bound. A hook that hasn't settled by this deadline
+ * is logged and abandoned (its promise keeps running unobserved — there
+ * is no cancellation in JS) so a wedged optional integration cannot
+ * stall the remaining hooks or, at shutdown, the queue/channel teardown
+ * behind them. Sized well above any legitimate hook (Hubitat's
+ * WebSocket start/stop settles in milliseconds) while staying inside
+ * deploy.sh's SIGTERM patience.
+ */
+const HOOK_TIMEOUT_MS = 15_000;
+
+class HookTimeoutError extends Error {
+  constructor(name: string) {
+    super(
+      `Lifecycle hook "${name}" did not settle within ${HOOK_TIMEOUT_MS}ms`,
+    );
+    this.name = 'HookTimeoutError';
+  }
+}
+
+function withTimeout(name: string, run: Promise<void>): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new HookTimeoutError(name)),
+      HOOK_TIMEOUT_MS,
+    );
+  });
+  return Promise.race([run, deadline]).finally(() => clearTimeout(timer));
+}
+
 async function runHooks(list: NamedHook[], phase: string): Promise<void> {
   for (const { name, fn } of list) {
     try {
-      await fn();
-      // eslint-disable-next-line no-catch-all/no-catch-all -- hook-isolation contract (module doc): whatever an optional plugin hook throws is its own failure, surfaced via the error log with the hook's name; rethrowing would let one broken integration abort platform startup or skip the remaining shutdown hooks
+      await withTimeout(name, Promise.resolve().then(fn));
     } catch (err) {
+      // Isolation contract (module doc): an Error from an optional
+      // plugin hook — including our own HookTimeoutError — is that
+      // hook's failure, surfaced via the error log; the remaining
+      // hooks (and the platform teardown after them) still run. A
+      // non-Error throwable is a programming defect, not a hook
+      // failure, and propagates.
+      if (!(err instanceof Error)) throw err;
       logger.error({ err, hook: name, phase }, 'Lifecycle hook failed');
     }
   }
