@@ -60,15 +60,12 @@ import {
   consumeSessionReset,
   getActivePendingRunAtNames,
   getAllChats,
-  getAllRegisteredGroups,
-  getAllSessions,
   deleteAllSessions,
   deleteRegisteredGroup,
   deleteSession,
   deleteSessionName,
   getAllTasks,
   getCurrentTz,
-  getLastBotMessageTimestamp,
   getLastFromMeMessage,
   getMessagesSince,
   getTaskById,
@@ -80,12 +77,10 @@ import {
   createTask,
   deleteTask,
   getNewMessages,
-  getRouterState,
   initDatabase,
   setRegisteredGroup,
   updateGroupTrusted,
   updateGroupTrigger,
-  setRouterState,
   setSession,
   shouldStoreBotMessage,
   storeChatMetadata,
@@ -160,6 +155,16 @@ import {
   recordFailure,
   recordSuccess,
 } from './circuit-breaker.js';
+import {
+  getOrRecoverCursor,
+  lastAgentTimestamp,
+  lastTimestamp,
+  loadState,
+  registeredGroups,
+  saveState,
+  sessions,
+  setLastTimestamp,
+} from './orchestrator-state.js';
 import { checkSilentZero } from './usage-log.js';
 import {
   getActiveIdleTimer,
@@ -177,6 +182,10 @@ import { wipeSessionJsonl } from './session-wipe.js';
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
 export { wipeSessionJsonl } from './session-wipe.js';
+// Orchestrator state moved to ./orchestrator-state.ts (#749); the test
+// helper is re-exported here because routing.test.ts / router-integration
+// import it from ./index.js.
+export { _setRegisteredGroups } from './orchestrator-state.js';
 // Gate orchestration helpers moved to ./gates/orchestrator.ts (#749);
 // re-exported here because the gate tests import them from ./index.js.
 export {
@@ -185,20 +194,6 @@ export {
   gateAllowsSpawn,
 } from './gates/orchestrator.js';
 
-/** Check if a message is a reply to or quote of a bot message. */
-let lastTimestamp = '';
-// Nested by groupFolder → sessionName → sessionId. Tracks the user-facing
-// `default` slot's SDK session chain so consecutive inbound messages
-// resume the prior turn. `maintenance` entries may still be present here
-// (e.g. loaded from persisted session state at startup, or written by a
-// pre-#193 build), but scheduled tasks no longer update or resume that
-// slot: they always start a fresh SDK turn (#193) to prevent cross-task
-// `last_result` bleed, and the scheduler wipes their on-disk session
-// artifacts (JSONL transcript + tool-results dir) immediately after
-// each run completes.
-let sessions: Record<string, Record<string, string>> = {};
-let registeredGroups: Record<string, RegisteredGroup> = {};
-let lastAgentTimestamp: Record<string, string> = {};
 // Per-chat reply-to tracking: updated when follow-up messages are piped,
 // consumed by the output callback to quote-reply the latest message.
 const pendingReplyTo: Record<string, string | undefined> = {};
@@ -280,50 +275,6 @@ const STALE_SESSION_RE =
 export function isStaleSessionError(errorMsg: string | undefined): boolean {
   if (!errorMsg) return false;
   return STALE_SESSION_RE.test(errorMsg);
-}
-
-function loadState(): void {
-  lastTimestamp = getRouterState('last_timestamp') || '';
-  const agentTs = getRouterState('last_agent_timestamp');
-  try {
-    lastAgentTimestamp = agentTs ? JSON.parse(agentTs) : {};
-  } catch (err) {
-    if (!(err instanceof SyntaxError)) throw err;
-    logger.warn('Corrupted last_agent_timestamp in DB, resetting');
-    lastAgentTimestamp = {};
-  }
-  sessions = getAllSessions();
-  registeredGroups = getAllRegisteredGroups();
-  logger.info(
-    { groupCount: Object.keys(registeredGroups).length },
-    'State loaded',
-  );
-}
-
-/**
- * Return the message cursor for a group, recovering from the last bot reply
- * if lastAgentTimestamp is missing (new group, corrupted state, restart).
- */
-function getOrRecoverCursor(chatJid: string): string {
-  const existing = lastAgentTimestamp[chatJid];
-  if (existing) return existing;
-
-  const botTs = getLastBotMessageTimestamp(chatJid, ASSISTANT_NAME);
-  if (botTs) {
-    logger.info(
-      { chatJid, recoveredFrom: botTs },
-      'Recovered message cursor from last bot reply',
-    );
-    lastAgentTimestamp[chatJid] = botTs;
-    saveState();
-    return botTs;
-  }
-  return '';
-}
-
-function saveState(): void {
-  setRouterState('last_timestamp', lastTimestamp);
-  setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
 }
 
 /**
@@ -558,13 +509,6 @@ export function getAvailableGroups(): import('./container-runner.js').AvailableG
       containerConfig: registeredGroups[c.jid]?.containerConfig,
       requiresTrigger: registeredGroups[c.jid]?.requiresTrigger,
     }));
-}
-
-/** @internal - exported for testing */
-export function _setRegisteredGroups(
-  groups: Record<string, RegisteredGroup>,
-): void {
-  registeredGroups = groups;
 }
 
 /**
@@ -1486,7 +1430,7 @@ async function startMessageLoop(): Promise<void> {
         logger.info({ count: messages.length }, 'New messages');
 
         // Advance the "seen" cursor for all messages immediately
-        lastTimestamp = newTimestamp;
+        setLastTimestamp(newTimestamp);
         saveState();
 
         // Deduplicate by group
