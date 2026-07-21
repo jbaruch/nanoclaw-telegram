@@ -31,7 +31,7 @@
  */
 
 import { tzFromCoords } from './tz-from-coords.js';
-import { TripitSegment, walkTzSegments } from './db.js';
+import { TripitSegment, walkTzSegments } from './db-tz.js';
 import { LocationRecord } from './types.js';
 
 export const STALE_FOR_TZ_FALLBACK_HOURS = 4;
