@@ -19,7 +19,12 @@ import type { RegisteredGroup } from './types.js';
 export interface IpcTaskPayload {
   type: string;
   taskId?: string;
-  prompt?: string;
+  // #512: `prompt` and `script` cross the IPC boundary as raw JSON, so a
+  // writer can (and does — the JSON-Buffer `{type:'Buffer',data:[...]}`
+  // shape) send non-string values. Typed `unknown` so every handler is
+  // forced through `coerceTaskTextField` instead of trusting the wire
+  // shape and reintroducing BLOB / "[object Object]" persistence.
+  prompt?: unknown;
   schedule_type?: string;
   schedule_value?: string;
   /**
@@ -33,7 +38,8 @@ export interface IpcTaskPayload {
    */
   timezone?: string | null;
   context_mode?: string;
-  script?: string;
+  // Raw wire value — see `prompt` above (#512 applies to both fields).
+  script?: unknown;
   groupFolder?: string;
   chatJid?: string;
   targetJid?: string;
@@ -202,7 +208,14 @@ export async function dispatchIpcTask(
       { sourceGroup: ctx.sourceGroup, type: ctx.data.type },
       'Unauthorized IPC command blocked (main-only)',
     );
-    if (typeof ctx.data.requestId === 'string') {
+    // Only a VALID requestId gets an error envelope — a missing, empty,
+    // or malformed id means fire-and-forget (or a payload we refuse to
+    // route a reply for), matching the legacy per-case convention where
+    // those blocked silently with just the warn above.
+    if (
+      typeof ctx.data.requestId === 'string' &&
+      VALID_REQUEST_ID_RE.test(ctx.data.requestId)
+    ) {
       fs.writeFileSync(
         scriptResultPath(ctx.sourceGroup, ctx.data),
         JSON.stringify({

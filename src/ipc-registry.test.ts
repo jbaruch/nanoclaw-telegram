@@ -160,6 +160,25 @@ describe('requiresMain gate', () => {
     );
   });
 
+  it('does not write any envelope for a blocked request with an invalid requestId', async () => {
+    registerIpcHandler('test_admin_bad_id', {
+      requiresMain: true,
+      handler: vi.fn(),
+    });
+    for (const requestId of ['', '../evil', 'has space']) {
+      await dispatchIpcTask(
+        ctx({
+          data: { type: 'test_admin_bad_id', requestId },
+          sourceGroup: 'group-d',
+          isMain: false,
+        }),
+      );
+    }
+    expect(fs.existsSync(path.join(TEST_DATA_DIR, 'ipc', 'group-d'))).toBe(
+      false,
+    );
+  });
+
   it('lets a main caller through to the handler', async () => {
     const handler = vi.fn();
     registerIpcHandler('test_admin_main', { requiresMain: true, handler });
