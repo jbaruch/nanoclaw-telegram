@@ -67,11 +67,9 @@ import {
   deleteSession,
   deleteSessionName,
   getAllTasks,
-  getChatByJid,
   getCurrentTz,
   getLastBotMessageTimestamp,
   getLastFromMeMessage,
-  getMessageById,
   getMessagesSince,
   getTaskById,
   getTriggerPatterns,
@@ -154,6 +152,14 @@ import {
   resolveGatesForGroup,
   evaluateGateChain,
 } from './gates/orchestrator.js';
+import { isAddressedToUs } from './message-classify.js';
+import {
+  CIRCUIT_BREAKER_COOLDOWN_MINUTES,
+  checkCircuitBreaker,
+  isBreakerActive,
+  recordFailure,
+  recordSuccess,
+} from './circuit-breaker.js';
 import { checkSilentZero } from './usage-log.js';
 import {
   getActiveIdleTimer,
@@ -180,48 +186,6 @@ export {
 } from './gates/orchestrator.js';
 
 /** Check if a message is a reply to or quote of a bot message. */
-function isReplyToBot(msg: NewMessage): boolean {
-  // Check content prefix — resolveReply adds [Replying to SenderName: "..."]
-  if (msg.content.startsWith(`[Replying to ${ASSISTANT_NAME}:`)) return true;
-  // Check reply_to_message_id in DB — covers cases where prefix format differs
-  if (msg.reply_to_message_id) {
-    const original = getMessageById(msg.reply_to_message_id, msg.chat_jid);
-    if (original?.is_from_me) return true;
-  }
-  return false;
-}
-
-/**
- * Decide whether an inbound batch is "addressed to us" — drives the
- * agent-runner's react-first 👀 gate (#289). Independent of
- * `requires_trigger`, which governs whether the agent ANSWERS
- * deterministically vs. reasons about every inbound. The 👀 ack is
- * about whether the message was directed at us at all.
- *
- * Resolves true iff:
- *  - the chat is the main control group, OR
- *  - the chat is a 1:1 DM (`chats.is_group=0`) — every solo inbound is
- *    implicitly for us, OR
- *  - at least one message in the batch matches the trigger pattern, OR
- *  - at least one message replies to OUR bot (per `isReplyToBot`).
- *
- * Note: `requires_trigger=false` on a multi-bot group (e.g. `Old.wtf`)
- * does NOT short-circuit — that was the original bug.
- */
-function isAddressedToUs(
-  group: RegisteredGroup,
-  chatJid: string,
-  messages: NewMessage[],
-): boolean {
-  if (group.isMain === true) return true;
-  const chat = getChatByJid(chatJid);
-  if (chat && chat.is_group === 0) return true;
-  const triggerPattern = getTriggerPattern(group.trigger ?? undefined);
-  return messages.some(
-    (m) => triggerPattern.test(m.content.trim()) || isReplyToBot(m),
-  );
-}
-
 let lastTimestamp = '';
 // Nested by groupFolder → sessionName → sessionId. Tracks the user-facing
 // `default` slot's SDK session chain so consecutive inbound messages
@@ -255,12 +219,6 @@ function installIdleTimerControl(
     queue.closeStdin(chatJid),
   );
 }
-
-// Circuit breaker: pause groups that fail repeatedly to avoid burning credits.
-const MAX_CONSECUTIVE_FAILURES = 5;
-const CIRCUIT_BREAKER_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
-const consecutiveFailures: Record<string, number> = {};
-const circuitBreakerUntil: Record<string, number> = {};
 
 // #496 — `follow_me_tasks.pending_run_at` is treated as "fresh" (and
 // therefore worth respecting) for this long after stamp-time. Anything
@@ -626,15 +584,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const isMainGroup = group.isMain === true;
 
   // Circuit breaker: skip groups that have failed too many times in a row
-  const breakerExpiry = circuitBreakerUntil[group.folder];
-  if (breakerExpiry) {
-    if (Date.now() < breakerExpiry) {
-      logger.warn({ group: group.name }, 'Circuit breaker active — skipping');
-      return true;
-    }
-    // Cooldown expired — reset and let the group try again
-    delete circuitBreakerUntil[group.folder];
-    consecutiveFailures[group.folder] = 0;
+  const breakerStatus = checkCircuitBreaker(group.folder);
+  if (breakerStatus === 'skip') {
+    logger.warn({ group: group.name }, 'Circuit breaker active — skipping');
+    return true;
+  }
+  if (breakerStatus === 'resumed') {
     logger.info(
       { group: group.name },
       'Circuit breaker cooldown expired — resuming',
@@ -895,14 +850,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (output === 'error' || hadError) {
     // Track consecutive failures for circuit breaker
-    consecutiveFailures[group.folder] =
-      (consecutiveFailures[group.folder] || 0) + 1;
-    if (consecutiveFailures[group.folder] >= MAX_CONSECUTIVE_FAILURES) {
-      circuitBreakerUntil[group.folder] =
-        Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS;
+    const { tripped, failures } = recordFailure(group.folder);
+    if (tripped) {
       logger.error(
-        { group: group.name, failures: consecutiveFailures[group.folder] },
-        `Circuit breaker tripped — pausing group for ${CIRCUIT_BREAKER_COOLDOWN_MS / 60_000} minutes`,
+        { group: group.name, failures },
+        `Circuit breaker tripped — pausing group for ${CIRCUIT_BREAKER_COOLDOWN_MINUTES} minutes`,
       );
       // Notify via main group if this isn't the main group
       if (!isMainGroup) {
@@ -913,7 +865,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           const mainChannel = findChannel(channels, mainJid);
           mainChannel?.sendMessage(
             mainJid,
-            `Circuit breaker tripped for "${group.name}" — ${consecutiveFailures[group.folder]} consecutive failures. Paused for 30 minutes. Check logs.`,
+            `Circuit breaker tripped for "${group.name}" — ${failures} consecutive failures. Paused for ${CIRCUIT_BREAKER_COOLDOWN_MINUTES} minutes. Check logs.`,
           );
         }
       }
@@ -939,7 +891,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   // Reset failure counter on success
-  consecutiveFailures[group.folder] = 0;
+  recordSuccess(group.folder);
   return true;
 }
 
@@ -2383,8 +2335,7 @@ async function main(): Promise<void> {
       // bookkeeping rather than queue lifecycle. Both signals are
       // cooldown windows from the chat_status caller's perspective.
       const group = registeredGroups[chatJid];
-      const breakerExpiry = group ? circuitBreakerUntil[group.folder] : 0;
-      const breakerActive = !!breakerExpiry && Date.now() < breakerExpiry;
+      const breakerActive = group ? isBreakerActive(group.folder) : false;
       return queue.getStatus(chatJid, sessionName, breakerActive);
     },
     onTasksChanged: () => {
