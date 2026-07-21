@@ -4,7 +4,7 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
-## [1.2.100] - 2026-07-20
+## [1.2.100] - 2026-07-21
 
 - Made the message pipeline's best-effort channel calls crash-safe (#826). The two awaited `channel.setTyping?.(...)` calls around the agent run now go through a `setTypingBestEffort` helper (rejection → `logger.warn`, never a throw), so a typing-indicator transport failure can no longer abort processing or skip the `releaseIdleTimerControl` cleanup; the fire-and-forget circuit-breaker trip notification (`mainChannel?.sendMessage(...)`) gets a `.catch` → `logger.warn`, so a channel rejection during an already-degraded state no longer surfaces as an unhandled rejection. These were pre-existing patterns moved verbatim by the #825 extraction and deferred to keep that move behavior-preserving. Adds 4 unit tests for the helper (forwarding, async rejection, sync throw, channels without `setTyping`).
 

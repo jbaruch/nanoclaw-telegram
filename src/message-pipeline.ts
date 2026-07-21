@@ -129,16 +129,19 @@ function installIdleTimerControl(
  * moves on. Exported for the unit tests in
  * `src/message-pipeline.test.ts`.
  */
-export async function setTypingBestEffort(
+export function setTypingBestEffort(
   channel: Channel,
   chatJid: string,
   typing: boolean,
 ): Promise<void> {
-  try {
-    await channel.setTyping?.(chatJid, typing);
-  } catch (err) {
-    logger.warn({ chatJid, typing, err }, 'Failed to set typing indicator');
-  }
+  // Promise-style .catch, matching the piped-message setTyping site in
+  // startMessageLoop; the .then wrapper folds a synchronous throw from
+  // a channel implementation into the same rejection path.
+  return Promise.resolve()
+    .then(() => channel.setTyping?.(chatJid, typing))
+    .catch((err) => {
+      logger.warn({ chatJid, typing, err }, 'Failed to set typing indicator');
+    });
 }
 
 /**
