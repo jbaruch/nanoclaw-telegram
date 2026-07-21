@@ -111,7 +111,11 @@ export function loadSidecarRegistry(): SidecarRegistryResult {
       return fail(`${where}.image must be a non-empty string`);
     }
 
-    const mountsRaw = spec.mounts ?? [];
+    // Defaults apply ONLY to genuinely omitted fields (`undefined`).
+    // An explicit `null` (hand-edit leftovers, templating artifacts) is
+    // a shape error and fails loudly like any other wrong type — the
+    // loader must never quietly reinterpret a present-but-wrong value.
+    const mountsRaw = spec.mounts === undefined ? [] : spec.mounts;
     if (
       !Array.isArray(mountsRaw) ||
       mountsRaw.some((m) => typeof m !== 'string')
@@ -124,22 +128,32 @@ export function loadSidecarRegistry(): SidecarRegistryResult {
       if (!expanded.ok) {
         return fail(`${where}.mounts[${i}]: ${expanded.error}`);
       }
-      if (!expanded.value.includes(':')) {
+      // Both sides of the bind must be non-empty so a malformed spec
+      // fails HERE with the entry named, not later inside `docker run`
+      // with a generic daemon error. A third `:options` segment
+      // (`:ro` etc.) is allowed but must be non-empty when present.
+      const segments = expanded.value.split(':');
+      if (
+        segments.length < 2 ||
+        segments.length > 3 ||
+        segments.some((s) => s.length === 0)
+      ) {
         return fail(
-          `${where}.mounts[${i}] must be a "hostPath:containerPath" bind spec`,
+          `${where}.mounts[${i}] must be a "hostPath:containerPath[:options]" bind spec with non-empty segments`,
         );
       }
       mounts.push(expanded.value);
     }
 
-    const baseArgs = spec.baseArgs ?? [];
+    const baseArgs = spec.baseArgs === undefined ? [] : spec.baseArgs;
     if (
       !Array.isArray(baseArgs) ||
       baseArgs.some((a) => typeof a !== 'string')
     ) {
       return fail(`${where}.baseArgs must be an array of strings`);
     }
-    const allowedFlags = spec.allowedFlags ?? [];
+    const allowedFlags =
+      spec.allowedFlags === undefined ? [] : spec.allowedFlags;
     if (
       !Array.isArray(allowedFlags) ||
       allowedFlags.some((f) => typeof f !== 'string')
@@ -147,7 +161,8 @@ export function loadSidecarRegistry(): SidecarRegistryResult {
       return fail(`${where}.allowedFlags must be an array of strings`);
     }
 
-    const timeoutMs = spec.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const timeoutMs =
+      spec.timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : spec.timeoutMs;
     if (
       typeof timeoutMs !== 'number' ||
       !Number.isFinite(timeoutMs) ||
@@ -155,7 +170,8 @@ export function loadSidecarRegistry(): SidecarRegistryResult {
     ) {
       return fail(`${where}.timeoutMs must be a positive number (ms)`);
     }
-    const maxBuffer = spec.maxBuffer ?? DEFAULT_MAX_BUFFER;
+    const maxBuffer =
+      spec.maxBuffer === undefined ? DEFAULT_MAX_BUFFER : spec.maxBuffer;
     if (
       typeof maxBuffer !== 'number' ||
       !Number.isFinite(maxBuffer) ||

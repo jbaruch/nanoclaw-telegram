@@ -127,13 +127,37 @@ describe('loadSidecarRegistry', () => {
     expect(result.error).toMatch(/"broken"\.image/);
   });
 
-  it('rejects a mount without a hostPath:containerPath separator', () => {
-    writeConfig({ broken: { image: 'x:1', mounts: ['/just-a-path'] } });
+  it('rejects malformed bind specs with the entry named (empty side, too many segments)', () => {
+    for (const mount of [
+      '/just-a-path',
+      ':/container',
+      '/host:',
+      '/host:/container:',
+      'a:b:c:d',
+    ]) {
+      writeConfig({ broken: { image: 'x:1', mounts: [mount] } });
+      const result = loadSidecarRegistry();
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error).toMatch(/"broken"\.mounts\[0\]/);
+      expect(result.error).toMatch(/hostPath:containerPath/);
+    }
+  });
+
+  it('accepts a non-empty :options third segment', () => {
+    writeConfig({ ok: { image: 'x:1', mounts: ['/host:/container:ro'] } });
+    const result = loadSidecarRegistry();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.registry.ok.mounts).toEqual(['/host:/container:ro']);
+  });
+
+  it('rejects an explicit null for a defaultable field (defaults apply only when omitted)', () => {
+    writeConfig({ broken: { image: 'x:1', mounts: null } });
     const result = loadSidecarRegistry();
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error).toMatch(/"broken"\.mounts\[0\]/);
-    expect(result.error).toMatch(/hostPath:containerPath/);
+    expect(result.error).toMatch(/"broken"\.mounts must be an array/);
   });
 
   it('rejects wrong-typed fields with entry-specific messages', () => {
