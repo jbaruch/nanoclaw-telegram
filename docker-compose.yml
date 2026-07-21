@@ -13,13 +13,12 @@ services:
       - ./data:/app/data
       - ./groups:/app/groups
       - ./logs:/app/logs
-      # Credentials (mounted, never baked into image). RW so a host
-      # flow that refreshes an OAuth grant can persist the rotated
-      # token back to .env; without RW the persist step throws
-      # OSError 30 (Read-only file system). The original in-host
-      # autorefresh path that required this is retired (Trakt moved
-      # to the OneCLI gateway, #817) — revisit whether RO now suffices.
-      - ./.env:/app/.env
+      # Credentials (mounted, never baked into image). RO: nothing in
+      # the orchestrator writes .env — the last writer (in-host Trakt
+      # OAuth autorefresh) was retired when Trakt moved to the OneCLI
+      # gateway (#817). A future flow that must persist a rotated
+      # credential needs its own mechanism, not a widened mount.
+      - ./.env:/app/.env:ro
       # Shared trusted directory (mounted into trusted + main agent containers)
       - ./trusted:/app/trusted
       # NanoClaw config (mount allowlist, sender allowlist)
