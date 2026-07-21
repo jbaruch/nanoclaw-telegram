@@ -49,6 +49,23 @@ describe('location sink registry', () => {
     );
   });
 
+  it('routes an async sink rejection to the error log (no unhandled rejection)', async () => {
+    const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    const after = vi.fn();
+    registerLocationSink('async-boom', async () => {
+      throw new Error('async artifact write failed');
+    });
+    registerLocationSink('after', after);
+    runLocationSinks(RECORD);
+    expect(after).toHaveBeenCalledOnce();
+    // Let the rejected promise's .catch handler run.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.objectContaining({ sink: 'async-boom' }),
+      'Location sink failed',
+    );
+  });
+
   it('isolates a throwing sink: logs it and still runs the rest', () => {
     const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => {});
     const after = vi.fn();

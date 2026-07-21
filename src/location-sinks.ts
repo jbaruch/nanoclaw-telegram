@@ -17,7 +17,7 @@ import type { LocationRecord } from './types.js';
  * location.
  */
 
-export type LocationSink = (record: LocationRecord) => void;
+export type LocationSink = (record: LocationRecord) => void | Promise<void>;
 
 interface NamedSink {
   name: string;
@@ -34,11 +34,22 @@ export function registerLocationSink(name: string, fn: LocationSink): void {
   sinks.push({ name, fn });
 }
 
-/** Fan a stored location out to every registered sink, in order. */
+/**
+ * Fan a stored location out to every registered sink, in order. The
+ * caller (the channel `onLocation` callback) is synchronous, so an
+ * async sink runs fire-and-forget: its rejection is caught via
+ * `.catch` below and logged the same as a synchronous throw — never
+ * left as an unhandled rejection.
+ */
 export function runLocationSinks(record: LocationRecord): void {
   for (const { name, fn } of sinks) {
     try {
-      fn(record);
+      const out = fn(record);
+      if (out && typeof out.then === 'function') {
+        out.catch((err: unknown) => {
+          logger.error({ err, sink: name }, 'Location sink failed');
+        });
+      }
       // Isolation boundary around plugin sink code, invoked from the
       // channel onLocation callback:
       //   - Caller's silent-failure shape: the channel treats a thrown
@@ -47,7 +58,9 @@ export function runLocationSinks(record: LocationRecord): void {
       //     surface as a channel-level receive failure and could drop
       //     or retry the message that carried the location.
       //   - What the catch emits: a structured ERROR log with the
-      //     sink's name and the failure; the remaining sinks still run.
+      //     sink's name and the failure (async sinks route rejections
+      //     to the same log via the .catch above); the remaining sinks
+      //     still run.
       //   - Why propagation breaks the contract: one broken OPTIONAL
       //     capability artifact-writer must not disturb core message
       //     handling or the other sinks (#849).
