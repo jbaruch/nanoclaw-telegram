@@ -146,7 +146,7 @@ export function registerLearnedTriggerIpcHandlers(): void {
       if (target.disabled === true) {
         logger.warn(
           { groupFolder, kind, pattern },
-          'promote_learned_trigger: pattern is auto-rolled-back (disabled=true) — re-enable via the demotion handler before promoting (item 2)',
+          'promote_learned_trigger: pattern is auto-rolled-back (disabled=true) — run reenable_learned_trigger first, then promote',
         );
         return;
       }
