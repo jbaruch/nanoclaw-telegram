@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.104] - 2026-07-21
+
+- Extracted the registered-group accessors out of `src/db.ts` into `src/db-registered-groups.ts` (#751 seam 4). Verbatim move of the `registered_groups` domain — the container-config / trigger-pattern parsers (#81/#82 config machinery incl. `parseContainerConfig`, `parseTriggerPatternColumn`, `legacyTriggerToConfig`, serializers) and the nine public accessors (`deriveTriggerString`, `getTriggerPatterns`, `setTriggerPatterns`, `getRegisteredGroup`, `setRegisteredGroup`, `updateGroupTrusted`, `updateGroupTrigger`, `deleteRegisteredGroup`, `getAllRegisteredGroups`) — onto the seam-2 `db-connection.ts` live-binding pattern, re-exported from `db.ts` so call sites and tests are unchanged. `isTriggerPatternConfig` is now exported for the one remaining `db.ts` consumer (the createSchema-time legacy trigger_pattern backfill, which stays with the schema). No schema or query changes. `db.ts` 3651 → 3076 lines.
+
 ## [1.2.103] - 2026-07-21
 
 - Extracted the session-length cap state accessors (#413 section) out of `src/db.ts` into `src/db-session-length-cap.ts` (#751 seam 3). Verbatim move of `SessionLengthRow` / `SessionResetReason` / `PendingReset` and `getSessionLengthState` / `recordSessionTurn` / `markSessionForReset` / `consumeSessionReset` / `clearSessionLengthStateForGroup` onto the seam-2 `db-connection.ts` live-binding pattern; `db.ts` re-exports everything so call sites (`message-pipeline`, `ipc`, session-cap tests) are unchanged. The section header's stale "`src/index.ts` runAgent" writer attribution is corrected to `message-pipeline.ts` (post-#749). No schema or query changes. `db.ts` 3878 → 3651 lines.
