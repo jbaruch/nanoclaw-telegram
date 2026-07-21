@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.115] - 2026-07-21
+
+- Migrated the learned-trigger IPC commands to the #845 registry (slice 4): `list_learned_triggers` / `promote_learned_trigger` / `reenable_learned_trigger` / `delete_learned_trigger` move from the `processTaskIpc` switch to `src/ipc-handlers/learned-triggers.ts`, keeping owner-of-the-bill authorization gated in-handler (the list command implicitly scopes a non-main caller to its own folder and writes the cross-folder-denied envelope). Bodies are verbatim transplants — the {kind, pattern} identity matching, no-trim-on-pattern rule, and snapshot refreshes unchanged. `ipc.ts` 3659 → 3294 lines.
+
 ## [1.2.114] - 2026-07-21
 
 - Migrated the config-override IPC commands to the #845 registry (slice 3): `set_agent_model` / `set_maintenance_agent_model` / `set_session_caps` / `set_task_agent_model` / `set_additional_tiles` move from the `processTaskIpc` switch to `src/ipc-handlers/group-config.ts`. The model/cap commands keep owner-of-the-bill authorization gated in-handler; trust-adjacent `set_additional_tiles` is main-only via the dispatcher's `requiresMain` gate. Bodies are verbatim transplants — validation, containerConfig sibling-field preservation, the cadence-registry-row write refusal, and snapshot refreshes unchanged. `ipc.ts` 4181 → 3659 lines.
