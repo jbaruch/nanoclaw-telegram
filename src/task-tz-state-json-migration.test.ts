@@ -351,8 +351,9 @@ describe('task-tz-state.json → SQLite migration (#302)', () => {
     // Pre-#542 the writer omitted `schema_version` from its column
     // list, so an already-bumped value survived. Post-#542 the writer
     // is expected to STAY in sync with the reader gate
-    // (`SUPPORTED_TZ_STATE_SCHEMA_VERSION` in src/db.ts — currently 3
-    // post-jbaruch/nanoclaw-admin#229; was 2 between #542 and #229)
+    // (`SUPPORTED_TZ_STATE_SCHEMA_VERSION` in src/db.ts — currently 4
+    // post-state-015 / #574 Phase 2; was 3 after
+    // jbaruch/nanoclaw-admin#229, 2 between #542 and #229)
     // by writing the constant's current value explicitly. The thing
     // we're still catching: a regression to `INSERT OR REPLACE`,
     // which is delete+insert in SQLite and would reset schema_version
