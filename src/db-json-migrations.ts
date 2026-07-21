@@ -1332,16 +1332,18 @@ function resolveFollowMeTaskShape(
  * `task-tz-state-json-migration.test.ts` pins this down by manually
  * bumping `schema_version` between two group imports and asserting
  * the writer's known shape (`SUPPORTED_TZ_STATE_SCHEMA_VERSION`,
- * currently 3 post-jbaruch/nanoclaw-admin#229) is what lands on the
+ * currently 4 post-state-015 / #574 Phase 2; was 3 after
+ * jbaruch/nanoclaw-admin#229) is what lands on the
  * second import — anything else (1 or the manually-bumped value)
  * would signal either a `INSERT OR REPLACE` regression (1) or that
  * the writer dropped its explicit `schema_version` bind (manual
  * bump survives, gate rejects the row).
  *
  * `tz_state` UPSERT writes `schema_version` explicitly through
- * `SUPPORTED_TZ_STATE_SCHEMA_VERSION` (3 post-#229; was 2 between
- * #542 and #229): a fresh-DB import would otherwise land at the
- * state-010 column default of 1, and the reader gate would reject
+ * `SUPPORTED_TZ_STATE_SCHEMA_VERSION` (4 post-state-015; 3 between
+ * #229 and state-015; 2 between #542 and #229): a fresh-DB import
+ * would otherwise land at the state-010 column default of 1, and
+ * the reader gate would reject
  * the imported row as "unfamiliar schema_version" until
  * `applyTripitSegmentsToTzState` rewrote it on the next nightly
  * `sync_tripit` run. The explicit bind keeps the JSON-import's row
