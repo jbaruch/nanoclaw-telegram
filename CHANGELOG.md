@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.111] - 2026-07-21
+
+- Migrated the group-registry IPC commands to the #845 registry (slice 2): `refresh_groups` / `register_group` / `unregister_group` / `set_trusted` / `set_trigger` move from the `processTaskIpc` switch to `src/ipc-handlers/groups.ts`, using the dispatcher's `requiresMain` gate in place of per-case isMain checks (fire-and-forget commands warn and drop on unauthorized callers, as before). Also isolates the registry between tests — `ipc-registry.test.ts` wipes the module-global handler map and the core-registration once-guard in `afterEach` via test-only `_reset*ForTests` helpers (same testing-standards finding the fleet reviewer raised on #856's spawn-gate tests). `ipc.ts` 4505 → 4181 lines.
+
 ## [1.2.110] - 2026-07-21
 
 - Made pre-spawn gates registrable and removed the hard-coded `tessl__flight-assist` entry from core (#846, second P0 child of #844): `src/spawn-gates.ts` now owns only the mechanism — `registerSpawnGate` / `evaluateSpawnGate`, duplicate-name throw, and the shared fail-open/closed fs-errno narrowing helper. The trip-window policy (travel-db.json symlink-contained resolve, 24h lead/trail window arithmetic, fail-open/closed asymmetry) moved verbatim to `src/host-plugins/flight-assist-spawn-gate.ts`, registered at startup through the new idempotent `registerHostPlugins()` entry point (called before `startSchedulerLoop` so gates are in place before the first fire). Behavior preserved: skills without a registered gate spawn unconditionally, and the #754 trip-window semantics are pinned by the tests, which moved with their owner.
