@@ -62,7 +62,7 @@ import {
   handleSessionCommand,
   isSessionCommandAllowed,
 } from './session-commands.js';
-import { NewMessage, RegisteredGroup } from './types.js';
+import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 import {
   resolveGatesForGroup,
@@ -119,6 +119,29 @@ function installIdleTimerControl(
   return installIdleTimerControlImpl(chatJid, group, () =>
     queue.closeStdin(chatJid),
   );
+}
+
+/**
+ * Typing indicators are cosmetic: a channel transport rejection must
+ * never abort message processing or skip the post-run cleanup
+ * (`releaseIdleTimerControl`) that follows the call sites (#826).
+ * Failures log a warning — visible, never silent — and the pipeline
+ * moves on. Exported for the unit tests in
+ * `src/message-pipeline.test.ts`.
+ */
+export function setTypingBestEffort(
+  channel: Channel,
+  chatJid: string,
+  typing: boolean,
+): Promise<void> {
+  // Promise-style .catch, matching the piped-message setTyping site in
+  // startMessageLoop; the .then wrapper folds a synchronous throw from
+  // a channel implementation into the same rejection path.
+  return Promise.resolve()
+    .then(() => channel.setTyping?.(chatJid, typing))
+    .catch((err) => {
+      logger.warn({ chatJid, typing, err }, 'Failed to set typing indicator');
+    });
 }
 
 /**
@@ -317,7 +340,7 @@ export async function processGroupMessages(chatJid: string): Promise<boolean> {
   // from a previous container generation for this chat (#506).
   const idleTimerControl = installIdleTimerControl(chatJid, group);
 
-  await channel.setTyping?.(chatJid, true);
+  await setTypingBestEffort(channel, chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
 
@@ -446,7 +469,7 @@ export async function processGroupMessages(chatJid: string): Promise<boolean> {
     allowedMessageId,
   );
 
-  await channel.setTyping?.(chatJid, false);
+  await setTypingBestEffort(channel, chatJid, false);
   releaseIdleTimerControl(chatJid, idleTimerControl);
 
   if (output === 'error' || hadError) {
@@ -464,10 +487,20 @@ export async function processGroupMessages(chatJid: string): Promise<boolean> {
         );
         if (mainJid) {
           const mainChannel = findChannel(channels, mainJid);
-          mainChannel?.sendMessage(
-            mainJid,
-            `Circuit breaker tripped for "${group.name}" — ${failures} consecutive failures. Paused for ${CIRCUIT_BREAKER_COOLDOWN_MINUTES} minutes. Check logs.`,
-          );
+          // Fire-and-forget by design; without a .catch a transport
+          // rejection here becomes an unhandled rejection in an
+          // already-degraded state (#826).
+          mainChannel
+            ?.sendMessage(
+              mainJid,
+              `Circuit breaker tripped for "${group.name}" — ${failures} consecutive failures. Paused for ${CIRCUIT_BREAKER_COOLDOWN_MINUTES} minutes. Check logs.`,
+            )
+            .catch((err) =>
+              logger.warn(
+                { group: group.name, mainJid, err },
+                'Failed to send circuit-breaker notification',
+              ),
+            );
         }
       }
     }
