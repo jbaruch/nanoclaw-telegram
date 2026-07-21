@@ -1,3 +1,4 @@
+import { registerGroupConfigIpcHandlers } from './group-config.js';
 import { registerGroupIpcHandlers } from './groups.js';
 import { registerTaskIpcHandlers } from './tasks.js';
 
@@ -15,6 +16,7 @@ export function registerCoreIpcHandlers(): void {
   registered = true;
   registerTaskIpcHandlers();
   registerGroupIpcHandlers();
+  registerGroupConfigIpcHandlers();
 }
 
 /**
