@@ -8,6 +8,7 @@ import {
   type CadenceRegistryRebuildResult,
 } from './cadence-registry.js';
 import { ASSISTANT_NAME, STORE_DIR } from './config.js';
+import { db, setDbHandle } from './db-connection.js';
 import { migrateJsonState } from './db-json-migrations.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
@@ -74,8 +75,6 @@ const TRANSIENT_SQLITE_CODES: ReadonlySet<string> = new Set([
   'SQLITE_BUSY',
   'SQLITE_LOCKED',
 ]);
-
-let db: Database.Database;
 
 /**
  * One versioned state-table migration (epic #293). Tracked via SQLite's
@@ -816,7 +815,7 @@ export function initDatabase(): void {
   const dbPath = path.join(STORE_DIR, 'messages.db');
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
-  db = new Database(dbPath);
+  setDbHandle(new Database(dbPath));
   // WAL keeps cross-process readers from seeing partially-written pages
   // (the bot writes from the orchestrator while agent containers and
   // ad-hoc sqlite3 readers query the same file). Without WAL, readers
@@ -859,7 +858,7 @@ export { firstNonEmpty } from './db-json-migrations.js';
 
 /** @internal - for tests only. Creates a fresh in-memory database. */
 export function _initTestDatabase(): void {
-  db = new Database(':memory:');
+  setDbHandle(new Database(':memory:'));
   createSchema(db);
   applyStateMigrations(db, STATE_MIGRATIONS);
 }
@@ -2870,20 +2869,9 @@ export function getActivePendingRunAtNames(maxAgeMs: number): string[] {
   return rows.map((r) => r.name);
 }
 
-// --- Router state accessors ---
-
-export function getRouterState(key: string): string | undefined {
-  const row = db
-    .prepare('SELECT value FROM router_state WHERE key = ?')
-    .get(key) as { value: string } | undefined;
-  return row?.value;
-}
-
-export function setRouterState(key: string, value: string): void {
-  db.prepare(
-    'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
-  ).run(key, value);
-}
+// Router-state accessors moved to `db-router-state.ts` (#751 seam 2).
+// Re-exported so existing importers keep working.
+export { getRouterState, setRouterState } from './db-router-state.js';
 
 // --- Session accessors ---
 //
