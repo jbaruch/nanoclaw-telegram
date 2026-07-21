@@ -12,7 +12,7 @@ import {
   type CadenceRegistryDeps,
   type CadenceRegistryRebuildResult,
 } from './cadence-registry.js';
-import { db } from './db-connection.js';
+import { db, isDbHandleRegistered } from './db-connection.js';
 import { ScheduledTask, TaskRunLog } from './types.js';
 
 export function createTask(
@@ -59,9 +59,10 @@ export function createTask(
  * the rebuild keys on `source = 'cadence-registry'`.
  *
  * Throws explicitly when called before `initDatabase` so tests that
- * simulate the spawn path without initialising the DB get an
- * actionable error instead of `Cannot read properties of undefined
- * (reading 'transaction')` deep inside the cadence-registry. Per
+ * simulate the spawn path without initialising the DB get a
+ * function-specific actionable error instead of the generic
+ * db-connection sentinel error firing on `db.transaction` deep inside
+ * the cadence-registry. Per
  * `coding-policy: error-handling`, an unexpected initialisation
  * failure must propagate, not be papered over with a synthetic
  * success — production paths always init before spawn is reachable
@@ -72,7 +73,10 @@ export function createTask(
 export function rebuildCadenceRegistryForGroup(
   opts: Omit<CadenceRegistryDeps, 'db'>,
 ): CadenceRegistryRebuildResult {
-  if (!db) {
+  // `db` is a live binding whose pre-init value is an always-truthy
+  // Proxy sentinel (see db-connection.ts), so `!db` can never detect
+  // the uninitialised state — ask the registration flag instead.
+  if (!isDbHandleRegistered()) {
     throw new Error(
       `rebuildCadenceRegistryForGroup called before initDatabase (groupFolder=${opts.groupFolder}). ` +
         `Production always invokes initDatabase() in src/index.ts startup before runContainerAgent is reachable; ` +
