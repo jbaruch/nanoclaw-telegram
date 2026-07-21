@@ -4,6 +4,15 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.107] - 2026-07-21
+
+- Completed the #751 `src/db.ts` god-file split — seams 6–9 land the four remaining domain extracts (PRs #837–#840), all on the seam-2 `db-connection.ts` live-binding pattern with `db.ts` re-exports so call sites and tests are unchanged, no schema or query changes:
+  - **Seam 6** (#837): messages/chats/reactions → `src/db-messages.ts` (21 symbols, `storeChatMetadata` … `getLastFromMeMessages` incl. the Telegram synthetic bot-id two-pass lookup). `db.ts` 3009 → 2477.
+  - **Seam 7** (#838): scheduled tasks + run logs → `src/db-tasks.ts` (19 symbols incl. `rebuildCadenceRegistryForGroup`). Also fixes the pre-init guard in `rebuildCadenceRegistryForGroup`, dead since seam 2 made the pre-init handle an always-truthy Proxy sentinel — `db-connection.ts` now tracks registration explicitly (`isDbHandleRegistered()`), with a new `db-tasks.test.ts` pinning the function-specific error (flagged by Copilot). `db.ts` 2477 → 1999.
+  - **Seam 8** (#839): timezone/location → `src/db-tz.ts` (`tz_state`/`locations`/`follow_me_tasks`: the #574 location cascade, TripIt segment walking, `runTzHeartbeatAdvisory`, follow-me pending-run lock helpers, `TRANSIENT_SQLITE_CODES`). `tz-resolver.ts` and `db-json-migrations.ts` retarget imports to `db-tz.js` so the pre-existing `walkTzSegments` ↔ `resolveCurrentTz` cycle stays two-module and call-time-only. `db.ts` 1999 → 1126.
+  - **Seam 9** (#840): smart-home events → `src/db-smart-home.ts`, plus `db-smart-home.test.ts` covering the previously-untested accessors (insert round-trip, filters, hour-window bounds, frozen-clock retention cleanup, latest-state rollup — coverage gap surfaced by the fleet reviewer's testing-standards check).
+  - **End-state reached:** `db.ts` is 1040 lines (from 6545 at issue re-measure) — `initDatabase`/`createSchema`, the state-migration runner, test helpers, and the re-export barrel. Every domain accessor lives in its `src/db-<domain>.ts` module. Full suite 174 files / 3835 tests green.
+
 ## [1.2.106] - 2026-07-21
 
 - Flipped the orchestrator's `.env` bind mount to read-only (`./.env:/app/.env:ro`, #835). The mount was RW solely so the in-host Trakt OAuth autorefresh could persist rotated tokens back to `.env`; that last writer was retired when Trakt moved to the OneCLI gateway (#817). Audit confirms every remaining `.env` access goes through the read-only `readEnvFile` in `src/env.ts`, so the write surface on the credentials file is closed.
