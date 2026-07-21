@@ -12,12 +12,8 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, GROUPS_DIR } from './config.js';
-import {
-  setRegisteredGroup,
-  setRouterState,
-  setSession,
-  SUPPORTED_TZ_STATE_SCHEMA_VERSION,
-} from './db.js';
+import { setRegisteredGroup, setRouterState, setSession } from './db.js';
+import { SUPPORTED_TZ_STATE_SCHEMA_VERSION } from './db-tz.js';
 import { isFsErrorWithCode } from './fs-errors.js';
 import { isValidGroupFolder } from './group-folder.js';
 import {
