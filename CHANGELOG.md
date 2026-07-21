@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.116] - 2026-07-21
+
+- Added the generic location-sink registry and moved the flight-assist artifact writer to a host plugin (#849): the channel `onLocation` callback now does `storeLocation` + `runLocationSinks` — core owns location persistence and the fan-out list (`src/location-sinks.ts`, sinks run in registration order, each an isolated outer-boundary catch), while the travel tile's `current-location.json` write (owner-only filtering intact) registers as `src/host-plugins/flight-assist-location-sink.ts`. `registerHostPlugins()` now runs BEFORE channels connect so sinks are registered before the first inbound location. No flight-assist import remains in the core message path; DB location rows unchanged.
+
 ## [1.2.115] - 2026-07-21
 
 - Migrated the learned-trigger IPC commands to the #845 registry (slice 4): `list_learned_triggers` / `promote_learned_trigger` / `reenable_learned_trigger` / `delete_learned_trigger` move from the `processTaskIpc` switch to `src/ipc-handlers/learned-triggers.ts`, keeping owner-of-the-bill authorization gated in-handler (the list command implicitly scopes a non-main caller to its own folder and writes the cross-folder-denied envelope). Bodies are verbatim transplants — the {kind, pattern} identity matching, no-trim-on-pattern rule, and snapshot refreshes unchanged. `ipc.ts` 3659 → 3294 lines.
