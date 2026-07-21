@@ -2,8 +2,6 @@ import { execFile } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-import { CronExpressionParser } from 'cron-parser';
-
 import {
   ASSISTANT_NAME,
   DATA_DIR,
@@ -12,7 +10,6 @@ import {
   IPC_POLL_INTERVAL,
   ORCHESTRATOR_REPO_URL,
   STORE_DIR,
-  TIMEZONE,
 } from './config.js';
 import { SqliteError } from 'better-sqlite3';
 import { GrammyError, HttpError } from 'grammy';
@@ -20,7 +17,6 @@ import { GrammyError, HttpError } from 'grammy';
 import { syncBackupRepo, type SyncResult } from './backup-sync.js';
 import { isFsErrorWithCode } from './fs-errors.js';
 import { sendPoolMessage } from './channels/telegram.js';
-import { coerceTaskTextField } from './coerce-task-prompt.js';
 import {
   buildSnitchmdFlags,
   formatSnitchmdHeader,
@@ -29,11 +25,9 @@ import {
 } from './fetch-markdown-args.js';
 import {
   AvailableGroup,
-  DEFAULT_SESSION_NAME,
   getInstalledTiles,
   resolveAgentModel,
   resolvePerGroupAgentModel,
-  sessionInputDirName,
 } from './container-runner.js';
 import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
 import { hostLogsOrchestratorFile } from './host-logs.js';
@@ -45,12 +39,10 @@ import {
 } from './db-messages.js';
 import { deleteAllSessions } from './db-sessions.js';
 import {
-  createTask,
   deleteTask,
   getTaskById,
   getTasksForGroup,
   setTaskAgentModel,
-  updateTask,
 } from './db-tasks.js';
 import {
   applyTripitSegmentsToTzState,
@@ -60,15 +52,16 @@ import {
 } from './db-tz.js';
 import type { ContainerStatus } from './group-queue.js';
 import { isValidGroupFolder } from './group-folder.js';
+import { registerCoreIpcHandlers } from './ipc-handlers/index.js';
+import {
+  dispatchIpcTask,
+  scriptResultPath,
+  type IpcTaskPayload,
+} from './ipc-registry.js';
 import { logger } from './logger.js';
 import { stripInternalTags } from './router.js';
 import { runSidecar } from './sidecar-runner.js';
 import { recomputeLocalSchedules } from './task-scheduler.js';
-import {
-  isValidTimezone,
-  normalizeScheduleTimezone,
-  type ScheduleType,
-} from './timezone.js';
 import { RegisteredGroup, TriggerPattern } from './types.js';
 
 // Errno codes the IPC poller's best-effort fs ops (readdir, stat, unlink,
@@ -238,30 +231,6 @@ export interface IpcDeps {
 
 let ipcWatcherRunning = false;
 
-/**
- * Path to the `_script_result_<requestId>.json` reply file the host writes
- * for an IPC request. Must land in the SAME session's input dir that the
- * requesting container mounts at `/workspace/ipc/input/` — otherwise the
- * container polls forever and the IPC call times out.
- *
- * The container-side MCP server stamps `sessionName` onto every IPC
- * payload (both TASKS and MESSAGES — see
- * `container/agent-runner/src/ipc-mcp-stdio.ts`). Older containers that
- * predate that change (or any request where the field is missing) fall
- * back to the default session — matches pre-parallel behavior where
- * only one session existed.
- */
-// Session names accepted on IPC requests: ONLY the two the orchestrator
-// ever creates. A broader regex (e.g. `[A-Za-z0-9_-]+`) would let a
-// container send distinct valid-looking names and force the host into
-// unbounded `input-<session>/` dir creation below — an empty-dir DoS.
-// Canonical enum is the right level of trust for payload-supplied values.
-const KNOWN_SESSION_NAMES: ReadonlySet<string> = new Set([
-  DEFAULT_SESSION_NAME,
-  MAINTENANCE_SESSION_NAME,
-]);
-const VALID_REQUEST_ID_RE = /^[A-Za-z0-9_-]+$/;
-
 // Host-side allowlist for the five tile-repo names the promote flow is
 // wired against. The MCP tools' zod enums (ipc-mcp-stdio.ts::TILE_NAMES)
 // mirror this list client-side for a clean schema error at tool-call
@@ -278,116 +247,6 @@ const KNOWN_TILE_NAMES: ReadonlySet<string> = new Set([
   'nanoclaw-trusted',
   'nanoclaw-host',
 ]);
-
-/**
- * Resolve the IANA zone to pass to `cron-parser` when computing an
- * initial `next_run` for a stored task row. Centralised so
- * `schedule_task` and `update_task` produce values consistent with
- * `task-scheduler.ts:computeNextRunDetailed` at fire time.
- *
- * Three inputs:
- *   - `null`         → server-wide TIMEZONE fallback (pre-#102 behaviour
- *                       for rows without a per-task tz).
- *   - IANA name      → pass through unchanged (validated upstream by
- *                       `normalizeScheduleTimezone`).
- *   - `'local'`      → resolve via `getCurrentTz()` — the singleton
- *                       `tz_state.current_tz` written by `task-tz-sync`.
- *                       If the resolver returns null (no tz_state row
- *                       yet, or unfamiliar `schema_version`) OR returns
- *                       a value `Intl.DateTimeFormat` doesn't recognize
- *                       (corrupt write), fall back to TIMEZONE. Same
- *                       fallback the scheduler reaches via its
- *                       catch-and-retry path — narrowed here to a
- *                       sanity check up-front so a corrupt resolver
- *                       result doesn't brick `schedule_task` /
- *                       `update_task` with an "Invalid cron expression"
- *                       error that's actually a tz_state problem.
- */
-function resolveCronTz(scheduleTimezone: string | null): string {
-  if (scheduleTimezone === 'local') {
-    const resolved = getCurrentTz();
-    if (resolved && isValidTimezone(resolved)) return resolved;
-    logger.warn(
-      { resolved },
-      'resolveCronTz: tz_state.current_tz unusable for cron-parser — falling back to TIMEZONE',
-    );
-    return TIMEZONE;
-  }
-  return scheduleTimezone || TIMEZONE;
-}
-
-/**
- * Compute the host path where an IPC response file should land.
- *
- * Both `data.sessionName` and `data.requestId` arrive from the container's
- * IPC payload — treat as untrusted. Without validation, crafted values
- * like `../default` or `../../etc/passwd` would make `path.join` escape
- * the expected `<DATA_DIR>/ipc/<sourceGroup>/input-<session>/` subtree.
- *
- * Fail-safe strategy, two independent fallbacks:
- * - Invalid `requestId` → fixed filename `_script_result_invalid.json`.
- *   Keeps path traversal out of the filename AND prevents a noisy/
- *   malicious container from filling disk by spamming unique ids —
- *   at most one orphan file per session's input dir, overwritten in
- *   place each time. The SESSION dir is still whatever was validated
- *   from the payload (the `sessionName` check is separate).
- * - Invalid `sessionName` → fall back to `DEFAULT_SESSION_NAME`. Blocks
- *   `..`-style path-segment escape into a different group's subtree.
- *
- * Both fallbacks log at warn level for auditing. The malformed request
- * effectively times out (its response lands where no container polls),
- * which is the correct outcome for a bad payload. This keeps every
- * caller's `fs.writeFileSync(resultPath, ...)` pattern intact (no null-
- * checking at 10+ call sites) while still blocking path traversal.
- */
-function scriptResultPath(
-  sourceGroup: string,
-  data: { sessionName?: string; requestId?: string },
-): string {
-  let requestId: string;
-  if (
-    typeof data.requestId === 'string' &&
-    VALID_REQUEST_ID_RE.test(data.requestId)
-  ) {
-    requestId = data.requestId;
-  } else {
-    logger.warn(
-      { sourceGroup, requestId: data.requestId },
-      'IPC request has missing or invalid requestId — routing response to orphan path',
-    );
-    // Fixed filename for all invalid requests so a noisy/malicious container
-    // can't spam unique requestIds and fill disk with orphan replies. At
-    // most one `_script_result_invalid.json` file exists per input dir, and
-    // it gets overwritten on every subsequent malformed request.
-    requestId = 'invalid';
-  }
-  let session = DEFAULT_SESSION_NAME;
-  if (typeof data.sessionName === 'string' && data.sessionName) {
-    if (KNOWN_SESSION_NAMES.has(data.sessionName)) {
-      session = data.sessionName;
-    } else {
-      logger.warn(
-        { sourceGroup, sessionName: data.sessionName },
-        'IPC request has unknown sessionName — falling back to default',
-      );
-    }
-  }
-  const inputDir = path.join(
-    DATA_DIR,
-    'ipc',
-    sourceGroup,
-    sessionInputDirName(session),
-  );
-  // Ensure the session's input dir exists before the caller writes into it.
-  // In the common path both sessions have already spawned at least once and
-  // the dir exists — but a maintenance-only group (or a container that has
-  // never gone through default) won't have `input-default/`, and our
-  // fallback routes here for malformed payloads. Creating the dir
-  // defensively keeps `fs.writeFileSync(resultPath, ...)` from throwing
-  // ENOENT at every caller.
-  fs.mkdirSync(inputDir, { recursive: true });
-  return path.join(inputDir, `_script_result_${requestId}.json`);
-}
 
 // Prefix for outbound text emitted by the maintenance-session AyeAye.
 // Without the prefix, a scheduled-task reply looks identical to a
@@ -1643,625 +1502,20 @@ export function startIpcWatcher(deps: IpcDeps): () => void {
 }
 
 export async function processTaskIpc(
-  data: {
-    type: string;
-    taskId?: string;
-    prompt?: string;
-    schedule_type?: string;
-    schedule_value?: string;
-    /**
-     * IANA timezone for cron expressions; #102.
-     *
-     * `null` is also accepted on the update path (where it means
-     * "clear back to TIMEZONE default"). Must be `string | null` — not
-     * just `string` — because IPC payloads arrive as raw JSON and the
-     * caller can legitimately send `null` to unset; TS strict mode
-     * would otherwise reject the `data.timezone === null` check.
-     */
-    timezone?: string | null;
-    context_mode?: string;
-    script?: string;
-    groupFolder?: string;
-    chatJid?: string;
-    targetJid?: string;
-    // For register_group
-    jid?: string;
-    name?: string;
-    folder?: string;
-    trigger?: string;
-    requiresTrigger?: boolean;
-    containerConfig?: RegisteredGroup['containerConfig'];
-    // For set_trusted
-    trusted?: boolean;
-    // For set_agent_model (#395). `string` = per-group override, `null` =
-    // clear the override (fall back to global AGENT_MODEL).
-    // `undefined` is rejected at the handler.
-    agentModel?: string | null;
-    // For set_maintenance_agent_model (#509). `string` = per-session-slot
-    // override that applies only to the maintenance container slot for
-    // this group; `null` = clear the override (maintenance falls back to
-    // the per-group `agentModel` → global `AGENT_MODEL` ladder, which is
-    // the pre-#509 behavior).
-    maintenanceAgentModel?: string | null;
-    // For set_session_caps (#561). Positive number = per-group cap
-    // override; `null` = clear the override (fall back to the global
-    // SESSION_TURN_CAP / SESSION_TOKEN_CAP). A field left `undefined`
-    // leaves that cap unchanged; both undefined is rejected at the
-    // handler. Non-positive / non-finite numbers are rejected.
-    sessionTurnCap?: number | null;
-    sessionTokenCap?: number | null;
-    // For set_additional_tiles (#305). Array of tile names from the
-    // local registry to overlay on top of the trust-tier baseline.
-    // `null` or `[]` clears the override. Anything else (string,
-    // object, undefined) is rejected at the handler.
-    additionalTiles?: string[] | null;
-    // For host operations / github_backup / promote_staging
-    requestId?: string;
-    message?: string;
-    // persist_tz_segments (#748): the `segments[]` array the in-container
-    // TripIt → Reclaim sync parsed from `reclaim-tripit-timezones-sync`'s
-    // `--output=json` stdout. Raw JSON off the IPC wire — validated to an
-    // array at the handler before it reaches `applyTripitSegmentsToTzState`.
-    segments?: unknown;
-    // persist_global_file (#393): allowlisted global persona filenames to
-    // commit + push. Validated by `validateGlobalFilesToPersist` at the
-    // handler against `PERSISTABLE_GLOBAL_FILES`.
-    files?: unknown;
-    tileName?: string;
-    skillName?: string;
-    // push_staged_to_branch
-    branch?: string;
-    commitMessage?: string;
-    // For run_sidecar (#750): allowlisted flags the plugin appends to the
-    // named sidecar's command line. Image + mounts come from the trusted
-    // registry, never the payload. Typed `unknown` because IPC payloads
-    // arrive as raw JSON — the handler validates it is a string[] before use.
-    flags?: unknown;
-    command?: string;
-    payload?: string | Record<string, unknown>;
-    confirm?: boolean;
-    // chat_status / nuke_chat / send_message_to_chat / inspect_gate_decisions
-    chat_id?: string;
-    chat_name?: string;
-    session?: 'default' | 'maintenance' | 'all';
-    // inspect_gate_decisions (#443)
-    message_id?: string;
-    limit?: number;
-    // send_message_to_chat
-    text?: string;
-    pin?: boolean;
-    sender?: string;
-    /**
-     * Continuation marker for self-resuming cycles (#93/#130). Set by the
-     * resumable-cycle helper skill when scheduling the next link of a
-     * chain via `schedule_task`. Persisted onto the scheduled_tasks row
-     * verbatim; surfaced to the spawned container at fire time as
-     * `NANOCLAW_CONTINUATION=1` + `NANOCLAW_CONTINUATION_CYCLE_ID=<value>`.
-     * Free-form opaque slot key (UTC date / ISO week per the proposal),
-     * but type-narrowed to string for safety; non-string values are
-     * dropped at the handler.
-     */
-    continuation_cycle_id?: string;
-    // For promote_learned_trigger (#451 item 1). Identifies a learned
-    // proposal in registered_groups.trigger_pattern by its {kind,
-    // pattern} tuple — the same identity the trigger-learner schema
-    // uses to supersede prior versions.
-    kind?: string;
-    pattern?: string;
-    // For fetch_markdown (#169). All optional except `url`. Mirrors the
-    // snitchmd CLI flag set; see docs/fetch-tools.md for the decision
-    // matrix and snitchmd's own README for flag semantics.
-    url?: string;
-    wait?: number;
-    waitUntil?: string;
-    waitForSelector?: string;
-    favorPrecision?: boolean;
-    favorRecall?: boolean;
-    includeLinks?: boolean;
-    includeImages?: boolean;
-    maxChars?: number;
-    noCache?: boolean;
-    timeout?: number;
-  },
+  data: IpcTaskPayload,
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
   deps: IpcDeps,
 ): Promise<void> {
+  // #845: commands with a registered handler dispatch through the IPC
+  // registry; everything still in the legacy switch below falls through
+  // until its migration slice lands.
+  registerCoreIpcHandlers();
+  if (await dispatchIpcTask({ data, sourceGroup, isMain, deps })) return;
+
   const registeredGroups = deps.registeredGroups();
 
   switch (data.type) {
-    case 'schedule_task':
-      if (
-        data.prompt &&
-        data.schedule_type &&
-        data.schedule_value &&
-        data.targetJid
-      ) {
-        // #512 — coerce `prompt` and `script` to text at the IPC
-        // boundary. TS declares `string`, but the value is
-        // deserialized from JSON: a non-string here would otherwise
-        // bind as a BLOB via better-sqlite3 and surface later as
-        // `t.prompt.slice is not a function` in `list_tasks`.
-        // `coerceTaskTextField` returns:
-        //   - the string itself when `data.prompt` is a string,
-        //   - decoded UTF-8 when it's the JSON-Buffer shape
-        //     (`{type:'Buffer',data:[...]}`),
-        //   - `null` for any other shape — signal to reject the
-        //     payload rather than persist a garbage row that would
-        //     fire with `"[object Object]"` as its prompt.
-        const promptStr = coerceTaskTextField(data.prompt);
-        if (promptStr === null) {
-          logger.warn(
-            { sourceGroup, promptType: typeof data.prompt },
-            'schedule_task: rejecting non-text prompt payload',
-          );
-          break;
-        }
-        let scriptStr: string | null = null;
-        if (data.script != null) {
-          const coerced = coerceTaskTextField(data.script);
-          if (coerced === null) {
-            logger.warn(
-              { sourceGroup, scriptType: typeof data.script },
-              'schedule_task: rejecting non-text script payload',
-            );
-            break;
-          }
-          // Treat empty-string script the same as null — same
-          // semantics as the prior `data.script || null`.
-          scriptStr = coerced || null;
-        }
-        // Resolve the target group from JID
-        const targetJid = data.targetJid as string;
-        const targetGroupEntry = registeredGroups[targetJid];
-
-        if (!targetGroupEntry) {
-          logger.warn(
-            { targetJid },
-            'Cannot schedule task: target group not registered',
-          );
-          break;
-        }
-
-        const targetFolder = targetGroupEntry.folder;
-
-        // Authorization: non-main groups can only schedule for themselves
-        if (!isMain && targetFolder !== sourceGroup) {
-          logger.warn(
-            { sourceGroup, targetFolder },
-            'Unauthorized schedule_task attempt blocked',
-          );
-          break;
-        }
-
-        const scheduleType = data.schedule_type as 'cron' | 'interval' | 'once';
-
-        // #102: optional timezone parameter. Validated up-front so a
-        // typo fails the schedule call rather than silently falling
-        // back to server-local at fire time. #456 extends the accepted
-        // values with the literal token `'local'` — resolved at fire
-        // time against `tz_state.current_tz` by
-        // `task-scheduler.ts:computeNextRunDetailed`.
-        //
-        // Force `null` for non-cron types: the column has no effect on
-        // `interval` (always elapsed-ms) or `once` (instant pinned at
-        // schedule time). Persisting it for those types would be a
-        // footgun if the task were later updated to `cron` without
-        // explicitly passing `timezone` — an old, previously-ignored
-        // value would silently start affecting cron evaluation.
-        const tzOutcome = normalizeScheduleTimezone(
-          data.timezone,
-          scheduleType,
-        );
-        if (tzOutcome.action === 'reject-invalid') {
-          logger.warn(
-            { timezone: data.timezone },
-            'Invalid IANA timezone for schedule_task',
-          );
-          break;
-        }
-        if (tzOutcome.action === 'ignore-non-cron') {
-          logger.warn(
-            { timezone: data.timezone, scheduleType },
-            'schedule_task: timezone parameter is only meaningful for cron — ignoring',
-          );
-        }
-        const scheduleTimezone: string | null =
-          tzOutcome.action === 'accept' ? tzOutcome.value : null;
-
-        let nextRun: string | null = null;
-        if (scheduleType === 'cron') {
-          try {
-            // #456: resolve `'local'` against `tz_state.current_tz` to
-            // mirror `computeNextRunDetailed`. The scheduler retries
-            // with TIMEZONE on cron-parser failure; we narrow the
-            // failure surface here by sanity-checking the resolved
-            // value up-front so a corrupt `tz_state.current_tz` (e.g.
-            // a future task-tz-sync bug writing garbage) doesn't brick
-            // schedule_task — falls through to TIMEZONE just like NULL
-            // `schedule_timezone` and like the scheduler's retry path.
-            const cronTz = resolveCronTz(scheduleTimezone);
-            const interval = CronExpressionParser.parse(data.schedule_value, {
-              tz: cronTz,
-            });
-            nextRun = interval.next().toISOString();
-          } catch (err) {
-            // Bind + filter rather than catch-all per
-            // `jbaruch/coding-policy: error-handling`. CronExpressionParser
-            // throws plain Error instances on invalid syntax; anything
-            // non-Error here is a bug somewhere else (e.g. a `throw "str"`
-            // upstream) and should propagate.
-            if (!(err instanceof Error)) throw err;
-            logger.warn(
-              { err: err.message, scheduleValue: data.schedule_value },
-              'Invalid cron expression',
-            );
-            break;
-          }
-        } else if (scheduleType === 'interval') {
-          const MIN_INTERVAL_MS = 60_000;
-          const ms = parseInt(data.schedule_value, 10);
-          if (isNaN(ms) || ms < MIN_INTERVAL_MS) {
-            logger.warn(
-              { scheduleValue: data.schedule_value, minMs: MIN_INTERVAL_MS },
-              'Invalid interval: must be at least 60s',
-            );
-            break;
-          }
-          nextRun = new Date(Date.now() + ms).toISOString();
-        } else if (scheduleType === 'once') {
-          const date = new Date(data.schedule_value);
-          if (isNaN(date.getTime())) {
-            logger.warn(
-              { scheduleValue: data.schedule_value },
-              'Invalid timestamp',
-            );
-            break;
-          }
-          nextRun = date.toISOString();
-        }
-
-        const taskId =
-          data.taskId ||
-          `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const contextMode =
-          data.context_mode === 'group' || data.context_mode === 'isolated'
-            ? data.context_mode
-            : 'isolated';
-        // Provenance: derived from the VERIFIED source group's trust tier
-        // (sourceGroup and isMain are set from the IPC directory path, not
-        // from untrusted payload fields). The agent that scheduled the
-        // task NEVER gets to claim its own role — this is the security
-        // boundary that keeps an untrusted group from self-scheduling a
-        // prompt that later fires unwrapped as if it were trusted.
-        const sourceGroupEntry = Object.values(registeredGroups).find(
-          (g) => g.folder === sourceGroup,
-        );
-        const createdByRole:
-          | 'main_agent'
-          | 'trusted_agent'
-          | 'untrusted_agent' = isMain
-          ? 'main_agent'
-          : sourceGroupEntry?.containerConfig?.trusted
-            ? 'trusted_agent'
-            : 'untrusted_agent';
-        // Optional continuation marker (#93/#130). Set by the
-        // resumable-cycle helper skill when scheduling the next link of a
-        // self-resuming cycle chain; the task-scheduler reads it at fire
-        // time and plumbs the matching env vars onto the spawned
-        // container. Untyped non-string values are dropped — the field is
-        // a free-form opaque slot key (per the proposal: UTC date for
-        // nightly/morning-brief, ISO week for weekly), but we never want
-        // a stray number / object to land in the DB column.
-        let continuationCycleId: string | null = null;
-        if (
-          typeof data.continuation_cycle_id === 'string' &&
-          data.continuation_cycle_id.length > 0
-        ) {
-          continuationCycleId = data.continuation_cycle_id;
-        }
-        createTask({
-          id: taskId,
-          group_folder: targetFolder,
-          chat_jid: targetJid,
-          prompt: promptStr,
-          script: scriptStr,
-          schedule_type: scheduleType,
-          schedule_value: data.schedule_value,
-          schedule_timezone: scheduleTimezone,
-          context_mode: contextMode,
-          next_run: nextRun,
-          status: 'active',
-          created_at: new Date().toISOString(),
-          created_by_role: createdByRole,
-          continuation_cycle_id: continuationCycleId,
-        });
-        logger.info(
-          {
-            taskId,
-            sourceGroup,
-            targetFolder,
-            contextMode,
-            createdByRole,
-            continuationCycleId,
-          },
-          'Task created via IPC',
-        );
-        deps.onTasksChanged();
-      }
-      break;
-
-    case 'pause_task':
-      if (data.taskId) {
-        const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
-          updateTask(data.taskId, { status: 'paused' });
-          logger.info(
-            { taskId: data.taskId, sourceGroup },
-            'Task paused via IPC',
-          );
-          deps.onTasksChanged();
-        } else {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Unauthorized task pause attempt',
-          );
-        }
-      }
-      break;
-
-    case 'resume_task':
-      if (data.taskId) {
-        const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
-          updateTask(data.taskId, { status: 'active' });
-          logger.info(
-            { taskId: data.taskId, sourceGroup },
-            'Task resumed via IPC',
-          );
-          deps.onTasksChanged();
-        } else {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Unauthorized task resume attempt',
-          );
-        }
-      }
-      break;
-
-    case 'cancel_task':
-      if (data.taskId) {
-        const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
-          deleteTask(data.taskId);
-          logger.info(
-            { taskId: data.taskId, sourceGroup },
-            'Task cancelled via IPC',
-          );
-          deps.onTasksChanged();
-        } else {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Unauthorized task cancel attempt',
-          );
-        }
-      }
-      break;
-
-    case 'update_task':
-      if (data.taskId) {
-        const task = getTaskById(data.taskId);
-        if (!task) {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Task not found for update',
-          );
-          break;
-        }
-        if (!isMain && task.group_folder !== sourceGroup) {
-          logger.warn(
-            { taskId: data.taskId, sourceGroup },
-            'Unauthorized task update attempt',
-          );
-          break;
-        }
-
-        const updates: Parameters<typeof updateTask>[1] = {};
-        // #512 — same boundary-coercion contract as schedule_task
-        // above. `coerceTaskTextField` decodes the JSON-Buffer shape
-        // so an older writer's BLOB-shaped payload still round-trips
-        // to its real text; any other non-string shape is rejected
-        // (we abort the whole update rather than write a garbage
-        // column).
-        if (data.prompt !== undefined) {
-          const promptCoerced = coerceTaskTextField(data.prompt);
-          if (promptCoerced === null) {
-            logger.warn(
-              {
-                taskId: data.taskId,
-                sourceGroup,
-                promptType: typeof data.prompt,
-              },
-              'update_task: rejecting non-text prompt payload',
-            );
-            break;
-          }
-          updates.prompt = promptCoerced;
-        }
-        if (data.script !== undefined) {
-          if (data.script == null) {
-            updates.script = null;
-          } else {
-            const scriptCoerced = coerceTaskTextField(data.script);
-            if (scriptCoerced === null) {
-              logger.warn(
-                {
-                  taskId: data.taskId,
-                  sourceGroup,
-                  scriptType: typeof data.script,
-                },
-                'update_task: rejecting non-text script payload',
-              );
-              break;
-            }
-            // Empty string is the documented "clear back to no script"
-            // signal — preserve that semantics.
-            updates.script = scriptCoerced || null;
-          }
-        }
-        if (data.schedule_type !== undefined)
-          updates.schedule_type = data.schedule_type as
-            | 'cron'
-            | 'interval'
-            | 'once';
-        if (data.schedule_value !== undefined)
-          updates.schedule_value = data.schedule_value;
-
-        // #102: optional timezone update. `null`/empty-string clears
-        // (back to TIMEZONE default); a non-null IANA string overrides.
-        // Only meaningful for cron tasks: if the task IS a cron (or is
-        // being changed to cron in this same update), accept and
-        // persist; otherwise force the value to null so we don't store
-        // a stray timezone that would silently start affecting cron
-        // evaluation if the task were later switched to cron without
-        // explicitly re-passing it.
-        const effectiveScheduleType =
-          updates.schedule_type ?? task.schedule_type;
-
-        // If the schedule_type is being changed AWAY from cron AND the
-        // existing row had a stored schedule_timezone, drop the stored
-        // value too — even if the caller didn't explicitly pass
-        // `timezone`. Otherwise a once/interval task can outlive a
-        // previous cron incarnation with a stray timezone column that
-        // would re-activate if the task were later flipped back to
-        // cron without re-stating tz. (Copilot review round 2.)
-        if (
-          updates.schedule_type !== undefined &&
-          updates.schedule_type !== 'cron' &&
-          task.schedule_timezone &&
-          data.timezone === undefined
-        ) {
-          updates.schedule_timezone = null;
-        }
-
-        if (data.timezone !== undefined) {
-          // Same normalizer as schedule_task above — accepts null /
-          // empty / IANA / `'local'` (#456); ignores tz on non-cron
-          // (caller logs and forces null); rejects unrecognized
-          // strings (caller logs and aborts).
-          const updateTzOutcome = normalizeScheduleTimezone(
-            data.timezone,
-            effectiveScheduleType as ScheduleType,
-          );
-          if (updateTzOutcome.action === 'reject-invalid') {
-            logger.warn(
-              { taskId: data.taskId, timezone: data.timezone },
-              'Invalid IANA timezone in task update',
-            );
-            break;
-          }
-          if (updateTzOutcome.action === 'ignore-non-cron') {
-            logger.warn(
-              {
-                taskId: data.taskId,
-                timezone: data.timezone,
-                effectiveScheduleType,
-              },
-              'update_task: ignoring timezone — effective schedule_type is not cron',
-            );
-            updates.schedule_timezone = null;
-          } else {
-            updates.schedule_timezone = updateTzOutcome.value;
-          }
-        }
-
-        // Recompute next_run if a recompute-relevant field changed.
-        // Use `!== undefined` (not truthiness) for `schedule_value`
-        // because an empty string IS a valid input on the wire (the
-        // host catches it below as invalid) — truthy-skip would
-        // silently leave next_run stale on a malformed update. For
-        // `timezone`, only count it as a recompute trigger when the
-        // (effective) schedule_type is cron — a timezone-only update
-        // on a once/interval task has no effect on next_run.
-        const triggerRecompute =
-          data.schedule_type !== undefined ||
-          data.schedule_value !== undefined ||
-          (data.timezone !== undefined && effectiveScheduleType === 'cron');
-        if (triggerRecompute) {
-          const updatedTask = {
-            ...task,
-            ...updates,
-          };
-          if (updatedTask.schedule_type === 'cron') {
-            try {
-              // #456: same `'local'`-aware resolver as the schedule_task
-              // path — sanity-checks `tz_state.current_tz` before
-              // passing to cron-parser so a corrupt resolver result
-              // falls back to TIMEZONE rather than aborting the update.
-              const cronTz = resolveCronTz(
-                updatedTask.schedule_timezone ?? null,
-              );
-              const interval = CronExpressionParser.parse(
-                updatedTask.schedule_value,
-                { tz: cronTz },
-              );
-              updates.next_run = interval.next().toISOString();
-            } catch (err) {
-              // See schedule_task above — same Error-or-rethrow pattern
-              // per `jbaruch/coding-policy: error-handling`.
-              if (!(err instanceof Error)) throw err;
-              logger.warn(
-                {
-                  err: err.message,
-                  taskId: data.taskId,
-                  value: updatedTask.schedule_value,
-                },
-                'Invalid cron in task update',
-              );
-              break;
-            }
-          } else if (updatedTask.schedule_type === 'interval') {
-            const MIN_INTERVAL_MS = 60_000;
-            const ms = parseInt(updatedTask.schedule_value, 10);
-            if (!isNaN(ms) && ms >= MIN_INTERVAL_MS) {
-              updates.next_run = new Date(Date.now() + ms).toISOString();
-            } else if (!isNaN(ms)) {
-              logger.warn(
-                {
-                  taskId: data.taskId,
-                  value: updatedTask.schedule_value,
-                  minMs: MIN_INTERVAL_MS,
-                },
-                'Invalid interval in task update: must be at least 60s',
-              );
-              break;
-            }
-          } else if (updatedTask.schedule_type === 'once') {
-            // #102 follow-up: if a once-task's schedule_value changes
-            // (or the type flips to 'once'), recompute next_run from
-            // the new timestamp. Without this branch the row would
-            // keep its old `next_run` and fire incorrectly.
-            const date = new Date(updatedTask.schedule_value);
-            if (isNaN(date.getTime())) {
-              logger.warn(
-                { taskId: data.taskId, value: updatedTask.schedule_value },
-                'Invalid once timestamp in task update',
-              );
-              break;
-            }
-            updates.next_run = date.toISOString();
-          }
-        }
-
-        updateTask(data.taskId, updates);
-        logger.info(
-          { taskId: data.taskId, sourceGroup, updates },
-          'Task updated via IPC',
-        );
-        deps.onTasksChanged();
-      }
-      break;
-
     case 'refresh_groups':
       // Only main group can request a refresh
       if (isMain) {
@@ -3472,7 +2726,7 @@ export async function processTaskIpc(
         // missing) falls back to 'all' — the safe default that preserves
         // pre-parallel behaviour. The value comes from the container's
         // IPC payload so we cast from `unknown` and allowlist.
-        const sessionArg = (data as Record<string, unknown>).session;
+        const sessionArg = (data as unknown as Record<string, unknown>).session;
         const validSession: 'default' | 'maintenance' | 'all' =
           sessionArg === 'default' || sessionArg === 'maintenance'
             ? sessionArg
@@ -3484,7 +2738,8 @@ export async function processTaskIpc(
         // string "true", etc.) falls back to the safe default of
         // preserving the checkpoint, so a malformed payload can't
         // accidentally erase reentry state.
-        const skipReentryArg = (data as Record<string, unknown>).skipReentry;
+        const skipReentryArg = (data as unknown as Record<string, unknown>)
+          .skipReentry;
         const skipReentry = skipReentryArg === true;
         // `sourceGroup` is authoritative (derived from the IPC dir the
         // request arrived in); `data.groupFolder` is only used as a
