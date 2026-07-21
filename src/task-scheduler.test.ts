@@ -81,6 +81,7 @@ import { SqliteError } from 'better-sqlite3';
 import { logger } from './logger.js';
 import type { ContainerOutput } from './container-runner.js';
 import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
+import { registerHostPlugins } from './host-plugins/index.js';
 
 describe('task scheduler', () => {
   beforeEach(() => {
@@ -4932,6 +4933,10 @@ describe('runTask pre-spawn gate (#754)', () => {
   const groupDir = path.join(GROUPS_DIR, 'gate-754-test');
 
   beforeEach(() => {
+    // #846: the trip-window gate is no longer hard-coded in core —
+    // register it through the same host-plugin entry point production
+    // startup uses (idempotent, so per-test invocation is safe).
+    registerHostPlugins();
     _initTestDatabase();
     _resetSchedulerLoopForTests();
     mockRunContainerAgent.mockClear();

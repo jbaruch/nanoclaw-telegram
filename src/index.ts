@@ -61,6 +61,7 @@ import {
   stopRemoteControl,
 } from './remote-control.js';
 import { pruneOldContainerLogs } from './host-logs.js';
+import { registerHostPlugins } from './host-plugins/index.js';
 import { startSessionCleanup } from './session-cleanup.js';
 import {
   startHubitatListener,
@@ -407,6 +408,12 @@ async function main(): Promise<void> {
   // the JID or chat-type lookup fails) finishes before we start
   // spawning queries that would feed the observer.
   await initObserver(channels, () => registeredGroups);
+
+  // Register host-plugin modules (#846) BEFORE the scheduler loop
+  // starts: spawn gates must be in the registry when the first fire is
+  // evaluated, or a windowed skill would spawn unconditionally on the
+  // first post-deploy tick.
+  registerHostPlugins();
 
   // Start subsystems (independently of connection handler).
   // Scheduled tasks run through the shared queue under the parallel

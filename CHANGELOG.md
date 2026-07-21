@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.110] - 2026-07-21
+
+- Made pre-spawn gates registrable and removed the hard-coded `tessl__flight-assist` entry from core (#846, second P0 child of #844): `src/spawn-gates.ts` now owns only the mechanism — `registerSpawnGate` / `evaluateSpawnGate`, duplicate-name throw, and the shared fail-open/closed fs-errno narrowing helper. The trip-window policy (travel-db.json symlink-contained resolve, 24h lead/trail window arithmetic, fail-open/closed asymmetry) moved verbatim to `src/host-plugins/flight-assist-spawn-gate.ts`, registered at startup through the new idempotent `registerHostPlugins()` entry point (called before `startSchedulerLoop` so gates are in place before the first fire). Behavior preserved: skills without a registered gate spawn unconditionally, and the #754 trip-window semantics are pinned by the tests, which moved with their owner.
+
 ## [1.2.109] - 2026-07-21
 
 - Introduced the host IPC command registry (#845, first P0 child of the #844 host-plugin-architecture epic): `src/ipc-registry.ts` owns handler registration (`registerIpcHandler` / `dispatchIpcTask`, with an opt-in `requiresMain` admin gate) plus the shared `IpcTaskPayload` type and `scriptResultPath`, moved verbatim out of `ipc.ts`. First migrated slice: the five scheduled-task lifecycle commands (`schedule_task` / `pause_task` / `resume_task` / `cancel_task` / `update_task`) now register from `src/ipc-handlers/tasks.ts`; `processTaskIpc` dispatches through the registry first and falls through to the legacy switch for not-yet-migrated commands. No behavior change — task-file shape, result-file paths, and authorization gates unchanged (pinned by `ipc-auth.test.ts`, now exercising the migrated handlers through the registry; new `ipc-registry.test.ts` covers dispatch, duplicate registration, and the admin gate). `ipc.ts` 5249 → 4505 lines.
