@@ -84,7 +84,6 @@ async function runHooks(list: NamedHook[], phase: string): Promise<void> {
   for (const { name, fn } of list) {
     try {
       await withTimeout(name, Promise.resolve().then(fn));
-    } catch (err) {
       // outer-boundary-process-contract — this loop is the host's sole
       // execution boundary around third-party plugin hook code, invoked
       // directly from `main()` (startup) and the SIGTERM/SIGINT handler
@@ -106,6 +105,7 @@ async function runHooks(list: NamedHook[], phase: string): Promise<void> {
       // Narrowest everything-except-defects form: an Error is a hook
       // failure and is handled; a non-Error throwable is a programming
       // defect and propagates.
+    } catch (err) {
       if (!(err instanceof Error)) throw err;
       logger.error({ err, hook: name, phase }, 'Lifecycle hook failed');
     }
