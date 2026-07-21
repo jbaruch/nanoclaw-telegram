@@ -85,12 +85,27 @@ async function runHooks(list: NamedHook[], phase: string): Promise<void> {
     try {
       await withTimeout(name, Promise.resolve().then(fn));
     } catch (err) {
-      // Isolation contract (module doc): an Error from an optional
-      // plugin hook — including our own HookTimeoutError — is that
-      // hook's failure, surfaced via the error log; the remaining
-      // hooks (and the platform teardown after them) still run. A
-      // non-Error throwable is a programming defect, not a hook
-      // failure, and propagates.
+      // outer-boundary-process-contract — this loop is the host's sole
+      // execution boundary around third-party plugin hook code, invoked
+      // directly from `main()` (startup) and the SIGTERM/SIGINT handler
+      // (shutdown); no frame above it can preserve per-hook isolation.
+      //   - Caller's silent-failure shape: deploy.sh / launchd read a
+      //     hung or non-zero-exiting shutdown as failed teardown — the
+      //     SIGTERM handler never reaches queue.shutdown / channel
+      //     disconnect / process.exit(0), so the supervisor SIGKILLs
+      //     and cascades 137 across every in-flight agent container;
+      //     at startup, a propagating hook crash-loops the platform.
+      //   - What the catch emits: a structured ERROR log carrying the
+      //     hook's name, the phase, and the failure (incl. our own
+      //     HookTimeoutError for hung hooks); the remaining hooks and
+      //     the platform teardown behind them still run.
+      //   - Why propagation breaks the contract: one broken OPTIONAL
+      //     integration would abort platform startup or skip the rest
+      //     of shutdown — the exact inversion of the plugin/platform
+      //     trust relationship (#847).
+      // Narrowest everything-except-defects form: an Error is a hook
+      // failure and is handled; a non-Error throwable is a programming
+      // defect and propagates.
       if (!(err instanceof Error)) throw err;
       logger.error({ err, hook: name, phase }, 'Lifecycle hook failed');
     }
