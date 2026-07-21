@@ -1,5 +1,6 @@
 import { registerGroupConfigIpcHandlers } from './group-config.js';
 import { registerGroupIpcHandlers } from './groups.js';
+import { registerLearnedTriggerIpcHandlers } from './learned-triggers.js';
 import { registerTaskIpcHandlers } from './tasks.js';
 
 let registered = false;
@@ -17,6 +18,7 @@ export function registerCoreIpcHandlers(): void {
   registerTaskIpcHandlers();
   registerGroupIpcHandlers();
   registerGroupConfigIpcHandlers();
+  registerLearnedTriggerIpcHandlers();
 }
 
 /**
