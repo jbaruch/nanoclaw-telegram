@@ -1,6 +1,14 @@
 import fs from 'fs';
 
-import { describe, it, expect, afterAll, beforeEach, vi } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  afterAll,
+  afterEach,
+  beforeEach,
+  vi,
+} from 'vitest';
 
 // Isolate filesystem writes (the dispatcher's main-only error envelope
 // goes through `scriptResultPath`, which builds paths under `DATA_DIR`)
@@ -28,8 +36,12 @@ vi.mock('./config.js', async () => {
 
 import path from 'path';
 
-import { registerCoreIpcHandlers } from './ipc-handlers/index.js';
 import {
+  _resetCoreIpcHandlersForTests,
+  registerCoreIpcHandlers,
+} from './ipc-handlers/index.js';
+import {
+  _resetIpcRegistryForTests,
   dispatchIpcTask,
   hasIpcHandler,
   registerIpcHandler,
@@ -41,10 +53,8 @@ afterAll(() => {
   fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true });
 });
 
-// The registry is module-global state shared across this file's tests, so
-// every registered name here is unique per test. Only the dispatch
-// contract is under test — a minimal deps stub is enough because the
-// dispatcher itself never touches deps (handlers do).
+// Only the dispatch contract is under test — a minimal deps stub is
+// enough because the dispatcher itself never touches deps (handlers do).
 const deps = {} as IpcDeps;
 
 function ctx(overrides: Partial<IpcHandlerContext>): IpcHandlerContext {
@@ -59,6 +69,14 @@ function ctx(overrides: Partial<IpcHandlerContext>): IpcHandlerContext {
 
 beforeEach(() => {
   fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+});
+
+afterEach(() => {
+  // The handler registry is module-global shared state — wipe it (and
+  // the core-registration once-guard) so no test's registration leaks
+  // into another and order never matters.
+  _resetIpcRegistryForTests();
+  _resetCoreIpcHandlersForTests();
 });
 
 describe('registerIpcHandler / dispatchIpcTask', () => {

@@ -16,3 +16,14 @@ export function registerCoreIpcHandlers(): void {
   registerTaskIpcHandlers();
   registerGroupIpcHandlers();
 }
+
+/**
+ * Reset the once-guard alongside `_resetIpcRegistryForTests` so a test
+ * that wiped the registry can re-register the core handlers.
+ *
+ * @internal — test-only export, stripped from the public `.d.ts`
+ * surface (`stripInternal: true`).
+ */
+export function _resetCoreIpcHandlersForTests(): void {
+  registered = false;
+}
