@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.114] - 2026-07-21
+
+- Migrated the config-override IPC commands to the #845 registry (slice 3): `set_agent_model` / `set_maintenance_agent_model` / `set_session_caps` / `set_task_agent_model` / `set_additional_tiles` move from the `processTaskIpc` switch to `src/ipc-handlers/group-config.ts`. The model/cap commands keep owner-of-the-bill authorization gated in-handler; trust-adjacent `set_additional_tiles` is main-only via the dispatcher's `requiresMain` gate. Bodies are verbatim transplants — validation, containerConfig sibling-field preservation, the cadence-registry-row write refusal, and snapshot refreshes unchanged. `ipc.ts` 4181 → 3659 lines.
+
 ## [1.2.113] - 2026-07-21
 
 - Made the named-sidecar registry data-driven (#850, first P1 child of #844): sidecar specs move from TypeScript literals in `sidecar-runner.ts` (which hard-coded the audible-backup NAS mount paths) to a gitignored `config/sidecars.json`, loaded and validated per `run_sidecar` call by the new `src/sidecar-config.ts` and exposed to the orchestrator container via a new read-only `./config:/app/config` compose mount. Missing file = empty registry with a discoverable unknown-name error; invalid file (bad JSON, wrong shape, unset `${VAR}` in a mount) = entry-specific actionable error envelope, never a silently-empty registry. `${VAR}` placeholders in mounts expand from the host env plus a `HOST_PROJECT_PARENT` builtin preserving the pre-#850 `.audible` resolution. Trust model unchanged from #750 — image/mounts/flag-allowlist come from trusted host config, never the IPC payload. `config/sidecars.example.json` documents the shape, `config/README.md` the add-a-sidecar-without-a-TS-change workflow.
