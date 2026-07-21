@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.109] - 2026-07-21
+
+- Introduced the host IPC command registry (#845, first P0 child of the #844 host-plugin-architecture epic): `src/ipc-registry.ts` owns handler registration (`registerIpcHandler` / `dispatchIpcTask`, with an opt-in `requiresMain` admin gate) plus the shared `IpcTaskPayload` type and `scriptResultPath`, moved verbatim out of `ipc.ts`. First migrated slice: the five scheduled-task lifecycle commands (`schedule_task` / `pause_task` / `resume_task` / `cancel_task` / `update_task`) now register from `src/ipc-handlers/tasks.ts`; `processTaskIpc` dispatches through the registry first and falls through to the legacy switch for not-yet-migrated commands. No behavior change — task-file shape, result-file paths, and authorization gates unchanged (pinned by `ipc-auth.test.ts`, now exercising the migrated handlers through the registry; new `ipc-registry.test.ts` covers dispatch, duplicate registration, and the admin gate). `ipc.ts` 5249 → 4505 lines.
+
 ## [1.2.108] - 2026-07-21
 
 - Ended the `db.ts` barrel role (#842, the #751 follow-up): all 40 consumer files now import DB accessors directly from their owning `src/db-<domain>.ts` module, and the re-export blocks are removed from `db.ts` so typecheck enforces the import discipline. `db.ts` is 911 lines — `initDatabase`/`createSchema`, the state-migration runner, and test helpers only. Test plumbing moved with it: `vi.mock('./db.js', …)` targets retargeted to the domain modules the subjects now import (the old mocks silently stopped intercepting), and `vi.resetModules()`-style dynamic imports split per module. No runtime behavior change.
