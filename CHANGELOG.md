@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.108] - 2026-07-21
+
+- Ended the `db.ts` barrel role (#842, the #751 follow-up): all 40 consumer files now import DB accessors directly from their owning `src/db-<domain>.ts` module, and the re-export blocks are removed from `db.ts` so typecheck enforces the import discipline. `db.ts` is 911 lines — `initDatabase`/`createSchema`, the state-migration runner, and test helpers only. Test plumbing moved with it: `vi.mock('./db.js', …)` targets retargeted to the domain modules the subjects now import (the old mocks silently stopped intercepting), and `vi.resetModules()`-style dynamic imports split per module. No runtime behavior change.
+
 ## [1.2.107] - 2026-07-21
 
 - Completed the #751 `src/db.ts` god-file split — seams 6–9 land the four remaining domain extracts (PRs #837–#840), all on the seam-2 `db-connection.ts` live-binding pattern with `db.ts` re-exports so call sites and tests are unchanged, no schema or query changes:
