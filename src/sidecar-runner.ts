@@ -1,12 +1,20 @@
 import { execFile } from 'child_process';
-import path from 'path';
 
 import { logger } from './logger.js';
+import { loadSidecarRegistry } from './sidecar-config.js';
 
 /**
  * A privileged docker sidecar the host can run on a plugin's behalf. The
  * security-sensitive surface — which image runs and which host paths it
- * bind-mounts — lives here in trusted host config, NEVER in the IPC payload.
+ * bind-mounts — lives in trusted host config, NEVER in the IPC payload.
+ *
+ * Named-sidecar registry (#750, part of #741): a plugin references an
+ * entry by NAME and may only append allowlisted flags, mirroring
+ * OneCLI's named-credential model — a compromised container cannot
+ * request `-v /:/…` or mount the host `.env`. Since #850 the entries
+ * themselves are DATA, loaded per call from `config/sidecars.json` (see
+ * `sidecar-config.ts`), so adding a sidecar is a host-config edit, not
+ * a TS change, and no personal NAS path lives in committed source.
  */
 export interface SidecarSpec {
   image: string;
@@ -18,36 +26,6 @@ export interface SidecarSpec {
   allowedFlags: readonly string[];
   timeoutMs: number;
   maxBuffer: number;
-}
-
-/**
- * Named-sidecar registry (#750, part of #741). The host holds image + mount
- * paths + limits; a plugin references an entry by NAME and may only append
- * allowlisted flags. This mirrors OneCLI's named-credential model: the
- * security-sensitive surface lives in trusted host config, never in the
- * plugin payload, so a compromised container cannot request `-v /:/…` or
- * mount the host `.env`.
- *
- * Built as a function so env-derived mount paths (HOST_PROJECT_ROOT) resolve
- * at call time rather than module-load time.
- */
-export function getSidecarRegistry(): Record<string, SidecarSpec> {
-  return {
-    'audible-backup': {
-      image: 'audible-backup:latest',
-      // Preserve the exact mount resolution of the former audible_backup IPC
-      // case: the `.audible` credential dir sits beside the host project
-      // root, the OpenAudible library lives on the NAS share.
-      mounts: [
-        `${path.dirname(process.env.HOST_PROJECT_ROOT || process.cwd())}/.audible:/root/.audible`,
-        '/volume1/Google Drive/Audio Books:/library',
-      ],
-      baseArgs: ['--json'],
-      allowedFlags: ['--dry-run'],
-      timeoutMs: 600_000,
-      maxBuffer: 10 * 1024 * 1024,
-    },
-  };
 }
 
 export interface RunSidecarRequest {
@@ -75,12 +53,22 @@ export interface RunSidecarRequest {
 export async function runSidecar(
   req: RunSidecarRequest,
 ): Promise<Record<string, unknown>> {
-  const registry = getSidecarRegistry();
+  const loaded = loadSidecarRegistry();
+  if (!loaded.ok) {
+    // Fail loudly and actionably (#850): a present-but-broken config
+    // must never degrade into a silent empty registry.
+    logger.error(
+      { name: req.name, configPath: loaded.configPath, error: loaded.error },
+      'run_sidecar: sidecar config invalid',
+    );
+    return { error: `Sidecar config invalid: ${loaded.error}` };
+  }
+  const registry = loaded.registry;
   const spec = registry[req.name];
   if (!spec) {
     logger.warn({ name: req.name }, 'run_sidecar: unknown sidecar');
     return {
-      error: `Unknown sidecar "${req.name}". Registered: ${Object.keys(registry).join(', ')}.`,
+      error: `Unknown sidecar "${req.name}". Registered: ${Object.keys(registry).join(', ') || '(none)'}. Add it to ${loaded.configPath} — see config/README.md.`,
     };
   }
 

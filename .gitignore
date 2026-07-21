@@ -74,3 +74,6 @@ scripts/heartbeat-external.state
 ._*
 trusted/
 __pycache__/
+
+# Host sidecar registry — machine-specific paths (see config/README.md)
+config/sidecars.json

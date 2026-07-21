@@ -1,0 +1,13 @@
+{
+  "audible-backup": {
+    "image": "audible-backup:latest",
+    "mounts": [
+      "${HOST_PROJECT_PARENT}/.audible:/root/.audible",
+      "/volume1/Google Drive/Audio Books:/library"
+    ],
+    "baseArgs": ["--json"],
+    "allowedFlags": ["--dry-run"],
+    "timeoutMs": 600000,
+    "maxBuffer": 10485760
+  }
+}

@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.113] - 2026-07-21
+
+- Made the named-sidecar registry data-driven (#850, first P1 child of #844): sidecar specs move from TypeScript literals in `sidecar-runner.ts` (which hard-coded the audible-backup NAS mount paths) to a gitignored `config/sidecars.json`, loaded and validated per `run_sidecar` call by the new `src/sidecar-config.ts` and exposed to the orchestrator container via a new read-only `./config:/app/config` compose mount. Missing file = empty registry with a discoverable unknown-name error; invalid file (bad JSON, wrong shape, unset `${VAR}` in a mount) = entry-specific actionable error envelope, never a silently-empty registry. `${VAR}` placeholders in mounts expand from the host env plus a `HOST_PROJECT_PARENT` builtin preserving the pre-#850 `.audible` resolution. Trust model unchanged from #750 — image/mounts/flag-allowlist come from trusted host config, never the IPC payload. `config/sidecars.example.json` documents the shape, `config/README.md` the add-a-sidecar-without-a-TS-change workflow.
+
 ## [1.2.112] - 2026-07-21
 
 - Added host lifecycle hooks (#847, third P0 child of #844): `src/host-lifecycle.ts` registers named startup/shutdown hooks that run in registration order, each isolated — a hook's throw or rejection is logged with the hook's name and never skips the remaining hooks or the platform teardown that follows. First consumer: Hubitat. `main()` no longer hard-codes `startHubitatListener`/`stopHubitatListener` — `src/host-plugins/hubitat.ts` registers both hooks via `registerHostPlugins()`, gated on `HUBITAT_HUB_IP` so an unconfigured install registers nothing (full listener extraction is #848). No behavior change when no plugins register.
