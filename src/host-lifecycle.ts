@@ -51,11 +51,8 @@ async function runHooks(list: NamedHook[], phase: string): Promise<void> {
   for (const { name, fn } of list) {
     try {
       await fn();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- hook-isolation contract (module doc): whatever an optional plugin hook throws is its own failure, surfaced via the error log with the hook's name; rethrowing would let one broken integration abort platform startup or skip the remaining shutdown hooks
     } catch (err) {
-      // Deliberately unfiltered — see the isolation contract in the
-      // module doc: a hook failure is logged and must not skip the
-      // remaining hooks (or, at shutdown, the platform teardown that
-      // follows).
       logger.error({ err, hook: name, phase }, 'Lifecycle hook failed');
     }
   }
