@@ -1,4 +1,4 @@
-import { getMessageById } from '../db.js';
+import { getMessageById } from '../db-messages.js';
 import { logger } from '../logger.js';
 import { NewMessage, RegisteredGroup } from '../types.js';
 import { runGateChain, GateContext } from './index.js';

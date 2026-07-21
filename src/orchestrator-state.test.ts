@@ -1,20 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('./db.js', () => ({
+vi.mock('./db-router-state.js', () => ({
   getRouterState: vi.fn(),
   setRouterState: vi.fn(),
+}));
+
+vi.mock('./db-sessions.js', () => ({
   getAllSessions: vi.fn(() => ({})),
+}));
+
+vi.mock('./db-registered-groups.js', () => ({
   getAllRegisteredGroups: vi.fn(() => ({})),
+}));
+
+vi.mock('./db-messages.js', () => ({
   getLastBotMessageTimestamp: vi.fn(),
 }));
 
-import {
-  getAllRegisteredGroups,
-  getAllSessions,
-  getLastBotMessageTimestamp,
-  getRouterState,
-  setRouterState,
-} from './db.js';
+import { getLastBotMessageTimestamp } from './db-messages.js';
+import { getAllRegisteredGroups } from './db-registered-groups.js';
+import { getRouterState, setRouterState } from './db-router-state.js';
+import { getAllSessions } from './db-sessions.js';
 import * as state from './orchestrator-state.js';
 
 const mockGetRouterState = vi.mocked(getRouterState);

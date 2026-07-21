@@ -1,11 +1,8 @@
 import { ASSISTANT_NAME } from './config.js';
-import {
-  getAllRegisteredGroups,
-  getAllSessions,
-  getLastBotMessageTimestamp,
-  getRouterState,
-  setRouterState,
-} from './db.js';
+import { getLastBotMessageTimestamp } from './db-messages.js';
+import { getAllRegisteredGroups } from './db-registered-groups.js';
+import { getRouterState, setRouterState } from './db-router-state.js';
+import { getAllSessions } from './db-sessions.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 

@@ -2,14 +2,12 @@ import fs from 'fs';
 import path from 'path';
 
 import { HOST_GID, HOST_UID } from './config.js';
+import { getAllChats } from './db-messages.js';
 import {
-  getAllChats,
-  getTaskById,
   getTriggerPatterns,
-  createTask,
-  deleteTask,
   setRegisteredGroup,
-} from './db.js';
+} from './db-registered-groups.js';
+import { getTaskById, createTask, deleteTask } from './db-tasks.js';
 import { BEST_EFFORT_FS_CODES, isFsErrorWithCode } from './fs-errors.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
 import type { RegisteredGroup } from './types.js';

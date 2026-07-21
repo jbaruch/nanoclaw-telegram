@@ -131,12 +131,12 @@ vi.mock('./onecli-client.js', () => ({
 }));
 
 // #305 Phase 2a — runContainerAgent now invokes the cadence-registry
-// rebuild after `buildVolumeMounts`. The wrapper in `./db.js` throws
+// rebuild after `buildVolumeMounts`. The wrapper in `./db-tasks.js` throws
 // when the module-private `db` handle is uninitialised (this test
 // harness simulates the spawn path without `initDatabase()`); stubbing
 // the wrapper to a no-op keeps the rest of these assertions
 // independent of the registry plumbing.
-vi.mock('./db.js', () => ({
+vi.mock('./db-tasks.js', () => ({
   rebuildCadenceRegistryForGroup: vi.fn(() => ({
     deleted: 0,
     inserted: 0,

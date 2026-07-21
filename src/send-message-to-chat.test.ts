@@ -50,13 +50,13 @@ vi.mock('./channels/telegram.js', () => ({
 import path from 'path';
 
 import { ASSISTANT_NAME } from './config.js';
+import { _initTestDatabase } from './db.js';
 import {
-  _initTestDatabase,
   getLastFromMeMessage,
   getLatestMessage,
   getMessageById,
   storeChatMetadata,
-} from './db.js';
+} from './db-messages.js';
 import { processTaskIpc, IpcDeps } from './ipc.js';
 import { RegisteredGroup } from './types.js';
 

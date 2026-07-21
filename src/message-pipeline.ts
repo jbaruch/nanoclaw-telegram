@@ -26,19 +26,20 @@ import {
   writeTasksSnapshot,
 } from './container-runner.js';
 import {
-  consumeSessionReset,
   getAllChats,
-  deleteSessionName,
-  getAllTasks,
   getLastFromMeMessage,
   getMessagesSince,
-  markSessionForReset,
-  recordSessionTurn,
   getNewMessages,
-  setSession,
   shouldStoreBotMessage,
   storeMessage,
-} from './db.js';
+} from './db-messages.js';
+import {
+  consumeSessionReset,
+  markSessionForReset,
+  recordSessionTurn,
+} from './db-session-length-cap.js';
+import { deleteSessionName, setSession } from './db-sessions.js';
+import { getAllTasks } from './db-tasks.js';
 import {
   buildHandoffPrefix,
   buildResetNotification,

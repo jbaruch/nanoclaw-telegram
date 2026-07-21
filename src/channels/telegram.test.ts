@@ -243,7 +243,8 @@ import {
   getOneCliOutboundConfig,
 } from '../onecli-client.js';
 import { logger } from '../logger.js';
-import { _initTestDatabase, storeChatMetadata, storeMessage } from '../db.js';
+import { _initTestDatabase } from '../db.js';
+import { storeChatMetadata, storeMessage } from '../db-messages.js';
 
 // Constructs the specific Telegram-side HTML parse rejection
 // (`error_code: 400, description: "can't parse entities"`) — the only

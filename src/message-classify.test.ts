@@ -3,12 +3,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ASSISTANT_NAME } from './config.js';
 import type { NewMessage, RegisteredGroup } from './types.js';
 
-vi.mock('./db.js', () => ({
+vi.mock('./db-messages.js', () => ({
   getMessageById: vi.fn(),
   getChatByJid: vi.fn(),
 }));
 
-import { getChatByJid, getMessageById } from './db.js';
+import { getChatByJid, getMessageById } from './db-messages.js';
 import { isAddressedToUs, isReplyToBot } from './message-classify.js';
 
 const mockGetMessageById = vi.mocked(getMessageById);

@@ -12,7 +12,9 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, GROUPS_DIR } from './config.js';
-import { setRegisteredGroup, setRouterState, setSession } from './db.js';
+import { setRegisteredGroup } from './db-registered-groups.js';
+import { setRouterState } from './db-router-state.js';
+import { setSession } from './db-sessions.js';
 import { SUPPORTED_TZ_STATE_SCHEMA_VERSION } from './db-tz.js';
 import { isFsErrorWithCode } from './fs-errors.js';
 import { isValidGroupFolder } from './group-folder.js';

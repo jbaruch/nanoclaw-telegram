@@ -15,7 +15,7 @@ import {
   getMessageById,
   messageExistsInDifferentChat,
   storeReaction,
-} from '../db.js';
+} from '../db-messages.js';
 import { readEnvFile } from '../env.js';
 import { isFsErrorWithCode } from '../fs-errors.js';
 import { logger } from '../logger.js';

@@ -34,7 +34,7 @@ import {
   walkTzSegments,
   getLatestLocationForSender,
   readTzStateForContext,
-} from './db.js';
+} from './db-tz.js';
 import { resolveCurrentTz, TzResolverSource } from './tz-resolver.js';
 import { resolveTimezone } from './timezone.js';
 import { escapeXml } from './router.js';

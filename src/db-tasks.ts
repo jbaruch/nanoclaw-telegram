@@ -67,7 +67,7 @@ export function createTask(
  * failure must propagate, not be papered over with a synthetic
  * success — production paths always init before spawn is reachable
  * so this branch never fires there; a test that hits it should
- * `vi.mock('./db.js', ...)` the wrapper alongside its other module
+ * `vi.mock('./db-tasks.js', ...)` the wrapper alongside its other module
  * mocks.
  */
 export function rebuildCadenceRegistryForGroup(
@@ -80,7 +80,7 @@ export function rebuildCadenceRegistryForGroup(
     throw new Error(
       `rebuildCadenceRegistryForGroup called before initDatabase (groupFolder=${opts.groupFolder}). ` +
         `Production always invokes initDatabase() in src/index.ts startup before runContainerAgent is reachable; ` +
-        `if you're seeing this in a test, mock ./db.js's rebuildCadenceRegistryForGroup alongside the test's other module mocks.`,
+        `if you're seeing this in a test, mock ./db-tasks.js's rebuildCadenceRegistryForGroup alongside the test's other module mocks.`,
     );
   }
   return rebuildCadenceRegistry({ ...opts, db });
