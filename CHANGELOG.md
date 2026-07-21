@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.106] - 2026-07-21
+
+- Flipped the orchestrator's `.env` bind mount to read-only (`./.env:/app/.env:ro`, #835). The mount was RW solely so the in-host Trakt OAuth autorefresh could persist rotated tokens back to `.env`; that last writer was retired when Trakt moved to the OneCLI gateway (#817). Audit confirms every remaining `.env` access goes through the read-only `readEnvFile` in `src/env.ts`, so the write surface on the credentials file is closed.
+
 ## [1.2.105] - 2026-07-21
 
 - Extracted the session accessors out of `src/db.ts` into `src/db-sessions.ts` (#751 seam 5). Verbatim move of the `sessions` table domain — `getSession`, `setSession`, `deleteSession`, `deleteSessionName`, `deleteAllSessions`, `getAllSessions` — onto the `db-connection.ts` live-binding pattern, re-exported from `db.ts` so call sites and tests are unchanged. No schema or query changes. `db.ts` 3076 → 3007 lines.
