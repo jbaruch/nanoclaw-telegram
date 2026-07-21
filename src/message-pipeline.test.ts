@@ -10,7 +10,10 @@ vi.mock('./router.js', async (importOriginal) => {
 });
 
 import { recordFailure } from './circuit-breaker.js';
-import { processGroupMessages } from './message-pipeline.js';
+import {
+  processGroupMessages,
+  setTypingBestEffort,
+} from './message-pipeline.js';
 import { channels } from './orchestrator-runtime.js';
 import { _setRegisteredGroups } from './orchestrator-state.js';
 import { findChannel } from './router.js';
@@ -60,5 +63,36 @@ describe('processGroupMessages — spawn guards', () => {
     // Trip the breaker: five consecutive failures arm the cooldown.
     for (let i = 0; i < 5; i += 1) recordFailure('telegram_breaker');
     await expect(processGroupMessages('c@g.us')).resolves.toBe(true);
+  });
+});
+
+describe('setTypingBestEffort — crash-safe typing indicator (#826)', () => {
+  it('forwards the call to the channel with the given jid and state', async () => {
+    const setTyping = vi.fn().mockResolvedValue(undefined);
+    await setTypingBestEffort({ setTyping } as never, 'g@g.us', true);
+    expect(setTyping).toHaveBeenCalledWith('g@g.us', true);
+  });
+
+  it('resolves (does not throw) when setTyping rejects', async () => {
+    const setTyping = vi.fn().mockRejectedValue(new Error('transport down'));
+    await expect(
+      setTypingBestEffort({ setTyping } as never, 'g@g.us', false),
+    ).resolves.toBeUndefined();
+    expect(setTyping).toHaveBeenCalledWith('g@g.us', false);
+  });
+
+  it('resolves (does not throw) when setTyping throws synchronously', async () => {
+    const setTyping = vi.fn().mockImplementation(() => {
+      throw new Error('sync failure');
+    });
+    await expect(
+      setTypingBestEffort({ setTyping } as never, 'g@g.us', true),
+    ).resolves.toBeUndefined();
+  });
+
+  it('no-ops on channels without setTyping support', async () => {
+    await expect(
+      setTypingBestEffort({} as never, 'g@g.us', true),
+    ).resolves.toBeUndefined();
   });
 });
