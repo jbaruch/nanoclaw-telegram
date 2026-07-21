@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.105] - 2026-07-21
+
+- Extracted the session accessors out of `src/db.ts` into `src/db-sessions.ts` (#751 seam 5). Verbatim move of the `sessions` table domain — `getSession`, `setSession`, `deleteSession`, `deleteSessionName`, `deleteAllSessions`, `getAllSessions` — onto the `db-connection.ts` live-binding pattern, re-exported from `db.ts` so call sites and tests are unchanged. No schema or query changes. `db.ts` 3076 → 3007 lines.
+
 ## [1.2.104] - 2026-07-21
 
 - Extracted the registered-group accessors out of `src/db.ts` into `src/db-registered-groups.ts` (#751 seam 4). Verbatim move of the `registered_groups` domain — the container-config / trigger-pattern parsers (#81/#82 config machinery incl. `parseContainerConfig`, `parseTriggerPatternColumn`, `legacyTriggerToConfig`, serializers) and the nine public accessors (`deriveTriggerString`, `getTriggerPatterns`, `setTriggerPatterns`, `getRegisteredGroup`, `setRegisteredGroup`, `updateGroupTrusted`, `updateGroupTrigger`, `deleteRegisteredGroup`, `getAllRegisteredGroups`) — onto the seam-2 `db-connection.ts` live-binding pattern, re-exported from `db.ts` so call sites and tests are unchanged. `isTriggerPatternConfig` is now exported for the one remaining `db.ts` consumer (the createSchema-time legacy trigger_pattern backfill, which stays with the schema). No schema or query changes. `db.ts` 3651 → 3076 lines.
