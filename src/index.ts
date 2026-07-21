@@ -50,7 +50,7 @@ import {
 } from './db-tz.js';
 import { DEFAULT_SESSION_NAME } from './group-queue.js';
 import { BEST_EFFORT_FS_CODES, isFsErrorWithCode } from './fs-errors.js';
-import { writeFlightAssistLocation } from './flight-assist-location.js';
+import { runLocationSinks } from './location-sinks.js';
 import { initBotPool } from './channels/telegram.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatOutbound } from './router.js';
@@ -325,6 +325,12 @@ async function main(): Promise<void> {
     }
   }
 
+  // Register host-plugin modules (#846/#847/#849) BEFORE channels
+  // connect: location sinks must be in the registry when the first
+  // inbound location arrives, and spawn gates before the scheduler's
+  // first fire below.
+  registerHostPlugins();
+
   // Channel callbacks (shared by all channels)
   const channelOpts = {
     onMessage: (chatJid: string, msg: NewMessage) => {
@@ -347,17 +353,12 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     onLocation: (record: LocationRecord) => {
+      // Core owns persistence: the DB row (host-side TZ resolver input)
+      // is written first, unconditionally. Everything else a location
+      // feeds — e.g. the travel tile's current-location.json artifact —
+      // is a registered sink (#849), fanned out after the write.
       storeLocation(record);
-      // Sidecar write for `jbaruch/nanoclaw-travel`'s
-      // `precheck.py` origin-resolution ladder (issue
-      // `nanoclaw-travel#18`). The DB row drives the host-side
-      // TZ resolver; this file drives the per-group container's
-      // time-to-leave origin. Filters to owner-only inside.
-      writeFlightAssistLocation(record, {
-        groups: registeredGroups,
-        ownerSenderId: ASSISTANT_OWNER_TG_USER_ID,
-        dataDir: DATA_DIR,
-      });
+      runLocationSinks(record);
     },
     registeredGroups: () => registeredGroups,
   };
@@ -408,12 +409,6 @@ async function main(): Promise<void> {
   // the JID or chat-type lookup fails) finishes before we start
   // spawning queries that would feed the observer.
   await initObserver(channels, () => registeredGroups);
-
-  // Register host-plugin modules (#846) BEFORE the scheduler loop
-  // starts: spawn gates must be in the registry when the first fire is
-  // evaluated, or a windowed skill would spawn unconditionally on the
-  // first post-deploy tick.
-  registerHostPlugins();
 
   // Start subsystems (independently of connection handler).
   // Scheduled tasks run through the shared queue under the parallel
