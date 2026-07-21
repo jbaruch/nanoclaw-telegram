@@ -60,13 +60,10 @@ import {
   startRemoteControl,
   stopRemoteControl,
 } from './remote-control.js';
+import { runShutdownHooks, runStartupHooks } from './host-lifecycle.js';
 import { pruneOldContainerLogs } from './host-logs.js';
 import { registerHostPlugins } from './host-plugins/index.js';
 import { startSessionCleanup } from './session-cleanup.js';
-import {
-  startHubitatListener,
-  stopHubitatListener,
-} from './hubitat-listener.js';
 import {
   recomputeLocalSchedules,
   startSchedulerLoop,
@@ -266,7 +263,10 @@ async function main(): Promise<void> {
       'Pre-shutdown checkpoint pass complete',
     );
 
-    stopHubitatListener();
+    // Optional-integration teardown (#847): registered shutdown hooks
+    // (Hubitat listener, future host plugins) run first, each isolated
+    // so one failure can't skip the platform teardown below.
+    await runShutdownHooks();
     proxyServer.close();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
@@ -537,8 +537,12 @@ async function main(): Promise<void> {
     }
   }
 
-  // Start Hubitat smart home listener (if configured)
-  startHubitatListener();
+  // Optional-integration startup (#847): run the startup hooks host
+  // plugins registered in `registerHostPlugins()` above (Hubitat
+  // EventSocket listener when configured, future optional listeners).
+  // Each hook is isolated — a failing optional integration logs and
+  // never takes down platform startup.
+  await runStartupHooks();
 
   // #496 — stale-lock recovery. On startup, clear any
   // `follow_me_tasks.pending_run_at` older than the freshness window.

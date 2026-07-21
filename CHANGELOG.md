@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.112] - 2026-07-21
+
+- Added host lifecycle hooks (#847, third P0 child of #844): `src/host-lifecycle.ts` registers named startup/shutdown hooks that run in registration order, each isolated — a hook's throw or rejection is logged with the hook's name and never skips the remaining hooks or the platform teardown that follows. First consumer: Hubitat. `main()` no longer hard-codes `startHubitatListener`/`stopHubitatListener` — `src/host-plugins/hubitat.ts` registers both hooks via `registerHostPlugins()`, gated on `HUBITAT_HUB_IP` so an unconfigured install registers nothing (full listener extraction is #848). No behavior change when no plugins register.
+
 ## [1.2.111] - 2026-07-21
 
 - Migrated the group-registry IPC commands to the #845 registry (slice 2): `refresh_groups` / `register_group` / `unregister_group` / `set_trusted` / `set_trigger` move from the `processTaskIpc` switch to `src/ipc-handlers/groups.ts`, using the dispatcher's `requiresMain` gate in place of per-case isMain checks (fire-and-forget commands warn and drop on unauthorized callers, as before). Also isolates the registry between tests — `ipc-registry.test.ts` wipes the module-global handler map and the core-registration once-guard in `afterEach` via test-only `_reset*ForTests` helpers (same testing-standards finding the fleet reviewer raised on #856's spawn-gate tests). `ipc.ts` 4505 → 4181 lines.
