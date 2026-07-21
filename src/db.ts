@@ -2967,6 +2967,8 @@ export {
 // Registered-group accessors moved to `db-registered-groups.ts` (#751
 // seam 4). Re-exported so existing importers keep working.
 export {
+  type TriggerPattern,
+  type TriggerPatternConfig,
   deriveTriggerString,
   getTriggerPatterns,
   setTriggerPatterns,
