@@ -1,3 +1,4 @@
+import { registerChatAdminIpcHandlers } from './chat-admin.js';
 import { registerGroupConfigIpcHandlers } from './group-config.js';
 import { registerGroupIpcHandlers } from './groups.js';
 import { registerLearnedTriggerIpcHandlers } from './learned-triggers.js';
@@ -19,6 +20,7 @@ export function registerCoreIpcHandlers(): void {
   registerGroupIpcHandlers();
   registerGroupConfigIpcHandlers();
   registerLearnedTriggerIpcHandlers();
+  registerChatAdminIpcHandlers();
 }
 
 /**
