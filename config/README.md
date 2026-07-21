@@ -42,7 +42,15 @@ entry's `allowedFlags`. Review edits to this file like code.
 }
 ```
 
-- `image` (required) — the docker image to `docker run --rm`.
+- `image` (required) — the docker image to `docker run --rm`. Pin
+  registry-pulled images to a versioned tag or digest per
+  `coding-policy: dependency-management`. A **locally built** image
+  (e.g. `audible-backup:latest`, built on the NAS from its own
+  Dockerfile and never pulled from a registry) may keep `latest`: the
+  tag only ever changes when the operator explicitly rebuilds it, so
+  the renewal mechanism IS the manual local rebuild — there is no
+  scanner-trackable pin and no remote that could move underneath it.
+  Note which case applies when adding an entry.
 - `mounts` (default `[]`) — `host:container` bind specs. `${VAR}`
   placeholders expand from the host environment at load time, plus the
   built-in `${HOST_PROJECT_PARENT}` (the directory containing the
