@@ -1,3 +1,7 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const { execFileMock } = vi.hoisted(() => ({ execFileMock: vi.fn() }));
@@ -7,7 +11,7 @@ vi.mock('./logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-import { runSidecar, getSidecarRegistry } from './sidecar-runner.js';
+import { runSidecar } from './sidecar-runner.js';
 
 /** Make the mocked execFile invoke its callback with a fixed result. */
 function mockExec(
@@ -25,39 +29,68 @@ function mockExec(
   );
 }
 
-afterEach(() => {
-  vi.unstubAllEnvs();
+let tmpDir: string;
+
+/**
+ * Write a temp sidecars.json fixture (#850) and point the loader at it.
+ * Mirrors the shipped `config/sidecars.example.json` audible-backup
+ * entry so the docker-arg assertions below pin the same behavior the
+ * pre-#850 in-code registry had.
+ */
+function writeFixtureConfig(): void {
+  const p = path.join(tmpDir, 'sidecars.json');
+  fs.writeFileSync(
+    p,
+    JSON.stringify({
+      'audible-backup': {
+        image: 'audible-backup:latest',
+        mounts: [
+          '${HOST_PROJECT_PARENT}/.audible:/root/.audible',
+          '/volume1/Google Drive/Audio Books:/library',
+        ],
+        baseArgs: ['--json'],
+        allowedFlags: ['--dry-run'],
+        timeoutMs: 600000,
+        maxBuffer: 10485760,
+      },
+    }),
+  );
+  vi.stubEnv('SIDECARS_CONFIG_PATH', p);
+}
+
+beforeEach(() => {
+  execFileMock.mockReset();
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-runner-'));
+  vi.stubEnv('HOST_PROJECT_ROOT', '/host/nanoclaw');
+  writeFixtureConfig();
 });
 
-describe('getSidecarRegistry', () => {
-  beforeEach(() => {
-    vi.stubEnv('HOST_PROJECT_ROOT', '/host/nanoclaw');
-  });
-
-  it('exposes the audible-backup entry with a trusted image + mounts', () => {
-    const reg = getSidecarRegistry();
-    const spec = reg['audible-backup'];
-    expect(spec.image).toBe('audible-backup:latest');
-    // Mount host paths come from trusted config, resolved from
-    // HOST_PROJECT_ROOT at call time — never from a caller payload.
-    expect(spec.mounts).toEqual([
-      '/host/.audible:/root/.audible',
-      '/volume1/Google Drive/Audio Books:/library',
-    ]);
-    expect(spec.baseArgs).toEqual(['--json']);
-    expect(spec.allowedFlags).toEqual(['--dry-run']);
-  });
+afterEach(() => {
+  vi.unstubAllEnvs();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 describe('runSidecar', () => {
-  beforeEach(() => {
-    execFileMock.mockReset();
-    vi.stubEnv('HOST_PROJECT_ROOT', '/host/nanoclaw');
-  });
-
-  it('rejects an unknown sidecar name without invoking docker', async () => {
+  it('rejects an unknown sidecar name without invoking docker, naming the config path', async () => {
     const result = await runSidecar({ name: 'not-registered' });
     expect(result.error).toMatch(/Unknown sidecar "not-registered"/);
+    expect(result.error).toContain(path.join(tmpDir, 'sidecars.json'));
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
+
+  it('returns an actionable error envelope when the config is invalid, without invoking docker', async () => {
+    fs.writeFileSync(path.join(tmpDir, 'sidecars.json'), 'not json {');
+    const result = await runSidecar({ name: 'audible-backup' });
+    expect(result.error).toMatch(/Sidecar config invalid/);
+    expect(result.error).toMatch(/not valid JSON/);
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
+
+  it('treats a missing config as an empty registry with a discoverable fix', async () => {
+    fs.rmSync(path.join(tmpDir, 'sidecars.json'));
+    const result = await runSidecar({ name: 'audible-backup' });
+    expect(result.error).toMatch(/Unknown sidecar "audible-backup"/);
+    expect(result.error).toMatch(/\(none\)/);
     expect(execFileMock).not.toHaveBeenCalled();
   });
 
@@ -71,7 +104,7 @@ describe('runSidecar', () => {
     expect(execFileMock).not.toHaveBeenCalled();
   });
 
-  it('builds docker args from the registry plus allowlisted flags', async () => {
+  it('builds docker args from the config registry plus allowlisted flags', async () => {
     mockExec(null, JSON.stringify({ books: [] }), '');
     await runSidecar({ name: 'audible-backup', flags: ['--dry-run'] });
     const [cmd, args] = execFileMock.mock.calls[0] as [string, string[]];
@@ -80,6 +113,8 @@ describe('runSidecar', () => {
       'run',
       '--rm',
       '-v',
+      // ${HOST_PROJECT_PARENT} expanded from HOST_PROJECT_ROOT at load
+      // time — trusted config, never the caller payload.
       '/host/.audible:/root/.audible',
       '-v',
       '/volume1/Google Drive/Audio Books:/library',
