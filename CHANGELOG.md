@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.103] - 2026-07-21
+
+- Extracted the session-length cap state accessors (#413 section) out of `src/db.ts` into `src/db-session-length-cap.ts` (#751 seam 3). Verbatim move of `SessionLengthRow` / `SessionResetReason` / `PendingReset` and `getSessionLengthState` / `recordSessionTurn` / `markSessionForReset` / `consumeSessionReset` / `clearSessionLengthStateForGroup` onto the seam-2 `db-connection.ts` live-binding pattern; `db.ts` re-exports everything so call sites (`message-pipeline`, `ipc`, session-cap tests) are unchanged. The section header's stale "`src/index.ts` runAgent" writer attribution is corrected to `message-pipeline.ts` (post-#749). No schema or query changes. `db.ts` 3878 → 3651 lines.
+
 ## [1.2.102] - 2026-07-21
 
 - Extracted the shared SQLite connection handle and the router-state accessors out of `src/db.ts` (#751 seam 2). New `src/db-connection.ts` owns the `db` live binding: `initDatabase` / `_initTestDatabase` still open the database and register the handle via `setDbHandle`, so single-connection ownership (WAL + busy_timeout, one open handle per process) is unchanged — domain modules read the live binding at call time instead of a module-local `let`. First domain on the pattern: `getRouterState` / `setRouterState` move to `src/db-router-state.ts`, re-exported from `db.ts` so call sites and tests are unchanged. This is the enabler for the remaining #751 seams (session-length cap, registered groups, sessions), mirroring the `orchestrator-state.ts` enabler from the #749 split.
