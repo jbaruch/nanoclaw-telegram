@@ -91,12 +91,25 @@ describe('host lifecycle hooks', () => {
     await expect(runShutdownHooks()).resolves.toBeUndefined();
   });
 
-  it('propagates a non-Error throwable (programming defect, not a hook failure)', async () => {
+  it('isolates a non-Error throwable the same as an Error (bare-catch boundary)', async () => {
+    const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    const after = vi.fn();
     registerStartupHook('throws-string', () => {
-      // A thrown non-Error is the defect shape under test.
+      // Plugin hooks are arbitrary code — even a thrown string must not
+      // take down startup or skip the remaining hooks.
       throw 'not an Error instance';
     });
-    await expect(runStartupHooks()).rejects.toBe('not an Error instance');
+    registerStartupHook('after', after);
+    await runStartupHooks();
+    expect(after).toHaveBeenCalledOnce();
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hook: 'throws-string',
+        phase: 'startup',
+        err: 'not an Error instance',
+      }),
+      'Lifecycle hook failed',
+    );
   });
 
   it('abandons a hung hook at the timeout and still runs the rest', async () => {

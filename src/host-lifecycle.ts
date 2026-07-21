@@ -10,13 +10,13 @@ import { logger } from './logger.js';
  *
  * Execution contract:
  *   - Hooks run in registration order.
- *   - Hooks are isolation boundaries: one hook's thrown/rejected Error
- *     is logged (with the hook's name) and the remaining hooks still
- *     run. An optional integration must never take down platform
- *     startup, and a broken listener must never block the rest of
- *     shutdown (queue drain, channel disconnect). A non-Error throwable
- *     is a programming defect, not a hook failure, and propagates per
- *     `coding-policy: error-handling`.
+ *   - Hooks are isolation boundaries: whatever a hook throws or rejects
+ *     with is logged (with the hook's name) and the remaining hooks
+ *     still run — the per-hook catch is the documented
+ *     outer-boundary-process-contract carve-out (see the annotation on
+ *     the catch in `runHooks`). An optional integration must never take
+ *     down platform startup, and a broken listener must never block the
+ *     rest of shutdown (queue drain, channel disconnect).
  *   - Each hook is bounded by `HOOK_TIMEOUT_MS`: a hook that hangs is
  *     logged and abandoned so a wedged plugin cannot stall startup or
  *     the platform teardown that follows the shutdown hooks.
@@ -102,11 +102,12 @@ async function runHooks(list: NamedHook[], phase: string): Promise<void> {
       //     integration would abort platform startup or skip the rest
       //     of shutdown — the exact inversion of the plugin/platform
       //     trust relationship (#847).
-      // Narrowest everything-except-defects form: an Error is a hook
-      // failure and is handled; a non-Error throwable is a programming
-      // defect and propagates.
+      // JS has no interrupt-exception hierarchy, so the narrowest
+      // "everything except interrupts" form is the bare catch below —
+      // whatever shape a plugin hook throws (Error or not), the
+      // remaining hooks and the platform teardown must still run.
+      // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
     } catch (err) {
-      if (!(err instanceof Error)) throw err;
       logger.error({ err, hook: name, phase }, 'Lifecycle hook failed');
     }
   }
