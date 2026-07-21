@@ -3,7 +3,8 @@
 // AFTER `createSchema` + the versioned state-table migrations
 // (`state-migrations/*`), so every backfill targets a table that
 // already exists. The DATA_DIR migrations (router_state / sessions /
-// registered_groups) write through the db.ts accessors; the per-group
+// registered_groups) write through the domain-module accessors
+// (db-router-state / db-sessions / db-registered-groups); the per-group
 // #293-wave importers take the connection handle explicitly — a
 // parameter, not a second handle, preserving the single-connection
 // ownership in db.ts.
