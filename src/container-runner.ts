@@ -60,7 +60,7 @@ import {
   ONECLI_MANAGED_PLACEHOLDER,
 } from './onecli-client.js';
 import type { TrustTier } from './trust-tier.js';
-import { rebuildCadenceRegistryForGroup } from './db.js';
+import { rebuildCadenceRegistryForGroup } from './db-tasks.js';
 import { isHandoffActive } from './handoff.js';
 import { sweepStaleInputs } from './ipc-input-sweep.js';
 import { validateAdditionalMounts } from './mount-security.js';

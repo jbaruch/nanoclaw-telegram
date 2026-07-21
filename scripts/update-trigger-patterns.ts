@@ -28,11 +28,11 @@
 import path from 'path';
 import { pathToFileURL } from 'url';
 
+import { initDatabase } from '../src/db.js';
 import {
-  initDatabase,
   getTriggerPatterns,
   setTriggerPatterns,
-} from '../src/db.js';
+} from '../src/db-registered-groups.js';
 import type {
   TriggerPattern,
   TriggerPatternConfig,

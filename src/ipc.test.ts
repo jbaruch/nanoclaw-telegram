@@ -10,7 +10,7 @@ import {
   // `MAINTENANCE_SESSION_NAME` lives in group-queue.ts — import from there
   // so the test tracks any future rename without silently breaking.
 } from './container-runner.js';
-import { shouldStoreBotMessage } from './db.js';
+import { shouldStoreBotMessage } from './db-messages.js';
 import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
 import {
   MAX_TZ_SEGMENTS,

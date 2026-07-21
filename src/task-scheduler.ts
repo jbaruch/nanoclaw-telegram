@@ -20,10 +20,14 @@ import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
 import { computeThresholds } from './threshold.js';
 import { emitSessionTokens } from './usage-telemetry.js';
 import {
+  shouldStoreBotMessage,
+  storeChatMetadata,
+  storeMessage,
+} from './db-messages.js';
+import {
   clearTaskSessionId,
   getActiveLocalScheduledTasks,
   getAllTasks,
-  getCurrentTz,
   getDormantRecurringTasks,
   getDueTasks,
   resurrectZombieTasks,
@@ -32,12 +36,10 @@ import {
   pruneCompletedTasks,
   setTaskNextRun,
   setTaskSessionId,
-  shouldStoreBotMessage,
-  storeChatMetadata,
-  storeMessage,
   updateTask,
   updateTaskAfterRun,
-} from './db.js';
+} from './db-tasks.js';
+import { getCurrentTz } from './db-tz.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';

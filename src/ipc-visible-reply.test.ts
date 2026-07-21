@@ -40,7 +40,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 
-import { _initTestDatabase, setRegisteredGroup } from './db.js';
+import { _initTestDatabase } from './db.js';
+import { setRegisteredGroup } from './db-registered-groups.js';
 import { startIpcWatcher, IpcDeps } from './ipc.js';
 import { RegisteredGroup } from './types.js';
 

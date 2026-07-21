@@ -8,7 +8,8 @@ import fs from 'fs';
 import path from 'path';
 
 import { STORE_DIR } from '../src/config.js';
-import { initDatabase, setRegisteredGroup } from '../src/db.js';
+import { initDatabase } from '../src/db.js';
+import { setRegisteredGroup } from '../src/db-registered-groups.js';
 import { isValidGroupFolder } from '../src/group-folder.js';
 import { logger } from '../src/logger.js';
 import { emitStatus } from './status.js';

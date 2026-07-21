@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import type { LocationRecord } from './types.js';
-import type { TripitSegment } from './db.js';
+import type { TripitSegment } from './db-tz.js';
 import { buildAgentContext, formatAgentContextTag } from './agent-context.js';
 
 const FIXED_NOW = new Date('2026-05-16T13:40:00.000Z');

@@ -19,13 +19,12 @@
  *  3. Start a low-cadence loop (default daily) that walks every
  *     registered group and runs the learner once.
  */
+import { getReactionsForMessage, getMessagesSince } from '../db-messages.js';
 import {
   getAllRegisteredGroups,
-  getReactionsForMessage,
-  getMessagesSince,
   getTriggerPatterns,
   setTriggerPatterns,
-} from '../db.js';
+} from '../db-registered-groups.js';
 import { ASSISTANT_OWNER_HANDLE } from '../config.js';
 import { hostLogsOrchestratorFile } from '../host-logs.js';
 import { findGateDecisions, readHostLog } from '../host-log-parser.js';

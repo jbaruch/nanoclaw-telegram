@@ -3,13 +3,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RegisteredGroup } from './types.js';
 
 // cleanupOrphanNonMainHeartbeats reads getTaskById + deleteTask; keep the
-// rest of db real so the module loads.
-vi.mock('./db.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./db.js')>();
+// rest of db-tasks real so the module loads.
+vi.mock('./db-tasks.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./db-tasks.js')>();
   return { ...actual, getTaskById: vi.fn(), deleteTask: vi.fn() };
 });
 
-import { getTaskById, deleteTask } from './db.js';
+import { getTaskById, deleteTask } from './db-tasks.js';
 import { cleanupOrphanNonMainHeartbeats } from './group-registry.js';
 import { _setRegisteredGroups } from './orchestrator-state.js';
 

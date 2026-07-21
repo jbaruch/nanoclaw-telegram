@@ -40,8 +40,8 @@ describe('database migrations', () => {
       legacyDb.close();
 
       vi.resetModules();
-      const { initDatabase, getAllChats, _closeDatabase } =
-        await import('./db.js');
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      const { getAllChats } = await import('./db-messages.js');
 
       initDatabase();
 
@@ -117,12 +117,9 @@ describe('database migrations', () => {
       legacyDb.close();
 
       vi.resetModules();
-      const {
-        initDatabase,
-        storeMessage,
-        getBotMessageByTelegramId,
-        _closeDatabase,
-      } = await import('./db.js');
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      const { storeMessage, getBotMessageByTelegramId } =
+        await import('./db-messages.js');
 
       // Must not throw — pre-fix, CREATE INDEX on a column that didn't
       // exist yet would throw "no such column: telegram_message_id"
@@ -418,8 +415,8 @@ describe('database migrations', () => {
       legacyDb.close();
 
       vi.resetModules();
-      const { initDatabase, getTaskById, _closeDatabase } =
-        await import('./db.js');
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      const { getTaskById } = await import('./db-tasks.js');
 
       // Must not throw — every column-add migration must be PRAGMA-gated
       // so a re-run on an already-upgraded DB is a no-op (idempotent).
@@ -511,8 +508,8 @@ describe('database migrations', () => {
       legacyDb.close();
 
       vi.resetModules();
-      const { initDatabase, getTaskById, _closeDatabase } =
-        await import('./db.js');
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      const { getTaskById } = await import('./db-tasks.js');
 
       initDatabase();
 
@@ -597,8 +594,8 @@ describe('database migrations', () => {
       legacyDb.close();
 
       vi.resetModules();
-      const { initDatabase, getTaskById, _closeDatabase } =
-        await import('./db.js');
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      const { getTaskById } = await import('./db-tasks.js');
 
       initDatabase();
 
@@ -678,8 +675,8 @@ describe('database migrations', () => {
       legacyDb.close();
 
       vi.resetModules();
-      const { initDatabase, getTaskById, _closeDatabase } =
-        await import('./db.js');
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      const { getTaskById } = await import('./db-tasks.js');
 
       initDatabase();
 
@@ -762,8 +759,8 @@ describe('database migrations', () => {
       legacyDb.close();
 
       vi.resetModules();
-      const { initDatabase, getRegisteredGroup, _closeDatabase } =
-        await import('./db.js');
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      const { getRegisteredGroup } = await import('./db-registered-groups.js');
 
       initDatabase();
 
@@ -793,12 +790,9 @@ describe('database migrations', () => {
       fs.mkdirSync(path.join(tempDir, 'store'), { recursive: true });
 
       vi.resetModules();
-      const {
-        initDatabase,
-        setRegisteredGroup,
-        getRegisteredGroup,
-        _closeDatabase,
-      } = await import('./db.js');
+      const { initDatabase, _closeDatabase } = await import('./db.js');
+      const { setRegisteredGroup, getRegisteredGroup } =
+        await import('./db-registered-groups.js');
 
       initDatabase();
       setRegisteredGroup('benign@g.us', {
@@ -811,11 +805,10 @@ describe('database migrations', () => {
 
       // Second boot — same DB, no dormant row to remove.
       vi.resetModules();
-      const {
-        initDatabase: initAgain,
-        getRegisteredGroup: getAgain,
-        _closeDatabase: closeAgain,
-      } = await import('./db.js');
+      const { initDatabase: initAgain, _closeDatabase: closeAgain } =
+        await import('./db.js');
+      const { getRegisteredGroup: getAgain } =
+        await import('./db-registered-groups.js');
       initAgain();
 
       expect(getAgain('benign@g.us')).toBeDefined();

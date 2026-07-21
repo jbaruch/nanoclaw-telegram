@@ -62,18 +62,16 @@ vi.mock('./container-runner.js', async () => {
 
 import path from 'path';
 
+import { _initTestDatabase } from './db.js';
 import {
-  _initTestDatabase,
-  _seedTzStateForTests,
-  createTask,
   deleteRegisteredGroup,
-  getAllTasks,
   getRegisteredGroup,
-  getTaskById,
   setRegisteredGroup,
   updateGroupTrusted,
   updateGroupTrigger,
-} from './db.js';
+} from './db-registered-groups.js';
+import { createTask, getAllTasks, getTaskById } from './db-tasks.js';
+import { _seedTzStateForTests } from './db-tz.js';
 import { processTaskIpc, IpcDeps } from './ipc.js';
 import { RegisteredGroup, TriggerPattern } from './types.js';
 

@@ -6,39 +6,47 @@ import {
   _initTestDatabase,
   _rawQueryForTests,
   _runCreateSchemaForTests,
-  _seedTzStateForTests,
   _writeRawRegisteredGroup,
-  applyTripitSegmentsToTzState,
-  createTask,
-  logTaskRun,
-  getCurrentTz,
-  deleteRegisteredGroup,
-  deleteTask,
-  deriveTriggerString,
+} from './db.js';
+import {
   getAllChats,
-  getAllRegisteredGroups,
   getBotMessageByTelegramId,
   getChatByJid,
   getLastBotMessageTimestamp,
-  getLatestLocationForSender,
   getMessageById,
   getMessagesSince,
   getNewMessages,
-  getRegisteredGroup,
-  getTaskById,
-  getTriggerPatterns,
   messageExistsInDifferentChat,
-  runTzHeartbeatAdvisory,
-  setRegisteredGroup,
-  setTaskAgentModel,
-  setTriggerPatterns,
   storeChatMetadata,
-  storeLocation,
   storeMessage,
+} from './db-messages.js';
+import {
+  deleteRegisteredGroup,
+  deriveTriggerString,
+  getAllRegisteredGroups,
+  getRegisteredGroup,
+  getTriggerPatterns,
+  setRegisteredGroup,
+  setTriggerPatterns,
   updateGroupTrigger,
+} from './db-registered-groups.js';
+import {
+  createTask,
+  logTaskRun,
+  deleteTask,
+  getTaskById,
+  setTaskAgentModel,
   updateTask,
+} from './db-tasks.js';
+import {
+  _seedTzStateForTests,
+  applyTripitSegmentsToTzState,
+  getCurrentTz,
+  getLatestLocationForSender,
+  runTzHeartbeatAdvisory,
+  storeLocation,
   walkTzSegments,
-} from './db.js';
+} from './db-tz.js';
 import type { ContainerConfig, TriggerPatternConfig } from './types.js';
 import { logger } from './logger.js';
 import { formatMessages } from './router.js';

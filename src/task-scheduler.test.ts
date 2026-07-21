@@ -35,23 +35,26 @@ import {
   _execRawForTests,
   _initTestDatabase,
   _rawQueryForTests,
+} from './db.js';
+import {
+  getAllChats,
+  getLastBotMessageTimestamp,
+  storeChatMetadata,
+} from './db-messages.js';
+import { getSession, setSession } from './db-sessions.js';
+import {
   clearTaskSessionIdsForGroup,
   createTask,
   deleteTask,
   getActiveLocalScheduledTasks,
-  getAllChats,
-  getLastBotMessageTimestamp,
-  getSession,
   getTaskById,
   pruneCompletedTasks,
   resurrectZombieTasks,
-  setSession,
   setTaskNextRun,
   setTaskSessionId,
-  storeChatMetadata,
   updateTask,
   updateTaskAfterRun,
-} from './db.js';
+} from './db-tasks.js';
 import {
   COMPLETED_TASK_TTL_MS,
   DORMANT_CRON_THRESHOLD_MS,

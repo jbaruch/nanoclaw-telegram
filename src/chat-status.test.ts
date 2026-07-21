@@ -38,7 +38,8 @@ vi.mock('./config.js', async () => {
 
 import path from 'path';
 
-import { _initTestDatabase, storeChatMetadata, storeMessage } from './db.js';
+import { _initTestDatabase } from './db.js';
+import { storeChatMetadata, storeMessage } from './db-messages.js';
 import type { ContainerStatus } from './group-queue.js';
 import { processTaskIpc, IpcDeps } from './ipc.js';
 import { RegisteredGroup } from './types.js';

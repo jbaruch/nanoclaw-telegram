@@ -26,13 +26,12 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
+import { _closeDatabase, _initTestDatabase } from './db.js';
 import {
-  _closeDatabase,
-  _initTestDatabase,
   _seedFollowMeTaskForTests,
   clearStalePendingRunAt,
   getActivePendingRunAtNames,
-} from './db.js';
+} from './db-tz.js';
 
 function seedFollowMeTask(args: {
   name: string;

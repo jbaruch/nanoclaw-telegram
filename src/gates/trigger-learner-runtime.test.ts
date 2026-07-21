@@ -24,10 +24,13 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 // Mocks must be declared BEFORE the imports that pull them in. We
 // stub the live DB, the host-log file resolver, and the host-log
 // parser — the unit under test should never touch real I/O.
-vi.mock('../db.js', () => ({
-  getAllRegisteredGroups: vi.fn(),
+vi.mock('../db-messages.js', () => ({
   getReactionsForMessage: vi.fn(),
   getMessagesSince: vi.fn(),
+}));
+
+vi.mock('../db-registered-groups.js', () => ({
+  getAllRegisteredGroups: vi.fn(),
   getTriggerPatterns: vi.fn(),
   setTriggerPatterns: vi.fn(),
 }));
@@ -54,11 +57,8 @@ vi.mock('../config.js', () => ({
   ASSISTANT_OWNER_HANDLE: undefined,
 }));
 
-import {
-  getReactionsForMessage,
-  getMessagesSince,
-  getAllRegisteredGroups,
-} from '../db.js';
+import { getReactionsForMessage, getMessagesSince } from '../db-messages.js';
+import { getAllRegisteredGroups } from '../db-registered-groups.js';
 import { findGateDecisions } from '../host-log-parser.js';
 import {
   buildLearnerPersistence,

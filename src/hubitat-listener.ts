@@ -6,7 +6,7 @@
 import Database from 'better-sqlite3';
 
 import { HUBITAT_HUB_IP } from './config.js';
-import { insertSmartHomeEvent } from './db.js';
+import { insertSmartHomeEvent } from './db-smart-home.js';
 import { logger } from './logger.js';
 
 /** Raw event from Hubitat EventSocket */

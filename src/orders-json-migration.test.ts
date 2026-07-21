@@ -454,7 +454,7 @@ describe('orders-db.json → SQLite migration (#294)', () => {
 // migration-level setup just to exercise the pure fallback chain.
 describe('firstNonEmpty (#347 helper)', () => {
   it('returns the first non-empty string', async () => {
-    const { firstNonEmpty } = await import('./db.js');
+    const { firstNonEmpty } = await import('./db-json-migrations.js');
     expect(firstNonEmpty(['a', 'b'])).toBe('a');
     expect(firstNonEmpty([null, 'b'])).toBe('b');
     expect(firstNonEmpty([undefined, 'b'])).toBe('b');
@@ -463,7 +463,7 @@ describe('firstNonEmpty (#347 helper)', () => {
   });
 
   it('falls through to a fresh ISO timestamp when every candidate is missing', async () => {
-    const { firstNonEmpty } = await import('./db.js');
+    const { firstNonEmpty } = await import('./db-json-migrations.js');
     const before = Date.now();
     const result = firstNonEmpty([null, undefined, '']);
     const after = Date.now();
@@ -479,7 +479,7 @@ describe('firstNonEmpty (#347 helper)', () => {
   });
 
   it('handles an empty candidate list — returns a fresh ISO timestamp', async () => {
-    const { firstNonEmpty } = await import('./db.js');
+    const { firstNonEmpty } = await import('./db-json-migrations.js');
     const result = firstNonEmpty([]);
     expect(typeof result).toBe('string');
     expect(result.length).toBeGreaterThan(0);

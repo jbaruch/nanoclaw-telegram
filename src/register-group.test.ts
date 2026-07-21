@@ -7,11 +7,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 
 import { hydrateRegisteredGroupTriggerPatterns } from './index.js';
+import { _initTestDatabase } from './db.js';
 import {
-  _initTestDatabase,
   getTriggerPatterns,
   setRegisteredGroup,
-} from './db.js';
+} from './db-registered-groups.js';
 import type { RegisteredGroup } from './types.js';
 
 describe('hydrateRegisteredGroupTriggerPatterns (#670)', () => {

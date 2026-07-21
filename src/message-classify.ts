@@ -1,5 +1,5 @@
 import { ASSISTANT_NAME, getTriggerPattern } from './config.js';
-import { getChatByJid, getMessageById } from './db.js';
+import { getChatByJid, getMessageById } from './db-messages.js';
 import { NewMessage, RegisteredGroup } from './types.js';
 
 export function isReplyToBot(msg: NewMessage): boolean {

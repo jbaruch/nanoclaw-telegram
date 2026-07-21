@@ -1,14 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { _closeDatabase, _initTestDatabase } from './db.js';
 import {
-  _closeDatabase,
-  _initTestDatabase,
   clearSessionLengthStateForGroup,
   consumeSessionReset,
   getSessionLengthState,
   markSessionForReset,
   recordSessionTurn,
-} from './db.js';
+} from './db-session-length-cap.js';
 
 // DB-helper tests for the session-length cap. Each test gets a fresh
 // in-memory SQLite via `_initTestDatabase` so writes from one test
