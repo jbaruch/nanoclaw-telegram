@@ -1,3 +1,4 @@
+import { registerGroupIpcHandlers } from './groups.js';
 import { registerTaskIpcHandlers } from './tasks.js';
 
 let registered = false;
@@ -13,4 +14,5 @@ export function registerCoreIpcHandlers(): void {
   if (registered) return;
   registered = true;
   registerTaskIpcHandlers();
+  registerGroupIpcHandlers();
 }
