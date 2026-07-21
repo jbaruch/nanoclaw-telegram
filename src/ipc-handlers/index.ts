@@ -1,3 +1,4 @@
+import { registerGroupIpcHandlers } from './groups.js';
 import { registerTaskIpcHandlers } from './tasks.js';
 
 let registered = false;
@@ -13,4 +14,16 @@ export function registerCoreIpcHandlers(): void {
   if (registered) return;
   registered = true;
   registerTaskIpcHandlers();
+  registerGroupIpcHandlers();
+}
+
+/**
+ * Reset the once-guard alongside `_resetIpcRegistryForTests` so a test
+ * that wiped the registry can re-register the core handlers.
+ *
+ * @internal — test-only export, stripped from the public `.d.ts`
+ * surface (`stripInternal: true`).
+ */
+export function _resetCoreIpcHandlersForTests(): void {
+  registered = false;
 }

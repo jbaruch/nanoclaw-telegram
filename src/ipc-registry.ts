@@ -194,6 +194,20 @@ export function hasIpcHandler(name: string): boolean {
 }
 
 /**
+ * Wipe the handler registry between tests. The registry is module-global
+ * shared state; `testing-standards` requires tests to clean it up so
+ * order never matters. Callers that also exercised
+ * `registerCoreIpcHandlers` must reset its once-guard too — see
+ * `_resetCoreIpcHandlersForTests` in `ipc-handlers/index.ts`.
+ *
+ * @internal — test-only export, stripped from the public `.d.ts`
+ * surface (`stripInternal: true`).
+ */
+export function _resetIpcRegistryForTests(): void {
+  handlers.clear();
+}
+
+/**
  * Dispatch one task payload to its registered handler. Returns false
  * when no handler is registered for `data.type` — the caller falls
  * through to the legacy switch until every command has migrated.
