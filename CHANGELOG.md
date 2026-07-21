@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.117] - 2026-07-21
+
+- Migrated the chat-admin IPC commands to the #845 registry (slice 5): `nuke_session` / `chat_status` / `inspect_gate_decisions` / `nuke_chat` / `send_message_to_chat` move from the `processTaskIpc` switch to `src/ipc-handlers/chat-admin.ts`. The four admin-tile commands keep their in-handler isMain gate (their error envelopes are written unconditionally, including to the orphan result path on a bad requestId — the dispatcher's `requiresMain` gate only writes for valid ids); `nuke_session` stays self-scoped to the verified sourceGroup. Bodies are verbatim transplants: the chat_id/chat_name disambiguation ladder, pre-nuke status snapshot, pool-vs-direct broadcast routing with phantom-row gating, and both outer-boundary result-envelope catches unchanged. Only the ops slice (named host operations) remains in the legacy switch. `ipc.ts` 3294 → 2550 lines.
+
 ## [1.2.116] - 2026-07-21
 
 - Added the generic location-sink registry and moved the flight-assist artifact writer to a host plugin (#849): the channel `onLocation` callback now does `storeLocation` + `runLocationSinks` — core owns location persistence and the fan-out list (`src/location-sinks.ts`, sinks run in registration order, each an isolated outer-boundary catch), while the travel tile's `current-location.json` write (owner-only filtering intact) registers as `src/host-plugins/flight-assist-location-sink.ts`. `registerHostPlugins()` now runs BEFORE channels connect so sinks are registered before the first inbound location. No flight-assist import remains in the core message path; DB location rows unchanged.
