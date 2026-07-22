@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.120] - 2026-07-21
+
+- Removed the `index.ts` re-export barrel left behind by the #749 split (#852): the compatibility shims for `escapeXml`/`formatMessages`, `wipeSessionJsonl`, `_setRegisteredGroups`, `getAvailableGroups`/`isStaleSessionError`, `hydrateRegisteredGroupTriggerPatterns`, and the gate orchestration helpers are gone. Every test now imports from the owning module (`message-pipeline`, `orchestrator-state`, `session-wipe`, `group-registry`, `gates/orchestrator`); `index.ts` is startup wiring only. No runtime behavior change.
+
 ## [1.2.119] - 2026-07-21
 
 - Extracted the Hubitat listener + `smart_home_events` accessors into a self-contained host plugin (#848): `src/hubitat-listener.ts` → `src/host-plugins/hubitat/listener.ts`, `src/db-smart-home.ts` → `src/host-plugins/hubitat/db.ts`, registration in `src/host-plugins/hubitat/index.ts`. The lifecycle hooks now load the listener via dynamic import, so with `HUBITAT_HUB_IP` unset the plugin registers no hooks and the listener/accessor modules never load — no connect attempts on an unconfigured install (only the small registration entrypoint is evaluated). The `smart_home_events` schema migration stays in core `src/db.ts` with ownership documented at the CREATE TABLE; the `HUBITAT_*` config knobs stay in `src/config.ts` with the plugin contract documented (three of the four are reserved for the epic:smart-home product phases). Behavior with the env set is unchanged; listener/accessor bodies moved verbatim.
