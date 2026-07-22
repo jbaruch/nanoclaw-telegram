@@ -2,6 +2,7 @@ import { registerChatAdminIpcHandlers } from './chat-admin.js';
 import { registerGroupConfigIpcHandlers } from './group-config.js';
 import { registerGroupIpcHandlers } from './groups.js';
 import { registerLearnedTriggerIpcHandlers } from './learned-triggers.js';
+import { registerOpsIpcHandlers } from './ops.js';
 import { registerTaskIpcHandlers } from './tasks.js';
 
 let registered = false;
@@ -21,6 +22,7 @@ export function registerCoreIpcHandlers(): void {
   registerGroupConfigIpcHandlers();
   registerLearnedTriggerIpcHandlers();
   registerChatAdminIpcHandlers();
+  registerOpsIpcHandlers();
 }
 
 /**
