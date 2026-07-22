@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.125] - 2026-07-21
+
+- Split tile selection + skill-context materialization out of `container-runner.ts` (#851 slice 3): `selectTiles` (#305), `getRegistryTilesDir`/`getInstalledTiles`, the maintenance skill-blocklist closure pre-scan (`computeEffectiveSkillContextForSpawn`, #544b/#441), and the concurrent-safe `atomicPublishDir`/`rmBestEffort`/`RACE_CODES` publish machinery move verbatim to the new `src/tile-materialize.ts`. Facade re-export keeps the import surface; no behavior change. `container-runner.ts` 4108 → 3721 lines.
+
 ## [1.2.124] - 2026-07-21
 
 - Split the secret env-file machinery out of `container-runner.ts` (#851 slice 2): `SECRET_CONTAINER_VARS`, the OneCLI managed-placeholder map (`ONECLI_MANAGED_VARS`, `BYAIR_MANAGED_PLACEHOLDER`, #564/#640), and the symlink-race-safe `buildSecretEnvFile` writer move verbatim to the new `src/secret-env.ts`. `container-runner.ts` keeps the facade re-export (including the `ONECLI_MANAGED_PLACEHOLDER` pass-through from `onecli-client.ts`); no behavior change.
