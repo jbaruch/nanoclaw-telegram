@@ -39,6 +39,7 @@ skill reads (#854).
 | 002, 003 | `email_feedback` | skill | nanoclaw-admin brief-cleanup |
 | 004 | `scheduled_reminders` | skill | reminders skill |
 | 005 | `email_state`, `email_seen_ids` | skill | tessl__check-email |
+| 005 | `resumable_cycles` | skill | tessl__resumable-cycle |
 | 006 | trusted session tables | skill | tessl__trusted-memory |
 | 007 | morning-brief queue tables | skill | morning-brief |
 | 008 | calendar tables | skill | check-calendar |
