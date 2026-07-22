@@ -36,7 +36,10 @@ EXCLUDES=(
   --exclude='scripts/heartbeat-external.conf'
   --exclude='scripts/heartbeat-external.state'
   --exclude='scripts/audible-backup.sh'
-  --exclude='src/hubitat-listener.ts'
+  # Host plugins are private-by-default (docs/CORE-VS-DOMAIN.md); the
+  # whole directory stays out of the public sync. Replaces the stale
+  # src/hubitat-listener.ts exclude (#866 moved it under host-plugins/).
+  --exclude='src/host-plugins/'
 
   # Personal content
   --exclude='groups/global/SOUL.md'
