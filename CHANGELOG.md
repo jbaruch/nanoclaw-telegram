@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.124] - 2026-07-21
+
+- Split the secret env-file machinery out of `container-runner.ts` (#851 slice 2): `SECRET_CONTAINER_VARS`, the OneCLI managed-placeholder map (`ONECLI_MANAGED_VARS`, `BYAIR_MANAGED_PLACEHOLDER`, #564/#640), and the symlink-race-safe `buildSecretEnvFile` writer move verbatim to the new `src/secret-env.ts`. `container-runner.ts` keeps the facade re-export (including the `ONECLI_MANAGED_PLACEHOLDER` pass-through from `onecli-client.ts`); no behavior change.
+
 ## [1.2.123] - 2026-07-21
 
 - Split the agent-model resolution ladder out of `container-runner.ts` (#851 slice 1): `DEFAULT_AGENT_MODEL`, `resolveAgentModel`, the tier base models (#613), `resolvePerGroupAgentModel` (#395), and `resolveSessionAgentModel` (#509) move verbatim to the new `src/model-resolve.ts`. `container-runner.ts` keeps a facade re-export so the ipc/scheduler/test import surface is unchanged; the env-derived `AGENT_MODEL`/`AGENT_EFFORT` snapshots stay with the spawn code. No behavior change.
