@@ -89,3 +89,33 @@ export const BEST_EFFORT_FS_CODES = [
   'ENOSPC',
   'ENOTEMPTY',
 ] as const;
+
+// Errno codes the spawn path's PRIMARY best-effort fs ops (chown/cp/unlink/
+// readdir/rename/write over mount-target trees) may legitimately raise —
+// including EEXIST/ERR_FS_CP_EEXIST/ENOTEMPTY from concurrent cpSync and the
+// path-shape errnos. Anything else surfaces the unexpected errno. Cleanup-
+// after-error paths use isErrnoCodedError instead (tolerate any fs errno so a
+// cleanup failure can't mask the primary error); the readlink probe uses
+// CR_READLINK_FS_CODES below.
+export const CR_FS_CODES = [
+  'EACCES',
+  'EPERM',
+  'ENOENT',
+  'EISDIR',
+  'ENOTDIR',
+  'ELOOP',
+  'ENAMETOOLONG',
+  'EROFS',
+  'EBUSY',
+  'ENOSPC',
+  'EEXIST',
+  'ERR_FS_CP_EEXIST',
+  'ENOTEMPTY', // concurrent-race errno on cp/rename over a non-empty target
+];
+
+// readlinkSync raises EINVAL when the path exists but is not a symlink — an
+// expected outcome when probing whether a group-scripts dir is already a
+// symlink. EINVAL is NOT in the shared CR_FS_CODES set: for every other fs op
+// it signals a bad argument (a defect) and must propagate, so only the
+// readlink probe adds it.
+export const CR_READLINK_FS_CODES = [...CR_FS_CODES, 'EINVAL'];
