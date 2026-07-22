@@ -62,7 +62,7 @@ Work through in order; first match wins.
    re-run this checklist.
 
 Single-skill *state* (tables, JSON shapes, migrations) has its own policy
-— see #854.
+— see [STATE-OWNERSHIP.md](STATE-OWNERSHIP.md).
 
 ## Private-fork rules
 
