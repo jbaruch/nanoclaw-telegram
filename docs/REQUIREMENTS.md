@@ -28,7 +28,7 @@ This isn't a framework or a platform. It's software that fits each user's exact 
 
 ### Customization = Code Changes
 
-No configuration sprawl. If you want different behavior, modify the code. The codebase is small enough that this is safe and practical. Very minimal things like the trigger word are in config. Everything else - just change the code to do what you want.
+No configuration sprawl. If you want different behavior, modify the code. The codebase is small enough that this is safe and practical. Very minimal things like the trigger word are in config. Everything else - just change the code to do what you want. One refinement from epic #844: "the code" has two kinds — platform core and personal domain. Domain changes go in a host plugin, tile skill, or sidecar entry, not into core files; see [CORE-VS-DOMAIN.md](CORE-VS-DOMAIN.md) for the boundary and the where-does-this-go checklist.
 
 ### AI-Native Development
 
