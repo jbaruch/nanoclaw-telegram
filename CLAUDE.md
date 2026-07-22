@@ -1,6 +1,6 @@
 # NanoClaw
 
-Personal Claude assistant. See [README.md](README.md) for philosophy and setup. See [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for architecture decisions.
+Personal Claude assistant. See [README.md](README.md) for philosophy and setup. See [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for architecture decisions. See [docs/CORE-VS-DOMAIN.md](docs/CORE-VS-DOMAIN.md) for the platform-core vs personal-domain boundary and the "where does this go?" checklist — consult it before adding host-side code.
 
 ## Quick Context
 

@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.121] - 2026-07-21
+
+- Documented the platform-core vs personal-domain boundary (#853): new `docs/CORE-VS-DOMAIN.md` maps the #844 seams (IPC registry, lifecycle hooks, spawn gates, location sinks, sidecar config, host-plugin registration) with the Hubitat/flight-assist extractions as reference examples, a "where does this go?" checklist (tile skill / overlay / host plugin / sidecar / core), and the private-fork rules (host plugins private-by-default, public sync must not grow personal domain). Linked from CLAUDE.md; the "just change the code" (REQUIREMENTS) and "handful of files" (README) claims now carry the core-vs-domain caveat.
+
 ## [1.2.120] - 2026-07-21
 
 - Removed the `index.ts` re-export barrel left behind by the #749 split (#852): the compatibility shims for `escapeXml`/`formatMessages`, `wipeSessionJsonl`, `_setRegisteredGroups`, `getAvailableGroups`/`isStaleSessionError`, `hydrateRegisteredGroupTriggerPatterns`, and the gate orchestration helpers are gone. Every test now imports from the owning module (`message-pipeline`, `orchestrator-state`, `session-wipe`, `group-registry`, `gates/orchestrator`); `index.ts` is startup wiring only. No orchestrator behavior change — nanoclaw is a deployed application, not a published library, and nothing consumes `dist/index.js` as a module entrypoint (the package is now marked `"private": true` to make that explicit).
