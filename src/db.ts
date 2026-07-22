@@ -313,6 +313,10 @@ function createSchema(database: Database.Database): void {
       requires_trigger INTEGER DEFAULT 1
     );
 
+    -- smart_home_events: fed exclusively by the Hubitat host plugin
+    -- (src/host-plugins/hubitat/, #848). Schema migration ownership
+    -- stays here in core so the table exists regardless of plugin
+    -- config; the plugin owns all reads/writes (see its db.ts).
     CREATE TABLE IF NOT EXISTS smart_home_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       device_id TEXT NOT NULL,

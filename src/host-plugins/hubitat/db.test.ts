@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { _closeDatabase, _initTestDatabase } from './db.js';
+import { _closeDatabase, _initTestDatabase } from '../../db.js';
 import {
   cleanupOldSmartHomeEvents,
   getLatestDeviceStates,
@@ -8,7 +8,7 @@ import {
   getSmartHomeEventsSince,
   insertSmartHomeEvent,
   type SmartHomeEvent,
-} from './db-smart-home.js';
+} from './db.js';
 
 // Accessor tests for the smart_home_events table (#751 seam 9). Each
 // test gets a fresh in-memory SQLite via `_initTestDatabase` so writes
