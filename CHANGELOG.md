@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.128] - 2026-07-21
+
+- Split the group-visible IPC snapshots out of `container-runner.ts` (#851 slice 6, final): `writeTasksSnapshot`, `writeGroupsSnapshot`, and the `AvailableGroup` shape move verbatim to the new `src/group-snapshots.ts`. This completes #851 — `container-runner.ts` is now spawn lifecycle only (`ContainerAgentError`, `buildContainerArgs`, `runContainerAgent`) plus the compatibility facades, 4576 → 1838 lines across six slices; every extracted module (`model-resolve`, `secret-env`, `tile-materialize`, `filtered-db`, `volume-mounts`, `session-names`, `group-snapshots`) has a single responsibility and the import graph is acyclic (none imports `container-runner`).
+
 ## [1.2.127] - 2026-07-21
 
 - Split volume-mount construction out of `container-runner.ts` (#851 slice 5): `buildVolumeMounts` — the per-tier mount set, tile-content materialization into the group workspace, OneCLI MITM CA delivery (#640), `SECRET_FILES` /dev/null shadowing, symlink-safe chown — moves verbatim to the new `src/volume-mounts.ts`; the session-slot naming (`DEFAULT_SESSION_NAME`, `MAINTENANCE_SESSION_NAME`, `sessionInputDirName`) moves to the new `src/session-names.ts` so both modules import it without a cycle. Facade re-exports keep the import surface; no behavior change. `container-runner.ts` 3443 → 1921 lines.
