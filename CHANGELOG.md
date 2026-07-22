@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.127] - 2026-07-21
+
+- Split volume-mount construction out of `container-runner.ts` (#851 slice 5): `buildVolumeMounts` — the per-tier mount set, tile-content materialization into the group workspace, OneCLI MITM CA delivery (#640), `SECRET_FILES` /dev/null shadowing, symlink-safe chown — moves verbatim to the new `src/volume-mounts.ts`; the session-slot naming (`DEFAULT_SESSION_NAME`, `MAINTENANCE_SESSION_NAME`, `sessionInputDirName`) moves to the new `src/session-names.ts` so both modules import it without a cycle. Facade re-exports keep the import surface; no behavior change. `container-runner.ts` 3443 → 1921 lines.
+
 ## [1.2.126] - 2026-07-21
 
 - Split the filtered-DB snapshot machinery out of `container-runner.ts` (#851 slice 4): `createFilteredDb` (untrusted-group DB isolation — ATTACH+CTAS DELETE-journal snapshot #287, atomic temp+rename #93, one-shot WAL/SHM recovery retry #100) moves verbatim to the new `src/filtered-db.ts` with its private helpers. The shared `CR_FS_CODES`/`CR_READLINK_FS_CODES` errno sets move to `src/fs-errors.ts` (exported) beside `isFsErrorWithCode`, ending their container-runner-private status. Facade re-export keeps the import surface; no behavior change. `container-runner.ts` 3721 → 3446 lines.
