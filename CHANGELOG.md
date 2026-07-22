@@ -6,7 +6,7 @@ For detailed release notes, see the [full changelog on the documentation site](h
 
 ## [1.2.120] - 2026-07-21
 
-- Removed the `index.ts` re-export barrel left behind by the #749 split (#852): the compatibility shims for `escapeXml`/`formatMessages`, `wipeSessionJsonl`, `_setRegisteredGroups`, `getAvailableGroups`/`isStaleSessionError`, `hydrateRegisteredGroupTriggerPatterns`, and the gate orchestration helpers are gone. Every test now imports from the owning module (`message-pipeline`, `orchestrator-state`, `session-wipe`, `group-registry`, `gates/orchestrator`); `index.ts` is startup wiring only. No runtime behavior change.
+- Removed the `index.ts` re-export barrel left behind by the #749 split (#852): the compatibility shims for `escapeXml`/`formatMessages`, `wipeSessionJsonl`, `_setRegisteredGroups`, `getAvailableGroups`/`isStaleSessionError`, `hydrateRegisteredGroupTriggerPatterns`, and the gate orchestration helpers are gone. Every test now imports from the owning module (`message-pipeline`, `orchestrator-state`, `session-wipe`, `group-registry`, `gates/orchestrator`); `index.ts` is startup wiring only. No orchestrator behavior change — nanoclaw is a deployed application, not a published library, and nothing consumes `dist/index.js` as a module entrypoint (the package is now marked `"private": true` to make that explicit).
 
 ## [1.2.119] - 2026-07-21
 
