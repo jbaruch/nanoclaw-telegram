@@ -6,7 +6,7 @@
 // "no patterns configured" and fail-open on every message until reload.
 import { describe, it, expect, beforeEach } from 'vitest';
 
-import { hydrateRegisteredGroupTriggerPatterns } from './index.js';
+import { hydrateRegisteredGroupTriggerPatterns } from './group-registry.js';
 import { _initTestDatabase } from './db.js';
 import {
   getTriggerPatterns,

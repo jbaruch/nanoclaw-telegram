@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 import { _initTestDatabase } from '../db.js';
+import { _setRegisteredGroups } from '../orchestrator-state.js';
 import {
-  _setRegisteredGroups,
   evaluateGateChain,
   gateAllowsSpawn,
   resolveGatesForGroup,
-} from '../index.js';
+} from './orchestrator.js';
 import {
   RecoverableGateError,
   _unregisterGateForTesting,

@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import { _initTestDatabase } from './db.js';
 import { storeChatMetadata } from './db-messages.js';
-import { getAvailableGroups, _setRegisteredGroups } from './index.js';
+import { getAvailableGroups } from './message-pipeline.js';
+import { _setRegisteredGroups } from './orchestrator-state.js';
 
 beforeEach(() => {
   _initTestDatabase();

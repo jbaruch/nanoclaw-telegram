@@ -18,7 +18,7 @@
 
 import { describe, it, expect } from 'vitest';
 
-import { isStaleSessionError } from './index.js';
+import { isStaleSessionError } from './message-pipeline.js';
 
 describe('isStaleSessionError', () => {
   it('matches the historical "no conversation found" thrown error', () => {

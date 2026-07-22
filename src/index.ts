@@ -93,29 +93,6 @@ import {
 } from './group-registry.js';
 import { ipcDeps } from './ipc-deps.js';
 
-// Re-export for backwards compatibility during refactor
-export { escapeXml, formatMessages } from './router.js';
-export { wipeSessionJsonl } from './session-wipe.js';
-// Orchestrator state moved to ./orchestrator-state.ts (#749); the test
-// helper is re-exported here because routing.test.ts / router-integration
-// import it from ./index.js.
-export { _setRegisteredGroups } from './orchestrator-state.js';
-// Message pipeline moved to ./message-pipeline.ts (#749); these are
-// re-exported because routing.test.ts / stale-session.test.ts import
-// them from ./index.js.
-export { getAvailableGroups, isStaleSessionError } from './message-pipeline.js';
-// Group registry moved to ./group-registry.ts (#749); the trigger-pattern
-// hydrator is re-exported because register-group.test.ts imports it from
-// ./index.js.
-export { hydrateRegisteredGroupTriggerPatterns } from './group-registry.js';
-// Gate orchestration helpers moved to ./gates/orchestrator.ts (#749);
-// re-exported here because the gate tests import them from ./index.js.
-export {
-  resolveGatesForGroup,
-  evaluateGateChain,
-  gateAllowsSpawn,
-} from './gates/orchestrator.js';
-
 // #496 — `follow_me_tasks.pending_run_at` is treated as "fresh" (and
 // therefore worth respecting) for this long after stamp-time. Anything
 // older is presumed orphaned by a dead/killed container and gets

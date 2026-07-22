@@ -414,7 +414,7 @@ describe('inspect_gate_decisions log search (#443)', () => {
 });
 
 // PR #445 review feedback (Copilot): the parser contract sits across two
-// files — `src/index.ts:evaluateGateChain` produces the `'gate decision'`
+// files — `src/gates/orchestrator.ts:evaluateGateChain` produces the `'gate decision'`
 // line, `src/host-log-parser.ts` consumes it. A silent rename of the
 // message text or any field name in the producer would let the parser
 // keep matching nothing while CI stays green. This producer-side spy
@@ -428,7 +428,7 @@ describe('evaluateGateChain producer log shape (#443 / #445 review)', () => {
     // scoped to this it() and `mockRestore()`d in finally.
     const { logger } = await import('./logger.js');
     const infoSpy = vi.spyOn(logger, 'info');
-    const { evaluateGateChain } = await import('./index.js');
+    const { evaluateGateChain } = await import('./gates/orchestrator.js');
     const { _unregisterGateForTesting, registerGate } =
       await import('./gates/index.js');
 
