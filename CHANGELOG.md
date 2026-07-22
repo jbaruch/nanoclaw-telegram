@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.122] - 2026-07-21
+
+- Documented the state-ownership policy (#854): new `docs/STATE-OWNERSHIP.md` — single-skill state is skill-owned (preferred home `/workspace/state/<skill>/` per `stateful-artifacts`), core owns the migration framework and cross-cutting tables, and a new core `state-0NN` migration for single-skill state requires a linked epic exception. Includes the full ownership inventory of state-001..016 (nine skill-owned, seven platform-owned) with shipped tables grandfathered. Linked from `docs/CORE-VS-DOMAIN.md` and gated in `src/state-migrations/README.md`'s add-a-migration steps.
+
 ## [1.2.121] - 2026-07-21
 
 - Documented the platform-core vs personal-domain boundary (#853): new `docs/CORE-VS-DOMAIN.md` maps the #844 seams (IPC registry, lifecycle hooks, spawn gates, location sinks, sidecar config, host-plugin registration) with the Hubitat/flight-assist extractions as reference examples, a "where does this go?" checklist (tile skill / overlay / host plugin / sidecar / core), and the private-fork rules (host plugins private-by-default, public sync must not grow personal domain). Linked from CLAUDE.md; the "just change the code" (REQUIREMENTS) and "handful of files" (README) claims now carry the core-vs-domain caveat.

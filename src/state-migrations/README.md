@@ -15,6 +15,12 @@ discipline used by Alembic, Flyway, and Rails migrations.
 
 ## Adding a new migration
 
+Ownership gate first: if the table is single-skill-owned, it likely
+belongs in `/workspace/state/<skill>/`, not here — see
+[docs/STATE-OWNERSHIP.md](../../docs/STATE-OWNERSHIP.md) (#854) for the
+policy and the exception requirement.
+
+
 1. Add a new entry to the `STATE_MIGRATIONS` array in `index.ts`.
 2. The entry's `version` must equal `index + 1` (contiguous from 1).
    `validateMigrationRegistry` rejects gaps and duplicates at startup.
