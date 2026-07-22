@@ -13,8 +13,9 @@ let registered = false;
  * is config-gated — with `HUBITAT_HUB_IP` unset the hooks are never
  * registered, and the listener + `smart_home_events` accessor modules
  * are never loaded (they're pulled in via dynamic import inside the
- * hooks), so an unconfigured install runs zero Hubitat code at
- * startup/shutdown. The `smart_home_events` schema migration stays in
+ * hooks), so an unconfigured install runs no listener code and makes
+ * no connect attempts — only this registration entrypoint is evaluated
+ * at startup. The `smart_home_events` schema migration stays in
  * core `src/db.ts`; product build-out continues under
  * `epic:smart-home`.
  */

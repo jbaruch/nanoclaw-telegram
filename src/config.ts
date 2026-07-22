@@ -438,8 +438,10 @@ export const TRIGGER_PATTERN = buildTriggerPattern(DEFAULT_TRIGGER);
 // --- Hubitat Smart Home ---
 // Plugin contract (#848): these knobs are read by the Hubitat host
 // plugin (src/host-plugins/hubitat/). HUBITAT_HUB_IP unset = the plugin
-// registers nothing and none of its modules load. The remaining knobs
-// are reserved for the epic:smart-home product phases.
+// registers no lifecycle hooks, and its listener + DB accessor modules
+// are never loaded (no WebSocket connect attempts); only the small
+// registration entrypoint runs. The remaining knobs are reserved for
+// the epic:smart-home product phases.
 export const HUBITAT_HUB_IP =
   process.env.HUBITAT_HUB_IP || envConfig.HUBITAT_HUB_IP || '';
 export const HUBITAT_APP_ID =
