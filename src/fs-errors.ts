@@ -111,11 +111,11 @@ export const CR_FS_CODES = [
   'EEXIST',
   'ERR_FS_CP_EEXIST',
   'ENOTEMPTY', // concurrent-race errno on cp/rename over a non-empty target
-];
+] as const;
 
 // readlinkSync raises EINVAL when the path exists but is not a symlink — an
 // expected outcome when probing whether a group-scripts dir is already a
 // symlink. EINVAL is NOT in the shared CR_FS_CODES set: for every other fs op
 // it signals a bad argument (a defect) and must propagate, so only the
 // readlink probe adds it.
-export const CR_READLINK_FS_CODES = [...CR_FS_CODES, 'EINVAL'];
+export const CR_READLINK_FS_CODES = [...CR_FS_CODES, 'EINVAL'] as const;
