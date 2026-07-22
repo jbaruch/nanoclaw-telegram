@@ -1,6 +1,6 @@
 import { registerFlightAssistLocationSink } from './flight-assist-location-sink.js';
 import { registerFlightAssistSpawnGate } from './flight-assist-spawn-gate.js';
-import { registerHubitatPlugin } from './hubitat.js';
+import { registerHubitatPlugin } from './hubitat/index.js';
 
 let registered = false;
 

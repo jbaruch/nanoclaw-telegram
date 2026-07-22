@@ -9,9 +9,9 @@ const listener = vi.hoisted(() => ({
   stopHubitatListener: vi.fn(),
 }));
 
-vi.mock('../config.js', async () => {
+vi.mock('../../config.js', async () => {
   const actual =
-    await vi.importActual<typeof import('../config.js')>('../config.js');
+    await vi.importActual<typeof import('../../config.js')>('../../config.js');
   return {
     ...actual,
     get HUBITAT_HUB_IP() {
@@ -19,7 +19,7 @@ vi.mock('../config.js', async () => {
     },
   };
 });
-vi.mock('../hubitat-listener.js', () => listener);
+vi.mock('./listener.js', () => listener);
 
 /**
  * Re-import the plugin + lifecycle modules with fresh module state (the
@@ -27,8 +27,8 @@ vi.mock('../hubitat-listener.js', () => listener);
  */
 async function freshImports() {
   vi.resetModules();
-  const plugin = await import('./hubitat.js');
-  const lifecycle = await import('../host-lifecycle.js');
+  const plugin = await import('./index.js');
+  const lifecycle = await import('../../host-lifecycle.js');
   return { plugin, lifecycle };
 }
 

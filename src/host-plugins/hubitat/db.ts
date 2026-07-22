@@ -1,11 +1,12 @@
-// Smart-home event accessors (#751 seam 9, extracted verbatim from
-// src/db.ts).
+// Smart-home event accessors (#751 seam 9; moved into the Hubitat host
+// plugin in #848).
 //
 // Covers the `smart_home_events` table fed by the Hubitat EventSocket
-// listener (`src/hubitat-listener.ts`): event inserts, time-window and
+// listener (`./listener.ts`): event inserts, time-window and
 // per-device selectors, retention cleanup, and the latest-state-per-
-// device/attribute rollup.
-import { db } from './db-connection.js';
+// device/attribute rollup. The table's schema migration stays in core
+// (`src/db.ts`) — see the CREATE TABLE comment there for ownership.
+import { db } from '../../db-connection.js';
 
 export interface SmartHomeEvent {
   id: number;
