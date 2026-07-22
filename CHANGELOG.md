@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.123] - 2026-07-21
+
+- Split the agent-model resolution ladder out of `container-runner.ts` (#851 slice 1): `DEFAULT_AGENT_MODEL`, `resolveAgentModel`, the tier base models (#613), `resolvePerGroupAgentModel` (#395), and `resolveSessionAgentModel` (#509) move verbatim to the new `src/model-resolve.ts`. `container-runner.ts` keeps a facade re-export so the ipc/scheduler/test import surface is unchanged; the env-derived `AGENT_MODEL`/`AGENT_EFFORT` snapshots stay with the spawn code. No behavior change.
+
 ## [1.2.122] - 2026-07-21
 
 - Documented the state-ownership policy (#854): new `docs/STATE-OWNERSHIP.md` — single-skill state is skill-owned (preferred home `/workspace/state/<skill>/` per `stateful-artifacts`), core owns the migration framework and cross-cutting tables, and a new core `state-0NN` migration for single-skill state requires a linked epic exception. Includes the full ownership inventory of state-001..016 (nine skill-owned, seven platform-owned) with shipped tables grandfathered. Linked from `docs/CORE-VS-DOMAIN.md` and gated in `src/state-migrations/README.md`'s add-a-migration steps.
