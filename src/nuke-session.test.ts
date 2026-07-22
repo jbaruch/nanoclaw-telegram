@@ -38,7 +38,7 @@ vi.mock('./config.js', async () => {
   return { ...actual, DATA_DIR: TEST_DATA_DIR };
 });
 
-import { wipeSessionJsonl } from './index.js';
+import { wipeSessionJsonl } from './session-wipe.js';
 
 function projectsDir(group: string, slot: string): string {
   return path.join(
