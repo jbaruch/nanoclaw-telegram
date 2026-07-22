@@ -54,7 +54,9 @@ export interface AvailableGroup {
 /**
  * Write available groups snapshot for the container to read.
  * Only main group can see all available groups (for activation).
- * Non-main groups only see their own registration status.
+ * Non-main trusted groups get an empty `groups` array — they can't
+ * activate groups, so there is nothing for them to see; untrusted
+ * groups don't get the file at all (IPC root not mounted).
  */
 export function writeGroupsSnapshot(
   groupFolder: string,
