@@ -1,5 +1,5 @@
 import { ASSISTANT_OWNER_TG_USER_ID, DATA_DIR } from '../config.js';
-import { writeFlightAssistLocation } from '../flight-assist-location.js';
+import { writeFlightAssistLocation } from './flight-assist-location.js';
 import { registerLocationSink } from '../location-sinks.js';
 import { registeredGroups } from '../orchestrator-state.js';
 

@@ -6,7 +6,7 @@ import path from 'path';
 // Module mocks must come before the imports that consume them. Vitest
 // hoists `vi.mock` automatically, but keeping them physically above the
 // imports makes the read order match the execution order.
-vi.mock('./logger.js', () => ({
+vi.mock('../logger.js', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -25,7 +25,7 @@ vi.mock('./logger.js', () => ({
 // observable target uid/gid differs.
 const TEST_UID = process.getuid?.() ?? 0;
 const TEST_GID = process.getgid?.() ?? 0;
-vi.mock('./config.js', () => ({
+vi.mock('../config.js', () => ({
   HOST_UID: process.getuid?.() ?? 0,
   HOST_GID: process.getgid?.() ?? 0,
 }));
@@ -34,7 +34,7 @@ import {
   CURRENT_LOCATION_SCHEMA_VERSION,
   writeFlightAssistLocation,
 } from './flight-assist-location.js';
-import type { LocationRecord, RegisteredGroup } from './types.js';
+import type { LocationRecord, RegisteredGroup } from '../types.js';
 
 const OWNER_ID = '12345';
 const CHAT_JID = 'tg:-1001';

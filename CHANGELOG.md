@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.129] - 2026-07-22
+
+- Closed the public-sync personal-domain hole (#869): `src/flight-assist-location.ts` (+test) moves under `src/host-plugins/` next to its only consumer, and `scripts/sync-to-public.sh` is reconciled with the post-#844 layout — dead audible_backup/index.ts/db-accessor scrubs removed, the db.ts schema scrub now consumes the #866 ownership comment, a generic `registerHostPlugins()` stub is generated into the public tree (the real `src/host-plugins/` is excluded wholesale but the seam is core, so public wouldn't compile without it), the leak verifier enumerates `registerIpcHandler()` registrations across `src/ipc-handlers/` instead of the removed switch, and both allowlists match the current 33-handler/34-tool rosters. Follow-ups filed from the residue audit: #877 (gate flight-assist registration), #878 (registry-ify the message IPC path), #879 (split ops.ts on next growth).
+
 ## [1.2.128] - 2026-07-21
 
 - Split the group-visible IPC snapshots out of `container-runner.ts` (#851 slice 6, final): `writeTasksSnapshot`, `writeGroupsSnapshot`, and the `AvailableGroup` shape move verbatim to the new `src/group-snapshots.ts`. This completes #851 — `container-runner.ts` is now spawn lifecycle only (`ContainerAgentError`, `buildContainerArgs`, `runContainerAgent`) plus the compatibility facades, 4576 → 1838 lines across six slices; every extracted module (`model-resolve`, `secret-env`, `tile-materialize`, `filtered-db`, `volume-mounts`, `session-names`, `group-snapshots`) has a single responsibility and the import graph is acyclic (none imports `container-runner`).

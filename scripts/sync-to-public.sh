@@ -129,40 +129,23 @@ rm -rf "$PUBLIC_DIR/dist/"
 # --- Apply in-file scrubs ---
 echo "Scrubbing files..."
 
-# Private handlers and MCP tools that must be scrubbed before the sync
-# reaches public. These are TWO INDEPENDENT SURFACES:
-#   - IPC handlers live in `src/ipc.ts` (the switch in the IPC dispatcher)
-#   - MCP tools live in `container/agent-runner/src/ipc-mcp-stdio.ts`
-#     (the `server.tool()` calls the containerized agent exposes)
-# A given private integration may expose one, the other, or both — list
-# its name in each list that applies. The two lists are NOT required to
-# be identical (e.g. `smarthome_status` is an MCP tool with no matching
-# IPC handler). Defense in depth: the allowlist verifier at the bottom
-# of this script enumerates every handler/tool in the scrubbed tree and
-# aborts the sync if anything isn't explicitly approved — so even if
-# you forget to add a name here, the verifier catches it before the
-# export lands on public.
-PRIVATE_IPC_HANDLERS=(
-  'audible_backup'
-)
+# Private MCP tools that must be scrubbed before the sync reaches
+# public. MCP tools live in `container/agent-runner/src/ipc-mcp-stdio.ts`
+# (the `server.tool()` calls the containerized agent exposes). Host-side
+# IPC handlers no longer need a scrub list: since #845 they live in the
+# registry modules under `src/ipc-handlers/` and every remaining core
+# handler is platform-generic (the last private one, `audible_backup`,
+# became the generic `run_sidecar` registry in #750); private host
+# behavior now lives in `src/host-plugins/`, which the rsync excludes
+# wholesale. Defense in depth: the allowlist verifier at the bottom of
+# this script enumerates every handler/tool in the scrubbed tree and
+# aborts the sync if anything isn't explicitly approved — so a new
+# private surface that skips this list still can't leak silently.
 PRIVATE_MCP_TOOLS=(
-  'audible_backup'
   'smarthome_status'
 )
 
-# 1. Remove private case blocks from ipc.ts
-# Anchor on 6-space break (case-level) + blank line to avoid matching inner breaks
-python3 -c "
-import re
-f = '$PUBLIC_DIR/src/ipc.ts'
-code = open(f).read()
-for name in $(printf "'%s', " "${PRIVATE_IPC_HANDLERS[@]}" | python3 -c "import sys; print('[' + sys.stdin.read().rstrip(', ') + ']')"):
-    code = re.sub(r\"    case '\" + name + r\"':.*?\n      break;\n\n\", '', code, flags=re.DOTALL)
-open(f, 'w').write(code)
-print('  ipc.ts: removed private IPC handlers')
-"
-
-# 2. Remove private MCP tools from ipc-mcp-stdio.ts
+# 1. Remove private MCP tools from ipc-mcp-stdio.ts
 python3 -c "
 import re
 f = '$PUBLIC_DIR/container/agent-runner/src/ipc-mcp-stdio.ts'
@@ -174,7 +157,8 @@ open(f, 'w').write(code)
 print('  ipc-mcp-stdio.ts: removed private MCP tools')
 "
 
-# 3. Remove Hubitat from config.ts
+# 2. Remove Hubitat config block from config.ts (the HUBITAT_* knobs
+# stay private; the src/host-plugins/hubitat/ reader is rsync-excluded)
 python3 -c "
 import re
 f = '$PUBLIC_DIR/src/config.ts'
@@ -190,38 +174,25 @@ open(f, 'w').write(code)
 print('  config.ts: removed Hubitat config')
 "
 
-# 4. Remove Hubitat from index.ts
-python3 -c "
-import re
-f = '$PUBLIC_DIR/src/index.ts'
-code = open(f).read()
-code = re.sub(r\"import \{\n  startHubitatListener,\n  stopHubitatListener,\n\} from '\./hubitat-listener\.js';\n\", '', code)
-code = re.sub(r\"  // Start Hubitat smart home listener.*?startHubitatListener\(\);\n\", '', code, flags=re.DOTALL)
-code = re.sub(r\"    stopHubitatListener\(\);\n\", '', code)
-open(f, 'w').write(code)
-print('  index.ts: removed Hubitat listener')
-"
-
-# 5. Remove smart_home_events from db.ts
+# 3. Remove the smart_home_events schema from db.ts (the accessors left
+# db.ts in #751 and live in the rsync-excluded Hubitat plugin since
+# #866; only the CREATE TABLE + its ownership comment remain in core)
 python3 -c "
 import re
 f = '$PUBLIC_DIR/src/db.ts'
 code = open(f).read()
-# Remove smart_home_events table creation
-code = re.sub(r\"\n    CREATE TABLE IF NOT EXISTS smart_home_events.*?CREATE INDEX IF NOT EXISTS idx_she_device_time.*?\n\", '\n', code, flags=re.DOTALL)
-# Remove smart home functions and interface
-code = re.sub(r\"// --- Smart Home event accessors ---.*?// --- JSON migration ---\", '// --- JSON migration ---', code, flags=re.DOTALL)
+code = re.sub(r\"\n    -- smart_home_events: fed exclusively.*?CREATE INDEX IF NOT EXISTS idx_she_device_time.*?\n\", '\n', code, flags=re.DOTALL)
 open(f, 'w').write(code)
-print('  db.ts: removed smart home schema and functions')
+print('  db.ts: removed smart_home_events schema')
 "
 
-# 6. Remove reclaim-tripit from Dockerfile
+# 4. Remove reclaim-tripit from Dockerfile
 if [ -f "$PUBLIC_DIR/Dockerfile.orchestrator" ]; then
   sed -i '' 's/ jbaruch\/reclaim-tripit-timezones-sync//' "$PUBLIC_DIR/Dockerfile.orchestrator"
   echo "  Dockerfile.orchestrator: removed reclaim-tripit package"
 fi
 
-# 7. Create generic SOUL-untrusted.md (excluded by rsync but Dockerfile.orchestrator needs it)
+# 5. Create generic SOUL-untrusted.md (excluded by rsync but Dockerfile.orchestrator needs it)
 cat > "$PUBLIC_DIR/groups/global/SOUL-untrusted.md" << 'SOUL_EOF'
 # Soul — Public Identity
 
@@ -249,7 +220,30 @@ Your natural state is silence. When you have nothing for the user to read, write
 SOUL_EOF
 echo "  SOUL-untrusted.md: created generic template"
 
-# 8. Scrub private integration references from comments and docs
+# 6. Create a generic src/host-plugins/index.ts. The real directory is
+# rsync-excluded wholesale (personal domain, private-by-default per
+# docs/CORE-VS-DOMAIN.md), but the registration seam itself is platform
+# core: src/index.ts calls registerHostPlugins() at startup. Without
+# this stub the public tree doesn't compile.
+mkdir -p "$PUBLIC_DIR/src/host-plugins"
+cat > "$PUBLIC_DIR/src/host-plugins/index.ts" << 'HOSTPLUGINS_EOF'
+let registered = false;
+
+/**
+ * Register host-plugin modules (spawn gates, lifecycle hooks, location
+ * sinks, IPC handlers) exactly once at startup. Host plugins carry
+ * fork-specific policy the platform core must not hard-code — see
+ * docs/CORE-VS-DOMAIN.md for the boundary and the registries available.
+ * Add your plugins under src/host-plugins/ and register them here.
+ */
+export function registerHostPlugins(): void {
+  if (registered) return;
+  registered = true;
+}
+HOSTPLUGINS_EOF
+echo "  host-plugins/index.ts: created generic registration stub"
+
+# 7. Scrub private integration references from comments and docs
 python3 -c "
 import re
 
@@ -403,19 +397,31 @@ echo ""
 APPROVED_PUBLIC_IPC_HANDLERS=(
   'cancel_task'
   'chat_status'
+  'delete_learned_trigger'
+  'fetch_markdown'
   'github_backup'
+  'inspect_gate_decisions'
+  'list_installed_tiles'
+  'list_learned_triggers'
   'nuke_chat'
   'nuke_session'
   'pause_task'
+  'persist_global_file'
   'persist_tz_segments'
+  'promote_learned_trigger'
   'promote_staging'
   'push_staged_to_branch'
+  'reenable_learned_trigger'
   'refresh_groups'
   'register_group'
   'resume_task'
+  'run_sidecar'
   'schedule_task'
+  'send_message_to_chat'
+  'set_additional_tiles'
   'set_agent_model'
   'set_maintenance_agent_model'
+  'set_session_caps'
   'set_task_agent_model'
   'set_trigger'
   'set_trusted'
@@ -426,28 +432,38 @@ APPROVED_PUBLIC_IPC_HANDLERS=(
 APPROVED_PUBLIC_MCP_TOOLS=(
   'cancel_task'
   'chat_status'
+  'fetch_markdown'
   'github_backup'
+  'inspect_gate_decisions'
+  'list_installed_tiles'
   'list_tasks'
   'nuke_chat'
   'nuke_session'
   'pause_task'
+  'persist_global_file'
   'persist_tz_segments'
   'promote_staging'
   'push_staged_to_branch'
   'react_to_message'
   'register_group'
   'resume_task'
+  'run_sidecar'
   'schedule_task'
   'send_file'
   'send_message'
+  'send_message_to_chat'
+  'send_voice'
+  'set_additional_tiles'
   'set_agent_model'
   'set_maintenance_agent_model'
+  'set_session_caps'
   'set_task_agent_model'
   'set_trigger'
   'set_trusted'
   'tessl_update'
   'unregister_group'
   'update_task'
+  'write_trusted_memory'
 )
 
 # Extract actual handler/tool names via Python so the enumeration is
@@ -468,15 +484,21 @@ APPROVED_PUBLIC_MCP_TOOLS=(
 # via an env var instead of shell interpolation to keep the body
 # bash-inert.
 actual_handlers=$(PUBLIC_DIR="$PUBLIC_DIR" python3 <<'PY'
+import glob
 import os
 import re
-with open(os.environ["PUBLIC_DIR"] + "/src/ipc.ts") as f:
-    text = f.read()
-# Match case 'name': at the start of a line (any amount of leading
-# whitespace, spaces or tabs). Anchoring at line start excludes
-# occurrences embedded in strings/comments.
-names = sorted(set(re.findall(r"^[ \t]*case '([a-z_]+)':", text, re.MULTILINE)))
-print("\n".join(names))
+# Since #845 host IPC handlers are registerIpcHandler() registrations in
+# the registry modules under src/ipc-handlers/ (the ipc.ts switch is
+# gone). Enumerate every registration across those modules; host-plugin
+# registrations don't appear here because src/host-plugins/ ships only
+# the generic stub in the public tree.
+names = set()
+for path in glob.glob(os.environ["PUBLIC_DIR"] + "/src/ipc-handlers/*.ts"):
+    if path.endswith(".test.ts"):
+        continue
+    with open(path) as f:
+        names |= set(re.findall(r"registerIpcHandler\(\s*'([a-z_]+)'", f.read()))
+print("\n".join(sorted(names)))
 PY
 )
 actual_tools=$(PUBLIC_DIR="$PUBLIC_DIR" python3 <<'PY'
@@ -500,7 +522,7 @@ PY
 # through unnoticed.
 if [ -z "$actual_handlers" ] || [ -z "$actual_tools" ]; then
   echo "LEAK verifier enumerated zero entries — parser broken or files missing:"
-  [ -z "$actual_handlers" ] && echo "  handlers: none found in $PUBLIC_DIR/src/ipc.ts"
+  [ -z "$actual_handlers" ] && echo "  handlers: none found in $PUBLIC_DIR/src/ipc-handlers/*.ts"
   [ -z "$actual_tools" ] && echo "  tools:    none found in $PUBLIC_DIR/container/agent-runner/src/ipc-mcp-stdio.ts"
   echo "Aborting sync. Inspect the scrubbed tree at $PUBLIC_DIR and"
   echo "update the extraction patterns in scripts/sync-to-public.sh."

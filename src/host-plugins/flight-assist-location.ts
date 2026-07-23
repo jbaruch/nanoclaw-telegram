@@ -1,9 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 
-import { HOST_GID, HOST_UID } from './config.js';
-import { logger } from './logger.js';
-import type { LocationRecord, RegisteredGroup } from './types.js';
+import { HOST_GID, HOST_UID } from '../config.js';
+import { logger } from '../logger.js';
+import type { LocationRecord, RegisteredGroup } from '../types.js';
 
 /**
  * Authoritative schema definition for the `current-location.json`

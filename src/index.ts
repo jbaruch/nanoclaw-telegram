@@ -99,8 +99,8 @@ import { ipcDeps } from './ipc-deps.js';
 // reclaimed via `clearStalePendingRunAt`.
 //
 // Sized for the largest plausible follow-me task duration with margin:
-// the morning-brief skill (the longest in the fleet) caps around
-// 10–15 min of agent work; 1h gives 4× margin for an unusually slow
+// the longest scheduled skills in this fleet cap around 10–15 min of
+// agent work; 1h gives 4× margin for an unusually slow
 // run while still recovering well before the next-day fire. A shorter
 // window (e.g. 10 min) would risk reclaiming an in-flight lock from a
 // genuinely long but legitimate run; a longer window delays recovery
