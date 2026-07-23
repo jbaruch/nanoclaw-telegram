@@ -209,8 +209,9 @@ export function _resetIpcRegistryForTests(): void {
 
 /**
  * Dispatch one task payload to its registered handler. Returns false
- * when no handler is registered for `data.type` — the caller falls
- * through to the legacy switch until every command has migrated.
+ * when no handler is registered for `data.type` — since #845 every
+ * core command registers here, so an unhandled type means a wiring bug
+ * or a stale container payload (the caller logs it).
  */
 export async function dispatchIpcTask(
   ctx: IpcHandlerContext,
