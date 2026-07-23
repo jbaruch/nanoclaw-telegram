@@ -5,7 +5,7 @@ import type { LocationRecord } from '../types.js';
 const writer = vi.hoisted(() => ({
   writeFlightAssistLocation: vi.fn(),
 }));
-vi.mock('../flight-assist-location.js', () => writer);
+vi.mock('./flight-assist-location.js', () => writer);
 
 /**
  * Re-import the plugin + sink-registry modules with fresh module state

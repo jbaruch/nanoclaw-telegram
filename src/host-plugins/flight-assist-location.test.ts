@@ -34,7 +34,7 @@ import {
   CURRENT_LOCATION_SCHEMA_VERSION,
   writeFlightAssistLocation,
 } from './flight-assist-location.js';
-import type { LocationRecord, RegisteredGroup } from './types.js';
+import type { LocationRecord, RegisteredGroup } from '../types.js';
 
 const OWNER_ID = '12345';
 const CHAT_JID = 'tg:-1001';
