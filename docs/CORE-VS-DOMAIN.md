@@ -68,10 +68,10 @@ Single-skill *state* (tables, JSON shapes, migrations) has its own policy
 
 - **Host plugins are private-by-default.** They exist in
   `jbaruch/nanoclaw`, not in the public fork; `scripts/sync-to-public.sh`
-  excludes `src/host-plugins/` wholesale in its rsync exclude list. (The
-  script's older in-file regex scrubs have drifted from the post-#844
-  layout — reconciling or retiring them is #869.) A plugin only goes
-  public deliberately, as a generic example with the personal specifics
+  excludes `src/host-plugins/` wholesale in its rsync exclude list and
+  generates a generic `registerHostPlugins()` stub in its place so the
+  public tree still compiles (#869). A plugin only goes public
+  deliberately, as a generic example with the personal specifics
   removed.
 - **Public sync must not grow personal domain.** When reviewing a
   `sync/*` PR on the public repo, `src/host-plugins/` content beyond the
