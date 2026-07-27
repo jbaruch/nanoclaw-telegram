@@ -128,10 +128,12 @@ export function registerOpsFetchIpcHandlers(): void {
               // Playwright / Chromium fault could echo the input URL.
               // Scrub the exact URL we passed in before writing so a
               // query-string auth secret can't leak via stderr.
+              // Redact EVERY url-shaped token, not just the one we sent: a
+              // redirect can surface a signed/session URL in stderr that was
+              // never equal to the requested URL.
               const urlString = parsedUrl.toString();
-              const safeStderr = scrubFetchedUrl(
-                stderr.slice(-2000),
-                urlString,
+              const safeStderr = redactUrlsInText(
+                scrubFetchedUrl(stderr.slice(-2000), urlString),
               );
               logger.warn(
                 {
@@ -221,9 +223,11 @@ export function registerOpsFetchIpcHandlers(): void {
             // URL, session token) would then persist that secret into the
             // result envelope the agent reads. A successful fetch is exactly
             // the case where nobody thinks to look.
-            const safeSuccessStderr = scrubFetchedUrl(
-              stderr,
-              parsedUrl.toString(),
+            // Same treatment as both failure paths: a successful fetch can
+            // still have followed redirects, so stderr may carry a
+            // redirect-added credential the requested URL never had.
+            const safeSuccessStderr = redactUrlsInText(
+              scrubFetchedUrl(stderr, parsedUrl.toString()),
             ).slice(-500);
             fs.writeFileSync(
               resultPath,
