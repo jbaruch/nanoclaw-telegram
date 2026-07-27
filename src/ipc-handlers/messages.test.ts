@@ -72,7 +72,11 @@ beforeEach(() => {
   groupDir = path.join(TEST_GROUPS_DIR, SOURCE_GROUP);
   fs.mkdirSync(groupDir, { recursive: true });
   secretPath = path.join(path.dirname(TEST_DATA_DIR), '.env');
-  fs.writeFileSync(secretPath, 'GITHUB_TOKEN=ghp_supersecret\n');
+  // Neutral sentinel, deliberately not credential-shaped: the test only
+  // needs to prove this file never reaches sendFile, and a committed
+  // token-looking fixture trips secret scanners (`coding-policy:
+  // no-secrets` bans them even in tests).
+  fs.writeFileSync(secretPath, 'EXFIL_MARKER=not-a-secret\n');
   sendFile = vi.fn().mockResolvedValue('sent-1');
   _resetIpcMessageRegistryForTests();
   _resetMessageIpcHandlersForTests();
