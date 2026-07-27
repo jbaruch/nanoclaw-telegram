@@ -98,10 +98,11 @@ describe('registerOpsTilesIpcHandlers', () => {
 });
 
 describe('promote_staging handler', () => {
-  it('refuses a non-main caller', async () => {
+  it('refuses a non-main caller with an envelope, not silence', async () => {
     // promote_staging pushes to a tile repo with the host's GITHUB_TOKEN —
     // the isMain gate is what stops a compromised non-main container from
-    // driving it by writing a task file directly.
+    // driving it by writing a task file directly. The refusal is reported
+    // (#885): a silent return reads as a hang to the polling caller.
     await run(
       {
         type: 'promote_staging',
@@ -111,7 +112,7 @@ describe('promote_staging handler', () => {
       },
       false,
     );
-    expect(readEnvelope()).toBeUndefined();
+    expect(String(readEnvelope()?.error)).toContain('Only the main group');
   });
 
   it('rejects a tileName outside the host-side allowlist', async () => {
@@ -132,22 +133,44 @@ describe('promote_staging handler', () => {
     expect(String(envelope?.error)).toContain('../../etc');
   });
 
-  it('does nothing when tileName or skillName is absent', async () => {
-    // Documents CURRENT behavior, which is the hang #885 tracks: the whole
-    // body is gated on all three fields, so a requestId-bearing payload
-    // missing one produces no envelope and the caller polls until timeout.
-    // Pinned here so the fix for #885 has to change this test deliberately.
+  it('answers a payload missing tileName with an envelope (#885)', async () => {
+    // Pre-#885 the whole body was gated on all three fields, so this
+    // produced no result file and the in-container runHostOperation()
+    // polled until its own timeout.
     await run({ type: 'promote_staging', requestId: REQUEST_ID }, true);
-    expect(readEnvelope()).toBeUndefined();
+    expect(String(readEnvelope()?.error)).toContain('"tileName"');
+  });
+
+  it('answers a payload missing skillName with an envelope (#885)', async () => {
+    await run(
+      {
+        type: 'promote_staging',
+        requestId: REQUEST_ID,
+        tileName: 'nanoclaw-core',
+      },
+      true,
+    );
+    expect(String(readEnvelope()?.error)).toContain('"skillName"');
+  });
+
+  it('rejects a non-string tileName that skipped the MCP schema (#885)', async () => {
+    // The IPC tasks dir is writable by any container, so a payload can
+    // arrive without ever passing the tool's zod enum.
+    await run(
+      {
+        type: 'promote_staging',
+        requestId: REQUEST_ID,
+        tileName: 42 as unknown as string,
+        skillName: 'status',
+      },
+      true,
+    );
+    expect(String(readEnvelope()?.error)).toContain('"tileName"');
   });
 });
 
 describe('push_staged_to_branch handler', () => {
-  it('refuses a non-main caller WITH an envelope', async () => {
-    // Deliberate asymmetry, pinned so it isn't "fixed" by accident:
-    // promote_staging returns silently for a non-main caller, while this
-    // one writes a refusal. The silent variant is the hang #885 tracks —
-    // this handler already does the right thing.
+  it('refuses a non-main caller with an envelope', async () => {
     await run(
       {
         type: 'push_staged_to_branch',
@@ -173,6 +196,32 @@ describe('push_staged_to_branch handler', () => {
       true,
     );
     expect(String(readEnvelope()?.error)).toContain('Invalid tileName');
+  });
+
+  it('answers a payload missing branch with an envelope (#885)', async () => {
+    await run(
+      {
+        type: 'push_staged_to_branch',
+        requestId: REQUEST_ID,
+        tileName: 'nanoclaw-core',
+        commitMessage: 'fix: x',
+      },
+      true,
+    );
+    expect(String(readEnvelope()?.error)).toContain('"branch"');
+  });
+
+  it('answers a payload missing commitMessage with an envelope (#885)', async () => {
+    await run(
+      {
+        type: 'push_staged_to_branch',
+        requestId: REQUEST_ID,
+        tileName: 'nanoclaw-core',
+        branch: 'fix/x',
+      },
+      true,
+    );
+    expect(String(readEnvelope()?.error)).toContain('"commitMessage"');
   });
 });
 

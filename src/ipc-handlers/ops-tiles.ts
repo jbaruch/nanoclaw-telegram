@@ -36,13 +36,46 @@ const KNOWN_TILE_NAMES: ReadonlySet<string> = new Set([
 export function registerOpsTilesIpcHandlers(): void {
   registerIpcHandler('promote_staging', {
     handler: ({ data, sourceGroup, isMain }) => {
-      if (data.requestId && data.tileName && data.skillName) {
+      // Enter on `requestId` alone and validate inside (#885). Gating the
+      // whole body on the required fields meant a payload carrying a
+      // requestId but missing `tileName`/`skillName` produced NO result
+      // file, and the in-container `runHostOperation()` reads an absent
+      // file as a hang until its own timeout. The MCP tool's zod schema
+      // validates client-side, but the IPC tasks dir is writable by any
+      // container, so a payload that skips the MCP path arrives here
+      // unvalidated. Same boundary-validation shape as `run_sidecar`.
+      if (data.requestId) {
+        const promoteResultPath = scriptResultPath(sourceGroup, data);
+
         if (!isMain) {
           logger.warn({ sourceGroup }, 'Unauthorized promote_staging attempt');
+          fs.writeFileSync(
+            promoteResultPath,
+            JSON.stringify({
+              error: 'Only the main group can promote staging content.',
+            }),
+          );
           return;
         }
 
-        const promoteResultPath = scriptResultPath(sourceGroup, data);
+        if (typeof data.tileName !== 'string' || !data.tileName) {
+          fs.writeFileSync(
+            promoteResultPath,
+            JSON.stringify({
+              error: 'promote_staging: "tileName" must be a non-empty string.',
+            }),
+          );
+          return;
+        }
+        if (typeof data.skillName !== 'string' || !data.skillName) {
+          fs.writeFileSync(
+            promoteResultPath,
+            JSON.stringify({
+              error: 'promote_staging: "skillName" must be a non-empty string.',
+            }),
+          );
+          return;
+        }
 
         if (!KNOWN_TILE_NAMES.has(data.tileName)) {
           logger.warn(
@@ -404,12 +437,10 @@ export function registerOpsTilesIpcHandlers(): void {
 
   registerIpcHandler('push_staged_to_branch', {
     handler: ({ data, sourceGroup, isMain }) => {
-      if (
-        data.requestId &&
-        data.tileName &&
-        data.branch &&
-        data.commitMessage
-      ) {
+      // Same #885 boundary validation as `promote_staging` above: enter on
+      // `requestId` and answer every malformed payload with an envelope,
+      // never with silence the caller reads as a hang.
+      if (data.requestId) {
         const pushResultPath = scriptResultPath(sourceGroup, data);
         if (!isMain) {
           logger.warn(
@@ -420,6 +451,37 @@ export function registerOpsTilesIpcHandlers(): void {
             pushResultPath,
             JSON.stringify({
               error: 'Only the main group can push to tile branches.',
+            }),
+          );
+          return;
+        }
+
+        if (typeof data.tileName !== 'string' || !data.tileName) {
+          fs.writeFileSync(
+            pushResultPath,
+            JSON.stringify({
+              error:
+                'push_staged_to_branch: "tileName" must be a non-empty string.',
+            }),
+          );
+          return;
+        }
+        if (typeof data.branch !== 'string' || !data.branch) {
+          fs.writeFileSync(
+            pushResultPath,
+            JSON.stringify({
+              error:
+                'push_staged_to_branch: "branch" must be a non-empty string.',
+            }),
+          );
+          return;
+        }
+        if (typeof data.commitMessage !== 'string' || !data.commitMessage) {
+          fs.writeFileSync(
+            pushResultPath,
+            JSON.stringify({
+              error:
+                'push_staged_to_branch: "commitMessage" must be a non-empty string.',
             }),
           );
           return;
