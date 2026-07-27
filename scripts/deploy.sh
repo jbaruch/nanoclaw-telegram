@@ -275,14 +275,33 @@ fi
 # The emitted values include a gateway credential in the proxy URL, so
 # the array is never echoed; only its effect is.
 tessl_exec_env_flags() {
-    local line
+    local line out errfile rc
     TESSL_EXEC_FLAGS=()
+    errfile=$(mktemp) || { echo "ERROR: mktemp failed while resolving tessl gateway env" >&2; return 1; }
+    # stdout carries KEY=VALUE pairs (one of which embeds a gateway
+    # credential) and is never echoed; stderr carries diagnostics only, so
+    # it is safe to surface. Captured separately for exactly that reason —
+    # `2>/dev/null` here would hide a broken bridge behind a silent
+    # fallback, which is the failure shape this whole change exists to
+    # remove (`coding-policy: error-handling` Shell Error Handling).
+    set +e
+    out=$(docker exec nanoclaw node -e \
+        'import("/app/dist/tessl-env.js").then(m => m.printTesslChildEnv())' \
+        2>"$errfile")
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        echo "WARNING: could not resolve the OneCLI env for tessl (exit $rc) — running tessl on the direct path with whatever ambient auth exists." >&2
+        echo "         $(tr '\n' ' ' < "$errfile" | tail -c 400)" >&2
+        rm -f "$errfile"
+        return 0
+    fi
+    rm -f "$errfile"
+    # Empty output is the normal unconfigured-OneCLI case, not a failure.
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         TESSL_EXEC_FLAGS+=(-e "$line")
-    done < <(docker exec nanoclaw node -e \
-        'import("/app/dist/tessl-env.js").then(m => m.printTesslChildEnv()).catch(() => {})' \
-        2>/dev/null)
+    done <<< "$out"
 }
 
 echo "3. Updating tiles from registry..."

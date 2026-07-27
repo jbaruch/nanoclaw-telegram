@@ -53,7 +53,21 @@ const TESSL_CA_BASENAME = 'onecli-tessl-ca.pem';
  */
 export async function buildTesslChildEnv(): Promise<NodeJS.ProcessEnv> {
   if (!isOneCliConfigured()) return {};
-  const cfg = await getOneCliOutboundConfig('main');
+  let cfg: { proxyUrl: string; ca: string } | null;
+  try {
+    cfg = await getOneCliOutboundConfig('main');
+  } catch (err: unknown) {
+    // Documented as fail-open, so it has to actually fail open: this runs
+    // inside the `tessl_update` IPC handler, where a propagating rejection
+    // would surface as a handler crash instead of a degraded-but-working
+    // tessl run. A non-Error throw is a bug and still propagates.
+    if (!(err instanceof Error)) throw err;
+    logger.warn(
+      { err: err.message },
+      'OneCLI outbound config lookup failed — running tessl on the direct path with ambient auth',
+    );
+    return {};
+  }
   if (!cfg) {
     logger.warn(
       'OneCLI configured but the gateway returned no outbound config — running tessl on the direct path with ambient auth',
