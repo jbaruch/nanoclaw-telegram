@@ -5,6 +5,7 @@ import {
   formatSnitchmdHeader,
   parseFetchMarkdownUrl,
   parseSnitchmdStdout,
+  redactUrlForHeader,
   scrubFetchedUrl,
 } from './fetch-markdown-args.js';
 
@@ -413,5 +414,48 @@ describe('scrubFetchedUrl', () => {
 
   it('scrubs a URL embedded mid-token', () => {
     expect(scrubFetchedUrl(`[${SIGNED}]`, SIGNED)).toBe('[<URL>]');
+  });
+});
+
+describe('redactUrlForHeader', () => {
+  it('keeps scheme, host and path intact', () => {
+    expect(redactUrlForHeader('https://example.com/docs/page')).toBe(
+      'https://example.com/docs/page',
+    );
+  });
+
+  it('replaces a query string with a marker rather than dropping it silently', () => {
+    // The reader should still learn that parameters were involved.
+    expect(
+      redactUrlForHeader('https://example.com/d?sig=SECRET&token=t0ken'),
+    ).toBe('https://example.com/d?<redacted>');
+  });
+
+  it('strips userinfo credentials', () => {
+    const out = redactUrlForHeader('https://alice:hunter2@example.com/p');
+    expect(out).not.toContain('hunter2');
+    expect(out).not.toContain('alice');
+    expect(out).toBe('https://example.com/p');
+  });
+
+  it('strips the fragment', () => {
+    expect(redactUrlForHeader('https://example.com/p#tok=SECRET')).toBe(
+      'https://example.com/p',
+    );
+  });
+
+  it('redacts a redirect-added token, which the caller never saw', () => {
+    // final_url is the worst case: a redirect chain can ADD a credential
+    // the requested URL never carried.
+    const finalUrl = 'https://cdn.example.com/obj?X-Amz-Signature=DEADBEEF';
+    const out = redactUrlForHeader(finalUrl);
+    expect(out).not.toContain('DEADBEEF');
+    expect(out).toBe('https://cdn.example.com/obj?<redacted>');
+  });
+
+  it('refuses to pass through a value it cannot parse', () => {
+    // An unparseable value is exactly the case where we can't reason about
+    // what it contains, so it must not reach the envelope verbatim.
+    expect(redactUrlForHeader('not a url at all')).toBe('<unparseable-url>');
   });
 });

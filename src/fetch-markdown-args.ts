@@ -208,6 +208,41 @@ export function scrubFetchedUrl(text: string, url: string): string {
   return text.split(url).join('<URL>');
 }
 
+/**
+ * Strip the secret-bearing parts of a URL before it is persisted into the
+ * `fetch_markdown` result header (`coding-policy: no-secrets`).
+ *
+ * The header's `# source:` line is useful attribution — it names what was
+ * actually fetched, which matters when a redirect moved the target. But it
+ * ends up in the envelope the agent reads and in the conversation, and a
+ * fetch can legitimately authenticate through the URL itself: a signed S3
+ * link, a session token in the query, `user:pass@host` userinfo. `final_url`
+ * makes this worse than the requested URL — a redirect chain can ADD a token
+ * the caller never saw.
+ *
+ * So: keep scheme, host and path; drop userinfo and fragment outright; and
+ * replace a non-empty query with a fixed `?<redacted>` marker so the reader
+ * can still tell parameters were involved without learning them.
+ *
+ * A value that doesn't parse as a URL is returned as the fixed string
+ * `<unparseable-url>` rather than passed through — an unparseable value is
+ * exactly the case where we cannot reason about what it contains.
+ */
+export function redactUrlForHeader(raw: string): string {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return '<unparseable-url>';
+  }
+  u.username = '';
+  u.password = '';
+  u.hash = '';
+  const hadQuery = u.search.length > 0;
+  u.search = '';
+  return hadQuery ? `${u.toString()}?<redacted>` : u.toString();
+}
+
 export function formatSnitchmdHeader(
   payload: SnitchmdPayload,
   fallbackUrl: string,
@@ -220,7 +255,7 @@ export function formatSnitchmdHeader(
       : '';
   return (
     `# ${payload.title || '(untitled)'}\n` +
-    `# source: ${payload.final_url || fallbackUrl}\n` +
+    `# source: ${redactUrlForHeader(payload.final_url || fallbackUrl)}\n` +
     `# chars: ${chars}${qualityLine}\n\n`
   );
 }
