@@ -9,6 +9,7 @@ import { deleteAllSessions } from '../db-sessions.js';
 import { getActivePendingRunAtNames } from '../db-tz.js';
 import { registerIpcHandler, scriptResultPath } from '../ipc-registry.js';
 import { logger } from '../logger.js';
+import { buildTesslChildEnv } from '../tessl-env.js';
 
 // Host-side allowlist for the five tile-repo names the promote flow is
 // wired against. The MCP tools' zod enums (ipc-mcp-stdio.ts::TILE_NAMES)
@@ -203,7 +204,7 @@ export function registerOpsTilesIpcHandlers(): void {
   });
 
   registerIpcHandler('tessl_update', {
-    handler: ({ data, sourceGroup, isMain, deps }) => {
+    handler: async ({ data, sourceGroup, isMain, deps }) => {
       if (data.requestId) {
         const tesslResultPath = scriptResultPath(sourceGroup, data);
         if (!isMain) {
@@ -260,13 +261,22 @@ export function registerOpsTilesIpcHandlers(): void {
 
         logger.info({ sourceGroup }, 'Running tessl_update');
 
+        // Route through the OneCLI gateway when configured (#887) so the
+        // registry credential comes from the vault. Scoped to this child
+        // only — never the whole container (INCIDENT-746).
+        const tesslEnv = await buildTesslChildEnv();
+
         execFile(
           'bash',
           [
             '-c',
             'cd /app/tessl-workspace && tessl update --yes --accept-warnings --agent claude-code 2>&1',
           ],
-          { timeout: 150_000, maxBuffer: 2 * 1024 * 1024 },
+          {
+            timeout: 150_000,
+            maxBuffer: 2 * 1024 * 1024,
+            env: { ...process.env, ...tesslEnv },
+          },
           (error, stdout) => {
             if (error) {
               logger.error(
