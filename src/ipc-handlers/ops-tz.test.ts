@@ -9,8 +9,8 @@ import {
 describe('coerceTzSegments', () => {
   it('passes a segment array through untouched', () => {
     const segments = [
-      { timezone: 'America/New_York', from: '2026-08-01', to: '2026-08-05' },
-      { timezone: 'Europe/London', from: '2026-09-10', to: '2026-09-14' },
+      { timezone: 'America/New_York', from: '2025-08-01', to: '2025-08-05' },
+      { timezone: 'Europe/London', from: '2025-09-10', to: '2025-09-14' },
     ];
     const result = coerceTzSegments(segments);
     expect(result.wasArray).toBe(true);
@@ -49,8 +49,8 @@ describe('coerceTzSegments', () => {
 describe('classifyTzPersist', () => {
   const seg = {
     timezone: 'America/New_York',
-    from: '2026-08-01',
-    to: '2026-08-05',
+    from: '2025-08-01',
+    to: '2025-08-05',
   };
 
   it('denies a non-main caller regardless of payload', () => {
