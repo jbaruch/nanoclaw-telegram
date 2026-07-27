@@ -7,7 +7,7 @@ import {
 } from './container-runner.js';
 import { shouldStoreBotMessage } from './db-messages.js';
 import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
-import { applyMaintenancePrefix } from './ipc.js';
+import { applyMaintenancePrefix } from './maintenance-prefix.js';
 
 describe('applyMaintenancePrefix', () => {
   it('prepends [M] for the maintenance session', () => {

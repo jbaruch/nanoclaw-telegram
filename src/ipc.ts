@@ -1,25 +1,20 @@
 import fs from 'fs';
 import path from 'path';
 
-import {
-  ASSISTANT_NAME,
-  DATA_DIR,
-  GROUPS_DIR,
-  IPC_POLL_INTERVAL,
-} from './config.js';
+import { DATA_DIR, IPC_POLL_INTERVAL } from './config.js';
 import { SqliteError } from 'better-sqlite3';
 import { GrammyError, HttpError } from 'grammy';
 
 import { isFsErrorWithCode } from './fs-errors.js';
-import { sendPoolMessage } from './channels/telegram.js';
 import { AvailableGroup } from './container-runner.js';
-import { MAINTENANCE_SESSION_NAME } from './group-queue.js';
-import { shouldStoreBotMessage, storeMessage } from './db-messages.js';
 import type { ContainerStatus } from './group-queue.js';
 import { registerCoreIpcHandlers } from './ipc-handlers/index.js';
+import {
+  dispatchIpcMessage,
+  type IpcMessagePayload,
+} from './ipc-message-registry.js';
 import { dispatchIpcTask, type IpcTaskPayload } from './ipc-registry.js';
 import { logger } from './logger.js';
-import { stripInternalTags } from './router.js';
 import { RegisteredGroup } from './types.js';
 
 // Errno codes the IPC poller's best-effort fs ops (readdir, stat, unlink,
@@ -189,34 +184,6 @@ export interface IpcDeps {
 
 let ipcWatcherRunning = false;
 
-// Prefix for outbound text emitted by the maintenance-session AyeAye.
-// Without the prefix, a scheduled-task reply looks identical to a
-// user-facing reply in the chat, which confused Baruch when he
-// responded to `[heartbeat from maintenance]` messages as if they were
-// live conversation. The prefix is applied BOTH to Telegram-bound text
-// AND to the messages.db copy so the full trail shows provenance —
-// heartbeat accounting, future message recap, etc.
-const MAINTENANCE_MESSAGE_PREFIX = '[M] ';
-
-/**
- * Prepend `[M] ` if the payload came from the maintenance session.
- * Idempotent — if the text already begins with the prefix (double-
- * hop case, agent that hand-typed it, whatever), we don't stack.
- * Exported for the unit test; the production caller is in the same
- * file so the public API is a single entry point.
- *
- * @internal — test-only export, should not be part of the public
- * `.d.ts` surface (we build with `stripInternal: true`).
- */
-export function applyMaintenancePrefix(
-  text: string,
-  sessionName: string | undefined,
-): string {
-  if (sessionName !== MAINTENANCE_SESSION_NAME) return text;
-  if (text.startsWith(MAINTENANCE_MESSAGE_PREFIX)) return text;
-  return MAINTENANCE_MESSAGE_PREFIX + text;
-}
-
 /**
  * Start the IPC polling loop. Returns a stop handle that halts the
  * loop and cancels the pending poll — production ignores it (the
@@ -229,6 +196,14 @@ export function startIpcWatcher(deps: IpcDeps): () => void {
     return () => {};
   }
   ipcWatcherRunning = true;
+
+  // Wire the command registries before the first poll. Pre-#878 only
+  // `processTaskIpc` registered (the message path was an inline `else if`
+  // chain needing no registry), so a watcher that saw a message file
+  // before any task file would have found an empty message registry and
+  // silently discarded it. Idempotent — `processTaskIpc` still calls it
+  // for direct (test) invocations that bypass the watcher.
+  registerCoreIpcHandlers();
 
   const ipcBaseDir = path.join(DATA_DIR, 'ipc');
   fs.mkdirSync(ipcBaseDir, { recursive: true });
@@ -278,21 +253,7 @@ export function startIpcWatcher(deps: IpcDeps): () => void {
             // this, a throw after `data = JSON.parse(...)` but before
             // the per-type branches would leave the error-log blind to
             // what content was in flight.
-            let data:
-              | {
-                  type?: string;
-                  chatJid?: string;
-                  text?: string;
-                  sender?: string;
-                  replyToMessageId?: string;
-                  pin?: boolean;
-                  emoji?: string;
-                  messageId?: string;
-                  filePath?: string;
-                  caption?: string;
-                  [key: string]: unknown;
-                }
-              | undefined;
+            let data: IpcMessagePayload | undefined;
             try {
               const stat = fs.statSync(filePath);
               if (stat.size > 1_048_576) {
@@ -319,360 +280,14 @@ export function startIpcWatcher(deps: IpcDeps): () => void {
                 fs.unlinkSync(filePath);
                 continue;
               }
-              if (
-                data.type === 'react_to_message' &&
-                data.chatJid &&
-                data.emoji &&
-                deps.sendReaction
-              ) {
-                const targetGroup = registeredGroups[data.chatJid];
-                if (
-                  isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
-                ) {
-                  await deps.sendReaction(
-                    data.chatJid,
-                    data.messageId || undefined,
-                    data.emoji,
-                  );
-                  logger.info(
-                    {
-                      chatJid: data.chatJid,
-                      emoji: data.emoji,
-                      sourceGroup,
-                    },
-                    'IPC reaction sent',
-                  );
-                } else {
-                  logger.warn(
-                    { chatJid: data.chatJid, sourceGroup },
-                    'Unauthorized IPC reaction attempt blocked',
-                  );
-                }
-              } else if (
-                data.type === 'send_file' &&
-                data.chatJid &&
-                data.filePath &&
-                deps.sendFile
-              ) {
-                const targetGroup = registeredGroups[data.chatJid];
-                if (
-                  isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
-                ) {
-                  // Translate container path to host path
-                  const containerPath: string = data.filePath;
-                  let hostPath: string;
-                  if (containerPath.startsWith('/workspace/group/')) {
-                    hostPath = path.join(
-                      GROUPS_DIR,
-                      sourceGroup,
-                      containerPath.replace('/workspace/group/', ''),
-                    );
-                  } else if (containerPath.startsWith('/workspace/trusted/')) {
-                    hostPath = path.join(
-                      process.cwd(),
-                      'trusted',
-                      containerPath.replace('/workspace/trusted/', ''),
-                    );
-                  } else {
-                    logger.warn(
-                      { containerPath, sourceGroup },
-                      'send_file: path outside allowed mounts',
-                    );
-                    fs.unlinkSync(filePath);
-                    continue;
-                  }
-
-                  if (fs.existsSync(hostPath)) {
-                    // Strip <internal>…</internal> blocks from the caption
-                    // so agent-written internal reasoning never leaks —
-                    // neither to Telegram (display) nor to messages.db
-                    // (which feeds heartbeat's answered-check accounting).
-                    // Mirrors the message-payload stripping below. If the
-                    // caption is fully internal, send the file with no
-                    // caption; the file itself is still useful payload.
-                    const strippedCaption = data.caption
-                      ? stripInternalTags(data.caption)
-                      : '';
-                    // Tag maintenance-session captions so Baruch can
-                    // tell a scheduled-task file-send from a live one.
-                    // Skip the prefix entirely when the caption is
-                    // empty — `[M] ` alone on a silent file-send is
-                    // noise.
-                    const cleanCaption = strippedCaption
-                      ? applyMaintenancePrefix(
-                          strippedCaption,
-                          typeof data.sessionName === 'string'
-                            ? data.sessionName
-                            : undefined,
-                        )
-                      : '';
-                    const sentFileMsgId = await deps.sendFile(
-                      data.chatJid,
-                      hostPath,
-                      cleanCaption || undefined,
-                      data.replyToMessageId,
-                    );
-                    // Store the cleaned caption (if any) so the message
-                    // shows up in accounting the same as text messages.
-                    // Without this, `send_file` is a bypass: captions
-                    // reach Telegram but never hit messages.db, so
-                    // heartbeat unanswered-checks think the agent never
-                    // responded. Store the cleaned version — storing the
-                    // raw caption would let a caption whose visible text
-                    // was empty after stripping count as an "answered"
-                    // response. Gate on `sentFileMsgId` (#428) — a
-                    // failed send must not leave a phantom row that
-                    // marks the user as answered when delivery never
-                    // landed.
-                    const captionDelivered = shouldStoreBotMessage(
-                      data.chatJid,
-                      sentFileMsgId,
-                    );
-                    if (cleanCaption && captionDelivered) {
-                      storeMessage({
-                        id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-                        chat_jid: data.chatJid,
-                        sender: ASSISTANT_NAME,
-                        sender_name: ASSISTANT_NAME,
-                        content: cleanCaption,
-                        timestamp: new Date().toISOString(),
-                        is_from_me: true,
-                        is_bot_message: true,
-                        reply_to_message_id: data.replyToMessageId,
-                        // Stamp the Telegram message id so post-hoc
-                        // "which bot send corresponds to Telegram
-                        // message X" queries match the orchestrator
-                        // text-reply path (`src/index.ts:1659`) and
-                        // the `send_message` handler. Pre-#428
-                        // sendFile returned void so this column was
-                        // unavailable; now that we have the id, no
-                        // reason not to record it.
-                        telegram_message_id: sentFileMsgId,
-                      });
-                    } else if (cleanCaption && !captionDelivered) {
-                      logger.warn(
-                        {
-                          chatJid: data.chatJid,
-                          hostPath,
-                          captionLen: cleanCaption.length,
-                        },
-                        'send_file: skipping caption storeMessage — sendFile returned no message id (delivery failed)',
-                      );
-                    }
-                    // #722: same visible-send anchor release as the
-                    // send_message path — a delivered file (with or
-                    // without caption) is a visible reply.
-                    if (typeof sentFileMsgId === 'string') {
-                      deps.onVisibleReply?.(data.chatJid, sourceGroup);
-                    }
-                    logger.info(
-                      { chatJid: data.chatJid, hostPath, sourceGroup },
-                      'IPC file sent',
-                    );
-                  } else {
-                    logger.warn(
-                      { hostPath, containerPath, sourceGroup },
-                      'send_file: file not found on host',
-                    );
-                  }
-                }
-              } else if (data.type === 'message' && data.chatJid && data.text) {
-                logger.debug(
-                  {
-                    sourceGroup,
-                    chatJid: data.chatJid,
-                    rawTextLen: data.text.length,
-                    rawPreview: String(data.text).slice(0, 80),
-                    hasSender: Boolean(data.sender),
-                    senderValue: data.sender,
-                    hasReplyTo: Boolean(data.replyToMessageId),
-                    hasPin: Boolean(data.pin),
-                    ipcFile: file,
-                  },
-                  '[ipc] Received send_message IPC',
-                );
-                // Strip <internal> tags via the shared helper so this
-                // path can't drift from the send_file caption path
-                // above. If nothing remains, skip silently.
-                const strippedText = stripInternalTags(data.text);
-                if (!strippedText) {
-                  logger.debug(
-                    { sourceGroup },
-                    '[ipc] send_message suppressed (all internal)',
-                  );
-                  fs.unlinkSync(filePath);
-                  continue;
-                }
-                // Tag maintenance-session text so Baruch can tell a
-                // scheduled-task reply from a live conversational one.
-                // Applied AFTER internal-tag stripping (no point
-                // prefixing text we're about to suppress) and BEFORE
-                // both the Telegram send and the messages.db store, so
-                // the prefix flows through accounting uniformly.
-                const cleanText = applyMaintenancePrefix(
-                  strippedText,
-                  typeof data.sessionName === 'string'
-                    ? data.sessionName
-                    : undefined,
-                );
-                logger.debug(
-                  {
-                    sourceGroup,
-                    chatJid: data.chatJid,
-                    cleanLen: cleanText.length,
-                    cleanPreview: cleanText.slice(0, 80),
-                  },
-                  '[ipc] send_message after stripInternalTags + maintenance-prefix',
-                );
-
-                // Authorization: verify this group can send to this chatJid
-                const targetGroup = registeredGroups[data.chatJid];
-                const authOk =
-                  isMain ||
-                  Boolean(targetGroup && targetGroup.folder === sourceGroup);
-                logger.debug(
-                  {
-                    sourceGroup,
-                    chatJid: data.chatJid,
-                    isMain,
-                    targetGroupFolder: targetGroup?.folder,
-                    authOk,
-                  },
-                  '[ipc] send_message auth check',
-                );
-                if (authOk) {
-                  const usePool = Boolean(
-                    data.sender && data.chatJid.startsWith('tg:'),
-                  );
-                  logger.debug(
-                    {
-                      sourceGroup,
-                      chatJid: data.chatJid,
-                      path: usePool ? 'pool' : 'direct',
-                      sender: data.sender,
-                    },
-                    '[ipc] send_message path decision',
-                  );
-                  // Capture whichever send path's message ID applies. Both
-                  // `sendPoolMessage` and `deps.sendMessage` return the
-                  // Telegram-native message ID (or undefined if the send
-                  // failed or the channel isn't Telegram). Stored on the
-                  // messages row so "which bot send produced Telegram ID X"
-                  // is queryable without log spelunking.
-                  // Normalize immediately: both send paths can return
-                  // `string | void | undefined`. Collapsing to the
-                  // `string | undefined` domain up front keeps downstream
-                  // uses (`pinMessage`, `storeMessage`) type-safe without
-                  // truthiness checks that would also drop legitimate
-                  // empty-string / '0' IDs if Telegram ever returns them.
-                  let sentMsgId: string | undefined;
-                  if (usePool) {
-                    // `usePool` is only true when `data.sender` is a non-
-                    // empty string — TS just can't re-narrow across the
-                    // intermediate `Boolean(...)` boundary. The `!` is
-                    // safe by the `usePool` definition directly above.
-                    const poolResult = await sendPoolMessage(
-                      data.chatJid,
-                      cleanText,
-                      data.sender!,
-                      sourceGroup,
-                    );
-                    sentMsgId =
-                      typeof poolResult === 'string' ? poolResult : undefined;
-                    logger.debug(
-                      {
-                        sourceGroup,
-                        chatJid: data.chatJid,
-                        sentMsgId,
-                      },
-                      '[ipc] sendPoolMessage returned',
-                    );
-                  } else {
-                    const directResult = await deps.sendMessage(
-                      data.chatJid,
-                      cleanText,
-                      data.replyToMessageId,
-                    );
-                    sentMsgId =
-                      typeof directResult === 'string'
-                        ? directResult
-                        : undefined;
-                    logger.debug(
-                      {
-                        sourceGroup,
-                        chatJid: data.chatJid,
-                        sentMsgId,
-                      },
-                      '[ipc] deps.sendMessage returned',
-                    );
-                    // Pin the message if requested
-                    if (data.pin && sentMsgId && deps.pinMessage) {
-                      await deps.pinMessage(data.chatJid, sentMsgId);
-                      logger.debug(
-                        { sourceGroup, chatJid: data.chatJid, sentMsgId },
-                        '[ipc] pinMessage returned',
-                      );
-                    }
-                  }
-                  // #722: a confirmed visible reply releases the target
-                  // chat's reply anchor at the send boundary — the SDK
-                  // result's mark-displayed consumption arrives too late
-                  // for pipes landing in the gap. Own-chat gating lives
-                  // in the consumer (src/index.ts).
-                  if (typeof sentMsgId === 'string') {
-                    deps.onVisibleReply?.(data.chatJid, sourceGroup);
-                  }
-                  // Gate the bot-row write on send success — see the
-                  // `shouldStoreBotMessage` helper for the full rationale
-                  // (phantom rows on swallowed Telegram sends would
-                  // silence the heartbeat / unanswered-cron and feed
-                  // cascading hallucinated quote-replies downstream).
-                  if (shouldStoreBotMessage(data.chatJid, sentMsgId)) {
-                    const botRowId = `bot-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-                    storeMessage({
-                      id: botRowId,
-                      chat_jid: data.chatJid,
-                      sender: data.sender || ASSISTANT_NAME,
-                      sender_name: data.sender || ASSISTANT_NAME,
-                      content: cleanText,
-                      timestamp: new Date().toISOString(),
-                      is_from_me: true,
-                      is_bot_message: true,
-                      reply_to_message_id: data.replyToMessageId,
-                      telegram_message_id: sentMsgId,
-                    });
-                    logger.info(
-                      {
-                        chatJid: data.chatJid,
-                        sourceGroup,
-                        botRowId,
-                        contentLen: cleanText.length,
-                      },
-                      '[ipc] send_message complete — DB row written',
-                    );
-                  } else {
-                    logger.error(
-                      {
-                        chatJid: data.chatJid,
-                        sourceGroup,
-                        contentLen: cleanText.length,
-                      },
-                      '[ipc] send_message failed — Telegram returned no message id; skipping DB row to avoid phantom bot reply (would silence heartbeat / unanswered alerts)',
-                    );
-                  }
-                } else {
-                  logger.warn(
-                    {
-                      chatJid: data.chatJid,
-                      sourceGroup,
-                      targetGroupFolder: targetGroup?.folder,
-                    },
-                    '[ipc] Unauthorized IPC message attempt blocked',
-                  );
-                }
-              }
+              await dispatchIpcMessage({
+                data,
+                sourceGroup,
+                isMain,
+                registeredGroups,
+                deps,
+                file,
+              });
               fs.unlinkSync(filePath);
             } catch (err) {
               // Quarantine a bad file (recoverable data/transport failure) and
