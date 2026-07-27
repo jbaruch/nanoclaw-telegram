@@ -9,6 +9,7 @@ import {
   registerIpcMessageHandler,
   type IpcMessageContext,
 } from '../ipc-message-registry.js';
+import { isExpectedFsError } from '../fs-errors.js';
 import { logger } from '../logger.js';
 import { stripInternalTags } from '../router.js';
 import { applyMaintenancePrefix } from '../maintenance-prefix.js';
@@ -70,16 +71,17 @@ async function sendFile(ctx: IpcMessageContext): Promise<void> {
     // Translate container path to host path
     const containerPath: string = payloadFilePath;
     let hostPath: string;
+    let allowedBase: string;
     if (containerPath.startsWith('/workspace/group/')) {
+      allowedBase = path.join(GROUPS_DIR, sourceGroup);
       hostPath = path.join(
-        GROUPS_DIR,
-        sourceGroup,
+        allowedBase,
         containerPath.replace('/workspace/group/', ''),
       );
     } else if (containerPath.startsWith('/workspace/trusted/')) {
+      allowedBase = path.join(process.cwd(), 'trusted');
       hostPath = path.join(
-        process.cwd(),
-        'trusted',
+        allowedBase,
         containerPath.replace('/workspace/trusted/', ''),
       );
     } else {
@@ -95,7 +97,47 @@ async function sendFile(ctx: IpcMessageContext): Promise<void> {
       return;
     }
 
-    if (fs.existsSync(hostPath)) {
+    // Containment gate. The prefix check above only proves the payload
+    // STARTS inside an allowed mount; the suffix is attacker-controlled,
+    // so `/workspace/group/../../.env` used to `path.join` its way to the
+    // host's `.env` and get sent to a chat. Resolve through realpath — the
+    // group folder is container-writable, so a planted symlink is the same
+    // escape by another route — and require the result to stay under the
+    // base the prefix advertised. Same shape as `resolveTravelDbPath` in
+    // the flight-assist spawn gate and `checkTaskEvidence` in the
+    // scheduler. ENOENT here means the file simply isn't there, which
+    // falls through to the existing not-found branch.
+    let resolvedHostPath: string;
+    try {
+      resolvedHostPath = fs.realpathSync(hostPath);
+      const resolvedBase = fs.realpathSync(allowedBase);
+      if (
+        resolvedHostPath !== resolvedBase &&
+        !resolvedHostPath.startsWith(resolvedBase + path.sep)
+      ) {
+        logger.warn(
+          { containerPath, hostPath, resolvedHostPath, sourceGroup },
+          'send_file: resolved path escapes the allowed mount (traversal or symlink) — refusing',
+        );
+        return;
+      }
+    } catch (err: unknown) {
+      // A missing file (or a broken/looping symlink) is not an escape —
+      // report it the same way an absent file has always been reported.
+      // Anything that isn't a filesystem errno is a bug and propagates.
+      if (!isExpectedFsError(err)) throw err;
+      // `isExpectedFsError` in fs-errors.ts returns a plain boolean (the
+      // spawn-gates copy is the type-predicate one), so read the errno off
+      // the narrowed-by-hand value.
+      const code = (err as NodeJS.ErrnoException).code;
+      logger.warn(
+        { hostPath, containerPath, sourceGroup, code },
+        'send_file: file not found on host',
+      );
+      return;
+    }
+
+    if (fs.existsSync(resolvedHostPath)) {
       // Strip <internal>…</internal> blocks from the caption
       // so agent-written internal reasoning never leaks —
       // neither to Telegram (display) nor to messages.db
@@ -119,7 +161,7 @@ async function sendFile(ctx: IpcMessageContext): Promise<void> {
         : '';
       const sentFileMsgId = await sendFileDep(
         chatJid,
-        hostPath,
+        resolvedHostPath,
         cleanCaption || undefined,
         data.replyToMessageId,
       );
