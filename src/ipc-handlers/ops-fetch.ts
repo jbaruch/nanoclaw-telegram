@@ -9,6 +9,7 @@ import {
   formatSnitchmdHeader,
   parseFetchMarkdownUrl,
   parseSnitchmdStdout,
+  scrubFetchedUrl,
 } from '../fetch-markdown-args.js';
 import { registerIpcHandler, scriptResultPath } from '../ipc-registry.js';
 import { logger } from '../logger.js';
@@ -127,10 +128,10 @@ export function registerOpsFetchIpcHandlers(): void {
               // Scrub the exact URL we passed in before writing so a
               // query-string auth secret can't leak via stderr.
               const urlString = parsedUrl.toString();
-              const safeStderr = stderr
-                .slice(-2000)
-                .split(urlString)
-                .join('<URL>');
+              const safeStderr = scrubFetchedUrl(
+                stderr.slice(-2000),
+                urlString,
+              );
               logger.warn(
                 {
                   sourceGroup,
@@ -171,14 +172,14 @@ export function registerOpsFetchIpcHandlers(): void {
               // diagnostic so a query-string auth secret doesn't ride
               // the parse-failure path back to the agent.
               const urlString = parsedUrl.toString();
-              const safeStderr = stderr
-                .slice(-2000)
-                .split(urlString)
-                .join('<URL>');
-              const safeStdout = stdout
-                .slice(-2000)
-                .split(urlString)
-                .join('<URL>');
+              const safeStderr = scrubFetchedUrl(
+                stderr.slice(-2000),
+                urlString,
+              );
+              const safeStdout = scrubFetchedUrl(
+                stdout.slice(-2000),
+                urlString,
+              );
               logger.warn(
                 {
                   sourceGroup,
@@ -209,11 +210,23 @@ export function registerOpsFetchIpcHandlers(): void {
               },
               'fetch_markdown completed',
             );
+            // Scrub the input URL out of stderr on the SUCCESS path too, not
+            // just the failure paths (`coding-policy: no-secrets`). snitchmd's
+            // stderr is normally a benign `snitchmd: title=... chars=...`
+            // line, but a Playwright/Chromium warning can echo the URL it was
+            // given — and a fetch whose auth rides in the query string (signed
+            // URL, session token) would then persist that secret into the
+            // result envelope the agent reads. A successful fetch is exactly
+            // the case where nobody thinks to look.
+            const safeSuccessStderr = scrubFetchedUrl(
+              stderr,
+              parsedUrl.toString(),
+            ).slice(-500);
             fs.writeFileSync(
               resultPath,
               JSON.stringify({
                 stdout: header + markdown,
-                stderr: stderr.slice(-500) || undefined,
+                stderr: safeSuccessStderr || undefined,
               }),
             );
           },

@@ -5,6 +5,7 @@ import {
   formatSnitchmdHeader,
   parseFetchMarkdownUrl,
   parseSnitchmdStdout,
+  scrubFetchedUrl,
 } from './fetch-markdown-args.js';
 
 describe('parseFetchMarkdownUrl', () => {
@@ -375,5 +376,42 @@ describe('parseSnitchmdStdout', () => {
     } finally {
       (globalThis as { JSON: typeof JSON }).JSON.parse = original;
     }
+  });
+});
+
+describe('scrubFetchedUrl', () => {
+  const SIGNED =
+    'https://example.com/doc?sig=abc123SECRET&token=t0ken&expires=1234567890';
+
+  it('replaces every occurrence of the fetched URL', () => {
+    const stderr = `snitchmd: navigating ${SIGNED}\nwarn: timeout on ${SIGNED}\n`;
+    const out = scrubFetchedUrl(stderr, SIGNED);
+    expect(out).not.toContain('abc123SECRET');
+    expect(out).not.toContain('t0ken');
+    expect(out).toBe('snitchmd: navigating <URL>\nwarn: timeout on <URL>\n');
+  });
+
+  it('leaves output that never mentions the URL untouched', () => {
+    const stderr = 'snitchmd: title=Example quality=0.9 chars=1200\n';
+    expect(scrubFetchedUrl(stderr, SIGNED)).toBe(stderr);
+  });
+
+  it('treats the URL as literal text, not a regex pattern', () => {
+    // A URL is arbitrary user-supplied input; regex metacharacters in it
+    // must not become pattern syntax (or blow up the replace).
+    const weird = 'https://example.com/a+b(c)?x=.*&y=[z]';
+    const text = `fetching ${weird} now`;
+    expect(scrubFetchedUrl(text, weird)).toBe('fetching <URL> now');
+  });
+
+  it('returns the text unchanged for an empty url rather than exploding it', () => {
+    // `''.split('')` would shred the string into characters and rejoin it
+    // with <URL> between every one.
+    const text = 'snitchmd: nothing to scrub';
+    expect(scrubFetchedUrl(text, '')).toBe(text);
+  });
+
+  it('scrubs a URL embedded mid-token', () => {
+    expect(scrubFetchedUrl(`[${SIGNED}]`, SIGNED)).toBe('[<URL>]');
   });
 });

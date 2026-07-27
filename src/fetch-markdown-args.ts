@@ -187,6 +187,27 @@ export function parseSnitchmdStdout(stdout: string): ParsePayloadResult {
  * downstream skills (wiki, check-cfps) consume the header for
  * provenance, so a silent reformat would break their parsing.
  */
+/**
+ * Replace every occurrence of the fetched URL in `text` with `<URL>`.
+ *
+ * snitchmd's stderr is normally a benign `snitchmd: title=... chars=...`
+ * line, but a Playwright/Chromium fault can echo the URL it was handed —
+ * and a fetch whose auth rides in the query string (a signed URL, a
+ * session token) would then persist that secret into the result envelope
+ * the agent reads, or into the host log (`coding-policy: no-secrets`).
+ *
+ * Every path that surfaces snitchmd output — failure, parse-failure, AND
+ * success — routes through this. The success path is the one that matters
+ * most in practice: it is the case nobody thinks to inspect.
+ *
+ * Plain `split`/`join` rather than a regex: the URL is arbitrary
+ * user-supplied text and would need escaping to be a safe pattern.
+ */
+export function scrubFetchedUrl(text: string, url: string): string {
+  if (!url) return text;
+  return text.split(url).join('<URL>');
+}
+
 export function formatSnitchmdHeader(
   payload: SnitchmdPayload,
   fallbackUrl: string,
