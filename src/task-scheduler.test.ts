@@ -11,6 +11,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const { mockRunContainerAgent } = vi.hoisted(() => ({
   mockRunContainerAgent: vi.fn(),
 }));
+
+// The pre-spawn gate suite below registers the flight-assist trip-window
+// gate through `registerHostPlugins()`, which is opt-in per #877. This
+// file exercises the CONFIGURED install, so override just that one knob
+// — a partial mock rather than a `process.env` write, which would
+// outlive the file (`process.env` is worker-global, and `vi.stubEnv`
+// can't help: `config.js` resolves the value at import time, before any
+// test body runs). `host-plugins/index.test.ts` covers the unconfigured
+// install.
+vi.mock('./config.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('./config.js')>('./config.js');
+  return { ...actual, FLIGHT_ASSIST_ENABLED: true };
+});
 vi.mock('./container-runner.js', () => ({
   runContainerAgent: mockRunContainerAgent,
   writeTasksSnapshot: vi.fn(),
@@ -4932,11 +4946,11 @@ describe('runTask pre-spawn gate (#754)', () => {
   };
   const groupDir = path.join(GROUPS_DIR, 'gate-754-test');
 
-  beforeEach(() => {
+  beforeEach(async () => {
     // #846: the trip-window gate is no longer hard-coded in core —
     // register it through the same host-plugin entry point production
     // startup uses (idempotent, so per-test invocation is safe).
-    registerHostPlugins();
+    await registerHostPlugins();
     _initTestDatabase();
     _resetSchedulerLoopForTests();
     mockRunContainerAgent.mockClear();

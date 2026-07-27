@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.131] - 2026-07-26
+
+- Flight-assist host plugins are now opt-in (#877). The trip-window spawn gate and the `current-location.json` location sink used to register on every boot — so a fork with no `jbaruch/nanoclaw-travel` tile still got the operator's travel policy wired into the scheduler and the location fan-out. Both now sit behind `FLIGHT_ASSIST_ENABLED`, and because `SpawnGate` is a synchronous callback with no inner lazy-load seam, the gate sits at the import: with the knob unset neither policy module is loaded at all. `registerHostPlugins()` is async as a result (awaited at startup, before channels connect).
+
 ## [1.2.130] - 2026-07-26
 
 - `persistGlobalFilesToGit` no longer swallows a `git rev-list` failure (#865): a missing or broken `origin/main` tracking ref used to map to `aheadCount = 0` and return a clean `No changes to persist.` no-op, hiding — and blocking recovery of — a persona commit a prior run made but failed to push. It now returns a `stage: 'git'` envelope naming `git rev-list`, matching `backupCommitAndPush` in the same module.
