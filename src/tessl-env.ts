@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { STORE_DIR } from './config.js';
+import { isExpectedFsError } from './fs-errors.js';
 import { logger } from './logger.js';
 import {
   ONECLI_MANAGED_PLACEHOLDER,
@@ -57,14 +58,16 @@ export async function buildTesslChildEnv(): Promise<NodeJS.ProcessEnv> {
   try {
     cfg = await getOneCliOutboundConfig('main');
   } catch (err: unknown) {
-    // Documented as fail-open, so it has to actually fail open: this runs
-    // inside the `tessl_update` IPC handler, where a propagating rejection
-    // would surface as a handler crash instead of a degraded-but-working
-    // tessl run. A non-Error throw is a bug and still propagates.
-    if (!(err instanceof Error)) throw err;
+    // `getOneCliOutboundConfig` already returns null for a configured-
+    // but-unavailable gateway, so the only failure worth absorbing here is
+    // a filesystem errno from its CA read (the bundle is written by
+    // another component and can be mid-rotation). Anything else — a
+    // TypeError, a bug in the client — is not a gateway outage and
+    // propagates, per `coding-policy: error-handling` Specific Exceptions.
+    if (!isExpectedFsError(err)) throw err;
     logger.warn(
-      { err: err.message },
-      'OneCLI outbound config lookup failed — running tessl on the direct path with ambient auth',
+      { err: (err as NodeJS.ErrnoException).code },
+      'OneCLI CA read failed while resolving outbound config — running tessl on the direct path with ambient auth',
     );
     return {};
   }
@@ -80,11 +83,13 @@ export async function buildTesslChildEnv(): Promise<NodeJS.ProcessEnv> {
     fs.writeFileSync(caPath, cfg.ca);
   } catch (err: unknown) {
     // Without the CA on disk the MITM leg fails TLS, so a proxied run
-    // would break outright. Fall back to the direct path rather than
-    // handing tessl a proxy it cannot validate.
-    if (!(err instanceof Error)) throw err;
+    // would break outright — degrade rather than hand tessl a proxy it
+    // cannot validate. Narrowed to filesystem errnos (a full disk, a
+    // read-only mount); a non-fs Error is a programming defect and
+    // propagates rather than being laundered into a silent fallback.
+    if (!isExpectedFsError(err)) throw err;
     logger.warn(
-      { err: err.message, caPath },
+      { err: (err as NodeJS.ErrnoException).code, caPath },
       'Could not write the OneCLI CA for tessl — running tessl on the direct path',
     );
     return {};

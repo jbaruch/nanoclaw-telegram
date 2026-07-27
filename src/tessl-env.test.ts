@@ -119,6 +119,37 @@ describe('buildTesslChildEnv (#887)', () => {
     }
   });
 
+  it('propagates a non-filesystem Error rather than laundering it into a fallback', async () => {
+    // A TypeError here is a programming defect, not a disk problem —
+    // degrading to the direct path would hide it forever.
+    mockIsConfigured.mockReturnValue(true);
+    mockOutbound.mockResolvedValue({ proxyUrl: PROXY, ca: CA });
+    const spy = vi.spyOn(fs, 'writeFileSync').mockImplementation(() => {
+      throw new TypeError('not a function');
+    });
+    try {
+      await expect(buildTesslChildEnv()).rejects.toThrow(TypeError);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('propagates a non-filesystem Error from the outbound lookup', async () => {
+    mockIsConfigured.mockReturnValue(true);
+    mockOutbound.mockRejectedValue(new TypeError('client bug'));
+    await expect(buildTesslChildEnv()).rejects.toThrow(TypeError);
+  });
+
+  it('degrades on a filesystem errno from the outbound lookup', async () => {
+    // The CA bundle is written by another component and can be caught
+    // mid-rotation; that is a real transient, not a bug.
+    mockIsConfigured.mockReturnValue(true);
+    mockOutbound.mockRejectedValue(
+      Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }),
+    );
+    expect(await buildTesslChildEnv()).toEqual({});
+  });
+
   it('rethrows a non-Error write failure rather than masking a bug', async () => {
     mockIsConfigured.mockReturnValue(true);
     mockOutbound.mockResolvedValue({ proxyUrl: PROXY, ca: CA });
