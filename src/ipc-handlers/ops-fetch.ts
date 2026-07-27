@@ -239,7 +239,12 @@ export function registerOpsFetchIpcHandlers(): void {
   });
 
   registerIpcHandler('run_sidecar', {
-    handler: ({ data, sourceGroup, isMain }) => {
+    // Admin-tile only. The dispatcher enforces this BEFORE the handler
+    // runs and writes the refusal envelope itself, so a polling caller
+    // gets an actionable result instead of reading absence as a hang
+    // (`coding-policy: error-handling` outer-boundary contract).
+    requiresMain: true,
+    handler: ({ data, sourceGroup }) => {
       if (data.requestId) {
         // Authorization: run_sidecar spawns a privileged docker sidecar with
         // host bind-mounts defined in the trusted registry — same privilege
@@ -248,14 +253,6 @@ export function registerOpsFetchIpcHandlers(): void {
         // flags; the image and mount paths never come from the payload, so a
         // compromised non-main container can't request `-v /:/…` (see
         // src/sidecar-runner.ts).
-        if (!isMain) {
-          logger.warn(
-            { sourceGroup, name: data.name },
-            'Unauthorized run_sidecar attempt',
-          );
-          return;
-        }
-
         const sidecarResultPath = scriptResultPath(sourceGroup, data);
 
         // IPC payloads are raw JSON, so validate the shape at the boundary and

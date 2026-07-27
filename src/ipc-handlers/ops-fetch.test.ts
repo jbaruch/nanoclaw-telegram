@@ -120,7 +120,9 @@ describe('run_sidecar handler', () => {
       false,
     );
     expect(mockRunSidecar).not.toHaveBeenCalled();
-    expect(readEnvelope()).toBeUndefined();
+    // Answered, not silent: the dispatcher's `requiresMain` gate writes the
+    // refusal so the polling caller doesn't wait out its timeout.
+    expect(String(readEnvelope()?.error)).toContain('admin-tile only');
   });
 
   it('rejects a missing sidecar name with an actionable envelope', async () => {

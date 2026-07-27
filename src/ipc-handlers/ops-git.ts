@@ -27,7 +27,12 @@ import { logger } from '../logger.js';
  */
 export function registerOpsGitIpcHandlers(): void {
   registerIpcHandler('github_backup', {
-    handler: async ({ data, sourceGroup, isMain }) => {
+    // Admin-tile only. The dispatcher enforces this BEFORE the handler
+    // runs and writes the refusal envelope itself, so a polling caller
+    // gets an actionable result instead of reading absence as a hang
+    // (`coding-policy: error-handling` outer-boundary contract).
+    requiresMain: true,
+    handler: async ({ data, sourceGroup }) => {
       if (data.requestId) {
         // Authorization: github_backup performs a host-side filesystem
         // sync + `git push` using GITHUB_TOKEN — same privilege class
@@ -38,11 +43,6 @@ export function registerOpsGitIpcHandlers(): void {
         // shrinks the blast radius further: a compromised non-main
         // container can't trigger the backup pipeline by writing an
         // IPC task file directly.
-        if (!isMain) {
-          logger.warn({ sourceGroup }, 'Unauthorized github_backup attempt');
-          return;
-        }
-
         const backupDir = path.join(GROUPS_DIR, sourceGroup, 'backup-repo');
         const dbPath = path.join(STORE_DIR, 'messages.db');
         const resultPath = scriptResultPath(sourceGroup, data);
@@ -144,21 +144,18 @@ export function registerOpsGitIpcHandlers(): void {
   });
 
   registerIpcHandler('persist_global_file', {
-    handler: async ({ data, sourceGroup, isMain }) => {
+    // Admin-tile only. The dispatcher enforces this BEFORE the handler
+    // runs and writes the refusal envelope itself, so a polling caller
+    // gets an actionable result instead of reading absence as a hang
+    // (`coding-policy: error-handling` outer-boundary contract).
+    requiresMain: true,
+    handler: async ({ data, sourceGroup }) => {
       if (data.requestId) {
         // Authorization: persist_global_file commits + pushes the
         // orchestrator repo's `main` using GITHUB_TOKEN — same privilege
         // class as `github_backup` / `promote_staging`, gated on `isMain`.
         // A non-main container can't reach the persona source even by
         // writing an IPC task file directly.
-        if (!isMain) {
-          logger.warn(
-            { sourceGroup },
-            'Unauthorized persist_global_file attempt',
-          );
-          return;
-        }
-
         const persistResultPath = scriptResultPath(sourceGroup, data);
 
         // The container edits `/workspace/global/<file>`, an RW bind onto the

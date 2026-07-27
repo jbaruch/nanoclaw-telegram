@@ -111,7 +111,10 @@ describe('github_backup handler', () => {
     // Host-side gate: a compromised non-main container must not be able
     // to drive the GITHUB_TOKEN-bearing sync by writing a task file.
     expect(mockSyncBackupRepo).not.toHaveBeenCalled();
-    expect(readEnvelope()).toBeUndefined();
+    // The dispatcher's `requiresMain` gate answers with an envelope rather
+    // than silence — the caller polls for this file and reads its absence
+    // as a hang.
+    expect(String(readEnvelope()?.error)).toContain('admin-tile only');
   });
 
   it('does nothing at all without a requestId', async () => {
@@ -146,7 +149,7 @@ describe('persist_global_file handler', () => {
   it('refuses a non-main caller and never queues a persist', async () => {
     await run({ type: 'persist_global_file', requestId: REQUEST_ID }, false);
     expect(mockRunSerializedPersonaPersist).not.toHaveBeenCalled();
-    expect(readEnvelope()).toBeUndefined();
+    expect(String(readEnvelope()?.error)).toContain('admin-tile only');
   });
 
   it('rejects a non-allowlisted file with a validate-stage envelope', async () => {
