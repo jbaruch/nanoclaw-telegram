@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.133] - 2026-07-26
+
+- Registry-ified the IPC message path (#878). `react_to_message`, `send_file`, and `message` move out of the ~350-line `else if` chain inside `startIpcWatcher` into `src/ipc-handlers/messages.ts`, behind a `registerIpcMessageHandler` seam in the new `src/ipc-message-registry.ts` — a sibling of the task registry rather than an extension of it, since the two surfaces carry different payload fields and different authorization shapes. `ipc.ts` keeps only the poller (783 → 390 lines). Bodies are verbatim transplants, verified by diffing each region against the pre-split source with the intended renames applied. Fixes a latent bug found by the suite: `registerCoreIpcHandlers()` was only called from `processTaskIpc`, so a watcher that saw a message file before any task file would have found an empty registry and discarded it — `startIpcWatcher` now registers before its first poll. `applyMaintenancePrefix` moves to `src/maintenance-prefix.ts` to break the import cycle the handler module would otherwise close.
+
 ## [1.2.131] - 2026-07-26
 
 - Flight-assist host plugins are now opt-in (#877). The trip-window spawn gate and the `current-location.json` location sink used to register on every boot — so a fork with no `jbaruch/nanoclaw-travel` tile still got the operator's travel policy wired into the scheduler and the location fan-out. Both now sit behind `FLIGHT_ASSIST_ENABLED`, and because `SpawnGate` is a synchronous callback with no inner lazy-load seam, the gate sits at the import: with the knob unset neither policy module is loaded at all. `registerHostPlugins()` is async as a result (awaited at startup, before channels connect).
