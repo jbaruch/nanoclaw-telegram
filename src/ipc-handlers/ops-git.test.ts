@@ -134,7 +134,6 @@ describe('github_backup handler', () => {
 
   it('propagates a non-Error throw instead of masking a programming bug', async () => {
     mockSyncBackupRepo.mockImplementation(() => {
-      // eslint-disable-next-line @typescript-eslint/only-throw-error
       throw 'not-an-error';
     });
     await expect(

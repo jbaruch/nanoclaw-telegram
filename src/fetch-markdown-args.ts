@@ -232,7 +232,11 @@ export function redactUrlForHeader(raw: string): string {
   let u: URL;
   try {
     u = new URL(raw);
-  } catch {
+  } catch (err) {
+    // `new URL()` throws TypeError on an unparseable value. Anything else
+    // is a programming bug and propagates rather than being masked as a
+    // bad URL (`coding-policy: error-handling`).
+    if (!(err instanceof TypeError)) throw err;
     return '<unparseable-url>';
   }
   u.username = '';
