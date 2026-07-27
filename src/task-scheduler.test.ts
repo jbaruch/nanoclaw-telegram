@@ -13,12 +13,17 @@ const { mockRunContainerAgent } = vi.hoisted(() => ({
 }));
 
 // The pre-spawn gate suite below registers the flight-assist trip-window
-// gate through `registerHostPlugins()`, which is opt-in per #877. Set the
-// knob in a hoisted block so it lands before `config.js` is imported and
-// resolves `FLIGHT_ASSIST_ENABLED` — this file exercises the CONFIGURED
-// install; `host-plugins/index.test.ts` covers the unconfigured one.
-vi.hoisted(() => {
-  process.env.FLIGHT_ASSIST_ENABLED = '1';
+// gate through `registerHostPlugins()`, which is opt-in per #877. This
+// file exercises the CONFIGURED install, so override just that one knob
+// — a partial mock rather than a `process.env` write, which would
+// outlive the file (`process.env` is worker-global, and `vi.stubEnv`
+// can't help: `config.js` resolves the value at import time, before any
+// test body runs). `host-plugins/index.test.ts` covers the unconfigured
+// install.
+vi.mock('./config.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('./config.js')>('./config.js');
+  return { ...actual, FLIGHT_ASSIST_ENABLED: true };
 });
 vi.mock('./container-runner.js', () => ({
   runContainerAgent: mockRunContainerAgent,

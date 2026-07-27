@@ -34,7 +34,7 @@ export async function registerHostPlugins(): Promise<void> {
   registerHubitatPlugin();
   if (!FLIGHT_ASSIST_ENABLED) {
     logger.debug(
-      'FLIGHT_ASSIST_ENABLED not set — skipping flight-assist spawn gate + location sink registration',
+      'FLIGHT_ASSIST_ENABLED unset or disabled — skipping flight-assist spawn gate + location sink registration',
     );
     return;
   }
