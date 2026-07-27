@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+## [1.2.130] - 2026-07-26
+
+- `persistGlobalFilesToGit` no longer swallows a `git rev-list` failure (#865): a missing or broken `origin/main` tracking ref used to map to `aheadCount = 0` and return a clean `No changes to persist.` no-op, hiding — and blocking recovery of — a persona commit a prior run made but failed to push. It now returns a `stage: 'git'` envelope naming `git rev-list`, matching `backupCommitAndPush` in the same module.
+
 ## [1.2.129] - 2026-07-22
 
 - Closed the public-sync personal-domain hole (#869): `src/flight-assist-location.ts` (+test) moves under `src/host-plugins/` next to its only consumer, and `scripts/sync-to-public.sh` is reconciled with the post-#844 layout — dead audible_backup/index.ts/db-accessor scrubs removed, the db.ts schema scrub now consumes the #866 ownership comment, a generic `registerHostPlugins()` stub is generated into the public tree (the real `src/host-plugins/` is excluded wholesale but the seam is core, so public wouldn't compile without it), the leak verifier enumerates `registerIpcHandler()` registrations across `src/ipc-handlers/` instead of the removed switch, and both allowlists match the current 33-handler/34-tool rosters. Follow-ups filed from the residue audit: #877 (gate flight-assist registration), #878 (registry-ify the message IPC path), #879 (split ops.ts on next growth).
