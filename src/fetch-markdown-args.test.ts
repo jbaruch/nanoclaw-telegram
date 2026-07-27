@@ -5,6 +5,9 @@ import {
   formatSnitchmdHeader,
   parseFetchMarkdownUrl,
   parseSnitchmdStdout,
+  redactUrlForHeader,
+  redactUrlsInText,
+  scrubFetchedUrl,
 } from './fetch-markdown-args.js';
 
 describe('parseFetchMarkdownUrl', () => {
@@ -375,5 +378,119 @@ describe('parseSnitchmdStdout', () => {
     } finally {
       (globalThis as { JSON: typeof JSON }).JSON.parse = original;
     }
+  });
+});
+
+describe('scrubFetchedUrl', () => {
+  const SIGNED =
+    'https://example.com/doc?sig=abc123SECRET&token=t0ken&expires=1234567890';
+
+  it('replaces every occurrence of the fetched URL', () => {
+    const stderr = `snitchmd: navigating ${SIGNED}\nwarn: timeout on ${SIGNED}\n`;
+    const out = scrubFetchedUrl(stderr, SIGNED);
+    expect(out).not.toContain('abc123SECRET');
+    expect(out).not.toContain('t0ken');
+    expect(out).toBe('snitchmd: navigating <URL>\nwarn: timeout on <URL>\n');
+  });
+
+  it('leaves output that never mentions the URL untouched', () => {
+    const stderr = 'snitchmd: title=Example quality=0.9 chars=1200\n';
+    expect(scrubFetchedUrl(stderr, SIGNED)).toBe(stderr);
+  });
+
+  it('treats the URL as literal text, not a regex pattern', () => {
+    // A URL is arbitrary user-supplied input; regex metacharacters in it
+    // must not become pattern syntax (or blow up the replace).
+    const weird = 'https://example.com/a+b(c)?x=.*&y=[z]';
+    const text = `fetching ${weird} now`;
+    expect(scrubFetchedUrl(text, weird)).toBe('fetching <URL> now');
+  });
+
+  it('returns the text unchanged for an empty url rather than exploding it', () => {
+    // `''.split('')` would shred the string into characters and rejoin it
+    // with <URL> between every one.
+    const text = 'snitchmd: nothing to scrub';
+    expect(scrubFetchedUrl(text, '')).toBe(text);
+  });
+
+  it('scrubs a URL embedded mid-token', () => {
+    expect(scrubFetchedUrl(`[${SIGNED}]`, SIGNED)).toBe('[<URL>]');
+  });
+});
+
+describe('redactUrlForHeader', () => {
+  it('keeps scheme, host and path intact', () => {
+    expect(redactUrlForHeader('https://example.com/docs/page')).toBe(
+      'https://example.com/docs/page',
+    );
+  });
+
+  it('replaces a query string with a marker rather than dropping it silently', () => {
+    // The reader should still learn that parameters were involved.
+    expect(
+      redactUrlForHeader('https://example.com/d?sig=SECRET&token=t0ken'),
+    ).toBe('https://example.com/d?<redacted>');
+  });
+
+  it('strips userinfo credentials', () => {
+    const out = redactUrlForHeader('https://alice:hunter2@example.com/p');
+    expect(out).not.toContain('hunter2');
+    expect(out).not.toContain('alice');
+    expect(out).toBe('https://example.com/p');
+  });
+
+  it('strips the fragment', () => {
+    expect(redactUrlForHeader('https://example.com/p#tok=SECRET')).toBe(
+      'https://example.com/p',
+    );
+  });
+
+  it('redacts a redirect-added token, which the caller never saw', () => {
+    // final_url is the worst case: a redirect chain can ADD a credential
+    // the requested URL never carried.
+    const finalUrl = 'https://cdn.example.com/obj?X-Amz-Signature=DEADBEEF';
+    const out = redactUrlForHeader(finalUrl);
+    expect(out).not.toContain('DEADBEEF');
+    expect(out).toBe('https://cdn.example.com/obj?<redacted>');
+  });
+
+  it('refuses to pass through a value it cannot parse', () => {
+    // An unparseable value is exactly the case where we can't reason about
+    // what it contains, so it must not reach the envelope verbatim.
+    expect(redactUrlForHeader('not a url at all')).toBe('<unparseable-url>');
+  });
+});
+
+describe('redactUrlsInText', () => {
+  it('redacts a redirect-added credential the caller never sent', () => {
+    // The parse-failure case: stdout could not be parsed, so `final_url`
+    // cannot be extracted and scrubbed by value.
+    const stdout =
+      'Downloading newer chromium\n{"final_url":"https://cdn.example.com/o?X-Amz-Signature=DEADBEEF"';
+    const out = redactUrlsInText(stdout);
+    expect(out).not.toContain('DEADBEEF');
+    expect(out).toContain('https://cdn.example.com/o?<redacted>');
+  });
+
+  it('redacts several distinct URLs in one blob', () => {
+    const text =
+      'a https://one.example.com/p?t=AAA b https://two.example.com/q?t=BBB c';
+    const out = redactUrlsInText(text);
+    expect(out).not.toContain('AAA');
+    expect(out).not.toContain('BBB');
+    expect(out).toContain('https://one.example.com/p?<redacted>');
+    expect(out).toContain('https://two.example.com/q?<redacted>');
+  });
+
+  it('stops at the JSON quote so it does not swallow the rest of the payload', () => {
+    const text = '{"url":"https://example.com/p?k=SECRET","chars":12}';
+    const out = redactUrlsInText(text);
+    expect(out).not.toContain('SECRET');
+    expect(out).toContain('"chars":12');
+  });
+
+  it('leaves URL-free text alone', () => {
+    const text = 'snitchmd: title=Example quality=0.9 chars=1200';
+    expect(redactUrlsInText(text)).toBe(text);
   });
 });

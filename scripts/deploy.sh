@@ -420,6 +420,58 @@ fi
 echo "  ok — named carve-out manifests declare mode: managed + version: latest"
 echo ""
 
+# 3b-bis. Verify the fetch_markdown sidecar image default still floats.
+#
+# Per `nanoclaw-host: snitchmd-image-floating` (authority-of-record for
+# `coding-policy: dependency-management` Adversarial-Freshness Dependency
+# Carve-Out), snitchmd is the one
+# committed dependency in this repo that MUST NOT be pinned: its value is
+# adversarial freshness — each release carries updated CloakBrowser
+# fingerprints, so a pinned image degrades toward blocked fetches as
+# anti-bot detection advances, and a pin's renewal cadence competes with
+# an adversary's release cadence. `SNITCHMD_IMAGE` is the per-box escape
+# hatch for anyone who needs a reproducible build; this gate governs the
+# COMMITTED default only and deliberately does not read the environment.
+#
+# Catches a hand-edit that never got reverted, a merge from a fork
+# carrying a pin, a dependency-scanner PR rewriting the default to a
+# digest, and a refactor that moves the constant out of the gate's sight
+# (an unreadable source or a missing match fails the deploy rather than
+# passing vacuously).
+echo "3b-bis. Verifying the snitchmd sidecar image default still floats..."
+SNITCHMD_OFFENDER=$(python3 - <<'PY_SNITCHMD'
+import pathlib, re
+SRC = pathlib.Path("src/ipc-handlers/ops-fetch.ts")
+REQUIRED = "syabro/snitchmd:latest"
+try:
+    text = SRC.read_text()
+except OSError as exc:
+    print(f"{SRC}: unreadable ({type(exc).__name__}: {exc})")
+    raise SystemExit(0)
+# The committed default is the right-hand side of the SNITCHMD_IMAGE
+# env fallback. Matching the fallback specifically (rather than any
+# occurrence of the image name) is what makes a moved/renamed constant
+# fail loudly instead of matching a comment.
+m = re.search(r"process\.env\.SNITCHMD_IMAGE\s*\|\|\s*'([^']+)'", text)
+if not m:
+    print(f"{SRC}: no `process.env.SNITCHMD_IMAGE || '<image>'` default found "
+          f"(moved or renamed? the carve-out gate can no longer see it)")
+    raise SystemExit(0)
+found = m.group(1)
+if found != REQUIRED:
+    print(f"{SRC}: SNITCHMD_IMAGE default is {found!r} (must be {REQUIRED!r})")
+PY_SNITCHMD
+)
+if [[ -n "$SNITCHMD_OFFENDER" ]]; then
+    echo "ERROR: the snitchmd sidecar image default violates the floating carve-out:" >&2
+    echo "  - $SNITCHMD_OFFENDER" >&2
+    echo "Fix: restore the committed default to 'syabro/snitchmd:latest'; set SNITCHMD_IMAGE in this box's .env if you need a pinned build locally." >&2
+    echo "Why: nanoclaw-host: snitchmd-image-floating (approved exception to coding-policy: dependency-management)." >&2
+    exit 1
+fi
+echo "  ok — snitchmd sidecar image default floats"
+echo ""
+
 # 3c. Verify each declared workspace tile actually MATERIALIZED at the
 # registry's latest version.
 #
