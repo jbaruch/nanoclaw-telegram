@@ -20,6 +20,7 @@ const envConfig = readEnvFile([
   'HUBITAT_APP_ID',
   'HUBITAT_EVENT_RETENTION_DAYS',
   'HUBITAT_ALERT_SENSITIVITY',
+  'FLIGHT_ASSIST_ENABLED',
   'MAINTENANCE_RULE_BLOCKLIST',
   'MAINTENANCE_SKILL_BLOCKLIST',
 ]);
@@ -456,6 +457,26 @@ export const HUBITAT_ALERT_SENSITIVITY = (process.env
   .HUBITAT_ALERT_SENSITIVITY ||
   envConfig.HUBITAT_ALERT_SENSITIVITY ||
   'low') as 'low' | 'medium' | 'high';
+
+// --- Flight assist (travel tile) ---
+// Plugin contract (#877): gates the flight-assist host plugins
+// (src/host-plugins/flight-assist-*). Unset = the trip-window spawn gate
+// and the `current-location.json` sink are never registered and their
+// policy modules are never imported, so an install without the
+// `jbaruch/nanoclaw-travel` tile runs none of that personal-domain code.
+// OPT-IN (unlike SESSION_ARTIFACT_RETENTION's opt-out default): a fork
+// must not inherit the operator's travel policy by default. Set to any
+// value other than 0/false/no/off to enable.
+export const FLIGHT_ASSIST_ENABLED = ((): boolean => {
+  const raw = (
+    process.env.FLIGHT_ASSIST_ENABLED ??
+    envConfig.FLIGHT_ASSIST_ENABLED ??
+    ''
+  )
+    .trim()
+    .toLowerCase();
+  return raw !== '' && !['0', 'false', 'no', 'off'].includes(raw);
+})();
 
 // Tile owner namespace for tessl registry (e.g., "jbaruch" → "jbaruch/nanoclaw-core")
 export const TILE_OWNER =

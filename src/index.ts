@@ -305,8 +305,9 @@ async function main(): Promise<void> {
   // Register host-plugin modules (#846/#847/#849) BEFORE channels
   // connect: location sinks must be in the registry when the first
   // inbound location arrives, and spawn gates before the scheduler's
-  // first fire below.
-  registerHostPlugins();
+  // first fire below. Awaited because a config-gated plugin loads its
+  // policy modules by dynamic import (#877).
+  await registerHostPlugins();
 
   // Channel callbacks (shared by all channels)
   const channelOpts = {
