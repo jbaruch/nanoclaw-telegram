@@ -319,13 +319,19 @@ export async function persistGlobalFilesToGit(opts: {
     committedHere = true;
   } else if (staged.code === 0) {
     // Nothing staged. Recover a commit a prior run made but failed to push
-    // (HEAD ahead of origin/main); otherwise it's a genuine no-op.
+    // (HEAD ahead of origin/main); otherwise it's a genuine no-op. A failing
+    // `rev-list` (missing/broken `origin/main` tracking ref, corrupt ref) is a
+    // real error — mapping it to "nothing pending" would silently no-op the
+    // persist while a committed-but-unpushed persona change waits, and both
+    // the push gate and the push below need that same ref anyway. Surface it
+    // (#865, mirroring `backupCommitAndPush`).
     const ahead = await runGit(repoRoot, [
       'rev-list',
       '--count',
       'origin/main..HEAD',
     ]);
-    const aheadCount = ahead.code === 0 ? parseInt(ahead.stdout.trim(), 10) : 0;
+    if (ahead.code !== 0) return fail('git rev-list', ahead);
+    const aheadCount = parseInt(ahead.stdout.trim(), 10);
     if (!Number.isFinite(aheadCount) || aheadCount <= 0) {
       return { committed: false, stdout: 'No changes to persist.' };
     }

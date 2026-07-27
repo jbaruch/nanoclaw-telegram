@@ -194,6 +194,38 @@ describe('persistGlobalFilesToGit', () => {
     }
   });
 
+  it('surfaces a broken origin/main as an error instead of a false "No changes to persist"', async () => {
+    // No `origin/main` tracking ref → `rev-list origin/main..HEAD` fails. That
+    // must come back as a git-stage error (a committed-but-unpushed persona
+    // change could be waiting, and the push gate needs the same ref), not as a
+    // silent no-op that blocks recovery (#865).
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'persist-git-noref-'));
+    try {
+      git(root, ['init', '--initial-branch=main']);
+      git(root, ['config', 'user.email', 'test@example.com']);
+      git(root, ['config', 'user.name', 'Test']);
+      fs.mkdirSync(path.join(root, 'groups', 'global'), { recursive: true });
+      fs.writeFileSync(
+        path.join(root, 'groups', 'global', 'SOUL.md'),
+        'baseline\n',
+      );
+      git(root, ['add', '-A']);
+      git(root, ['commit', '-m', 'baseline']);
+      // No working-tree edit, so the run reaches the recovery branch with
+      // nothing staged and no origin/main to compare against.
+      const result = await persistGlobalFilesToGit({
+        repoRoot: root,
+        relPaths: ['groups/global/SOUL.md'],
+        message: 'soul: broken tracking ref',
+      });
+      expect(result.stage).toBe('git');
+      expect(result.error).toContain('git rev-list');
+      expect(result.committed).toBeUndefined();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('stages only the named paths, never unrelated working-tree changes', async () => {
     const { root, remote, cleanup } = setupRepo();
     try {
