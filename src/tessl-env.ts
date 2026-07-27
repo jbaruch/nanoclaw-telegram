@@ -37,8 +37,9 @@ const TESSL_CA_BASENAME = 'onecli-tessl-ca.pem';
  *   succeeded through the gateway)
  * - tessl authenticates from `TESSL_TOKEN` alone and puts it on the
  *   wire as `Authorization: Bearer <token>` to `api.tessl.io`, so the
- *   gateway has a request to rewrite (a bogus token returns 401 from
- *   the server, not a client-side refusal)
+ *   gateway has a request to rewrite (before the vault entry existed, a
+ *   bogus token returned 401 from the server rather than a client-side
+ *   refusal — that is what proved the credential reaches the wire)
  *
  * The placeholder and the proxy env MUST travel together: a placeholder
  * token without the gateway is a dead credential that 401s, and the
@@ -98,8 +99,13 @@ export async function buildTesslChildEnv(): Promise<NodeJS.ProcessEnv> {
     HTTPS_PROXY: cfg.proxyUrl,
     HTTP_PROXY: cfg.proxyUrl,
     NODE_EXTRA_CA_CERTS: caPath,
-    // The gateway swaps this for the vaulted registry token on the
-    // outbound `Authorization: Bearer` header for api.tessl.io.
+    // Any non-empty value would do: the gateway's injection config
+    // OVERWRITES the `Authorization` header on every api.tessl.io
+    // request rather than matching this specific placeholder. The value
+    // exists only so the CLI believes it has a credential and issues the
+    // request — with `TESSL_TOKEN` unset it refuses client-side and the
+    // gateway never sees anything to inject into. The placeholder name
+    // is kept for consistency with `ONECLI_MANAGED_VARS`.
     TESSL_TOKEN: ONECLI_MANAGED_PLACEHOLDER,
   };
 }
