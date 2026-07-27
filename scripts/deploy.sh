@@ -265,6 +265,26 @@ fi
 # `--accept-warnings` still installs tiles carrying advisory moderation
 # verdicts (e.g. a `.env.example` flagged W008), so those do NOT fail the
 # deploy — only a non-zero `tessl update` exit does.
+# Build the `docker exec -e` flags that route an in-container tessl run
+# through the OneCLI gateway (#887), so deploy's tessl steps use the same
+# vaulted credential the orchestrator's own runs do instead of a decaying
+# `~/.tessl` session. Emits nothing when OneCLI is unconfigured or the
+# gateway is unreachable — tessl then runs on the direct path with
+# whatever ambient auth exists, exactly as before this existed.
+#
+# The emitted values include a gateway credential in the proxy URL, so
+# the array is never echoed; only its effect is.
+tessl_exec_env_flags() {
+    local line
+    TESSL_EXEC_FLAGS=()
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        TESSL_EXEC_FLAGS+=(-e "$line")
+    done < <(docker exec nanoclaw node -e \
+        'import("/app/dist/tessl-env.js").then(m => m.printTesslChildEnv()).catch(() => {})' \
+        2>/dev/null)
+}
+
 echo "3. Updating tiles from registry..."
 # Window marker for the heartbeat skill's registry-missing spawn-refusal
 # suppression (jbaruch/nanoclaw-admin#405). During this step `tessl
@@ -305,7 +325,8 @@ tessl_update_attempt=0
 while :; do
     tessl_update_attempt=$((tessl_update_attempt + 1))
     # Capture status of the in-container tessl run itself, NOT a piped tail.
-    if docker exec nanoclaw sh -c 'cd /app/tessl-workspace && tessl update --yes --accept-warnings 2>&1'; then
+    tessl_exec_env_flags
+    if docker exec "${TESSL_EXEC_FLAGS[@]}" nanoclaw sh -c 'cd /app/tessl-workspace && tessl update --yes --accept-warnings 2>&1'; then
         break
     fi
     if [ "$tessl_update_attempt" -ge 2 ]; then
@@ -497,8 +518,15 @@ echo ""
 # untouched (steps 4-7 have not run yet) and names the offending
 # tile(s) so the operator can resolve the install before re-deploying.
 echo "3c. Verifying materialized tile versions match the registry latest..."
-TILE_VERSION_OFFENDERS=$(python3 - <<'PY'
-import json, os, re, subprocess
+tessl_exec_env_flags
+TILE_VERSION_OFFENDERS=$(TESSL_EXEC_FLAGS_STR="${TESSL_EXEC_FLAGS[*]}" python3 - <<'PY'
+import json, os, re, shlex, subprocess
+
+# `docker exec -e ...` flags routing this read through the OneCLI gateway
+# (#887), handed in by the shell so step 3c reads the registry with the
+# same credential step 3's `tessl update` used. Empty when OneCLI is
+# unconfigured — tessl then uses whatever ambient auth exists.
+TESSL_EXEC_FLAGS = shlex.split(os.environ.get("TESSL_EXEC_FLAGS_STR", ""))
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 SEMVER = re.compile(r"(\d+\.\d+\.\d+)")
@@ -526,7 +554,7 @@ for ref in sorted(deps):
     # Registry latest via in-container tessl — same auth + registry
     # view step 3's `tessl update` used.
     proc = subprocess.run(
-        ["docker", "exec", "nanoclaw", "tessl", "tile", "info", ref],
+        ["docker", "exec", *TESSL_EXEC_FLAGS, "nanoclaw", "tessl", "tile", "info", ref],
         capture_output=True,
         text=True,
     )
