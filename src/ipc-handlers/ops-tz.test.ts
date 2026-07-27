@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 
-import { MAX_TZ_SEGMENTS, classifyTzPersist, coerceTzSegments } from './ops.js';
+import {
+  MAX_TZ_SEGMENTS,
+  classifyTzPersist,
+  coerceTzSegments,
+} from './ops-tz.js';
 
 describe('coerceTzSegments', () => {
   it('passes a segment array through untouched', () => {
