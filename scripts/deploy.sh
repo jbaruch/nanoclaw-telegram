@@ -422,7 +422,9 @@ echo ""
 
 # 3b-bis. Verify the fetch_markdown sidecar image default still floats.
 #
-# Per `nanoclaw-host: snitchmd-image-floating`, snitchmd is the one
+# Per `nanoclaw-host: snitchmd-image-floating` (authority-of-record for
+# `coding-policy: dependency-management` Adversarial-Freshness Dependency
+# Carve-Out), snitchmd is the one
 # committed dependency in this repo that MUST NOT be pinned: its value is
 # adversarial freshness — each release carries updated CloakBrowser
 # fingerprints, so a pinned image degrades toward blocked fetches as

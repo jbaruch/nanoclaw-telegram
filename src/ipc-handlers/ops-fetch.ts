@@ -61,8 +61,9 @@ export function registerOpsFetchIpcHandlers(): void {
         // a specific tag or `sha256:…` digest via `SNITCHMD_IMAGE`
         // without a code change.
         //
-        // The floating default is the approved exception to
-        // `coding-policy: dependency-management` — authority-of-record is
+        // The floating default takes `coding-policy:
+        // dependency-management`'s Adversarial-Freshness Dependency
+        // Carve-Out; authority-of-record is
         // `nanoclaw-host: snitchmd-image-floating`, enforced at deploy
         // time by `verify_snitchmd_image_floating` in
         // `scripts/deploy.sh` (step 3b-bis), which fails the deploy if
