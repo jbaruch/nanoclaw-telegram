@@ -6,6 +6,7 @@ import {
   parseFetchMarkdownUrl,
   parseSnitchmdStdout,
   redactUrlForHeader,
+  redactUrlsInText,
   scrubFetchedUrl,
 } from './fetch-markdown-args.js';
 
@@ -457,5 +458,39 @@ describe('redactUrlForHeader', () => {
     // An unparseable value is exactly the case where we can't reason about
     // what it contains, so it must not reach the envelope verbatim.
     expect(redactUrlForHeader('not a url at all')).toBe('<unparseable-url>');
+  });
+});
+
+describe('redactUrlsInText', () => {
+  it('redacts a redirect-added credential the caller never sent', () => {
+    // The parse-failure case: stdout could not be parsed, so `final_url`
+    // cannot be extracted and scrubbed by value.
+    const stdout =
+      'Downloading newer chromium\n{"final_url":"https://cdn.example.com/o?X-Amz-Signature=DEADBEEF"';
+    const out = redactUrlsInText(stdout);
+    expect(out).not.toContain('DEADBEEF');
+    expect(out).toContain('https://cdn.example.com/o?<redacted>');
+  });
+
+  it('redacts several distinct URLs in one blob', () => {
+    const text =
+      'a https://one.example.com/p?t=AAA b https://two.example.com/q?t=BBB c';
+    const out = redactUrlsInText(text);
+    expect(out).not.toContain('AAA');
+    expect(out).not.toContain('BBB');
+    expect(out).toContain('https://one.example.com/p?<redacted>');
+    expect(out).toContain('https://two.example.com/q?<redacted>');
+  });
+
+  it('stops at the JSON quote so it does not swallow the rest of the payload', () => {
+    const text = '{"url":"https://example.com/p?k=SECRET","chars":12}';
+    const out = redactUrlsInText(text);
+    expect(out).not.toContain('SECRET');
+    expect(out).toContain('"chars":12');
+  });
+
+  it('leaves URL-free text alone', () => {
+    const text = 'snitchmd: title=Example quality=0.9 chars=1200';
+    expect(redactUrlsInText(text)).toBe(text);
   });
 });

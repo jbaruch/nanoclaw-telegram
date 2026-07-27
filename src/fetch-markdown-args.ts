@@ -181,13 +181,6 @@ export function parseSnitchmdStdout(stdout: string): ParsePayloadResult {
 }
 
 /**
- * Compose the 3-line header the handler prepends to the markdown body
- * before writing the IPC result file. Pulled out so the format is
- * pinned in tests against accidental whitespace / ordering drift —
- * downstream skills (wiki, check-cfps) consume the header for
- * provenance, so a silent reformat would break their parsing.
- */
-/**
  * Replace every occurrence of the fetched URL in `text` with `<URL>`.
  *
  * snitchmd's stderr is normally a benign `snitchmd: title=... chars=...`
@@ -247,6 +240,32 @@ export function redactUrlForHeader(raw: string): string {
   return hadQuery ? `${u.toString()}?<redacted>` : u.toString();
 }
 
+/**
+ * Redact every URL-looking token in free text through
+ * `redactUrlForHeader`.
+ *
+ * Used where the text's STRUCTURE is unknown — the parse-failure
+ * diagnostic, where snitchmd's stdout could not be parsed as JSON, so
+ * `final_url` cannot be extracted and scrubbed by value. A redirect can
+ * add a credential the caller never sent, so scrubbing only the URL we
+ * passed in leaves that case exposed (`coding-policy: no-secrets`).
+ *
+ * Deliberately greedy about what counts as a URL: over-redacting a
+ * diagnostic costs readability, under-redacting costs a leaked token.
+ */
+export function redactUrlsInText(text: string): string {
+  return text.replace(/https?:\/\/[^\s"'`<>)\]}]+/g, (m) =>
+    redactUrlForHeader(m),
+  );
+}
+
+/**
+ * Compose the 3-line header the handler prepends to the markdown body
+ * before writing the IPC result file. Pulled out so the format is
+ * pinned in tests against accidental whitespace / ordering drift —
+ * downstream skills (wiki, check-cfps) consume the header for
+ * provenance, so a silent reformat would break their parsing.
+ */
 export function formatSnitchmdHeader(
   payload: SnitchmdPayload,
   fallbackUrl: string,

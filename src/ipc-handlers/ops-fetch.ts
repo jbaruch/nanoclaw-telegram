@@ -9,6 +9,7 @@ import {
   formatSnitchmdHeader,
   parseFetchMarkdownUrl,
   parseSnitchmdStdout,
+  redactUrlsInText,
   scrubFetchedUrl,
 } from '../fetch-markdown-args.js';
 import { registerIpcHandler, scriptResultPath } from '../ipc-registry.js';
@@ -171,14 +172,16 @@ export function registerOpsFetchIpcHandlers(): void {
               // host stderr's same vector before persisting the
               // diagnostic so a query-string auth secret doesn't ride
               // the parse-failure path back to the agent.
+              // stdout failed to PARSE, so `final_url` can't be extracted
+              // and scrubbed by value — and a redirect can add a credential
+              // the caller never sent. Redact every URL-shaped token, not
+              // just the one we passed in.
               const urlString = parsedUrl.toString();
-              const safeStderr = scrubFetchedUrl(
-                stderr.slice(-2000),
-                urlString,
+              const safeStderr = redactUrlsInText(
+                scrubFetchedUrl(stderr.slice(-2000), urlString),
               );
-              const safeStdout = scrubFetchedUrl(
-                stdout.slice(-2000),
-                urlString,
+              const safeStdout = redactUrlsInText(
+                scrubFetchedUrl(stdout.slice(-2000), urlString),
               );
               logger.warn(
                 {
