@@ -41,12 +41,26 @@ describe('ipc message registry (#878)', () => {
   });
 
   it('awaits an async handler before reporting the dispatch complete', async () => {
+    // A manually-resolved deferred rather than a timer: the assertion is
+    // about ordering, and a wall-clock sleep would make it a race.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     const order: string[] = [];
     registerIpcMessageHandler('message', async () => {
-      await new Promise((r) => setTimeout(r, 5));
+      await gate;
       order.push('handler');
     });
-    await dispatchIpcMessage(ctx());
+
+    const dispatched = dispatchIpcMessage(ctx());
+    // Still pending while the handler is blocked — proven by the handler
+    // not having run, with the dispatch promise deliberately unawaited.
+    await Promise.resolve();
+    expect(order).toEqual([]);
+
+    release();
+    await dispatched;
     order.push('after-dispatch');
     // The poller unlinks the IPC file right after dispatch resolves, so
     // a handler that hadn't finished would lose its file mid-send.
