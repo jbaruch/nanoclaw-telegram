@@ -330,7 +330,16 @@ export async function persistGlobalFilesToGit(opts: {
       '--count',
       'origin/main..HEAD',
     ]);
-    if (ahead.code !== 0) return fail('git rev-list', ahead);
+    if (ahead.code !== 0) {
+      // Name the recovery, not just the failure (`coding-policy:
+      // error-handling` Actionable Messages). The approved edit is safe in
+      // the runtime mirror either way, so the fix is to repair the clone's
+      // tracking ref — or discard the clone and let the next persist
+      // re-create it — then re-run the persist.
+      const envelope = fail('git rev-list', ahead);
+      envelope.error = `${envelope.error} — cannot determine whether a prior persist left an unpushed commit. Repair the persona clone's tracking ref (\`git -C ${repoRoot} fetch origin\`), or delete ${repoRoot} so the next persist re-clones it, then retry.`;
+      return envelope;
+    }
     const aheadCount = parseInt(ahead.stdout.trim(), 10);
     if (!Number.isFinite(aheadCount) || aheadCount <= 0) {
       return { committed: false, stdout: 'No changes to persist.' };

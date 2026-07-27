@@ -221,6 +221,10 @@ describe('persistGlobalFilesToGit', () => {
       expect(result.stage).toBe('git');
       expect(result.error).toContain('git rev-list');
       expect(result.committed).toBeUndefined();
+      // Actionable, not just diagnostic (`coding-policy: error-handling`):
+      // the envelope names the repair and the repo it applies to.
+      expect(result.error).toContain('fetch origin');
+      expect(result.error).toContain(root);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
