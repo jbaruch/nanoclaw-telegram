@@ -60,6 +60,13 @@ export function registerOpsFetchIpcHandlers(): void {
         // releases. Operators who need a reproducible build can pin to
         // a specific tag or `sha256:…` digest via `SNITCHMD_IMAGE`
         // without a code change.
+        //
+        // The floating default is the approved exception to
+        // `coding-policy: dependency-management` — authority-of-record is
+        // `nanoclaw-host: snitchmd-image-floating`, enforced at deploy
+        // time by `verify_snitchmd_image_floating` in
+        // `scripts/deploy.sh` (step 3b-bis), which fails the deploy if
+        // this default is ever pinned.
         const snitchmdImage =
           process.env.SNITCHMD_IMAGE || 'syabro/snitchmd:latest';
 
