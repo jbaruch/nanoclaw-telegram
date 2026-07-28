@@ -35,7 +35,16 @@ const SCRIPT_MAX_OUTPUT_CHARS = 1024 * 1024;
 // failure — which the bare reason string could not.
 export type RunScriptResult =
   | { ok: true; result: ScriptResult }
-  | { ok: false; reason: PrecheckErrorReason; detail?: string };
+  | {
+      ok: false;
+      reason: PrecheckErrorReason;
+      detail?: string;
+      // #890 follow-up — `true` when the failure is specifically the
+      // declared-budget timeout kill, so the caller can stamp the
+      // operator alert off a field rather than re-deriving it by
+      // matching `detail`'s prose.
+      timedOut?: boolean;
+    };
 
 export interface RunScriptOptions {
   // #890 — the precheck's own budget, declared per-skill via
@@ -188,7 +197,12 @@ export function runScript(
           spawnCode,
         });
         log(`Script error: ${detail}`);
-        resolve({ ok: false, reason: 'execfile-error', detail });
+        resolve({
+          ok: false,
+          reason: 'execfile-error',
+          detail,
+          ...(timedOut ? { timedOut: true } : {}),
+        });
         return;
       }
 

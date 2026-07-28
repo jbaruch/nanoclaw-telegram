@@ -40,6 +40,11 @@ import {
   updateTaskAfterRun,
 } from './db-tasks.js';
 import { getCurrentTz } from './db-tz.js';
+import { getAllRegisteredGroups } from './db-registered-groups.js';
+import {
+  buildTimeoutKillAlert,
+  shouldAlertTimeoutKill,
+} from './timeout-kill-alert.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
@@ -1106,6 +1111,12 @@ async function runTask(
   // into the row's error column without flipping the status to 'error'.
   let killedMidRun = false;
   let killedReason = '';
+  // #890 follow-up — set when the run ended on a timeout, from either
+  // the precheck's declared `precheck_timeout_ms` budget (stamped
+  // in-container) or the host's container kill. Drives the immediate
+  // operator alert after the runStatus mapping below. Captured from
+  // both the streaming and terminal paths, same as `precheckSkipped`.
+  let timedOut = false;
 
   // Per-fire telemetry context (#349). Computed once so every
   // streamed `usage` payload classifies against the same window
@@ -1611,6 +1622,9 @@ async function runTask(
         if (streamedOutput.status === 'error') {
           error = streamedOutput.error || 'Unknown error';
         }
+        if (streamedOutput.timedOut) {
+          timedOut = true;
+        }
       },
     );
 
@@ -1654,6 +1668,12 @@ async function runTask(
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
+      // Covers the precheck's declared-budget kill, whose `timedOut`
+      // is stamped in-container by `buildPrecheckErrorOutput`, and the
+      // host's no-output container timeout.
+      if (output.timedOut) {
+        timedOut = true;
+      }
     } else if (output.status === 'killed') {
       // #589 (reopened) / #682 — container-runner resolves 'killed' when
       // a maintenance container ends without delivering a terminal
@@ -1668,6 +1688,9 @@ async function runTask(
       killedReason =
         output.error ||
         'Maintenance container ended without delivering a terminal result — incomplete run, retriable';
+      if (output.timedOut) {
+        timedOut = true;
+      }
     } else {
       if (output.status === 'precheck_skipped') {
         // #581 follow-up — terminal status mirrored to the outer
@@ -1830,6 +1853,46 @@ async function runTask(
       result,
       error,
     });
+
+    // #890 follow-up — tell the operator immediately when a run was
+    // killed on a timeout, either the precheck's declared
+    // `precheck_timeout_ms` budget or the host's container kill.
+    //
+    // Deliberately AFTER logTaskRun: the durable row is the record, the
+    // message is a notification. If the send throws, the row still
+    // exists and the heartbeat's task-failure report remains the
+    // backstop — so the alert is wrapped rather than allowed to abort
+    // post-run bookkeeping (next_run computation, session wipe) that
+    // the rest of this block owns.
+    if (shouldAlertTimeoutKill(timedOut)) {
+      const alert = buildTimeoutKillAlert({
+        taskId: task.id,
+        skillName: taskSkill,
+        durationMs,
+        runStatus,
+        error,
+      });
+      // Route to the main group, not `task.chat_jid`: the operator
+      // reads main, and a task belonging to some other group would
+      // otherwise drop an ops notification into that chat (and, for an
+      // untrusted group, in front of people who shouldn't see it).
+      const mainJid = Object.entries(getAllRegisteredGroups()).find(
+        ([, g]) => g.isMain,
+      )?.[0];
+      if (mainJid) {
+        void deps.sendMessage(mainJid, alert).catch((sendErr: unknown) => {
+          logger.error(
+            { taskId: task.id, err: sendErr },
+            '[task-scheduler] timeout-kill alert send failed — the task_run_logs row still records the kill (#890 follow-up)',
+          );
+        });
+      } else {
+        logger.warn(
+          { taskId: task.id },
+          '[task-scheduler] timeout-kill alert not sent — no group is registered as main (#890 follow-up)',
+        );
+      }
+    }
 
     // Re-fetch the task to compute next_run against the FRESH schedule
     // fields. The captured `task` is from before dispatch — between

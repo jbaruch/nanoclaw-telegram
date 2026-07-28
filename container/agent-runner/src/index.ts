@@ -4576,7 +4576,11 @@ async function main(): Promise<void> {
     if (!scriptResult.ok) {
       log(`Script failed: ${scriptResult.reason}`);
       writeOutput(
-        buildPrecheckErrorOutput(scriptResult.reason, scriptResult.detail),
+        buildPrecheckErrorOutput(
+          scriptResult.reason,
+          scriptResult.detail,
+          scriptResult.timedOut,
+        ),
       );
       return;
     }

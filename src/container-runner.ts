@@ -316,6 +316,22 @@ export interface ContainerOutput {
   error?: string;
   streamText?: string;
   /**
+   * #890 follow-up — `true` when this run ended on a TIMEOUT rather
+   * than any other failure. Two timeouts can end a run and both stamp
+   * it: the precheck's own declared `precheck_timeout_ms` budget
+   * (stamped in-container by `buildPrecheckErrorOutput`, arriving
+   * through the marker JSON) and this host's container kill.
+   *
+   * Structured rather than inferred from `error` prose, so the operator
+   * alert in `task-scheduler.ts` keys off a field both sides own. The
+   * three emitters word their messages differently and are free to be
+   * reworded; a rewording must not silently stop the alerting.
+   *
+   * Absent on every non-timeout outcome — a plain crash or non-zero
+   * exit stays covered by the heartbeat's task-failure report.
+   */
+  timedOut?: boolean;
+  /**
    * #581 — Set to `true` by the agent-runner when (a) the agent
    * successfully used `send_message` / `send_file` during this turn
    * AND (b) the SDK's final result message carried non-empty text.
@@ -1527,6 +1543,10 @@ export async function runContainerAgent(
                 status: 'killed',
                 result: null,
                 newSessionId,
+                // #890 follow-up — a real timeout kill of work in
+                // flight: reaped mid-compose with no terminal result.
+                // Alertable.
+                timedOut: true,
                 error: sawNoDeliveryMarker
                   ? `Maintenance container reaped by inactivity timeout after ${timeoutMs}ms; the requires_delivery skill delivered no user-facing content (noDelivery marker) — incomplete run (reaped mid-compose), retriable`
                   : `Maintenance container reaped by inactivity timeout after ${timeoutMs}ms having streamed only preview output and no terminal result — incomplete run (reaped mid-compose), retriable`,
@@ -1552,6 +1572,12 @@ export async function runContainerAgent(
                 status: 'success',
                 result: null,
                 newSessionId,
+                // Deliberately NOT stamped `timedOut` (#890 follow-up):
+                // the clock ran out, but nothing was killed mid-work —
+                // the agent already delivered and this is the idle
+                // reaper collecting a finished container. Alerting here
+                // would page the operator on every healthy maintenance
+                // run that idles out, which is most of them.
               });
             });
             return;
@@ -1565,7 +1591,18 @@ export async function runContainerAgent(
           resolve({
             status: 'error',
             result: null,
-            error: `Container timed out after ${configTimeout}ms`,
+            // #890 follow-up — killed by the container timeout having
+            // produced nothing at all. Alertable.
+            timedOut: true,
+            // `timeoutMs`, not `configTimeout`: the two differ for both
+            // session kinds — maintenance arms
+            // `MAINTENANCE_CONTAINER_TIMEOUT` and non-maintenance arms
+            // `Math.max(configTimeout, IDLE_TIMEOUT + 30_000)`. Reporting
+            // `configTimeout` named a duration the timer was never set
+            // to, and #890's alert now puts this string in front of the
+            // operator, so the misreport would be read as the budget to
+            // tune.
+            error: `Container timed out after ${timeoutMs}ms`,
           });
           return;
         }

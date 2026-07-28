@@ -56,6 +56,7 @@ import {
   storeChatMetadata,
 } from './db-messages.js';
 import { getSession, setSession } from './db-sessions.js';
+import { setRegisteredGroup } from './db-registered-groups.js';
 import {
   clearTaskSessionIdsForGroup,
   createTask,
@@ -5050,5 +5051,216 @@ describe('runTask pre-spawn gate (#754)', () => {
 
     expect(mockRunContainerAgent).toHaveBeenCalledTimes(1);
     expect(getRunLog()?.status).toBe('success');
+  });
+});
+
+describe('timeout-kill operator alert (#890 follow-up)', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+    _resetSchedulerLoopForTests();
+    mockRunContainerAgent.mockClear();
+    // Pinned clock so every fixture timestamp is a literal relative to
+    // a fixed reference rather than the wall clock, per
+    // `coding-policy: testing-standards` Determinism.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(ALERT_NOW));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // --- #890 follow-up: operator alert on a timeout kill ---
+  //
+  // A timeout kill previously reached chat only through the heartbeat's
+  // task-failure report, which queries `status = 'error'` (so a
+  // `'killed'` container timeout was invisible to it) and suppresses
+  // any failure the task has since recovered from (so a tight-cadence
+  // skill self-suppressed before the 30-min heartbeat looked). These
+  // cover the immediate path that replaces it, including the cases
+  // that must stay silent so the alert doesn't become noise.
+
+  const ALERT_MAIN_GROUP = {
+    name: 'Main',
+    folder: 'main',
+    trigger: 'always' as const,
+    added_at: '2026-01-01T00:00:00.000Z',
+    isMain: true,
+  };
+
+  // Fixed reference instant, pinned in `beforeEach` below. Every
+  // timestamp in these tests is a literal relative to it — no runtime
+  // `Date.now()` shapes a fixture, so a run today and a run next year
+  // are the same run (`coding-policy: testing-standards` Determinism).
+  const ALERT_NOW = '2026-07-01T00:00:00.000Z';
+  // A minute before ALERT_NOW, so the task is due the moment the
+  // scheduler loop first ticks.
+  const ALERT_DUE_AT = '2026-06-30T23:59:00.000Z';
+
+  function createTimeoutAlertTask(id: string): void {
+    createTask({
+      id,
+      group_folder: 'main',
+      chat_jid: 'other@g.us',
+      // Deliberately a skill no host plugin gates. Naming a real gated
+      // skill (flight-assist) made these pass alone and fail in-suite:
+      // a sibling describe registers host plugins globally and its
+      // spawn gate refused the run before the alert path was reached.
+      prompt: 'Skill(skill: "tessl__timeout-probe")',
+      schedule_type: 'once',
+      schedule_value: '2026-01-01T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: ALERT_DUE_AT,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      created_by_role: 'owner' as const,
+    });
+  }
+
+  function runSchedulerWithOutput(
+    output: ContainerOutput,
+    sendMessage: (jid: string, text: string) => Promise<string | void>,
+  ): void {
+    mockRunContainerAgent.mockImplementation(async () => output);
+    startSchedulerLoop({
+      registeredGroups: () => ({ 'main@g.us': ALERT_MAIN_GROUP }),
+      queue: {
+        enqueueTask: (
+          _groupJid: string,
+          _taskId: string,
+          _sessionName: string,
+          fn: () => Promise<void>,
+        ) => {
+          void fn();
+        },
+        closeStdin: vi.fn(),
+        consumeForcedCloseAt: vi.fn(() => null),
+      } as never,
+      onProcess: () => {},
+      sendMessage,
+      wipeSessionJsonl: () => 0,
+    });
+  }
+
+  it('alerts the main group when a run is killed on a timeout (#890 follow-up)', async () => {
+    setRegisteredGroup('main@g.us', ALERT_MAIN_GROUP as RegisteredGroup);
+    createTimeoutAlertTask('timeout-alert-task');
+    const sendMessage = vi.fn(async () => {});
+
+    runSchedulerWithOutput(
+      {
+        status: 'error',
+        result: null,
+        timedOut: true,
+        error: 'precheck script failed: execfile-error (timed out after 30s)',
+      } as ContainerOutput,
+      sendMessage,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    // Routed to the MAIN group, not the task's own `chat_jid`
+    // ('other@g.us') — an ops notification must not land in an
+    // unrelated (or untrusted) group.
+    const [jid, text] = sendMessage.mock.calls[0] as unknown as [
+      string,
+      string,
+    ];
+    expect(jid).toBe('main@g.us');
+    expect(text).toContain('tessl__timeout-probe');
+    expect(text).toContain('timed out after 30s');
+  });
+
+  it('alerts on a container timeout kill recorded as killed (#890 follow-up)', async () => {
+    // The shape the heartbeat's `status = 'error'` query could never
+    // see at all.
+    setRegisteredGroup('main@g.us', ALERT_MAIN_GROUP as RegisteredGroup);
+    createTimeoutAlertTask('timeout-alert-killed');
+    const sendMessage = vi.fn(async () => {});
+
+    runSchedulerWithOutput(
+      {
+        status: 'killed',
+        result: null,
+        timedOut: true,
+        error:
+          'Maintenance container reaped by inactivity timeout after 300000ms',
+      } as ContainerOutput,
+      sendMessage,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(
+      (sendMessage.mock.calls[0] as unknown as [string, string])[1],
+    ).toContain('reaped by inactivity timeout');
+  });
+
+  it('stays silent when a failing run was not a timeout kill (#890 follow-up)', async () => {
+    // A crashed precheck is a failure but not a timeout — it stays with
+    // the heartbeat's task-failure report rather than paging.
+    setRegisteredGroup('main@g.us', ALERT_MAIN_GROUP as RegisteredGroup);
+    createTimeoutAlertTask('timeout-alert-crash');
+    const sendMessage = vi.fn(async () => {});
+
+    runSchedulerWithOutput(
+      {
+        status: 'error',
+        result: null,
+        error: 'precheck script failed: execfile-error (exit=1)',
+      } as ContainerOutput,
+      sendMessage,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('stays silent on a healthy run (#890 follow-up)', async () => {
+    setRegisteredGroup('main@g.us', ALERT_MAIN_GROUP as RegisteredGroup);
+    createTimeoutAlertTask('timeout-alert-ok');
+    const sendMessage = vi.fn(async () => {});
+
+    runSchedulerWithOutput(
+      {
+        status: 'precheck_skipped',
+        result: '<internal>precheck-skipped</internal>',
+      } as ContainerOutput,
+      sendMessage,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('records the run even when the alert send fails (#890 follow-up)', async () => {
+    // The durable row is the record; the message is a notification. A
+    // send fault must not abort the post-run bookkeeping that follows.
+    setRegisteredGroup('main@g.us', ALERT_MAIN_GROUP as RegisteredGroup);
+    createTimeoutAlertTask('timeout-alert-sendfail');
+    const sendMessage = vi.fn(async () => {
+      throw new Error('telegram down');
+    });
+
+    runSchedulerWithOutput(
+      {
+        status: 'error',
+        result: null,
+        timedOut: true,
+        error: 'precheck script failed: execfile-error (timed out after 30s)',
+      } as ContainerOutput,
+      sendMessage,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const row = _rawQueryForTests(
+      'SELECT status, error FROM task_run_logs WHERE task_id = ?',
+      ['timeout-alert-sendfail'],
+    )[0] as { status: string; error: string } | undefined;
+    expect(row?.status).toBe('error');
+    expect(row?.error).toContain('timed out after 30s');
+    // Post-run bookkeeping still ran: a once-task is marked completed.
+    expect(getTaskById('timeout-alert-sendfail')?.status).toBe('completed');
   });
 });

@@ -51,6 +51,19 @@ export interface PrecheckErrorOutput {
   status: 'error';
   result: string;
   error: string;
+  /**
+   * #890 follow-up — `true` when this precheck error is specifically a
+   * timeout kill: the skill declared `precheck_timeout_ms` and the
+   * script outlived it. Structured rather than left for the host to
+   * infer by matching `formatExecErrorDetail`'s prose, so the operator
+   * alert keys off a field both sides own instead of a string that
+   * reads like an implementation detail and can be reworded.
+   *
+   * Absent for every other precheck failure (non-zero exit, bad JSON,
+   * spawn failure) — those are already covered by the heartbeat's
+   * task-failure report and need no immediate alert.
+   */
+  timedOut?: boolean;
 }
 
 /**
@@ -104,14 +117,21 @@ export type PrecheckErrorReason =
 export function buildPrecheckErrorOutput(
   reason: PrecheckErrorReason,
   detail?: string,
+  timedOut?: boolean,
 ): PrecheckErrorOutput {
   const suffix = detail ? ` (${detail})` : '';
   const errorMsg = `precheck script failed: ${reason}${suffix}`;
-  return {
+  const output: PrecheckErrorOutput = {
     status: 'error',
     result: `<internal>precheck-error: ${reason}${suffix}</internal>`,
     error: errorMsg,
   };
+  // Stamped only when true, so the emitted JSON keeps its existing
+  // shape for every non-timeout failure.
+  if (timedOut) {
+    output.timedOut = true;
+  }
+  return output;
 }
 
 // #812 Bug A: format the disambiguating cause of an `execfile-error` into

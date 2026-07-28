@@ -268,6 +268,11 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-123');
+    // #890 follow-up — deliberately NOT stamped. The clock ran out but
+    // nothing was killed mid-work: the agent already delivered and this
+    // is the idle reaper collecting a finished container. Stamping here
+    // would page the operator on every healthy maintenance run.
+    expect(result.timedOut).toBeUndefined();
     expect(onOutput).toHaveBeenCalledWith(
       expect.objectContaining({ result: 'Here is my response' }),
     );
@@ -293,6 +298,15 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('error');
     expect(result.error).toContain('timed out');
+    // #890 follow-up — a real kill with nothing produced. Drives the
+    // operator alert, so the field must survive independently of the
+    // `error` prose the assertion above matches.
+    expect(result.timedOut).toBe(true);
+    // The reported duration must be the timer that actually fired
+    // (IDLE_TIMEOUT + 30s for a non-maintenance session), not
+    // `containerConfig.timeout` — the alert puts this number in front
+    // of the operator as the budget to tune.
+    expect(result.error).toContain('1830000ms');
     expect(onOutput).not.toHaveBeenCalled();
   });
 
@@ -391,6 +405,10 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('killed');
     expect(result.error).toMatch(/reaped|incomplete|inactivity/i);
+    // #890 follow-up — work was killed in flight (reaped mid-compose),
+    // so this is the alertable shape. Asserted as a field rather than
+    // via the prose above, which the emitters may reword.
+    expect(result.timedOut).toBe(true);
   });
 
   it('default session that streamed output and times out still resolves as success (interactive idle cleanup unchanged, #589)', async () => {
@@ -454,6 +472,12 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('killed');
     expect(result.error).toMatch(/terminal result|incomplete/i);
+    // #890 follow-up — `killed` but NOT a timeout: the container exited
+    // on its own (code 0) without delivering. Still an incomplete run
+    // worth recording, but no clock killed it, so the timeout alert
+    // must stay silent. Guards the alert against firing on every
+    // `killed`, which would make it noise.
+    expect(result.timedOut).toBeUndefined();
   });
 
   it('maintenance session that delivered a terminal result (incl. #461 silent-stop no-op) and exits cleanly stays success (#682)', async () => {

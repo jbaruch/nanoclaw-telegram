@@ -67,6 +67,28 @@ describe('buildPrecheckErrorOutput', () => {
     expect(out.error).toBe('precheck script failed: execfile-error');
   });
 
+  it('stamps timedOut only for a declared-budget timeout kill (#890 follow-up)', () => {
+    // The host's operator alert keys off this field rather than
+    // matching `formatExecErrorDetail`'s prose, so the stamp must
+    // survive as structured JSON and must NOT appear on any other
+    // failure mode — a crash or bad-JSON precheck stays covered by the
+    // heartbeat's task-failure report instead of paging immediately.
+    const killed = buildPrecheckErrorOutput(
+      'execfile-error',
+      'timed out after 30s, signal=SIGTERM',
+      true,
+    );
+    expect(killed.timedOut).toBe(true);
+
+    const crashed = buildPrecheckErrorOutput('execfile-error', 'exit=1', false);
+    expect(crashed.timedOut).toBeUndefined();
+    expect('timedOut' in crashed).toBe(false);
+
+    const badJson = buildPrecheckErrorOutput('invalid-json');
+    expect(badJson.timedOut).toBeUndefined();
+    expect('timedOut' in badJson).toBe(false);
+  });
+
   it('covers each PrecheckErrorReason variant so watchdog queries can match on the specific cause', () => {
     const reasons = [
       'execfile-error',
