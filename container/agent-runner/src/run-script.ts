@@ -17,7 +17,6 @@ import {
 } from './precheck-emission.js';
 import { parseScriptOutput, type ScriptResult } from './script-output-parse.js';
 
-export const SCRIPT_TIMEOUT_MS = 30_000;
 // #812 Bug B: after the timeout fires we SIGTERM the child's process
 // GROUP; a precheck blocked in a network syscall (the Google gateway,
 // `gh`) ignores SIGTERM and would otherwise run to its own socket
@@ -39,6 +38,14 @@ export type RunScriptResult =
   | { ok: false; reason: PrecheckErrorReason; detail?: string };
 
 export interface RunScriptOptions {
+  // #890 — the precheck's own budget, declared per-skill via
+  // `precheck_timeout_ms` frontmatter. OMITTED means no in-container
+  // timer is armed at all: a precheck that declares nothing is bounded
+  // solely by the host's container kill (`containerConfig.timeout`,
+  // falling back to `MAINTENANCE_CONTAINER_TIMEOUT`). Two timeouts
+  // bound a precheck — the one the skill declares for itself and the
+  // container's — and the flat 30s global that used to sit between
+  // them is gone.
   timeoutMs?: number;
   killGraceMs?: number;
   // Injected so the caller (index.ts) keeps its `[agent-runner]`-prefixed
@@ -53,7 +60,7 @@ export function runScript(
   script: string,
   opts: RunScriptOptions = {},
 ): Promise<RunScriptResult> {
-  const timeoutMs = opts.timeoutMs ?? SCRIPT_TIMEOUT_MS;
+  const timeoutMs = opts.timeoutMs;
   const killGraceMs = opts.killGraceMs ?? SCRIPT_KILL_GRACE_MS;
   const log = opts.log ?? ((): void => {});
   const scriptPath = opts.scriptPath ?? '/tmp/task-script.sh';
@@ -139,11 +146,20 @@ export function runScript(
       }
     };
 
-    const timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      killGroup('SIGTERM');
-      escalationTimer = setTimeout(() => killGroup('SIGKILL'), killGraceMs);
-    }, timeoutMs);
+    // #890 — armed only when the skill declared a budget. With no
+    // declaration there is no in-container timer: the host's container
+    // kill is the bound, and it always exists.
+    const timeoutTimer =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            timedOut = true;
+            killGroup('SIGTERM');
+            escalationTimer = setTimeout(
+              () => killGroup('SIGKILL'),
+              killGraceMs,
+            );
+          }, timeoutMs);
 
     // Settle once, from whichever of `error` / `close` fires first. A
     // failed spawn (ENOENT) emits `error` and may never emit `close`, so
@@ -156,7 +172,9 @@ export function runScript(
         return;
       }
       settled = true;
-      clearTimeout(timeoutTimer);
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer);
+      }
       if (escalationTimer) {
         clearTimeout(escalationTimer);
       }

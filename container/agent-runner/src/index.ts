@@ -75,6 +75,7 @@ import {
   buildPrecheckSkippedOutput,
 } from './precheck-emission.js';
 import { runScript } from './run-script.js';
+import { resolvePrecheckTimeoutMs } from './precheck-timeout.js';
 import { isExpectedFsError, isFsErrorWithCode } from './fs-errors.js';
 import {
   decideHardExitWatchdog,
@@ -4550,8 +4551,27 @@ async function main(): Promise<void> {
 
   // Script phase: run script before waking agent
   if (containerInput.script && containerInput.isScheduledTask) {
-    log('Running task script...');
-    const scriptResult = await runScript(containerInput.script, { log });
+    // #890 — the precheck's budget is whatever the skill declared for
+    // itself (`precheck_timeout_ms` frontmatter), or nothing at all.
+    // `undefined` arms no in-container timer: the host's container kill
+    // is then the only bound, and it always exists. Resolved from
+    // `containerInput.prompt` — for a cadence-registry task that is
+    // literally `Skill(skill: "<name>")` (`src/cadence-registry.ts`),
+    // the same source `resolveDrainTimeoutMs` reads. Resolve BEFORE
+    // the `[SCHEDULED TASK]` enrichment below rewrites `prompt`.
+    const precheckTimeoutMs = resolvePrecheckTimeoutMs(
+      containerInput.prompt,
+      '/home/node/.claude/skills',
+    );
+    log(
+      precheckTimeoutMs === undefined
+        ? 'Running task script... (no declared timeout; bounded by the container)'
+        : `Running task script... (declared timeout ${precheckTimeoutMs}ms)`,
+    );
+    const scriptResult = await runScript(containerInput.script, {
+      log,
+      timeoutMs: precheckTimeoutMs,
+    });
 
     if (!scriptResult.ok) {
       log(`Script failed: ${scriptResult.reason}`);

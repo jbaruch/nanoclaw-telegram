@@ -27,19 +27,17 @@
  * and that's fine"; the runner can't infer a skill's delivery profile
  * any other way.
  *
- * Resolution mirrors `resolveDrainTimeoutMs` in `hard-exit-watchdog.ts`
- * — same prompt-skill resolution, same safe-name guard, same
- * ENOENT/ENOTDIR fallback. The frontmatter scalar is fully enumerable,
- * so a parser is appropriate per `coding-policy: script-delegation`.
+ * Resolution shares `readSkillMdForPrompt` with the runner's other
+ * per-skill overrides (`skill-frontmatter.ts`) — same safe-name guard,
+ * same ENOENT/ENOTDIR fallback. The frontmatter scalar is fully
+ * enumerable, so a parser is appropriate per `coding-policy:
+ * script-delegation`.
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
-
 import {
-  parseSkillNameFromPrompt,
-  SAFE_SKILL_NAME_RE,
-} from './hard-exit-watchdog.js';
+  readFrontmatterScalar,
+  readSkillMdForPrompt,
+} from './skill-frontmatter.js';
 
 /**
  * Parse the `requires_delivery` boolean from a SKILL.md's leading YAML
@@ -51,42 +49,9 @@ import {
  * for one scalar would be unjustified weight.
  */
 export function parseRequiresDeliveryFromFrontmatter(content: string): boolean {
-  // Trim a single leading BOM (U+FEFF) defensively — matches the
-  // host-side `parseSkillFrontmatter` in `src/cadence-registry.ts`.
-  const stripped = content.replace(/^\uFEFF/, '');
-  if (!stripped.startsWith('---\n') && !stripped.startsWith('---\r\n')) {
-    return false;
-  }
-  const afterOpen = stripped.replace(/^---\r?\n/, '');
-  const closeIdx = afterOpen.search(/^---\s*$/m);
-  if (closeIdx < 0) return false;
-  const body = afterOpen.slice(0, closeIdx);
-  for (const rawLine of body.split(/\r?\n/)) {
-    const line = rawLine.replace(/\s+$/, '');
-    if (!line.trim() || line.trim().startsWith('#')) continue;
-    const colonIdx = line.indexOf(':');
-    if (colonIdx <= 0) continue;
-    const key = line.slice(0, colonIdx).trim();
-    if (key !== 'requires_delivery') continue;
-    let value = line.slice(colonIdx + 1).trim();
-    // Strip an unquoted inline `# ...` comment before validating,
-    // matching `parseDrainTimeoutMsFromFrontmatter`.
-    if (!value.startsWith('"') && !value.startsWith("'")) {
-      const inlineCommentIdx = value.search(/\s+#/);
-      if (inlineCommentIdx >= 0) {
-        value = value.slice(0, inlineCommentIdx).trimEnd();
-      }
-    }
-    if (
-      value.length >= 2 &&
-      ((value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'")))
-    ) {
-      value = value.slice(1, -1);
-    }
-    return value.trim().toLowerCase() === 'true';
-  }
-  return false;
+  const value = readFrontmatterScalar(content, 'requires_delivery');
+  if (value === undefined) return false;
+  return value.trim().toLowerCase() === 'true';
 }
 
 /**
@@ -122,23 +87,7 @@ export function resolveRequiresDelivery(
   prompt: string,
   skillsDir: string,
 ): boolean {
-  const skillName = parseSkillNameFromPrompt(prompt);
-  if (!skillName) return false;
-  if (!SAFE_SKILL_NAME_RE.test(skillName)) return false;
-  const skillPath = path.join(skillsDir, skillName, 'SKILL.md');
-  // Defence-in-depth path containment, identical to
-  // `resolveDrainTimeoutMs`: even with the safe-name regex, verify the
-  // resolved path stays under `skillsDir`.
-  const resolvedSkill = path.resolve(skillPath);
-  const resolvedRoot = path.resolve(skillsDir) + path.sep;
-  if (!resolvedSkill.startsWith(resolvedRoot)) return false;
-  let content: string;
-  try {
-    content = fs.readFileSync(skillPath, 'utf-8');
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
-    throw err;
-  }
+  const content = readSkillMdForPrompt(prompt, skillsDir);
+  if (content === undefined) return false;
   return parseRequiresDeliveryFromFrontmatter(content);
 }
