@@ -3,6 +3,7 @@
   "description": [
     "npm renewal mechanism (coding-policy: dependency-management Freshness — 'Automate it where a scanner supports the ecosystem: a committed Dependabot or Renovate config'). Covers the two npm manifests (root package.json, container/agent-runner/package.json) plus the globally-installed npm packages pinned in container/Dockerfile (#796). Scoped via enabledManagers so it does not overlap the docker ecosystems handled by .github/dependabot.yml — Dependabot owns the base-image @sha256 pins in the same Dockerfile, Renovate owns the npm literals inside its RUN line; the two never touch the same text.",
     "The custom.regex manager exists because no native manager reads `RUN npm install -g <pkg>@<version>`: Dependabot's docker ecosystem sees only FROM lines, and Renovate's npm manager sees only package.json. Without it those two pins would be unwatched — a pin with no scanner is rot, not reproducibility.",
+    "jbaruch/reclaim-tripit-timezones-sync had a github-tags manager here until it was unpinned (nanoclaw-host: sync-cli-floating, authority-of-record for the First-Party Co-Shipped Dependency Carve-Out). A manager matching `#v<tag>` against a bare `owner/repo` install watches nothing, so it is removed rather than left as a dead entry. That reference's freshness mechanism is the Dockerfile's ADD refetch trigger plus the deploy gate, not this scanner.",
     "Package-rules mirror the repo's dependabot cadence: weekly, chore-typed commits, minor+patch grouped to keep the PR volume low; majors land as individual reviewable PRs. The agent-image globals are deliberately NOT grouped with the npm-manifest updates: a claude-code bump changes the agent's own runtime inside every container, so it is reviewed on its own rather than buried in a batch."
   ],
   "extends": ["config:recommended"],
@@ -24,17 +25,6 @@
       ],
       "datasourceTemplate": "npm",
       "versioningTemplate": "npm"
-    },
-    {
-      "customType": "regex",
-      "description": "GitHub-sourced global in the agent image pinned to a tag (container/Dockerfile `RUN npm install -g <owner/repo>#<tag>`, #748). Watched via the github-tags datasource since the npm datasource above cannot resolve a GitHub ref.",
-      "fileMatch": ["^container/Dockerfile$"],
-      "matchStringsStrategy": "any",
-      "matchStrings": [
-        "(?<depName>jbaruch/reclaim-tripit-timezones-sync)#(?<currentValue>v[0-9][^\\s\\\\]*)"
-      ],
-      "datasourceTemplate": "github-tags",
-      "versioningTemplate": "semver"
     },
     {
       "customType": "regex",

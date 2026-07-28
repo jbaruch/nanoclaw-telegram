@@ -512,6 +512,86 @@ fi
 echo "  ok — snitchmd sidecar image default floats"
 echo ""
 
+# 3b-ter. Verify the TripIt→Reclaim sync CLI install still floats AND still
+# refetches.
+#
+# Per `nanoclaw-host: sync-cli-floating` (authority-of-record for
+# `coding-policy: dependency-management` First-Party Co-Shipped Dependency
+# Carve-Out), `reclaim-tripit-timezones-sync` is installed unpinned: the same
+# operator owns both repos and this Dockerfile is the package's only consumer,
+# so a pin holds the image on a stale build rather than guarding it from
+# unreviewed upstream code — which is exactly what happened for 19 days when
+# the package grew OneCLI support and nobody cut a tag.
+#
+# Two halves, both required, which is why this gate is not just a grep for `#`:
+# an unpinned RUN behind a cached BuildKit layer resolves to whatever the last
+# rebuild fetched. The ADD of upstream's commit JSON is what moves when `main`
+# moves, so a missing or mistargeted ADD is as much a violation as a pin.
+echo "3b-ter. Verifying the sync CLI install floats and refetches..."
+SYNC_CLI_OFFENDER=$(python3 - <<'PY_SYNC_CLI'
+import pathlib, re
+
+DOCKERFILE = pathlib.Path("container/Dockerfile")
+REPO = "jbaruch/reclaim-tripit-timezones-sync"
+try:
+    text = DOCKERFILE.read_text()
+except OSError as exc:
+    print(f"{DOCKERFILE}: unreadable ({type(exc).__name__}: {exc})")
+    raise SystemExit(0)
+
+# Match the install itself, not a mention in a comment: a `RUN npm install -g`
+# line naming the repo. A rename or a move out of this file fails loudly here
+# rather than passing vacuously.
+install = re.search(
+    rf"^RUN npm install -g {re.escape(REPO)}(?P<ref>#\S+)?", text, re.MULTILINE
+)
+if not install:
+    print(f"{DOCKERFILE}: no `RUN npm install -g {REPO}` line found "
+          f"(moved or renamed? the carve-out gate can no longer see it)")
+    raise SystemExit(0)
+
+if install.group("ref"):
+    print(f"{DOCKERFILE}: the install carries the specifier "
+          f"{install.group('ref')!r} (must be the bare `{REPO}` form)")
+    raise SystemExit(0)
+
+# The refetch trigger is only a trigger where it sits: BuildKit invalidates
+# from the changed instruction DOWNWARD, so an ADD anywhere below this RUN —
+# or separated from it by another RUN — busts a different layer and leaves
+# the install cached. Bind the check to the line directly above, which is
+# what the Dockerfile comment and `nanoclaw-host: sync-cli-floating` require,
+# rather than accepting a match anywhere in the file.
+lines = text.splitlines()
+install_line = text[: install.start()].count("\n")
+prev = lines[install_line - 1] if install_line > 0 else ""
+# `<dest>` is required by ADD syntax — a URL-only ADD is not a valid
+# instruction, so the trailing argument is matched, not optional.
+add = re.match(
+    r"ADD https://api\.github\.com/repos/(?P<repo>[^/]+/[^/]+)/commits/\S+\s+\S+\s*$",
+    prev,
+)
+if not add:
+    print(f"{DOCKERFILE}: the install is unpinned but the line directly above "
+          f"it is not an `ADD <commits-url> <dest>` refetch trigger (found: "
+          f"{prev.strip()[:60]!r}) — BuildKit will serve a cached layer "
+          f"forever, so 'unpinned' means 'whatever the last rebuild fetched'")
+    raise SystemExit(0)
+if add.group("repo") != REPO:
+    print(f"{DOCKERFILE}: the ADD refetch trigger points at "
+          f"{add.group('repo')!r}, not {REPO!r} — it no longer invalidates "
+          f"the layer this install sits on")
+PY_SYNC_CLI
+)
+if [[ -n "$SYNC_CLI_OFFENDER" ]]; then
+    echo "ERROR: the sync CLI install violates the floating carve-out:" >&2
+    echo "  - $SYNC_CLI_OFFENDER" >&2
+    echo "Fix: install it as bare 'jbaruch/reclaim-tripit-timezones-sync', with the matching ADD of its commit JSON directly above the RUN." >&2
+    echo "Why: nanoclaw-host: sync-cli-floating (approved exception to coding-policy: dependency-management)." >&2
+    exit 1
+fi
+echo "  ok — sync CLI install floats and refetches"
+echo ""
+
 # 3c. Verify each declared workspace tile actually MATERIALIZED at the
 # registry's latest version.
 #

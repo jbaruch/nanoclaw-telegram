@@ -82,14 +82,26 @@ RUN npm install -g agent-browser@0.32.1 @anthropic-ai/claude-code@2.1.212
 # the OneCLI gateway), so the agent runs `reclaim-tripit-timezones-sync` itself
 # instead of the host-op that ran it in the orchestrator (removed in the #748
 # Phase 3 cutover, once the in-container path was verified).
-# Pinned to an
-# immutable tag (`coding-policy: dependency-management` Pinning) so a
-# `deploy.sh --no-cache` rebuild can't silently pull unreviewed upstream code —
-# a version change is a reviewed Dockerfile diff. Renewal is scanner-tracked,
-# not memory: `.github/renovate.json`'s `custom.regex` manager watches this
-# `#<tag>` pin (github-tags datasource) and opens a bump PR, same mechanism as
-# the two globals above (#796). Kept on its own layer.
-RUN npm install -g jbaruch/reclaim-tripit-timezones-sync#v0.3.3
+# Deliberately NOT pinned — approved exception under `coding-policy:
+# dependency-management` First-Party Co-Shipped Dependency Carve-Out (0.3.129),
+# with `nanoclaw-host: sync-cli-floating` (0.1.54) as the authority-of-record.
+# Same operator owns both repos and this Dockerfile is the package's only
+# consumer, so a pin never stood between us and unreviewed upstream code; what
+# it did was hold the image on a build from before the package grew the OneCLI
+# support this container needs. That cost 19 days of the nightly sync creating
+# zero OOO blocks: `createGCalClient` still wanted the GOOGLE_* OAuth trio that #638
+# removed, returned null, and the CLI read that as "OOO not configured" — while
+# Renovate, watching github-tags, saw no newer tag to propose because none was
+# ever cut. The package's own CI on `main` is what replaces the bump review.
+#
+# The ADD below is load-bearing, not decoration. Without it BuildKit caches this
+# layer forever and "unpinned" quietly means "whatever the last rebuild
+# fetched" — a pin with no version anyone can read. The commit JSON changes
+# whenever upstream `main` moves, which invalidates the layer and forces the
+# reinstall. `deploy.sh` step 3b-ter fails the deploy if either half drifts.
+# Kept on its own layer.
+ADD https://api.github.com/repos/jbaruch/reclaim-tripit-timezones-sync/commits/main /tmp/rtts-head.json
+RUN npm install -g jbaruch/reclaim-tripit-timezones-sync && rm -f /tmp/rtts-head.json
 
 # Create app directory
 WORKDIR /app
