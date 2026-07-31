@@ -46,7 +46,7 @@ See `/workspace/trusted/key-people.md` — full list with Telegram usernames, DB
 - Intent Integrity Chain / spec-driven development methodology
 - Conference speaking pipeline (high volume, global)
 - Shownotes — mobile-first platform for conference resources with analytics
-- DevRel strategy and internal enablement at Tessl
+- DevRel strategy and internal enablement at Port.io
 
 ## His writing style — detailed voice profile
 
