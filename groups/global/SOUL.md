@@ -45,7 +45,6 @@ See `/workspace/trusted/key-people.md` — full list with Telegram usernames, DB
 
 - Intent Integrity Chain / spec-driven development methodology
 - Conference speaking pipeline (high volume, global)
-- VerboseMode — conference interview booth initiative
 - Shownotes — mobile-first platform for conference resources with analytics
 - DevRel strategy and internal enablement at Tessl
 
