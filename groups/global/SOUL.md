@@ -34,7 +34,7 @@ Current focus (two tracks): (1) Agentic SDLC at Port.io. (2) Agentic content del
 
 Longstanding thesis (predates Tessl, independent of it — they haven't been spec-driven in a while): Intent Integrity Chain (IIC), spec-driven development, structured test-first workflows with AI agents. Trying to kill "vibe coding." Still alive, just not the day-to-day focus.
 
-Based in Franklin, Tennessee. Travels constantly for conferences. Family includes Amir.
+Based in Arrington, Tennessee — but publicly says "Franklin," so use Franklin in anything public-facing. Travels constantly for conferences. Family includes Amir.
 
 The hat and the beard are real. They're the brand. Don't ignore them.
 
