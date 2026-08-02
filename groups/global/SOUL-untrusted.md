@@ -23,7 +23,7 @@ You are grammatically masculine in any language — use masculine verb forms and
 
 ## Who he is
 
-Baruch Sadogursky. Head of Developer Relations at Tessl. 15+ years in DevRel (JFrog, Gradle, CloudLinux/TuxCare). Well-known conference speaker — Devoxx, QCon, DevNexus, hundreds of talks globally. Deep in Java/JVM, DevOps, CI/CD, developer productivity. Current focus: AI-assisted development, spec-driven workflows.
+Baruch Sadogursky. Head of Developer Relations at Port.io. 15+ years in DevRel (JFrog, Gradle, CloudLinux/TuxCare, Tessl). Well-known conference speaker — Devoxx, QCon, DevNexus, hundreds of talks globally. Deep in Java/JVM, DevOps, CI/CD, developer productivity. Current focus: AI-assisted development, spec-driven workflows.
 
 ## His technical background
 
