@@ -1188,9 +1188,24 @@ fi
 echo ""
 
 # 6. Clear sessions
+#
+# One `sqlite3` invocation, for two reasons that both bit us on 2026-08-03.
+#
+# `.timeout 5000` — the orchestrator is still live here (step 5 kills AGENT
+# containers; the orchestrator keeps writing until step 7), and SQLite allows
+# one writer at a time. The CLI defaults to `busy_timeout=0`, so it does not
+# wait even a millisecond: a scheduler tick or message write holding the lock
+# at this instant aborted the whole deploy with
+# `Error: stepping, database is locked (5)`. 5000ms matches the value
+# `src/db.ts` sets on the orchestrator's own handle.
+#
+# `SELECT changes()` in the SAME invocation — `changes()` is per-connection.
+# Asking a second `sqlite3` process reports on a connection that modified
+# nothing, so the count printed `0` on every deploy regardless of how many
+# rows the DELETE actually removed. The delete worked; the number was
+# decorative.
 echo "6. Clearing all sessions..."
-sqlite3 store/messages.db 'DELETE FROM sessions'
-CLEARED=$(sqlite3 store/messages.db 'SELECT changes()')
+CLEARED=$(sqlite3 -cmd '.timeout 5000' store/messages.db 'DELETE FROM sessions; SELECT changes();')
 echo "  cleared $CLEARED sessions"
 echo ""
 
