@@ -88,6 +88,7 @@ import {
   resolveRequiresDelivery,
   shouldStampNoDelivery,
 } from './delivery-requirement.js';
+import { shouldStampNoModelWork } from './model-work.js';
 import { shouldSuppressEchoedResult } from './empty-turn-echo-suppression.js';
 import {
   isStaleSessionError,
@@ -260,6 +261,24 @@ interface ContainerOutput {
    * non-empty result was emitted). See `delivery-requirement.ts`.
    */
   noDelivery?: boolean;
+  /**
+   * #901 — set `true` on a TERMINAL success marker when no assistant
+   * message carried a `usage` payload during the run, i.e. the SDK
+   * returned without the model producing a single turn. The
+   * subscription-cap abort takes this shape: the CLI ends the turn
+   * before issuing any API request and hands back a clean result whose
+   * text is the cap notice, so no `is_error` and no error-shaped
+   * `subtype` marks it as a failure.
+   *
+   * Same posture as `noDelivery`: the status stays `success` so
+   * `scheduleClose` still drains the maintenance slot promptly (no #461
+   * wedge), and the host (`src/container-runner.ts`) honours this flag
+   * to resolve the run as `killed` (incomplete / retriable) instead of
+   * recording a success for a run that did nothing. Absent whenever the
+   * model produced any turn, including an empty one. See
+   * `model-work.ts`.
+   */
+  noModelWork?: boolean;
 }
 
 interface SessionEntry {
@@ -2863,6 +2882,12 @@ async function runQuery(
   // resolves the run `killed` even when the silent-stop synthesis
   // didn't fire (a result event landed but carried no delivery).
   noDelivery: boolean;
+  // #901 — true when no assistant message carried a `usage` payload
+  // during this runQuery, i.e. the model never ran a turn (the
+  // subscription-cap abort). `main()` reads it to stamp `noModelWork` on
+  // the post-query session-update marker, the same plumbing `noDelivery`
+  // uses, so a did-nothing run reaches the host on every terminal path.
+  noModelWork: boolean;
   // #697 — a stale-session resume error surfaced via the result-message
   // path; `main()` retries once with a fresh session.
   staleResumeError: boolean;
@@ -4201,9 +4226,16 @@ async function runQuery(
           usage: latestUsage,
         };
         writeOutput(
-          shouldStampNoDelivery(requiresDelivery, deliveredUserFacingContent)
-            ? { ...echoSuppressedOutput, noDelivery: true }
-            : echoSuppressedOutput,
+          Object.assign(
+            echoSuppressedOutput,
+            shouldStampNoDelivery(requiresDelivery, deliveredUserFacingContent)
+              ? { noDelivery: true }
+              : {},
+            // #901 — an echo-suppressed empty turn still carries usage
+            // (an empty assistant turn burns tokens), so this stamp only
+            // fires when the SDK produced no assistant message at all.
+            shouldStampNoModelWork(latestUsage) ? { noModelWork: true } : {},
+          ),
         );
       } else {
         // #47 + #581: if the agent already used send_message / send_file
@@ -4245,9 +4277,17 @@ async function runQuery(
           latestUsage,
         );
         writeOutput(
-          shouldStampNoDelivery(requiresDelivery, deliveredUserFacingContent)
-            ? { ...successOutput, noDelivery: true }
-            : successOutput,
+          Object.assign(
+            successOutput,
+            shouldStampNoDelivery(requiresDelivery, deliveredUserFacingContent)
+              ? { noDelivery: true }
+              : {},
+            // #901 — the subscription-cap abort lands here: a clean SDK
+            // result whose text is the cap notice, with no assistant
+            // message behind it. Stamp so the host resolves it `killed`
+            // rather than recording the notice as a successful run.
+            shouldStampNoModelWork(latestUsage) ? { noModelWork: true } : {},
+          ),
         );
       }
       // Break out of the for-await loop after receiving the result.
@@ -4281,8 +4321,14 @@ async function runQuery(
       requiresDelivery,
       deliveredUserFacingContent,
     );
+    // #901 — no SDK result event AND no assistant turn means the query
+    // ended without the model running at all, not merely without a
+    // terminal marker. Stamped independently of `noDelivery` so a skill
+    // that never declared `requires_delivery` still surfaces the
+    // did-nothing run.
+    const noModelWork = shouldStampNoModelWork(latestUsage);
     log(
-      `No SDK result event observed; synthesizing terminal success (closedDuringQuery=${closedDuringQuery}, noDelivery=${noDelivery})`,
+      `No SDK result event observed; synthesizing terminal success (closedDuringQuery=${closedDuringQuery}, noDelivery=${noDelivery}, noModelWork=${noModelWork})`,
     );
     writeOutput({
       status: 'success',
@@ -4290,6 +4336,7 @@ async function runQuery(
       newSessionId,
       usage: latestUsage,
       ...(noDelivery ? { noDelivery: true } : {}),
+      ...(noModelWork ? { noModelWork: true } : {}),
     });
   }
 
@@ -4322,6 +4369,7 @@ async function runQuery(
       requiresDelivery,
       deliveredUserFacingContent,
     ),
+    noModelWork: shouldStampNoModelWork(latestUsage),
     staleResumeError,
   };
 }
@@ -4747,12 +4795,14 @@ async function main(): Promise<void> {
       // stamp `noDelivery` so the host resolves the run `killed`
       // (retriable) instead of recording this session-update as a
       // delivered success. Status stays `success` so `scheduleClose`
-      // still drains the slot promptly.
+      // still drains the slot promptly. #901 — same for a query in which
+      // the model never ran a turn.
       writeOutput({
         status: 'success',
         result: null,
         newSessionId: sessionId,
         ...(queryResult.noDelivery ? { noDelivery: true } : {}),
+        ...(queryResult.noModelWork ? { noModelWork: true } : {}),
       });
 
       log('Query ended, waiting for next IPC message...');

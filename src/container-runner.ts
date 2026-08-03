@@ -376,6 +376,24 @@ export interface ContainerOutput {
    * `delivery-requirement.ts`.
    */
   noDelivery?: boolean;
+  /**
+   * #901 — stamped `true` by the agent-runner on a TERMINAL `success`
+   * marker when no assistant message carried a `usage` payload during
+   * the run, i.e. the SDK returned without the model producing a single
+   * turn. The subscription-cap abort takes this shape: the CLI ends the
+   * turn before issuing any API request and hands back a clean result
+   * whose text is the cap notice, so nothing in the result marks it a
+   * failure and the run recorded `success` while doing no work.
+   *
+   * Handled exactly like `noDelivery`: the marker's `success` status is
+   * preserved so `scheduleClose` still drains the maintenance slot
+   * promptly (no #461 wedge), and the close handler below resolves the
+   * run as `killed` (incomplete / retriable). Unlike `noDelivery` this
+   * needs no per-skill declaration — a run in which the model never ran
+   * is a failed run for every skill. See the agent-runner's
+   * `model-work.ts`.
+   */
+  noModelWork?: boolean;
 }
 
 // Session naming moved to ./session-names.ts and the mount builder to
@@ -1337,6 +1355,13 @@ export async function runContainerAgent(
                 if (parsed.noDelivery === true) {
                   sawNoDeliveryMarker = true;
                 }
+                // #901 — same latch for a terminal marker the runner
+                // stamped `noModelWork`: the model never ran a turn, so
+                // whatever text the result carried (the subscription-cap
+                // notice) is not the product of a completed run.
+                if (parsed.noModelWork === true) {
+                  sawNoModelWorkMarker = true;
+                }
               }
               // Activity detected — reset the hard timeout
               resetTimeout();
@@ -1396,6 +1421,13 @@ export async function runContainerAgent(
       // maintenance run to `killed` despite `hadTerminalResult` being
       // set by the same (success-status) marker.
       let sawNoDeliveryMarker = false;
+      // #901 — set true once a terminal marker stamped `noModelWork` (a
+      // run in which no assistant message ever carried usage, i.e. the
+      // model never ran a turn) is observed. Latched on the same terms
+      // as `sawNoDeliveryMarker` and consumed by the same two
+      // classifications below, so a did-nothing run resolves `killed`
+      // instead of recording the subscription-cap notice as a success.
+      let sawNoModelWorkMarker = false;
       // Untrusted containers get shorter timeout (5 min vs 30 min default)
       const UNTRUSTED_TIMEOUT = 300_000;
       const defaultTimeout =
@@ -1526,7 +1558,7 @@ export async function runContainerAgent(
           if (
             isMaintenanceSession &&
             hadStreamingOutput &&
-            (!hadTerminalResult || sawNoDeliveryMarker)
+            (!hadTerminalResult || sawNoDeliveryMarker || sawNoModelWorkMarker)
           ) {
             logger.warn(
               {
@@ -1535,8 +1567,9 @@ export async function runContainerAgent(
                 duration,
                 code,
                 sawNoDeliveryMarker,
+                sawNoModelWorkMarker,
               },
-              'Maintenance container reaped by inactivity timeout without delivering user-facing content — classifying killed (incomplete, retriable) (#682/#689)',
+              'Maintenance container reaped by inactivity timeout without delivering user-facing content — classifying killed (incomplete, retriable) (#682/#689/#901)',
             );
             outputChain.then(() => {
               resolve({
@@ -1547,9 +1580,14 @@ export async function runContainerAgent(
                 // flight: reaped mid-compose with no terminal result.
                 // Alertable.
                 timedOut: true,
-                error: sawNoDeliveryMarker
-                  ? `Maintenance container reaped by inactivity timeout after ${timeoutMs}ms; the requires_delivery skill delivered no user-facing content (noDelivery marker) — incomplete run (reaped mid-compose), retriable`
-                  : `Maintenance container reaped by inactivity timeout after ${timeoutMs}ms having streamed only preview output and no terminal result — incomplete run (reaped mid-compose), retriable`,
+                // #901 is checked before #689: when the model never ran,
+                // "delivered nothing" is a consequence of that, and the
+                // no-model-work reason is the actionable one.
+                error: sawNoModelWorkMarker
+                  ? `Maintenance container reaped by inactivity timeout after ${timeoutMs}ms; no assistant turn ever ran (noModelWork marker) — the model produced no output at all, which is the shape a subscription-cap abort takes. Incomplete run, retriable once the cap resets`
+                  : sawNoDeliveryMarker
+                    ? `Maintenance container reaped by inactivity timeout after ${timeoutMs}ms; the requires_delivery skill delivered no user-facing content (noDelivery marker) — incomplete run (reaped mid-compose), retriable`
+                    : `Maintenance container reaped by inactivity timeout after ${timeoutMs}ms having streamed only preview output and no terminal result — incomplete run (reaped mid-compose), retriable`,
               });
             });
             return;
@@ -1728,7 +1766,7 @@ export async function runContainerAgent(
           // classifies the maintenance run `killed`.
           if (
             isMaintenanceSession &&
-            (!hadTerminalResult || sawNoDeliveryMarker)
+            (!hadTerminalResult || sawNoDeliveryMarker || sawNoModelWorkMarker)
           ) {
             outputChain.then(() => {
               logger.warn(
@@ -1737,16 +1775,22 @@ export async function runContainerAgent(
                   duration,
                   newSessionId,
                   sawNoDeliveryMarker,
+                  sawNoModelWorkMarker,
                 },
-                'Maintenance container exited cleanly (code 0) without delivering user-facing content — classifying killed (incomplete, retriable) (#682/#689)',
+                'Maintenance container exited cleanly (code 0) without delivering user-facing content — classifying killed (incomplete, retriable) (#682/#689/#901)',
               );
               resolve({
                 status: 'killed',
                 result: null,
                 newSessionId,
-                error: sawNoDeliveryMarker
-                  ? 'Maintenance container exited cleanly (code 0) but the requires_delivery skill delivered no user-facing content (noDelivery marker) — incomplete run (composed but never sent), retriable'
-                  : 'Maintenance container exited cleanly (code 0) without delivering a terminal result — incomplete run (exited before producing/sending a result), retriable',
+                // #901 before #689: a run whose model never ran also
+                // delivered nothing, and the no-model-work reason is the
+                // one that tells the operator why.
+                error: sawNoModelWorkMarker
+                  ? 'Maintenance container exited cleanly (code 0) but no assistant turn ever ran (noModelWork marker) — the model produced no output at all, which is the shape a subscription-cap abort takes. Incomplete run, retriable once the cap resets'
+                  : sawNoDeliveryMarker
+                    ? 'Maintenance container exited cleanly (code 0) but the requires_delivery skill delivered no user-facing content (noDelivery marker) — incomplete run (composed but never sent), retriable'
+                    : 'Maintenance container exited cleanly (code 0) without delivering a terminal result — incomplete run (exited before producing/sending a result), retriable',
               });
             });
             return;

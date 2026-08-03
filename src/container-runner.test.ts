@@ -785,6 +785,126 @@ describe('container-runner timeout behavior', () => {
     expect(result.status).toBe('success');
   });
 
+  it('maintenance success marker stamped noModelWork resolves as killed (#901)', async () => {
+    // #901 — the subscription-cap abort. The CLI ended the turn before
+    // issuing any API request and handed back a clean result whose text
+    // is the cap notice, so nothing in the SDK result marks it a
+    // failure. On 2026-08-01 that shape recorded 92 false successes.
+    // The runner stamps `noModelWork` when no assistant turn ever
+    // carried usage, and the host must resolve 'killed'.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: "You've hit your limit · resets 5pm (America/Chicago)",
+      noModelWork: true,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('killed');
+    expect(result.error).toMatch(/noModelWork|no assistant turn|cap/i);
+  });
+
+  it('noModelWork latch survives a trailing plain session-update success marker (#901)', async () => {
+    // Same latching contract as #689: the terminal marker carries the
+    // flag, then `main()`'s plain session-update success follows. The
+    // later unstamped marker must not clear the downgrade.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: '',
+      noModelWork: true,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Trailing plain session-update success — no noModelWork flag.
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('killed');
+  });
+
+  it('maintenance terminal success WITHOUT noModelWork stays success (#901 over-reach guard)', async () => {
+    // The careful part: a run in which the model DID work but produced
+    // no user-facing output carries no noModelWork flag, so the
+    // legitimate quiet no-op keeps its 'success'. Only the stamped
+    // marker downgrades — the flag is the sole signal, never inferred
+    // from the result text.
+    const onOutput = vi.fn(async () => {});
+    const maintInput = { ...testInput, sessionName: 'maintenance' };
+    const resultPromise = runContainerAgent(
+      testGroup,
+      maintInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: '',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('success');
+  });
+
+  it('default session with a noModelWork marker stays success (#901 maintenance-scoped)', async () => {
+    // Over-reach guard mirroring #689: the downgrade is maintenance-
+    // only. An interactive chat turn that hit the cap surfaces the
+    // notice to the user directly; the chat path's success semantics
+    // stay unchanged.
+    const onOutput = vi.fn(async () => {});
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: "You've hit your limit · resets 5pm (America/Chicago)",
+      noModelWork: true,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('success');
+  });
+
   it('default session keeps the IDLE_TIMEOUT+30s graceful-close floor', async () => {
     const onOutput = vi.fn(async () => {});
     // No sessionName → falls through to DEFAULT_SESSION_NAME.
