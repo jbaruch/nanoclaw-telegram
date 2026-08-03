@@ -28,6 +28,17 @@
     },
     {
       "customType": "regex",
+      "description": "audible-cli pinned in the audible-backup sidecar image (container/audible-backup/Dockerfile `RUN pip install --no-cache-dir audible-cli==<version>`, #895). Watched via the pypi datasource; no native manager reads a pip pin inside a RUN line. This pin is coupled to the image's python base tag through audible-cli's upper requires-python bound, so CI builds the image on every PR — a bump either scanner proposes that breaks the pair goes red before it merges.",
+      "fileMatch": ["^container/audible-backup/Dockerfile$"],
+      "matchStringsStrategy": "any",
+      "matchStrings": [
+        "(?<depName>audible-cli)==(?<currentValue>[0-9][^\\s\\\\]*)"
+      ],
+      "datasourceTemplate": "pypi",
+      "versioningTemplate": "pep440"
+    },
+    {
+      "customType": "regex",
       "description": "The tessl CLI pinned in the orchestrator image (Dockerfile.orchestrator `RUN npm install -g tessl@<version>`, #748 Phase 3). Same regex-manager mechanism as the agent-image globals; a separate fileMatch because Dockerfile.orchestrator is a distinct file.",
       "fileMatch": ["^Dockerfile.orchestrator$"],
       "matchStringsStrategy": "any",

@@ -34,6 +34,45 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# Host sidecar build scripts, one per line, sorted for a deterministic
+# build order (#895).
+#
+# Discovery is by convention — every `container/<name>/build.sh` builds
+# one sidecar image — so adding a sidecar needs no edit here. Two
+# deliberate exclusions:
+#   - `container/build.sh` is the AGENT image, built by step 2a with tag
+#     and --no-cache handling this loop does not replicate. It sits one
+#     level up, so the `*/` glob already skips it.
+#   - a non-executable build.sh is reported, never silently skipped: an
+#     unrunnable script is a permissions bug, and swallowing it here is
+#     how a sidecar goes missing without anyone noticing.
+sidecar_build_scripts() {
+    local script status=0
+    local -a found=()
+    for script in container/*/build.sh; do
+        # Unmatched glob stays literal under bash's default nullglob-off,
+        # so an install with no sidecars yields nothing rather than a
+        # bogus path.
+        [[ -f "$script" ]] || continue
+        if [[ ! -x "$script" ]]; then
+            # Non-zero, not a warning-and-continue: an unrunnable build
+            # script means that sidecar's image silently stops being
+            # rebuilt, which IS the #895 failure. `no-error-suppression`
+            # and `error-handling` both require it to surface and fail.
+            echo "ERROR: $script is not executable (chmod +x to include it)" >&2
+            status=1
+            continue
+        fi
+        found+=("$script")
+    done
+    # Sort inside the function, not via a trailing pipe: a pipeline's exit
+    # status is `sort`'s, which would swallow the failure above.
+    if [[ ${#found[@]} -gt 0 ]]; then
+        printf '%s\n' "${found[@]}" | sort
+    fi
+    return "$status"
+}
+
 # Read CONTAINER_IMAGE from .env if it isn't already set in the shell,
 # so this script and `docker compose` see the same source of truth.
 # `docker compose` reads .env directly when interpolating
@@ -195,6 +234,52 @@ if [[ "$TILES_ONLY" == false ]]; then
         echo "WARNING: which is NOT the image the orchestrator will spawn from."
         echo "WARNING: Push/tag your own build pipeline for '$AGENT_IMAGE' separately."
         ./container/build.sh "${AGENT_BUILD_FLAGS[@]}"
+    fi
+    echo ""
+
+    # 2a-bis. Rebuild host sidecar images (#895).
+    #
+    # Sidecars run as `docker run <image>` from the host (see
+    # src/sidecar-runner.ts). Their images are built locally and never
+    # pushed anywhere, so a `docker system prune` or a host reprovision
+    # deletes them for good: the next invocation reports "Unable to find
+    # image locally", docker falls back to a registry PULL, and the
+    # operator sees "pull access denied" for an image that was never
+    # meant to be pulled.
+    #
+    # Building here also makes a broken recipe fail AT DEPLOY rather than
+    # at backup time. #895 was exactly that: a Dependabot base-image bump
+    # left `pip install audible-cli==0.3.3` unsatisfiable (upper
+    # requires-python bound), and with nothing building the image, the
+    # break stayed invisible for 13 days until a prune removed the last
+    # good copy.
+    echo "2a-bis. Rebuilding host sidecar images..."
+    # Command substitution, not process substitution: `< <(...)` discards
+    # the discovery exit status, so an unrunnable build script would sail
+    # past the check below.
+    if ! SIDECAR_SCRIPTS_RAW=$(sidecar_build_scripts); then
+        echo "ERROR: a sidecar build script exists but is not executable (named above)." >&2
+        echo "Refusing to deploy: that sidecar's image would silently stop being rebuilt," >&2
+        echo "which is exactly how jbaruch/nanoclaw#895 stayed invisible for 13 days." >&2
+        echo "Fix: chmod +x the script, then re-run ./scripts/deploy.sh" >&2
+        exit 1
+    fi
+    SIDECAR_BUILD_SCRIPTS=()
+    while IFS= read -r script; do
+        [[ -n "$script" ]] && SIDECAR_BUILD_SCRIPTS+=("$script")
+    done <<< "$SIDECAR_SCRIPTS_RAW"
+    if [[ ${#SIDECAR_BUILD_SCRIPTS[@]} -eq 0 ]]; then
+        # Reaching here means zero sidecars exist. A present-but-unrunnable
+        # script already exited non-zero above, so this cannot misreport a
+        # chmod problem as "nothing installed".
+        echo "  none found (no container/*/build.sh)"
+    else
+        for script in "${SIDECAR_BUILD_SCRIPTS[@]}"; do
+            echo "  building via $script"
+            # No `|| true`: an unbuildable sidecar fails the deploy. That
+            # is the whole point — a silent skip here is how #895 hid.
+            "$script"
+        done
     fi
     echo ""
 
@@ -590,6 +675,101 @@ if [[ -n "$SYNC_CLI_OFFENDER" ]]; then
     exit 1
 fi
 echo "  ok — sync CLI install floats and refetches"
+echo ""
+
+# 3b-quater. Verify the OS-package carve-out's bounds still hold.
+#
+# Per `nanoclaw-host: os-package-floating` (authority-of-record for
+# `coding-policy: dependency-management` OS-Package Runtime Carve-Out),
+# the apt installs in these images carry no version specifiers: Debian's
+# archive serves only the current version of a package, so `pkg=<version>`
+# stops resolving at the next security update and fails every build.
+#
+# Two things make that bounded rather than open-ended, and both are checked
+# here. The base image must stay pinned — the distro release is what turns
+# "current" into a range — and the package set must stay the recorded one,
+# so the exemption cannot grow one `apt-get install` at a time.
+echo "3b-quater. Verifying the OS-package carve-out bounds..."
+OS_PKG_OFFENDERS=$(python3 - <<'PY_OS_PKG'
+import pathlib, re
+
+# Authoritative package sets. The human-readable mirror lives in
+# `nanoclaw-host: os-package-floating`; both move in lock-step per that
+# rule's Surface sync section.
+COVERED_IMAGES = {
+    "container/Dockerfile": {
+        "chromium", "fonts-liberation", "fonts-noto-color-emoji", "libgbm1",
+        "libnss3", "libatk-bridge2.0-0", "libgtk-3-0", "libx11-xcb1",
+        "libxcomposite1", "libxdamage1", "libxrandr2", "libasound2",
+        "libpangocairo-1.0-0", "libcups2", "libdrm2", "libxshmfence1",
+        "curl", "git", "poppler-utils", "python3", "sqlite3", "gh",
+    },
+    "Dockerfile.orchestrator": {
+        "ca-certificates", "curl", "docker.io", "g++", "gh", "make",
+        "python3", "sqlite3",
+    },
+    "container/audible-backup/Dockerfile": {"ffmpeg"},
+}
+
+# apt flags that may appear among the package operands.
+FLAGS = re.compile(r"^-")
+
+for rel, allowed in sorted(COVERED_IMAGES.items()):
+    path = pathlib.Path(rel)
+    try:
+        raw = path.read_text()
+    except OSError as exc:
+        print(f"{rel}: unreadable ({type(exc).__name__}: {exc})")
+        continue
+
+    # Join line continuations first so a multi-line package list and a
+    # single-line `&& apt-get install -y gh` parse the same way.
+    joined = re.sub(r"\\\n\s*", " ", raw)
+
+    from_lines = re.findall(r"^FROM\s+(\S+)", joined, re.MULTILINE)
+    if not from_lines:
+        print(f"{rel}: no FROM line found (moved or renamed? the gate cannot see it)")
+        continue
+    for ref in from_lines:
+        # A digest pin is bounded regardless of tag. Otherwise require an
+        # explicit non-latest tag: the distro release is what bounds the
+        # unpinned package versions below it.
+        if "@sha256:" in ref:
+            continue
+        name, sep, tag = ref.partition(":")
+        if not sep or not tag:
+            print(f"{rel}: base image {ref!r} carries no tag — the OS-package carve-out requires a pinned base")
+        elif tag == "latest":
+            print(f"{rel}: base image {ref!r} floats on :latest — floating the base AND its packages is unbounded")
+
+    installs = re.findall(r"apt-get install([^&|]*)", joined)
+    if not installs:
+        print(f"{rel}: no `apt-get install` found (moved or renamed? the gate cannot see it)")
+        continue
+    found = set()
+    for operands in installs:
+        for tok in operands.split():
+            if FLAGS.match(tok):
+                continue
+            found.add(tok)
+    extra = found - allowed
+    if extra:
+        print(
+            f"{rel}: apt package(s) {sorted(extra)} are not in the recorded set — "
+            f"add them to COVERED_IMAGES here and to the nanoclaw-host: os-package-floating rule, "
+            f"or pin them"
+        )
+PY_OS_PKG
+)
+if [[ -n "$OS_PKG_OFFENDERS" ]]; then
+    echo "ERROR: the OS-package floating carve-out's bounds are violated:" >&2
+    while IFS= read -r line; do
+        echo "  - $line" >&2
+    done <<< "$OS_PKG_OFFENDERS"
+    echo "Why: nanoclaw-host: os-package-floating (approved exception to coding-policy: dependency-management)." >&2
+    exit 1
+fi
+echo "  ok — covered images keep pinned bases and recorded package sets"
 echo ""
 
 # 3c. Verify each declared workspace tile actually MATERIALIZED at the

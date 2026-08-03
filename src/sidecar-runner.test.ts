@@ -13,7 +13,12 @@ vi.mock('./logger.js', () => ({
 
 import { runSidecar } from './sidecar-runner.js';
 
-/** Make the mocked execFile invoke its callback with a fixed result. */
+/**
+ * Make the mocked execFile invoke its callback with a fixed result for the
+ * `docker run`, while reporting the image as PRESENT for the #895 preflight
+ * (`docker image inspect`). Tests that care about the missing-image path use
+ * `mockImageMissing` instead.
+ */
 function mockExec(
   error: (Error & { code?: number }) | null,
   stdout: string,
@@ -22,11 +27,65 @@ function mockExec(
   execFileMock.mockImplementation(
     (
       _cmd: string,
-      _args: string[],
+      args: string[],
       _opts: unknown,
       cb: (e: Error | null, out: string, err: string) => void,
-    ) => cb(error, stdout, stderr),
+    ) =>
+      isInspect(args)
+        ? cb(null, '[{"Id":"sha256:deadbeef"}]', '')
+        : cb(error, stdout, stderr),
   );
+}
+
+/** Report the preflight image lookup as absent (non-zero exit). */
+function mockImageMissing(): void {
+  execFileMock.mockImplementation(
+    (
+      _cmd: string,
+      args: string[],
+      _opts: unknown,
+      cb: (e: Error | null, out: string, err: string) => void,
+    ) =>
+      isInspect(args)
+        ? cb(
+            Object.assign(new Error('Command failed: exit 1'), { code: 1 }),
+            '',
+            'Error: No such image: audible-backup:latest',
+          )
+        : cb(null, '{}', ''),
+  );
+}
+
+/** Docker itself is unusable — not on PATH, or the daemon is down. */
+function mockDockerUnavailable(stderr: string): void {
+  execFileMock.mockImplementation(
+    (
+      _cmd: string,
+      args: string[],
+      _opts: unknown,
+      cb: (e: Error | null, out: string, err: string) => void,
+    ) =>
+      isInspect(args)
+        ? cb(
+            Object.assign(new Error('spawn docker ENOENT'), { code: 'ENOENT' }),
+            '',
+            stderr,
+          )
+        : cb(null, '{}', ''),
+  );
+}
+
+function isInspect(args: string[]): boolean {
+  return args[0] === 'image' && args[1] === 'inspect';
+}
+
+/** The `docker run …` invocation, skipping the preflight inspect. */
+function runCall(): [string, string[]] {
+  const call = execFileMock.mock.calls.find(
+    (c) => !isInspect(c[1] as string[]),
+  );
+  if (!call) throw new Error('docker run was never invoked');
+  return call as [string, string[]];
 }
 
 let tmpDir: string;
@@ -104,10 +163,76 @@ describe('runSidecar', () => {
     expect(execFileMock).not.toHaveBeenCalled();
   });
 
+  it('reports a missing image actionably and never runs the container (#895)', async () => {
+    mockImageMissing();
+    const result = await runSidecar({ name: 'audible-backup' });
+    // The image name, so the operator knows WHICH image is gone.
+    expect(result.error).toContain('audible-backup:latest');
+    // Why it cannot self-heal: built locally, never pushed.
+    expect(result.error).toMatch(/built locally and never pushed/);
+    // Both remediations: the deploy step and the direct build script.
+    expect(result.error).toMatch(/scripts\/deploy\.sh/);
+    expect(result.error).toMatch(/container\/audible-backup\/build\.sh/);
+    // The raw docker fallback ("pull access denied") must never surface.
+    expect(result.error).not.toMatch(/pull access denied|docker login/);
+    // docker run must NOT be attempted — that is what produced the
+    // misleading registry error in the first place.
+    const runInvoked = execFileMock.mock.calls.some(
+      (c) => (c[1] as string[])[0] === 'run',
+    );
+    expect(runInvoked).toBe(false);
+  });
+
+  it('relays a docker fault as a docker fault, not as a missing image (#895)', async () => {
+    // Copilot's finding: treating EVERY inspect failure as "image missing"
+    // sends the operator to a build script that cannot fix a stopped daemon,
+    // and the early return means the real docker error never surfaces.
+    mockDockerUnavailable(
+      'Cannot connect to the Docker daemon at unix:///var/run/docker.sock',
+    );
+    const result = await runSidecar({ name: 'audible-backup' });
+    expect(result.error).toMatch(/docker itself did not respond/);
+    expect(result.error).toMatch(/Cannot connect to the Docker daemon/);
+    // Must NOT prescribe a rebuild — wrong remediation for this failure.
+    expect(result.error).not.toMatch(/build\.sh|deploy\.sh/);
+    const runInvoked = execFileMock.mock.calls.some(
+      (c) => (c[1] as string[])[0] === 'run',
+    );
+    expect(runInvoked).toBe(false);
+  });
+
+  it('treats docker\'s "No such object" wording as missing too (#895)', async () => {
+    execFileMock.mockImplementation(
+      (
+        _cmd: string,
+        args: string[],
+        _opts: unknown,
+        cb: (e: Error | null, out: string, err: string) => void,
+      ) =>
+        isInspect(args)
+          ? cb(
+              Object.assign(new Error('Command failed: exit 1'), { code: 1 }),
+              '',
+              'Error: No such object: audible-backup:latest',
+            )
+          : cb(null, '{}', ''),
+    );
+    const result = await runSidecar({ name: 'audible-backup' });
+    expect(result.error).toMatch(/not present on this host/);
+  });
+
+  it('preflights with `docker image inspect`, which never contacts a registry (#895)', async () => {
+    mockExec(null, JSON.stringify({ books: [] }), '');
+    await runSidecar({ name: 'audible-backup' });
+    const [cmd, args] = execFileMock.mock.calls[0] as [string, string[]];
+    expect(cmd).toBe('docker');
+    expect(args).toEqual(['image', 'inspect', 'audible-backup:latest']);
+  });
+
   it('builds docker args from the config registry plus allowlisted flags', async () => {
     mockExec(null, JSON.stringify({ books: [] }), '');
     await runSidecar({ name: 'audible-backup', flags: ['--dry-run'] });
-    const [cmd, args] = execFileMock.mock.calls[0] as [string, string[]];
+    const [cmd, args] = runCall();
     expect(cmd).toBe('docker');
     expect(args).toEqual([
       'run',
@@ -127,7 +252,7 @@ describe('runSidecar', () => {
   it('omits optional flags when none are supplied', async () => {
     mockExec(null, JSON.stringify({ books: [] }), '');
     await runSidecar({ name: 'audible-backup' });
-    const [, args] = execFileMock.mock.calls[0] as [string, string[]];
+    const [, args] = runCall();
     expect(args[args.length - 1]).toBe('--json');
     expect(args).not.toContain('--dry-run');
   });

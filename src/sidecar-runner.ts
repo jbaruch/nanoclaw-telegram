@@ -84,6 +84,42 @@ export async function runSidecar(
     };
   }
 
+  // Preflight the image (#895). Sidecar images are built locally and never
+  // pushed, so once one is gone `docker run` falls back to a registry pull
+  // and fails as "pull access denied … may require 'docker login'". That
+  // message sends the operator hunting for credentials for an image that
+  // was never meant to be pulled. Checking first reports the real problem
+  // and its fix instead.
+  const preflight = await inspectImage(spec.image);
+  if (preflight.state === 'missing') {
+    logger.error(
+      { name: req.name, image: spec.image },
+      'run_sidecar: image missing on host',
+    );
+    return {
+      error:
+        `Sidecar image "${spec.image}" is not present on this host. It is built locally and never pushed, ` +
+        `so a \`docker system prune\` or host reprovision removes it permanently. ` +
+        `Rebuild with \`./scripts/deploy.sh\` (step 2a-bis builds every container/*/build.sh), ` +
+        `or directly via \`./container/${req.name}/build.sh\` if that path exists.`,
+    };
+  }
+  if (preflight.state === 'docker-unavailable') {
+    // Docker itself is broken (not on PATH, daemon down, inspect timed out).
+    // Sending the operator to a build script would waste their time on the
+    // wrong problem, and the early return means the real docker error would
+    // otherwise never surface — so relay it verbatim.
+    logger.error(
+      { name: req.name, image: spec.image, error: preflight.message },
+      'run_sidecar: docker unavailable during image preflight',
+    );
+    return {
+      error:
+        `Could not check for sidecar image "${spec.image}" — docker itself did not respond: ${preflight.message}. ` +
+        `This is a docker problem on the host, not a missing image; the sidecar was not run.`,
+    };
+  }
+
   const dockerArgs = [
     'run',
     '--rm',
@@ -146,6 +182,51 @@ export async function runSidecar(
     error: error?.message,
     raw: stdout,
     logs: stderr?.slice(-2000),
+  };
+}
+
+/** Bounds for the preflight probe — small; it prints one JSON blob. */
+const IMAGE_INSPECT_TIMEOUT_MS = 10_000;
+const IMAGE_INSPECT_MAX_BUFFER = 1024 * 1024;
+
+type PreflightResult =
+  | { state: 'present' }
+  | { state: 'missing' }
+  | { state: 'docker-unavailable'; message: string };
+
+/**
+ * Look `image` up in the host daemon's local image store (#895).
+ *
+ * `docker image inspect` never contacts a registry, so unlike `docker run`
+ * it cannot be fooled into reporting a pull failure for an image that was
+ * only ever built locally — the misleading "pull access denied" in #895.
+ *
+ * A non-zero exit is NOT uniformly "missing". Docker being absent from PATH,
+ * a stopped daemon, or a timed-out probe all exit non-zero too, and since
+ * this preflight returns early, treating those as "missing" would send the
+ * operator to a build script for a problem the build script cannot fix — and
+ * bury the real docker error. So the absent-image signature is matched
+ * explicitly and everything else is relayed as a docker fault.
+ */
+async function inspectImage(image: string): Promise<PreflightResult> {
+  const { error, stderr } = await execDocker(['image', 'inspect', image], {
+    cwd: process.cwd(),
+    env: {
+      PATH: process.env.PATH || '/usr/bin:/bin',
+      HOME: process.env.HOME || '/root',
+    },
+    // A short bound so a wedged daemon can't hold the IPC caller open for
+    // the sidecar's full budget (10 minutes for audible-backup).
+    timeout: IMAGE_INSPECT_TIMEOUT_MS,
+    maxBuffer: IMAGE_INSPECT_MAX_BUFFER,
+  });
+  if (error === null) return { state: 'present' };
+  // Docker's absent-image wording across versions: "No such image",
+  // "No such object". Both arrive on stderr with exit 1.
+  if (/no such (image|object)/i.test(stderr)) return { state: 'missing' };
+  return {
+    state: 'docker-unavailable',
+    message: (stderr.trim() || error.message).slice(-500),
   };
 }
 

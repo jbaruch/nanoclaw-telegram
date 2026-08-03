@@ -85,3 +85,20 @@ jobs:
       - name: Python tests (audible-backup sidecar)
         working-directory: container/audible-backup
         run: python3 -m unittest test_backup test_enrich
+
+      # Build the sidecar image so a broken RECIPE fails at PR time (#895).
+      #
+      # The unit tests above import backup.py directly; they never exercise
+      # the Dockerfile, so nothing noticed when Dependabot #738 moved the
+      # base image to python:3.14-slim while `audible-cli==0.3.3` declared
+      # `requires-python <3.14`. That PR merged green, the image became
+      # unbuildable, and the break only surfaced 13 days later when a host
+      # prune removed the last image built under 3.13.
+      #
+      # This is a build only — nothing is pushed, and no Audible
+      # credentials are involved. It costs ~1 min and turns the next
+      # base-image bump that breaks the pin into a red check on the bump's
+      # own PR. `audible-cli==0.4.0` declares `<3.15`, so python:3.15-slim
+      # is the next one this will catch.
+      - name: Build audible-backup sidecar image
+        run: ./container/audible-backup/build.sh
