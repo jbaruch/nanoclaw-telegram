@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import tempfile
+import unicodedata
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -369,6 +370,157 @@ class FindMissingOnDiskTest(unittest.TestCase):
             inventory = [self._inventory_record("ASIN1", "Confusing.m4b")]
             missing = backup.find_missing_on_disk(inventory, books_dir)
             self.assertEqual([r["asin"] for r in missing], ["ASIN1"])
+
+    def test_resolves_bare_stem_against_mp3_on_disk(self):
+        # Most inventory rows carry a bare stem while the file on disk
+        # carries an extension. `.mp3` is the largest slice of the live
+        # library.
+        with tempfile.TemporaryDirectory() as tmp:
+            books_dir = Path(tmp)
+            (books_dir / "A Wizard of Earthsea.mp3").write_bytes(b"")
+            inventory = [self._inventory_record("ASIN1", "A Wizard of Earthsea")]
+            self.assertEqual(backup.find_missing_on_disk(inventory, books_dir), [])
+
+    def test_resolves_bare_stem_against_m4b_on_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            books_dir = Path(tmp)
+            (books_dir / "A Canticle for Leibowitz.m4b").write_bytes(b"")
+            inventory = [
+                self._inventory_record("ASIN1", "A Canticle for Leibowitz")
+            ]
+            self.assertEqual(backup.find_missing_on_disk(inventory, books_dir), [])
+
+    def test_resolves_bare_stem_against_m4a_on_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            books_dir = Path(tmp)
+            (books_dir / "Small Gods.m4a").write_bytes(b"")
+            inventory = [self._inventory_record("ASIN1", "Small Gods")]
+            self.assertEqual(backup.find_missing_on_disk(inventory, books_dir), [])
+
+    def test_resolves_filename_that_already_carries_extension(self):
+        # The minority of rows that already store `.m4b` must keep
+        # resolving as-is — the empty candidate in
+        # DISK_EXTENSION_CANDIDATES is what covers them.
+        with tempfile.TemporaryDirectory() as tmp:
+            books_dir = Path(tmp)
+            (books_dir / "Present.m4b").write_bytes(b"")
+            inventory = [self._inventory_record("ASIN1", "Present.m4b")]
+            self.assertEqual(backup.find_missing_on_disk(inventory, books_dir), [])
+
+    def test_resolves_title_containing_dots(self):
+        # Deriving a stem with `splitext` would turn "Dr. Seuss's ABC"
+        # into "Dr. Seuss's" and "Book 1.1" into "Book 1", so neither
+        # would ever resolve. Both are real live-library shapes.
+        with tempfile.TemporaryDirectory() as tmp:
+            books_dir = Path(tmp)
+            (books_dir / "Dr. Seuss's ABC.mp3").write_bytes(b"")
+            (books_dir / "Wheel of Time Book 1.1.m4b").write_bytes(b"")
+            inventory = [
+                self._inventory_record("ASIN1", "Dr. Seuss's ABC"),
+                self._inventory_record("ASIN2", "Wheel of Time Book 1.1"),
+            ]
+            self.assertEqual(backup.find_missing_on_disk(inventory, books_dir), [])
+
+    def test_resolves_nfd_inventory_against_nfc_on_disk(self):
+        # The inventory JSON stores some titles decomposed while the
+        # filesystem hands them back composed. Byte-comparing the two
+        # reports a present file as missing — the live case was the
+        # Shōgun volumes.
+        composed = unicodedata.normalize("NFC", "Shōgun, Part One")
+        decomposed = unicodedata.normalize("NFD", "Shōgun, Part One")
+        self.assertNotEqual(composed, decomposed)
+        with tempfile.TemporaryDirectory() as tmp:
+            books_dir = Path(tmp)
+            (books_dir / f"{composed}.m4b").write_bytes(b"")
+            inventory = [self._inventory_record("ASIN1", decomposed)]
+            self.assertEqual(backup.find_missing_on_disk(inventory, books_dir), [])
+
+    def test_resolves_nfc_inventory_against_nfd_on_disk(self):
+        # The mirror of the case above: normalizing only the inventory
+        # side would still miss a decomposed name on disk, so the disk
+        # index is normalized too.
+        composed = unicodedata.normalize("NFC", "Shōgun, Part Two")
+        decomposed = unicodedata.normalize("NFD", "Shōgun, Part Two")
+        with tempfile.TemporaryDirectory() as tmp:
+            books_dir = Path(tmp)
+            (books_dir / f"{decomposed}.m4b").write_bytes(b"")
+            inventory = [self._inventory_record("ASIN1", composed)]
+            self.assertEqual(backup.find_missing_on_disk(inventory, books_dir), [])
+
+    def test_genuinely_absent_file_still_reports_missing(self):
+        # The whole point of the alert: none of the extension or
+        # normalization fallbacks may resolve a book that truly is not
+        # there, or the check stops catching real gaps.
+        with tempfile.TemporaryDirectory() as tmp:
+            books_dir = Path(tmp)
+            (books_dir / "Present.mp3").write_bytes(b"")
+            inventory = [
+                self._inventory_record("ASIN1", "Present"),
+                self._inventory_record("ASIN2", "Vanished", "Vanished Book"),
+            ]
+            missing = backup.find_missing_on_disk(inventory, books_dir)
+            self.assertEqual([r["asin"] for r in missing], ["ASIN2"])
+
+    def test_unrelated_extension_does_not_resolve(self):
+        # A stray sidecar file sharing the stem (cover art, chapter
+        # JSON) is not the audiobook and must not satisfy the check.
+        with tempfile.TemporaryDirectory() as tmp:
+            books_dir = Path(tmp)
+            (books_dir / "Orphaned.jpg").write_bytes(b"")
+            (books_dir / "Orphaned.json").write_bytes(b"")
+            inventory = [self._inventory_record("ASIN1", "Orphaned")]
+            missing = backup.find_missing_on_disk(inventory, books_dir)
+            self.assertEqual([r["asin"] for r in missing], ["ASIN1"])
+
+    def test_per_title_subdirectory_does_not_resolve(self):
+        # The library also has per-title directories holding an m4b.
+        # That layout resolves zero inventory rows in practice, and a
+        # directory is not a playable file — keep it reporting missing
+        # rather than quietly counting a folder as the book.
+        with tempfile.TemporaryDirectory() as tmp:
+            books_dir = Path(tmp)
+            nested = books_dir / "A Canticle for Leibowitz [B005F5ZBRC]"
+            nested.mkdir()
+            (nested / "A Canticle for Leibowitz.m4b").write_bytes(b"")
+            inventory = [
+                self._inventory_record("ASIN1", "A Canticle for Leibowitz")
+            ]
+            missing = backup.find_missing_on_disk(inventory, books_dir)
+            self.assertEqual([r["asin"] for r in missing], ["ASIN1"])
+
+    def test_absent_books_dir_reports_every_named_record_missing(self):
+        # `main` creates books_dir AFTER this check runs, so the first
+        # bootstrap pass legitimately sees no directory. Every record
+        # with a filename is missing then — which is accurate, and must
+        # not raise.
+        with tempfile.TemporaryDirectory() as tmp:
+            books_dir = Path(tmp) / "never-created"
+            inventory = [
+                self._inventory_record("ASIN1", "Gone"),
+                self._inventory_record("ASIN2", ""),
+            ]
+            missing = backup.find_missing_on_disk(inventory, books_dir)
+            self.assertEqual([r["asin"] for r in missing], ["ASIN1"])
+
+    def test_books_dir_that_is_not_a_directory_raises(self):
+        # "Absent" is a legitimate empty result; "present but unusable"
+        # is a fault, and the two must not collapse into the same
+        # answer. Guarding with `is_dir()` collapses them — it reports
+        # False for ENOTDIR/EBADF/ELOOP as well as ENOENT — so a stray
+        # regular file at the mount point would report all 713 books
+        # missing with nothing logged anywhere. Catching only
+        # FileNotFoundError leaves this one loud.
+        #
+        # Driven through the real filesystem rather than a patched
+        # `iterdir`: a patch would only exercise the call the fixed code
+        # makes and would pass against the `is_dir()` version too,
+        # proving nothing.
+        with tempfile.TemporaryDirectory() as tmp:
+            books_dir = Path(tmp) / "books"
+            books_dir.write_bytes(b"not a directory")
+            inventory = [self._inventory_record("ASIN1", "Gone")]
+            with self.assertRaises(NotADirectoryError):
+                backup.find_missing_on_disk(inventory, books_dir)
 
 
 class LoadSkiplistTest(unittest.TestCase):

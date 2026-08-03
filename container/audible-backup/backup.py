@@ -25,6 +25,7 @@ import re
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
 from typing import Optional
 
@@ -226,26 +227,86 @@ def find_new_books(
     ]
 
 
+# Extensions appended to an inventory `filename` when resolving it on disk.
+#
+# The empty string comes first so a `filename` that already carries its
+# extension resolves as-is. The rest cover the bare-stem majority: the
+# live library stores a stem for most records and the audio files are a
+# mix of `.mp3`, `.m4b`, and `.m4a`.
+#
+# The stem is never derived with `os.path.splitext` — the dots that show
+# up inside a `filename` are part of the title ("Dr. Seuss's ABC",
+# "Book 1.1"), so splitting on the last dot mangles the name instead of
+# stripping an extension.
+DISK_EXTENSION_CANDIDATES = ("", ".m4b", ".mp3", ".m4a")
+
+
+def _disk_file_index(books_dir: Path) -> set[str]:
+    """NFC-normalized names of the regular files directly under books_dir.
+
+    Both sides of the comparison have to be normalized, which rules out
+    a bare `(books_dir / filename).is_file()`: the inventory JSON stores
+    some titles decomposed (NFD) while the filesystem hands them back
+    composed (NFC), so the raw byte comparison misses a file that is
+    present ("Shōgun" is the live example). Only the name can be
+    normalized, not the lookup, so the directory is indexed once and
+    membership is tested against that.
+
+    A missing `books_dir` yields an empty index rather than raising:
+    `main` creates it AFTER this check runs, so the first bootstrap pass
+    legitimately sees no directory. An empty index reports every record
+    with a `filename` as missing, which is the accurate answer when the
+    books directory holds nothing.
+
+    Only `FileNotFoundError` gets that treatment, and it is caught
+    rather than tested with `is_dir()`. `is_dir()` answers False for
+    ENOTDIR, EBADF, and ELOOP as well as the ENOENT we do want to
+    tolerate, so a `books_dir` that exists but is not a usable
+    directory — a stray regular file at the mount point, a symlink
+    loop — would read as a fresh install and report the whole library
+    missing with no error anywhere. Catching only the errno that means
+    "not created yet" keeps every other fault loud: a wrong-type path
+    raises `NotADirectoryError`, and an I/O error on the NAS mount
+    raises `OSError`. (A denied mount raises `PermissionError` either
+    way — `is_dir()` re-raises EACCES rather than swallowing it.)
+    """
+    try:
+        entries = list(books_dir.iterdir())
+    except FileNotFoundError:
+        return set()
+    return {
+        unicodedata.normalize("NFC", entry.name)
+        for entry in entries
+        if entry.is_file()
+    }
+
+
 def find_missing_on_disk(inventory: list[dict], books_dir: Path) -> list[dict]:
-    """Find inventory records whose m4b file is no longer present under books_dir.
+    """Find inventory records whose audio file is no longer present under books_dir.
 
     Soft-alert dedup gap: `find_new_books` keys off ASIN-presence in
     inventory, so once a record exists no later run re-downloads even if
-    the m4b is removed (Google Drive sync hiccup, manual cleanup, partial
+    the file is removed (Google Drive sync hiccup, manual cleanup, partial
     restore, disk migration). This helper surfaces inventory rows with a
     non-empty `filename` whose file is missing under `books_dir`, so the
     operator sees the gap on the next weekly run instead of finding out
     at playback time.
 
+    Resolution tries the `filename` as-is and then with each extension in
+    `DISK_EXTENSION_CANDIDATES`, comparing NFC-normalized names against
+    the `_disk_file_index` snapshot.
+
     Records with an empty `filename` are skipped — those have never been
     downloaded, a distinct state outside the disk-presence check.
     """
+    on_disk = _disk_file_index(books_dir)
     missing: list[dict] = []
     for record in inventory:
         filename = record.get("filename") or ""
         if not filename:
             continue
-        if not (books_dir / filename).is_file():
+        stem = unicodedata.normalize("NFC", filename)
+        if not any(f"{stem}{ext}" in on_disk for ext in DISK_EXTENSION_CANDIDATES):
             missing.append(record)
     return missing
 
