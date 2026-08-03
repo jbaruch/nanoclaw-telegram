@@ -281,7 +281,14 @@ export function _resetOneCliClient(): void {
   outboundConfigCache.clear();
 }
 
-function agentIdentifierForTier(tier: TrustTier): string {
+/**
+ * Vault agent identifier for a trust tier.
+ *
+ * Exported because #893's denial alert names the agent the operator has
+ * to inspect in the vault; deriving that string a second time in the
+ * alert module would let the two drift apart silently.
+ */
+export function agentIdentifierForTier(tier: TrustTier): string {
   return `${AGENT_IDENTIFIER_PREFIX}-${tier}`;
 }
 

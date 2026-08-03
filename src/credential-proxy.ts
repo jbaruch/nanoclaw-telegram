@@ -22,10 +22,15 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 import {
+  agentIdentifierForTier,
   getOneCliOutboundConfig,
   isOneCliConfigured,
   type TrustTier,
 } from './onecli-client.js';
+import {
+  buildOneCliDenialAlert,
+  OneCliDenialTracker,
+} from './onecli-denial-alert.js';
 import { lookupContainer } from './proxy-registry.js';
 import {
   appendUsageRecord,
@@ -78,6 +83,19 @@ export interface CredentialProxyOptions {
    * capture, and streaming without reaching the real API.
    */
   upstreamUrl?: URL;
+
+  /**
+   * #893: called with ready-to-send text when one trust tier has been
+   * denied by the OneCLI gateway often enough to be a standing break
+   * rather than a blip.
+   *
+   * Injected instead of imported so this module keeps no channel or
+   * group-registry dependency — the proxy decides a denial happened,
+   * the caller decides where an operator message goes. Omitted by every
+   * test and by any caller with nowhere to deliver: the log line stands
+   * on its own and the alert is additive.
+   */
+  onTierDenialAlert?: (text: string) => void;
 }
 
 export function startCredentialProxy(
@@ -98,6 +116,81 @@ export function startCredentialProxy(
   const upstreamUrl = opts.upstreamUrl ?? ANTHROPIC_DIRECT_URL;
 
   const usageLogPath = resolveUsageLogPath();
+
+  // #893: per-tier denial streaks, scoped to this proxy instance so a
+  // restart starts clean and two proxies in one test file can't share
+  // state.
+  const denialTracker = new OneCliDenialTracker();
+
+  /**
+   * Report an upstream auth status (#893).
+   *
+   * A 401/403 on a request that tunnelled through the OneCLI gateway
+   * means the vault has no usable grant for that tier's agent — every
+   * turn in the tier is dying, and nothing else on the host says so.
+   * That is a different remediation from an ordinary 401 on the `.env`
+   * fallback path, where the token in `.env` is the thing to look at,
+   * so the two get separate messages rather than one ambiguous line.
+   *
+   * Logs the tier, the upstream host, the status, and the path. Never
+   * the proxy URL, the CA, or any token: the gateway URL carries
+   * credentials in its userinfo (`http://x:<key>@gw:port`), which is
+   * exactly why it is not logged (`coding-policy: no-secrets`).
+   *
+   * Any non-auth status resets the tier's streak — denials separated by
+   * working requests are blips, not a standing break.
+   */
+  const noteUpstreamAuthStatus = (
+    statusCode: number | undefined,
+    upstreamHost: string,
+    rawPath: string,
+    tier?: TrustTier,
+  ): void => {
+    const denied = statusCode === 401 || statusCode === 403;
+    if (!denied) {
+      // Only a 2xx clears the streak. A 429 or a 5xx says nothing
+      // about whether the credential is usable, so it leaves the count
+      // alone rather than letting an upstream hiccup interleaved with
+      // real denials mask a tier that cannot authenticate at all.
+      const authenticated =
+        statusCode !== undefined && statusCode >= 200 && statusCode < 300;
+      if (tier && authenticated) denialTracker.recordSuccess(tier);
+      return;
+    }
+
+    // Log the path only. The query string is caller-controlled and
+    // unbounded — logging it would both risk carrying a sensitive
+    // parameter into `orchestrator.log` and let one request write an
+    // arbitrarily long line. The endpoint is all the operator needs to
+    // tell an auth failure on /v1/messages from one on the OAuth
+    // exchange.
+    const url = rawPath.split('?', 1)[0];
+
+    if (!tier) {
+      logger.warn(
+        { status: statusCode, upstreamHost, url },
+        'Credential proxy: upstream rejected the request — the request did NOT tunnel through OneCLI, so this is the .env fallback path; check the Anthropic token in .env',
+      );
+      return;
+    }
+
+    logger.error(
+      { status: statusCode, upstreamHost, url, tier },
+      `Credential proxy: OneCLI gateway denied the ${tier}-tier request — the vault agent '${agentIdentifierForTier(tier)}' has no usable grant for the Anthropic credential; check its effective-credentials in the vault. The .env token is not used on this path`,
+    );
+
+    const consecutiveDenials = denialTracker.recordDenial(tier, Date.now());
+    if (consecutiveDenials === null || !opts.onTierDenialAlert) return;
+    opts.onTierDenialAlert(
+      buildOneCliDenialAlert({
+        tier,
+        agentIdentifier: agentIdentifierForTier(tier),
+        upstreamHost,
+        status: statusCode,
+        consecutiveDenials,
+      }),
+    );
+  };
 
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
@@ -307,7 +400,7 @@ export function startCredentialProxy(
           // failure the client sees a 502.
           const sendUpstreamRequest = (
             targetUrl: URL,
-            oneCli?: { agent: Agent; ca: string },
+            oneCli?: { agent: Agent; ca: string; tier: TrustTier },
           ): void => {
             const isHttps = targetUrl.protocol === 'https:';
             const makeRequest = isHttps ? httpsRequest : httpRequest;
@@ -372,6 +465,19 @@ export function startCredentialProxy(
                   : {}),
               } as RequestOptions,
               (upRes) => {
+                // #893: a credential denial is the one upstream status
+                // the host has to say something about. Emitted before
+                // the response is forwarded so the log lands even when
+                // the client hangs up mid-pipe, and exactly once per
+                // request — the client still gets the status verbatim,
+                // the proxy does not rewrite or retry it.
+                noteUpstreamAuthStatus(
+                  upRes.statusCode,
+                  targetUrl.host,
+                  upstreamPath,
+                  oneCli?.tier,
+                );
+
                 res.writeHead(upRes.statusCode!, upRes.headers);
 
                 if (!captureUsage || upRes.statusCode !== 200) {
@@ -585,7 +691,7 @@ export function startCredentialProxy(
           // is unreachable, oneCli stays undefined and the request falls back
           // to .env injection (transition-safe; a hard 401 post-cutover once
           // the token leaves .env, which is the correct failure).
-          let oneCli: { agent: Agent; ca: string } | undefined;
+          let oneCli: { agent: Agent; ca: string; tier: TrustTier } | undefined;
           if (
             authMode === 'oauth' &&
             req.headers['authorization'] &&
@@ -614,6 +720,10 @@ export function startCredentialProxy(
               oneCli = {
                 agent: new HttpsProxyAgent(cfg.proxyUrl),
                 ca: cfg.ca,
+                // #893: carried so the response handler can name the
+                // tier whose vault grant is missing when the gateway
+                // denies the request.
+                tier,
               };
             }
           }

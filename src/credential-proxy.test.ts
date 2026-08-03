@@ -19,10 +19,22 @@ vi.mock('./logger.js', () => ({
 // has getOneCliOutboundConfig return a config. HttpsProxyAgent is mocked to a
 // plain http.Agent so the request reaches the local upstream mock directly
 // (the real CONNECT-tunnel-through-OneCLI path is verified live, not here).
-vi.mock('./onecli-client.js', () => ({
-  isOneCliConfigured: vi.fn(() => false),
-  getOneCliOutboundConfig: vi.fn(async () => null),
-}));
+// Spread the real module so unmocked exports stay real — #893's denial
+// log names the vault agent via `agentIdentifierForTier`, and a stub
+// there would let the test agree with itself while the shipped message
+// named something else. Only the two gateway-touching functions are
+// replaced.
+vi.mock('./onecli-client.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('./onecli-client.js')>(
+      './onecli-client.js',
+    );
+  return {
+    ...actual,
+    isOneCliConfigured: vi.fn(() => false),
+    getOneCliOutboundConfig: vi.fn(async () => null),
+  };
+});
 // Spy on HttpsProxyAgent construction so a CI test can assert the HTTPS
 // OneCLI routing branch builds the agent with the minted proxy URL + CA
 // (the real CONNECT/TLS tunnel is platform-bound and verified live at cutover).
@@ -59,6 +71,8 @@ vi.mock('https-proxy-agent', async () => {
 
 import { startCredentialProxy } from './credential-proxy.js';
 import { isFsErrorWithCode } from './fs-errors.js';
+import { logger } from './logger.js';
+import { DENIAL_ALERT_STREAK } from './onecli-denial-alert.js';
 import {
   isOneCliConfigured,
   getOneCliOutboundConfig,
@@ -464,6 +478,309 @@ describe('credential-proxy', () => {
     } finally {
       await new Promise<void>((r) => upstream401.close(() => r()));
     }
+  });
+});
+
+describe('credential-proxy denial visibility (#893)', () => {
+  let proxyServer: http.Server;
+  let denyingUpstream: http.Server;
+  let denyPort: number;
+  // Status the mock upstream answers with; each test sets it before
+  // issuing a request so 401 and 403 share one server.
+  let denyStatus: number;
+
+  beforeEach(async () => {
+    denyStatus = 401;
+    denyingUpstream = http.createServer((_req, res) => {
+      res.writeHead(denyStatus, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ type: 'error', error: { type: 'auth' } }));
+    });
+    await new Promise<void>((r) => denyingUpstream.listen(0, '127.0.0.1', r));
+    denyPort = (denyingUpstream.address() as AddressInfo).port;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => proxyServer?.close(() => r()));
+    await new Promise<void>((r) => denyingUpstream?.close(() => r()));
+    for (const key of Object.keys(mockEnv)) delete mockEnv[key];
+    _resetRegistry();
+    vi.mocked(isOneCliConfigured).mockReset();
+    vi.mocked(isOneCliConfigured).mockReturnValue(false);
+    vi.mocked(getOneCliOutboundConfig).mockReset();
+    vi.mocked(getOneCliOutboundConfig).mockResolvedValue(null);
+    vi.mocked(logger.error).mockClear();
+    vi.mocked(logger.warn).mockClear();
+    httpsProxyAgentCtor.mockClear();
+    httpsRequestSpy.mockClear();
+  });
+
+  /**
+   * Start a proxy against the denying upstream with OneCLI either on
+   * (the tunnelled path) or off (the `.env` fallback path).
+   *
+   * When `tier` is given, a container is registered and the request
+   * carries its `/c/<token>` prefix, which is how the proxy learns the
+   * caller's trust tier.
+   */
+  async function startAgainstDenyingUpstream(opts: {
+    oneCli: boolean;
+    tier?: 'main' | 'trusted' | 'untrusted';
+    onTierDenialAlert?: (text: string) => void;
+  }): Promise<{ port: number; pathPrefix: string }> {
+    if (opts.oneCli) {
+      vi.mocked(isOneCliConfigured).mockReturnValue(true);
+      vi.mocked(getOneCliOutboundConfig).mockResolvedValue({
+        proxyUrl: 'http://x:aoc_secret_key@gw:10255',
+        ca: 'fake-ca',
+      });
+    }
+    Object.assign(mockEnv, { CLAUDE_CODE_OAUTH_TOKEN: 'real-oauth-token' });
+    proxyServer = await startCredentialProxy(0, '127.0.0.1', {
+      upstreamUrl: new URL(`http://127.0.0.1:${denyPort}`),
+      onTierDenialAlert: opts.onTierDenialAlert,
+    });
+    let pathPrefix = '';
+    if (opts.tier) {
+      const token = registerContainer({
+        group: 'telegram_test',
+        tier: opts.tier,
+        session: 'session-1',
+        task_id: null,
+        message_id: null,
+      });
+      pathPrefix = `/c/${token}`;
+    }
+    return {
+      port: (proxyServer.address() as AddressInfo).port,
+      pathPrefix,
+    };
+  }
+
+  function denyingRequest(
+    port: number,
+    pathPrefix: string,
+  ): Promise<{ statusCode: number }> {
+    return makeRequest(
+      port,
+      {
+        method: 'POST',
+        path: `${pathPrefix}/v1/messages`,
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer placeholder',
+        },
+      },
+      '{}',
+    );
+  }
+
+  it('logs a tunnelled 401 as a vault-grant problem naming the tier and host', async () => {
+    const { port, pathPrefix } = await startAgainstDenyingUpstream({
+      oneCli: true,
+      tier: 'untrusted',
+    });
+
+    const res = await denyingRequest(port, pathPrefix);
+
+    // The client still sees the upstream status verbatim — the proxy
+    // reports, it does not rewrite or retry.
+    expect(res.statusCode).toBe(401);
+
+    const errorCalls = vi.mocked(logger.error).mock.calls;
+    const denial = errorCalls.filter(([, msg]) =>
+      String(msg).includes('OneCLI gateway denied'),
+    );
+    // "exactly one actionable orchestrator log line per request".
+    expect(denial).toHaveLength(1);
+    const [fields, message] = denial[0];
+    expect(fields).toMatchObject({ tier: 'untrusted', status: 401 });
+    expect((fields as { upstreamHost: string }).upstreamHost).toContain(
+      '127.0.0.1',
+    );
+    expect(String(message)).toContain('untrusted');
+    expect(String(message)).toContain('effective-credentials');
+    expect(String(message)).toContain('nanoclaw-untrusted');
+  });
+
+  it('logs a tunnelled 403 the same way as a 401', async () => {
+    denyStatus = 403;
+    const { port, pathPrefix } = await startAgainstDenyingUpstream({
+      oneCli: true,
+      tier: 'trusted',
+    });
+
+    await denyingRequest(port, pathPrefix);
+
+    const denial = vi
+      .mocked(logger.error)
+      .mock.calls.filter(([, msg]) =>
+        String(msg).includes('OneCLI gateway denied'),
+      );
+    expect(denial).toHaveLength(1);
+    expect(denial[0][0]).toMatchObject({ tier: 'trusted', status: 403 });
+  });
+
+  it('keeps the non-tunnelled 401 on its own .env message', async () => {
+    // The `.env` fallback path points at the token in `.env`; sending
+    // the operator to the vault here would be a wild goose chase.
+    const { port, pathPrefix } = await startAgainstDenyingUpstream({
+      oneCli: false,
+    });
+
+    await denyingRequest(port, pathPrefix);
+
+    expect(
+      vi
+        .mocked(logger.error)
+        .mock.calls.filter(([, msg]) =>
+          String(msg).includes('OneCLI gateway denied'),
+        ),
+    ).toHaveLength(0);
+
+    const fallback = vi
+      .mocked(logger.warn)
+      .mock.calls.filter(([, msg]) =>
+        String(msg).includes('upstream rejected the request'),
+      );
+    expect(fallback).toHaveLength(1);
+    expect(String(fallback[0][1])).toContain('.env');
+    expect(String(fallback[0][1])).not.toContain('effective-credentials');
+    expect(fallback[0][0]).not.toHaveProperty('tier');
+  });
+
+  it('never puts the gateway URL, its embedded key, or a token in the log', async () => {
+    // `getOneCliOutboundConfig` mints a proxy URL carrying the gateway
+    // API key in its userinfo. Logging the URL would put a live
+    // credential in `orchestrator.log` (`coding-policy: no-secrets`).
+    const { port, pathPrefix } = await startAgainstDenyingUpstream({
+      oneCli: true,
+      tier: 'untrusted',
+    });
+
+    await denyingRequest(port, pathPrefix);
+
+    const serialized = JSON.stringify([
+      ...vi.mocked(logger.error).mock.calls,
+      ...vi.mocked(logger.warn).mock.calls,
+    ]);
+    expect(serialized).not.toContain('aoc_secret_key');
+    expect(serialized).not.toContain('gw:10255');
+    expect(serialized).not.toContain('real-oauth-token');
+    expect(serialized).not.toContain('fake-ca');
+  });
+
+  it('logs the endpoint path without its query string', async () => {
+    // `req.url`'s query is caller-controlled and unbounded. Logging it
+    // would risk carrying a sensitive parameter into orchestrator.log
+    // and let one request write an arbitrarily long line; the endpoint
+    // alone is what makes the failure diagnosable.
+    const { port, pathPrefix } = await startAgainstDenyingUpstream({
+      oneCli: true,
+      tier: 'untrusted',
+    });
+
+    await makeRequest(
+      port,
+      {
+        method: 'POST',
+        path: `${pathPrefix}/v1/messages?beta=true&trace=super-secret-value`,
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer placeholder',
+        },
+      },
+      '{}',
+    );
+
+    const denial = vi
+      .mocked(logger.error)
+      .mock.calls.filter(([, msg]) =>
+        String(msg).includes('OneCLI gateway denied'),
+      );
+    expect(denial).toHaveLength(1);
+    expect(denial[0][0]).toMatchObject({ url: '/v1/messages' });
+    expect(JSON.stringify(denial[0])).not.toContain('super-secret-value');
+  });
+
+  it('raises one operator alert once a tier reaches the denial streak', async () => {
+    const alerts: string[] = [];
+    const { port, pathPrefix } = await startAgainstDenyingUpstream({
+      oneCli: true,
+      tier: 'untrusted',
+      onTierDenialAlert: (text) => alerts.push(text),
+    });
+
+    for (let i = 0; i < DENIAL_ALERT_STREAK; i++) {
+      await denyingRequest(port, pathPrefix);
+    }
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toContain('untrusted');
+    expect(alerts[0]).toContain('nanoclaw-untrusted');
+
+    // The cooldown holds for every further denial in this run, so a
+    // broken tier can't turn one incident into a message per request.
+    for (let i = 0; i < DENIAL_ALERT_STREAK * 2; i++) {
+      await denyingRequest(port, pathPrefix);
+    }
+    expect(alerts).toHaveLength(1);
+  });
+
+  it('does not let a 5xx between denials clear the streak', async () => {
+    // A 429 or 5xx says nothing about whether the credential is
+    // usable. Treating one as a success would let an upstream hiccup
+    // interleaved with real denials hide a tier that cannot
+    // authenticate at all — exactly the silence #893 is about.
+    const alerts: string[] = [];
+    const { port, pathPrefix } = await startAgainstDenyingUpstream({
+      oneCli: true,
+      tier: 'untrusted',
+      onTierDenialAlert: (text) => alerts.push(text),
+    });
+
+    for (let i = 0; i < DENIAL_ALERT_STREAK - 1; i++) {
+      await denyingRequest(port, pathPrefix);
+    }
+    denyStatus = 503;
+    await denyingRequest(port, pathPrefix);
+    denyStatus = 401;
+    await denyingRequest(port, pathPrefix);
+
+    expect(alerts).toHaveLength(1);
+  });
+
+  it('does not alert before the streak is reached', async () => {
+    const alerts: string[] = [];
+    const { port, pathPrefix } = await startAgainstDenyingUpstream({
+      oneCli: true,
+      tier: 'untrusted',
+      onTierDenialAlert: (text) => alerts.push(text),
+    });
+
+    for (let i = 0; i < DENIAL_ALERT_STREAK - 1; i++) {
+      await denyingRequest(port, pathPrefix);
+    }
+    expect(alerts).toHaveLength(0);
+  });
+
+  it('logs the denial even with no alert sink wired', async () => {
+    // The log line is the durable record and must not depend on a
+    // caller having somewhere to deliver a chat message.
+    const { port, pathPrefix } = await startAgainstDenyingUpstream({
+      oneCli: true,
+      tier: 'untrusted',
+    });
+
+    for (let i = 0; i < DENIAL_ALERT_STREAK; i++) {
+      await denyingRequest(port, pathPrefix);
+    }
+
+    expect(
+      vi
+        .mocked(logger.error)
+        .mock.calls.filter(([, msg]) =>
+          String(msg).includes('OneCLI gateway denied'),
+        ),
+    ).toHaveLength(DENIAL_ALERT_STREAK);
   });
 });
 

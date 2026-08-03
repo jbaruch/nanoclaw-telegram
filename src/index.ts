@@ -12,6 +12,7 @@ import {
 import { writeShutdownCheckpoints } from './shutdown-checkpoints.js';
 import { computeThresholds } from './threshold.js';
 import { startCredentialProxy } from './credential-proxy.js';
+import { createTierDenialAlertSender } from './onecli-denial-alert.js';
 import {
   ensureAgentForTier,
   isOneCliConfigured,
@@ -189,6 +190,25 @@ async function main(): Promise<void> {
   const proxyServer = await startCredentialProxy(
     CREDENTIAL_PROXY_PORT,
     PROXY_BIND_HOST,
+    {
+      // #893: a tier the OneCLI gateway keeps denying is dead in chat
+      // and nothing else says so — the untrusted tier stayed broken for
+      // ~19 days because the only evidence was 401s inside the
+      // container. The proxy raises the streak; delivery is wired here
+      // so the proxy itself keeps no channel dependency.
+      //
+      // Routed to the main group rather than the affected tier's own
+      // chats, same as the timeout-kill alert (#892): the operator
+      // reads main, and a tier this is about is by definition unable to
+      // answer. `channels` and `registeredGroups` are read at fire time
+      // — the first denial can only happen once a container is running,
+      // which is well after both are populated.
+      onTierDenialAlert: createTierDenialAlertSender({
+        registeredGroups: () => registeredGroups,
+        findChannel: (jid) => findChannel(channels, jid),
+        warn: (fields, message) => logger.warn(fields, message),
+      }),
+    },
   );
 
   // #564 groundwork: when OneCLI is configured (ONECLI_URL + ONECLI_API_KEY
