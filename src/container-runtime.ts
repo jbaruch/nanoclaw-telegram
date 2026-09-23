@@ -10,6 +10,13 @@ import { logger } from './logger.js';
 /** The container runtime binary name. */
 export const CONTAINER_RUNTIME_BIN = 'docker';
 
+function isExecFailure(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    ('status' in err || 'signal' in err || 'code' in err)
+  );
+}
+
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
   // On Linux, host.docker.internal isn't built-in — add it explicitly
@@ -86,7 +93,8 @@ export function cleanupOrphans(): void {
     for (const name of orphans) {
       try {
         stopContainer(name);
-      } catch {
+      } catch (err) {
+        if (!isExecFailure(err)) throw err;
         /* already stopped */
       }
     }
@@ -97,6 +105,7 @@ export function cleanupOrphans(): void {
       );
     }
   } catch (err) {
+    if (!isExecFailure(err)) throw err;
     logger.warn({ err }, 'Failed to clean up orphaned containers');
   }
 }

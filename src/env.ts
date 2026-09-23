@@ -14,6 +14,7 @@ export function readEnvFile(keys: string[]): Record<string, string> {
   try {
     content = fs.readFileSync(envFile, 'utf-8');
   } catch (err) {
+    if (!(err instanceof Error) || !('code' in err)) throw err;
     logger.debug({ err }, '.env file not found, using defaults');
     return {};
   }

@@ -46,7 +46,10 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { resolveGroupFolderPath } from './group-folder.js';
+import {
+  InvalidGroupFolderError,
+  resolveGroupFolderPath,
+} from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
@@ -80,6 +83,12 @@ const queue = new GroupQueue();
 const SEND_RETRY_ATTEMPTS = 3;
 const SEND_RETRY_BASE_DELAY_MS = 2000;
 
+interface RetryableSendError {
+  error?: { code?: unknown };
+  code?: unknown;
+  error_code?: unknown;
+}
+
 async function sendWithRetry(
   ch: Channel,
   jid: string,
@@ -92,8 +101,13 @@ async function sendWithRetry(
       return;
     } catch (err: unknown) {
       const isLast = attempt === SEND_RETRY_ATTEMPTS - 1;
-      const code = (err as any)?.error?.code || (err as any)?.code || '';
-      const httpCode = (err as any)?.error_code ?? 0;
+      const sendError: RetryableSendError =
+        typeof err === 'object' && err !== null
+          ? (err as RetryableSendError)
+          : {};
+      const code = sendError.error?.code || sendError.code || '';
+      const httpCode =
+        typeof sendError.error_code === 'number' ? sendError.error_code : 0;
       const isTransient =
         /ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|EPIPE/i.test(
           String(code),
@@ -155,7 +169,8 @@ function loadState(): void {
   const agentTs = getRouterState('last_agent_timestamp');
   try {
     lastAgentTimestamp = agentTs ? JSON.parse(agentTs) : {};
-  } catch {
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
@@ -198,6 +213,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   try {
     groupDir = resolveGroupFolderPath(group.folder);
   } catch (err) {
+    if (!(err instanceof InvalidGroupFolderError)) throw err;
     logger.warn(
       { jid, folder: group.folder, err },
       'Rejecting group registration with invalid folder',
@@ -363,6 +379,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             try {
               await sendWithRetry(channel, chatJid, text);
             } catch (err) {
+              if (!(err instanceof Error)) throw err;
               logger.error(
                 { group: group.name, err },
                 'Failed to send agent output after retries',
@@ -373,6 +390,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           try {
             await sendWithRetry(channel, chatJid, text);
           } catch (err) {
+            if (!(err instanceof Error)) throw err;
             logger.error(
               { group: group.name, err },
               'Failed to send agent output after retries',
@@ -502,6 +520,7 @@ async function runAgent(
 
     return 'success';
   } catch (err) {
+    if (!(err instanceof Error)) throw err;
     logger.error({ group: group.name, err }, 'Agent error');
     return 'error';
   }
@@ -603,6 +622,8 @@ async function startMessageLoop(): Promise<void> {
           }
         }
       }
+      // The timer caller sees a rejected loop as silent stoppage; this catch logs the failure and keeps polling; propagation would disable message processing.
+      // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
     } catch (err) {
       logger.error({ err }, 'Error in message loop');
     }

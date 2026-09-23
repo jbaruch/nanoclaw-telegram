@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
-import { isValidGroupFolder } from './group-folder.js';
+import { InvalidGroupFolderError, isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
   NewMessage,
@@ -13,6 +13,14 @@ import {
 } from './types.js';
 
 let db: Database.Database;
+
+function isDuplicateColumnError(err: unknown): boolean {
+  return (
+    err instanceof Database.SqliteError &&
+    err.code === 'SQLITE_ERROR' &&
+    err.message.includes('duplicate column name')
+  );
+}
 
 function createSchema(database: Database.Database): void {
   database.exec(`
@@ -100,14 +108,16 @@ function createSchema(database: Database.Database): void {
     database.exec(
       `ALTER TABLE scheduled_tasks ADD COLUMN context_mode TEXT DEFAULT 'isolated'`,
     );
-  } catch {
+  } catch (err) {
+    if (!isDuplicateColumnError(err)) throw err;
     /* column already exists */
   }
 
   // Add script column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN script TEXT`);
-  } catch {
+  } catch (err) {
+    if (!isDuplicateColumnError(err)) throw err;
     /* column already exists */
   }
 
@@ -120,7 +130,8 @@ function createSchema(database: Database.Database): void {
     database
       .prepare(`UPDATE messages SET is_bot_message = 1 WHERE content LIKE ?`)
       .run(`${ASSISTANT_NAME}:%`);
-  } catch {
+  } catch (err) {
+    if (!isDuplicateColumnError(err)) throw err;
     /* column already exists */
   }
 
@@ -133,7 +144,8 @@ function createSchema(database: Database.Database): void {
     database.exec(
       `UPDATE registered_groups SET is_main = 1 WHERE folder = 'main' OR folder LIKE '%\\_main' ESCAPE '\\'`,
     );
-  } catch {
+  } catch (err) {
+    if (!isDuplicateColumnError(err)) throw err;
     /* column already exists */
   }
 
@@ -154,7 +166,8 @@ function createSchema(database: Database.Database): void {
     database.exec(
       `UPDATE chats SET channel = 'telegram', is_group = 0 WHERE jid LIKE 'tg:%'`,
     );
-  } catch {
+  } catch (err) {
+    if (!isDuplicateColumnError(err)) throw err;
     /* columns already exist */
   }
 }
@@ -772,7 +785,9 @@ function migrateJsonState(): void {
       const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       fs.renameSync(filePath, `${filePath}.migrated`);
       return data;
-    } catch {
+    } catch (err) {
+      const isFileError = err instanceof Error && 'code' in err;
+      if (!(err instanceof SyntaxError) && !isFileError) throw err;
       return null;
     }
   };
@@ -815,6 +830,7 @@ function migrateJsonState(): void {
       try {
         setRegisteredGroup(jid, group);
       } catch (err) {
+        if (!(err instanceof InvalidGroupFolderError)) throw err;
         logger.warn(
           { jid, folder: group.folder, err },
           'Skipping migrated registered group with invalid folder',

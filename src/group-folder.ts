@@ -5,6 +5,13 @@ import { DATA_DIR, GROUPS_DIR } from './config.js';
 const GROUP_FOLDER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const RESERVED_FOLDERS = new Set(['global']);
 
+export class InvalidGroupFolderError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidGroupFolderError';
+  }
+}
+
 export function isValidGroupFolder(folder: string): boolean {
   if (!folder) return false;
   if (folder !== folder.trim()) return false;
@@ -17,14 +24,16 @@ export function isValidGroupFolder(folder: string): boolean {
 
 export function assertValidGroupFolder(folder: string): void {
   if (!isValidGroupFolder(folder)) {
-    throw new Error(`Invalid group folder "${folder}"`);
+    throw new InvalidGroupFolderError(`Invalid group folder "${folder}"`);
   }
 }
 
 function ensureWithinBase(baseDir: string, resolvedPath: string): void {
   const rel = path.relative(baseDir, resolvedPath);
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
-    throw new Error(`Path escapes base directory: ${resolvedPath}`);
+    throw new InvalidGroupFolderError(
+      `Path escapes base directory: ${resolvedPath}`,
+    );
   }
 }
 

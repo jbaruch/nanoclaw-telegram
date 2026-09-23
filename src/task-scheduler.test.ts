@@ -4,6 +4,7 @@ import { _initTestDatabase, createTask, getTaskById } from './db.js';
 import {
   _resetSchedulerLoopForTests,
   computeNextRun,
+  SchedulerDependencies,
   startSchedulerLoop,
 } from './task-scheduler.js';
 
@@ -41,7 +42,7 @@ describe('task scheduler', () => {
     startSchedulerLoop({
       registeredGroups: () => ({}),
       getSessions: () => ({}),
-      queue: { enqueueTask } as any,
+      queue: { enqueueTask } as unknown as SchedulerDependencies['queue'],
       onProcess: () => {},
       sendMessage: async () => {},
     });

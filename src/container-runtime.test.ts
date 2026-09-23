@@ -29,6 +29,10 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+function execFailure(message: string): Error & { status: number } {
+  return Object.assign(new Error(message), { status: 1 });
+}
+
 // --- Pure functions ---
 
 describe('readonlyMountArgs', () => {
@@ -131,7 +135,7 @@ describe('cleanupOrphans', () => {
 
   it('warns and continues when ps fails', () => {
     mockExecSync.mockImplementationOnce(() => {
-      throw new Error('docker not available');
+      throw execFailure('docker not available');
     });
 
     cleanupOrphans(); // should not throw
@@ -142,11 +146,20 @@ describe('cleanupOrphans', () => {
     );
   });
 
+  it('rethrows failures that are not container runtime command errors', () => {
+    mockExecSync.mockImplementationOnce(() => {
+      throw new TypeError('unexpected implementation failure');
+    });
+
+    expect(() => cleanupOrphans()).toThrow('unexpected implementation failure');
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
   it('continues stopping remaining containers when one stop fails', () => {
     mockExecSync.mockReturnValueOnce('nanoclaw-a-1\nnanoclaw-b-2\n');
     // First stop fails
     mockExecSync.mockImplementationOnce(() => {
-      throw new Error('already stopped');
+      throw execFailure('already stopped');
     });
     // Second stop succeeds
     mockExecSync.mockReturnValueOnce('');

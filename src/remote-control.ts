@@ -22,6 +22,17 @@ const STATE_FILE = path.join(DATA_DIR, 'remote-control.json');
 const STDOUT_FILE = path.join(DATA_DIR, 'remote-control.stdout');
 const STDERR_FILE = path.join(DATA_DIR, 'remote-control.stderr');
 
+function hasNodeErrorCode(
+  err: unknown,
+  ...codes: string[]
+): err is NodeJS.ErrnoException {
+  return (
+    err instanceof Error &&
+    typeof (err as NodeJS.ErrnoException).code === 'string' &&
+    codes.includes((err as NodeJS.ErrnoException).code!)
+  );
+}
+
 function saveState(session: RemoteControlSession): void {
   fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
   fs.writeFileSync(STATE_FILE, JSON.stringify(session));
@@ -30,7 +41,8 @@ function saveState(session: RemoteControlSession): void {
 function clearState(): void {
   try {
     fs.unlinkSync(STATE_FILE);
-  } catch {
+  } catch (err) {
+    if (!hasNodeErrorCode(err, 'ENOENT')) throw err;
     // ignore
   }
 }
@@ -39,7 +51,8 @@ function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (err) {
+    if (!hasNodeErrorCode(err, 'ESRCH', 'EPERM')) throw err;
     return false;
   }
 }
@@ -52,7 +65,8 @@ export function restoreRemoteControl(): void {
   let data: string;
   try {
     data = fs.readFileSync(STATE_FILE, 'utf-8');
-  } catch {
+  } catch (err) {
+    if (!hasNodeErrorCode(err, 'ENOENT')) throw err;
     return;
   }
 
@@ -67,7 +81,8 @@ export function restoreRemoteControl(): void {
     } else {
       clearState();
     }
-  } catch {
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     clearState();
   }
 }
@@ -114,7 +129,8 @@ export async function startRemoteControl(
       stdio: ['pipe', stdoutFd, stderrFd],
       detached: true,
     });
-  } catch (err: any) {
+  } catch (err) {
+    if (!(err instanceof Error) || !('code' in err)) throw err;
     fs.closeSync(stdoutFd);
     fs.closeSync(stderrFd);
     return { ok: false, error: `Failed to start: ${err.message}` };
@@ -153,7 +169,8 @@ export async function startRemoteControl(
       let content = '';
       try {
         content = fs.readFileSync(STDOUT_FILE, 'utf-8');
-      } catch {
+      } catch (err) {
+        if (!hasNodeErrorCode(err, 'ENOENT')) throw err;
         // File might not have content yet
       }
 
@@ -181,10 +198,12 @@ export async function startRemoteControl(
       if (Date.now() - startTime >= URL_TIMEOUT_MS) {
         try {
           process.kill(-pid, 'SIGTERM');
-        } catch {
+        } catch (err) {
+          if (!hasNodeErrorCode(err, 'ESRCH')) throw err;
           try {
             process.kill(pid, 'SIGTERM');
-          } catch {
+          } catch (fallbackErr) {
+            if (!hasNodeErrorCode(fallbackErr, 'ESRCH')) throw fallbackErr;
             // already dead
           }
         }
@@ -214,7 +233,8 @@ export function stopRemoteControl():
   const { pid } = activeSession;
   try {
     process.kill(pid, 'SIGTERM');
-  } catch {
+  } catch (err) {
+    if (!hasNodeErrorCode(err, 'ESRCH')) throw err;
     // already dead
   }
   activeSession = null;

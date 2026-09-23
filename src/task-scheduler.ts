@@ -17,7 +17,10 @@ import {
   updateTaskAfterRun,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { resolveGroupFolderPath } from './group-folder.js';
+import {
+  InvalidGroupFolderError,
+  resolveGroupFolderPath,
+} from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
@@ -84,7 +87,8 @@ async function runTask(
   try {
     groupDir = resolveGroupFolderPath(task.group_folder);
   } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
+    if (!(err instanceof InvalidGroupFolderError)) throw err;
+    const error = err.message;
     // Stop retry churn for malformed legacy rows.
     updateTask(task.id, { status: 'paused' });
     logger.error(
@@ -215,8 +219,9 @@ async function runTask(
       'Task completed',
     );
   } catch (err) {
+    if (!(err instanceof Error)) throw err;
     if (closeTimer) clearTimeout(closeTimer);
-    error = err instanceof Error ? err.message : String(err);
+    error = err.message;
     logger.error({ taskId: task.id, error }, 'Task failed');
   }
 
@@ -268,6 +273,8 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           runTask(currentTask, deps),
         );
       }
+      // The timer caller sees a rejected loop as silent stoppage; this catch logs the failure and schedules the next pass; propagation would disable scheduled tasks.
+      // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');
     }

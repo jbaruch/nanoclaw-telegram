@@ -46,6 +46,7 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
       }
       lastSentText = text;
     } catch (err) {
+      if (!(err instanceof Error)) throw err;
       logger.debug({ err }, 'Draft stream send/edit failed');
     }
   }
@@ -85,7 +86,8 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
         if (messageId) {
           try {
             await opts.deleteMessage(messageId);
-          } catch {
+          } catch (err) {
+            if (!(err instanceof Error)) throw err;
             // ignore — best effort cleanup
           }
         }
@@ -108,7 +110,8 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
       if (messageId) {
         try {
           await opts.deleteMessage(messageId);
-        } catch {
+        } catch (err) {
+          if (!(err instanceof Error)) throw err;
           // ignore
         }
       }

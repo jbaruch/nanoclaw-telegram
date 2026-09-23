@@ -28,48 +28,93 @@ vi.mock('../logger.js', () => ({
 
 // --- Grammy mock ---
 
-type Handler = (...args: any[]) => any;
+type Handler = (...args: unknown[]) => unknown;
 
-const botRef = vi.hoisted(() => ({ current: null as any }));
+interface MockBotState {
+  commandHandlers: Map<string, Handler>;
+  filterHandlers: Map<string, Handler[]>;
+  errorHandler: Handler | null;
+  api: {
+    sendMessage: ReturnType<typeof vi.fn>;
+    sendChatAction: ReturnType<typeof vi.fn>;
+    getFile: ReturnType<typeof vi.fn>;
+    raw: { setMessageReaction: ReturnType<typeof vi.fn> };
+  };
+}
 
-vi.mock('grammy', () => ({
-  Bot: class MockBot {
-    token: string;
-    commandHandlers = new Map<string, Handler>();
-    filterHandlers = new Map<string, Handler[]>();
-    errorHandler: Handler | null = null;
-
-    api = {
-      sendMessage: vi.fn().mockResolvedValue(undefined),
-      sendChatAction: vi.fn().mockResolvedValue(undefined),
-    };
-
-    constructor(token: string) {
-      this.token = token;
-      botRef.current = this;
-    }
-
-    command(name: string, handler: Handler) {
-      this.commandHandlers.set(name, handler);
-    }
-
-    on(filter: string, handler: Handler) {
-      const existing = this.filterHandlers.get(filter) || [];
-      existing.push(handler);
-      this.filterHandlers.set(filter, existing);
-    }
-
-    catch(handler: Handler) {
-      this.errorHandler = handler;
-    }
-
-    start(opts: { onStart: (botInfo: any) => void }) {
-      opts.onStart({ username: 'andy_ai_bot', id: 12345 });
-    }
-
-    stop() {}
-  },
+const botRef = vi.hoisted(() => ({
+  current: null as MockBotState | null,
 }));
+
+vi.mock('grammy', () => {
+  class MockGrammyError extends Error {
+    constructor(
+      message: string,
+      _error: unknown,
+      _method: string,
+      _payload: Record<string, unknown>,
+    ) {
+      super(message);
+      this.name = 'GrammyError';
+    }
+  }
+
+  class MockHttpError extends Error {
+    constructor(message: string, _error: unknown) {
+      super(message);
+      this.name = 'HttpError';
+    }
+  }
+
+  return {
+    GrammyError: MockGrammyError,
+    HttpError: MockHttpError,
+    Bot: class MockBot {
+      token: string;
+      commandHandlers = new Map<string, Handler>();
+      filterHandlers = new Map<string, Handler[]>();
+      errorHandler: Handler | null = null;
+
+      api = {
+        sendMessage: vi.fn().mockResolvedValue(undefined),
+        sendChatAction: vi.fn().mockResolvedValue(undefined),
+        getFile: vi
+          .fn()
+          .mockRejectedValue(new MockHttpError('Download failed', 'network')),
+        raw: { setMessageReaction: vi.fn().mockResolvedValue(true) },
+      };
+
+      constructor(token: string) {
+        this.token = token;
+        botRef.current = this;
+      }
+
+      command(name: string, handler: Handler) {
+        this.commandHandlers.set(name, handler);
+      }
+
+      on(filter: string, handler: Handler) {
+        const existing = this.filterHandlers.get(filter) || [];
+        existing.push(handler);
+        this.filterHandlers.set(filter, existing);
+      }
+
+      catch(handler: Handler) {
+        this.errorHandler = handler;
+      }
+
+      start(opts: {
+        onStart: (botInfo: { username: string; id: number }) => void;
+      }) {
+        opts.onStart({ username: 'andy_ai_bot', id: 12345 });
+      }
+
+      stop() {}
+    },
+  };
+});
+
+import { GrammyError } from 'grammy';
 
 import {
   TelegramChannel,
@@ -99,7 +144,7 @@ function createTestOpts(
 
 function createTextCtx(overrides: {
   chatId?: number;
-  chatType?: string;
+  chatType?: 'private' | 'group' | 'supergroup' | 'channel';
   chatTitle?: string;
   text: string;
   fromId?: number;
@@ -107,8 +152,23 @@ function createTextCtx(overrides: {
   username?: string;
   messageId?: number;
   date?: number;
-  entities?: any[];
-}) {
+  entities?: Array<{ type: string; offset: number; length: number }>;
+}): {
+  chat: { id: number; type: string; title: string };
+  from: {
+    id: number;
+    first_name?: string;
+    username?: string;
+  };
+  message: {
+    text: string;
+    date: number;
+    message_id: number;
+    entities: Array<{ type: string; offset: number; length: number }>;
+  };
+  me: { username: string };
+  reply: ReturnType<typeof vi.fn>;
+} {
   const chatId = overrides.chatId ?? 100200300;
   const chatType = overrides.chatType ?? 'group';
   return {
@@ -141,7 +201,7 @@ function createMediaCtx(overrides: {
   date?: number;
   messageId?: number;
   caption?: string;
-  extra?: Record<string, any>;
+  extra?: Record<string, unknown>;
 }) {
   const chatId = overrides.chatId ?? 100200300;
   return {
@@ -166,6 +226,7 @@ function createMediaCtx(overrides: {
 }
 
 function currentBot() {
+  if (!botRef.current) throw new Error('Telegram mock bot was not created');
   return botRef.current;
 }
 
@@ -346,7 +407,7 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       const ctx = createTextCtx({ text: 'Hi' });
-      ctx.from.first_name = undefined as any;
+      ctx.from.first_name = undefined;
       await triggerTextMessage(ctx);
 
       expect(opts.onMessage).toHaveBeenCalledWith(
@@ -361,8 +422,8 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       const ctx = createTextCtx({ text: 'Hi', fromId: 42 });
-      ctx.from.first_name = undefined as any;
-      ctx.from.username = undefined as any;
+      ctx.from.first_name = undefined;
+      ctx.from.username = undefined;
       await triggerTextMessage(ctx);
 
       expect(opts.onMessage).toHaveBeenCalledWith(
@@ -824,13 +885,35 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       currentBot().api.sendMessage.mockRejectedValueOnce(
-        new Error('Network error'),
+        new GrammyError(
+          'Bad Request: cannot parse entities',
+          {
+            ok: false,
+            error_code: 400,
+            description: 'Bad Request: cannot parse entities',
+          },
+          'sendMessage',
+          {},
+        ),
       );
 
       // Should not throw
       await expect(
         channel.sendMessage('tg:100200300', 'Will fail'),
       ).resolves.toBeUndefined();
+    });
+
+    it('propagates unexpected send implementation failures', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+
+      currentBot().api.sendMessage.mockRejectedValueOnce(
+        new TypeError('unexpected implementation failure'),
+      );
+
+      await expect(
+        channel.sendMessage('tg:100200300', 'Will fail'),
+      ).rejects.toThrow('unexpected implementation failure');
     });
 
     it('does nothing when bot is not initialized', async () => {
@@ -915,7 +998,12 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       currentBot().api.sendChatAction.mockRejectedValueOnce(
-        new Error('Rate limited'),
+        new GrammyError(
+          'Rate limited',
+          { ok: false, error_code: 429, description: 'Too Many Requests' },
+          'sendChatAction',
+          {},
+        ),
       );
 
       await expect(

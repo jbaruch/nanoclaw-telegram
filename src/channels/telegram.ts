@@ -1,8 +1,8 @@
 import fs from 'fs';
 import https from 'https';
 import path from 'path';
-import { Api, Bot } from 'grammy';
-import OpenAI from 'openai';
+import { Api, Bot, GrammyError, HttpError } from 'grammy';
+import OpenAI, { OpenAIError } from 'openai';
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import { createDraftStream, DraftStream } from '../draft-stream.js';
@@ -21,6 +21,36 @@ export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+}
+
+type TelegramReaction = NonNullable<
+  Parameters<Api['raw']['setMessageReaction']>[0]['reaction']
+>[number];
+type TelegramEmoji = Extract<TelegramReaction, { type: 'emoji' }>['emoji'];
+
+interface NonTextContext {
+  chat: {
+    id: number;
+    type: 'private' | 'group' | 'supergroup' | 'channel';
+  };
+  from?: {
+    id: number;
+    first_name?: string;
+    username?: string;
+  };
+  message: {
+    date: number;
+    message_id: number;
+    caption?: string;
+  };
+}
+
+function isTelegramError(err: unknown): err is GrammyError | HttpError {
+  return err instanceof GrammyError || err instanceof HttpError;
+}
+
+function isTelegramFileError(err: unknown): err is Error {
+  return isTelegramError(err) || (err instanceof Error && 'code' in err);
 }
 
 /**
@@ -43,6 +73,9 @@ async function sendTelegramMessage(
       parse_mode: 'Markdown',
     });
   } catch (err) {
+    if (!(err instanceof GrammyError) || !/parse entities/i.test(err.message)) {
+      throw err;
+    }
     // Fallback: send as plain text if Markdown parsing fails
     logger.debug({ err }, 'Markdown send failed, falling back to plain text');
     await api.sendMessage(chatId, text, options);
@@ -209,6 +242,7 @@ async function saveDocument(
     );
     return `/workspace/group/documents/${safeName}`;
   } catch (err) {
+    if (!isTelegramFileError(err)) throw err;
     logger.error({ err, fileName }, 'Failed to save Telegram document');
     return null;
   }
@@ -240,6 +274,7 @@ async function savePhoto(
     );
     return `/workspace/group/images/${filename}`;
   } catch (err) {
+    if (!isTelegramFileError(err)) throw err;
     logger.error({ err }, 'Failed to save Telegram photo');
     return null;
   }
@@ -266,6 +301,7 @@ async function transcribeVoice(audioBuffer: Buffer): Promise<string | null> {
     });
     return transcription.text;
   } catch (err) {
+    if (!(err instanceof OpenAIError)) throw err;
     logger.error({ err }, 'OpenAI transcription failed');
     return null;
   }
@@ -292,6 +328,7 @@ export async function initBotPool(tokens: string[]): Promise<void> {
         'Pool bot initialized',
       );
     } catch (err) {
+      if (!isTelegramError(err)) throw err;
       logger.error({ err }, 'Failed to initialize pool bot');
     }
   }
@@ -332,6 +369,7 @@ export async function sendPoolMessage(
         'Assigned and renamed pool bot',
       );
     } catch (err) {
+      if (!isTelegramError(err)) throw err;
       logger.warn(
         { sender, err },
         'Failed to rename pool bot (sending anyway)',
@@ -357,6 +395,7 @@ export async function sendPoolMessage(
       'Pool message sent',
     );
   } catch (err) {
+    if (!isTelegramError(err)) throw err;
     logger.error({ chatId, sender, err }, 'Failed to send pool message');
   }
 }
@@ -387,7 +426,7 @@ export class TelegramChannel implements Channel {
       const chatName =
         chatType === 'private'
           ? ctx.from?.first_name || 'Private'
-          : (ctx.chat as any).title || 'Unknown';
+          : ('title' in ctx.chat ? ctx.chat.title : undefined) || 'Unknown';
 
       ctx.reply(
         `Chat ID: \`tg:${chatId}\`\nName: ${chatName}\nType: ${chatType}`,
@@ -426,7 +465,7 @@ export class TelegramChannel implements Channel {
       const chatName =
         ctx.chat.type === 'private'
           ? senderName
-          : (ctx.chat as any).title || chatJid;
+          : ('title' in ctx.chat ? ctx.chat.title : undefined) || chatJid;
 
       // Translate Telegram @bot_username mentions into TRIGGER_PATTERN format.
       // Telegram @mentions (e.g., @andy_ai_bot) won't match TRIGGER_PATTERN
@@ -503,7 +542,7 @@ export class TelegramChannel implements Channel {
     });
 
     // Handle non-text messages with placeholders so the agent knows something was sent
-    const storeNonText = (ctx: any, placeholder: string) => {
+    const storeNonText = (ctx: NonTextContext, placeholder: string) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) return;
@@ -621,6 +660,7 @@ export class TelegramChannel implements Channel {
           );
         }
       } catch (err) {
+        if (!isTelegramFileError(err)) throw err;
         logger.error({ err }, 'Failed to process voice message');
         content = '[Voice message - transcription failed]';
       }
@@ -792,6 +832,7 @@ export class TelegramChannel implements Channel {
         'Telegram message sent',
       );
     } catch (err) {
+      if (!isTelegramError(err)) throw err;
       logger.error({ jid, err }, 'Failed to send Telegram message');
     }
   }
@@ -818,6 +859,7 @@ export class TelegramChannel implements Channel {
       const numericId = jid.replace(/^tg:/, '');
       await this.bot.api.sendChatAction(numericId, 'typing');
     } catch (err) {
+      if (!isTelegramError(err)) throw err;
       logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
     }
   }
@@ -834,10 +876,13 @@ export class TelegramChannel implements Channel {
       await this.bot.api.raw.setMessageReaction({
         chat_id: numericId,
         message_id: msgId,
-        reaction: emoji ? [{ type: 'emoji', emoji: emoji as any }] : [],
+        reaction: emoji
+          ? [{ type: 'emoji', emoji: emoji as TelegramEmoji }]
+          : [],
       });
       logger.info({ jid, messageId, emoji }, 'Telegram reaction sent');
     } catch (err) {
+      if (!isTelegramError(err)) throw err;
       logger.error(
         { jid, messageId, emoji, err },
         'Failed to send Telegram reaction',

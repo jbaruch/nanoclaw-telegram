@@ -17,6 +17,13 @@ import { AdditionalMount, AllowedRoot, MountAllowlist } from './types.js';
 let cachedAllowlist: MountAllowlist | null = null;
 let allowlistLoadError: string | null = null;
 
+class InvalidMountAllowlistError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidMountAllowlistError';
+  }
+}
+
 /**
  * Default blocked patterns - paths that should never be mounted
  */
@@ -72,15 +79,15 @@ export function loadMountAllowlist(): MountAllowlist | null {
 
     // Validate structure
     if (!Array.isArray(allowlist.allowedRoots)) {
-      throw new Error('allowedRoots must be an array');
+      throw new InvalidMountAllowlistError('allowedRoots must be an array');
     }
 
     if (!Array.isArray(allowlist.blockedPatterns)) {
-      throw new Error('blockedPatterns must be an array');
+      throw new InvalidMountAllowlistError('blockedPatterns must be an array');
     }
 
     if (typeof allowlist.nonMainReadOnly !== 'boolean') {
-      throw new Error('nonMainReadOnly must be a boolean');
+      throw new InvalidMountAllowlistError('nonMainReadOnly must be a boolean');
     }
 
     // Merge with default blocked patterns
@@ -101,7 +108,15 @@ export function loadMountAllowlist(): MountAllowlist | null {
 
     return cachedAllowlist;
   } catch (err) {
-    allowlistLoadError = err instanceof Error ? err.message : String(err);
+    const isFileError = err instanceof Error && 'code' in err;
+    if (
+      !(err instanceof SyntaxError) &&
+      !(err instanceof InvalidMountAllowlistError) &&
+      !isFileError
+    ) {
+      throw err;
+    }
+    allowlistLoadError = err.message;
     logger.error(
       {
         path: MOUNT_ALLOWLIST_PATH,
@@ -134,7 +149,8 @@ function expandPath(p: string): string {
 function getRealPath(p: string): string | null {
   try {
     return fs.realpathSync(p);
-  } catch {
+  } catch (err) {
+    if (!(err instanceof Error) || !('code' in err)) throw err;
     return null;
   }
 }

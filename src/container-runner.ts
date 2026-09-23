@@ -388,6 +388,7 @@ export async function runContainerAgent(
             // so idle timers start even for "silent" query completions.
             outputChain = outputChain.then(() => onOutput(parsed));
           } catch (err) {
+            if (!(err instanceof SyntaxError)) throw err;
             logger.warn(
               { group: group.name, error: err },
               'Failed to parse streamed output chunk',
@@ -435,6 +436,7 @@ export async function runContainerAgent(
       try {
         stopContainer(containerName);
       } catch (err) {
+        if (!(err instanceof Error) || !('status' in err)) throw err;
         logger.warn(
           { group: group.name, containerName, err },
           'Graceful stop failed, force killing',
@@ -638,6 +640,7 @@ export async function runContainerAgent(
 
         resolve(output);
       } catch (err) {
+        if (!(err instanceof SyntaxError)) throw err;
         logger.error(
           {
             group: group.name,
