@@ -95,9 +95,27 @@ describe('database migrations', () => {
         `INSERT INTO registered_groups (jid, name, folder, trigger_pattern, added_at) VALUES (?, ?, ?, ?, ?)`,
       );
       insert.run('tg:111', 'Main', 'main', '@Andy', '2024-01-01T00:00:00Z');
-      insert.run('tg:222', 'TG Main', 'telegram_main', '@Andy', '2024-01-01T00:00:00Z');
-      insert.run('tg:333', 'Swarm', 'telegram_swarm', '@Andy', '2024-01-01T00:00:00Z');
-      insert.run('tg:444', 'Slack Main', 'slack_main', '@Andy', '2024-01-01T00:00:00Z');
+      insert.run(
+        'tg:222',
+        'TG Main',
+        'telegram_main',
+        '@Andy',
+        '2024-01-01T00:00:00Z',
+      );
+      insert.run(
+        'tg:333',
+        'Swarm',
+        'telegram_swarm',
+        '@Andy',
+        '2024-01-01T00:00:00Z',
+      );
+      insert.run(
+        'tg:444',
+        'Slack Main',
+        'slack_main',
+        '@Andy',
+        '2024-01-01T00:00:00Z',
+      );
       legacyDb.close();
 
       vi.resetModules();
