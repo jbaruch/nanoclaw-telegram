@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
+import type { Channel } from '../types.js';
+
 // --- Mocks ---
 
 // Mock registry (registerChannel runs at import time)
@@ -732,7 +734,7 @@ describe('TelegramChannel', () => {
   describe('sendMessage', () => {
     it('sends message via bot API', async () => {
       const opts = createTestOpts();
-      const channel = new TelegramChannel('test-token', opts);
+      const channel: Channel = new TelegramChannel('test-token', opts);
       await channel.connect();
 
       await channel.sendMessage('tg:100200300', 'Hello');
@@ -740,6 +742,30 @@ describe('TelegramChannel', () => {
       expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
         '100200300',
         'Hello',
+        { parse_mode: 'Markdown' },
+      );
+    });
+
+    it('sends a reply through the channel interface only on the first chunk', async () => {
+      const channel: Channel = new TelegramChannel(
+        'test-token',
+        createTestOpts(),
+      );
+      await channel.connect();
+
+      await channel.sendMessage('tg:100200300', 'x'.repeat(5000), '42');
+
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(2);
+      expect(currentBot().api.sendMessage).toHaveBeenNthCalledWith(
+        1,
+        '100200300',
+        'x'.repeat(4096),
+        { parse_mode: 'Markdown', reply_parameters: { message_id: 42 } },
+      );
+      expect(currentBot().api.sendMessage).toHaveBeenNthCalledWith(
+        2,
+        '100200300',
+        'x'.repeat(904),
         { parse_mode: 'Markdown' },
       );
     });
