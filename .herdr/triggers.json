@@ -34,7 +34,11 @@
     "src/remote-control.ts",
     "src/router.ts",
     "src/sender-allowlist.ts",
-    "src/task-scheduler.ts"
+    "src/task-scheduler.ts",
+    ".claude/skills/x-integration/agent.ts",
+    ".claude/skills/x-integration/host.ts",
+    ".claude/settings.json",
+    ".mcp.json"
   ],
   "cli_spec_paths": [
     ".claude/skills/claw/scripts/claw",
@@ -46,7 +50,12 @@
     "setup/register.ts",
     "setup/timezone.ts",
     "src/channels/telegram.ts",
-    "src/index.ts"
+    "src/index.ts",
+    "setup/service.ts",
+    "setup/verify.ts",
+    "setup.sh",
+    "container/build.sh",
+    "setup/environment.ts"
   ],
   "cli_surface_markers": [
     "ArgumentParser(",
@@ -60,7 +69,9 @@
     "command === '/",
     "trimmed === '/",
     "process.exit(",
-    "sys.exit("
+    "sys.exit(",
+    "  exit ",
+    "${1"
   ],
   "user_doc_paths": [
     "README*.md",
