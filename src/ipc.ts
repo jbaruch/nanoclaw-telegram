@@ -37,16 +37,67 @@ export interface IpcDeps {
 
 let ipcWatcherRunning = false;
 
+export class InvalidIpcPayloadError extends Error {
+  constructor() {
+    super('IPC payload must be a non-null object with a string type');
+    this.name = 'InvalidIpcPayloadError';
+  }
+}
+
+export class NoChannelForJidError extends Error {
+  constructor(jid: string) {
+    super(`No channel for JID: ${jid}`);
+    this.name = 'NoChannelForJidError';
+  }
+}
+
+interface IpcPayload {
+  type: string;
+  taskId?: string;
+  prompt?: string;
+  schedule_type?: string;
+  schedule_value?: string;
+  context_mode?: string;
+  script?: string;
+  groupFolder?: string;
+  chatJid?: string;
+  targetJid?: string;
+  messageId?: string;
+  emoji?: string;
+  text?: string;
+  jid?: string;
+  name?: string;
+  folder?: string;
+  trigger?: string;
+  requiresTrigger?: boolean;
+  containerConfig?: RegisteredGroup['containerConfig'];
+}
+
+function parseIpcPayload(contents: string): IpcPayload {
+  const value: unknown = JSON.parse(contents);
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    Array.isArray(value) ||
+    typeof (value as { type?: unknown }).type !== 'string'
+  ) {
+    throw new InvalidIpcPayloadError();
+  }
+  return value as IpcPayload;
+}
+
 function isExpectedIpcFileError(err: unknown): err is Error {
   return (
     err instanceof SyntaxError ||
+    err instanceof InvalidIpcPayloadError ||
+    err instanceof NoChannelForJidError ||
     err instanceof Database.SqliteError ||
     err instanceof MessageDeliveryError ||
     isFileSystemError(err)
   );
 }
 
-export function startIpcWatcher(deps: IpcDeps): void {
+export async function startIpcWatcher(deps: IpcDeps): Promise<void> {
   if (ipcWatcherRunning) {
     logger.debug('IPC watcher already running, skipping duplicate start');
     return;
@@ -67,7 +118,6 @@ export function startIpcWatcher(deps: IpcDeps): void {
     } catch (err) {
       if (!isFileSystemError(err)) throw err;
       logger.error({ err }, 'Error reading IPC base directory');
-      setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
       return;
     }
 
@@ -93,7 +143,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
           for (const file of messageFiles) {
             const filePath = path.join(messagesDir, file);
             try {
-              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              const data = parseIpcPayload(fs.readFileSync(filePath, 'utf-8'));
               if (
                 data.type === 'react_to_message' &&
                 data.chatJid &&
@@ -176,7 +226,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
           for (const file of taskFiles) {
             const filePath = path.join(tasksDir, file);
             try {
-              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              const data = parseIpcPayload(fs.readFileSync(filePath, 'utf-8'));
               // Pass source group identity to processTaskIpc for authorization
               await processTaskIpc(data, sourceGroup, isMain, deps);
               fs.unlinkSync(filePath);
@@ -200,34 +250,28 @@ export function startIpcWatcher(deps: IpcDeps): void {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
       }
     }
-
-    setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
   };
 
-  processIpcFiles();
   logger.info('IPC watcher started (per-group namespaces)');
+  try {
+    while (ipcWatcherRunning) {
+      await processIpcFiles();
+      if (ipcWatcherRunning) {
+        await new Promise((resolve) => setTimeout(resolve, IPC_POLL_INTERVAL));
+      }
+    }
+  } finally {
+    ipcWatcherRunning = false;
+  }
+}
+
+/** @internal - for tests only. */
+export function _resetIpcWatcherForTests(): void {
+  ipcWatcherRunning = false;
 }
 
 export async function processTaskIpc(
-  data: {
-    type: string;
-    taskId?: string;
-    prompt?: string;
-    schedule_type?: string;
-    schedule_value?: string;
-    context_mode?: string;
-    script?: string;
-    groupFolder?: string;
-    chatJid?: string;
-    targetJid?: string;
-    // For register_group
-    jid?: string;
-    name?: string;
-    folder?: string;
-    trigger?: string;
-    requiresTrigger?: boolean;
-    containerConfig?: RegisteredGroup['containerConfig'];
-  },
+  data: IpcPayload,
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
   deps: IpcDeps,

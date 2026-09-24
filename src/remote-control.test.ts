@@ -206,6 +206,43 @@ describe('remote-control', () => {
       expect(spawnMock).toHaveBeenCalledTimes(2);
     });
 
+    it.each(['EACCES', 'EISDIR'])(
+      'settles when the stdout file has an operational read failure (%s)',
+      async (code) => {
+        const proc = createMockProcess();
+        spawnMock.mockReturnValue(proc);
+        readFileSyncSpy.mockImplementation((() => {
+          throw Object.assign(new Error(`${code}: cannot read stdout`), {
+            code,
+          });
+        }) as typeof fs.readFileSync);
+        vi.spyOn(process, 'kill').mockImplementation(processIsAlive);
+
+        await expect(
+          startRemoteControl('user1', 'tg:123', '/project'),
+        ).resolves.toEqual({
+          ok: false,
+          error: expect.stringContaining(
+            'Failed to read Remote Control output',
+          ),
+        });
+      },
+    );
+
+    it('rejects its promise when stdout polling hits a programming error', async () => {
+      const proc = createMockProcess();
+      const err = new TypeError('stdout read invariant failed');
+      spawnMock.mockReturnValue(proc);
+      readFileSyncSpy.mockImplementation((() => {
+        throw err;
+      }) as typeof fs.readFileSync);
+      vi.spyOn(process, 'kill').mockImplementation(processIsAlive);
+
+      await expect(
+        startRemoteControl('user1', 'tg:123', '/project'),
+      ).rejects.toBe(err);
+    });
+
     it('returns error if process exits before URL', async () => {
       const proc = createMockProcess(33333);
       spawnMock.mockReturnValue(proc);

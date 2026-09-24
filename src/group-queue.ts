@@ -1,4 +1,5 @@
 import { ChildProcess } from 'child_process';
+import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
@@ -221,6 +222,15 @@ export class GroupQueue {
           this.scheduleRetry(groupJid, state);
         }
       }
+    } catch (err) {
+      if (!(err instanceof Database.SqliteError) && !isFileSystemError(err)) {
+        throw err;
+      }
+      logger.error(
+        { groupJid, err },
+        'Operational error processing messages; scheduling retry',
+      );
+      this.scheduleRetry(groupJid, state);
     } finally {
       state.active = false;
       state.process = null;

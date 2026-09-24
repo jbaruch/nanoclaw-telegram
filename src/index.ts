@@ -51,7 +51,7 @@ import {
   InvalidGroupFolderError,
   resolveGroupFolderPath,
 } from './group-folder.js';
-import { startIpcWatcher } from './ipc.js';
+import { NoChannelForJidError, startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   isExecFailure,
@@ -128,6 +128,9 @@ async function sendWithRetry(
     }
   }
 }
+
+/** @internal - exported for testing */
+export const _sendWithRetryForTests = sendWithRetry;
 
 // --- Outbound dedup guard ---
 const DEDUP_WINDOW_MS = 10_000;
@@ -285,6 +288,28 @@ export function _setRegisteredGroups(
   registeredGroups = groups;
 }
 
+/** @internal - exported for testing */
+export function _setChannelsForTests(testChannels: Channel[]): void {
+  channels.splice(0, channels.length, ...testChannels);
+}
+
+/** @internal - exported for testing */
+export function _resetProcessingStateForTests(): void {
+  lastTimestamp = '';
+  sessions = {};
+  registeredGroups = {};
+  lastAgentTimestamp = {};
+  channels.splice(0, channels.length);
+  recentSends.clear();
+}
+
+/** @internal - exported for testing */
+export function _getLastAgentTimestampForTests(
+  chatJid: string,
+): string | undefined {
+  return lastAgentTimestamp[chatJid];
+}
+
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
@@ -384,12 +409,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               await sendWithRetry(channel, chatJid, text);
             } catch (err) {
               if (!(err instanceof MessageDeliveryError)) throw err;
-              hadError = true;
               logger.error(
                 { group: group.name, err },
                 'Failed to send agent output after retries',
               );
-              return;
             }
           }
         } else {
@@ -397,12 +420,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             await sendWithRetry(channel, chatJid, text);
           } catch (err) {
             if (!(err instanceof MessageDeliveryError)) throw err;
-            hadError = true;
             logger.error(
               { group: group.name, err },
               'Failed to send agent output after retries',
             );
-            return;
           }
         }
         outputSentToUser = true;
@@ -450,6 +471,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   return true;
 }
+
+/** @internal - exported for testing */
+export const _processGroupMessagesForTests = processGroupMessages;
 
 async function runAgent(
   group: RegisteredGroup,
@@ -826,7 +850,7 @@ async function main(): Promise<void> {
   startIpcWatcher({
     sendMessage: (jid, text) => {
       const channel = findChannel(channels, jid);
-      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (!channel) throw new NoChannelForJidError(jid);
       if (isDuplicateSend(jid, text)) return Promise.resolve();
       return sendWithRetry(channel, jid, text);
     },
@@ -867,6 +891,9 @@ async function main(): Promise<void> {
         writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
       }
     },
+  }).catch((err) => {
+    logger.fatal({ err }, 'IPC watcher crashed unexpectedly');
+    process.exit(1);
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();

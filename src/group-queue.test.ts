@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import type { ChildProcess } from 'child_process';
+import Database from 'better-sqlite3';
 
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
@@ -180,6 +181,41 @@ describe('GroupQueue', () => {
     queue.enqueueMessageCheck('group1@g.us');
     await vi.advanceTimersByTimeAsync(0);
 
+    expect(logSpy).toHaveBeenCalledWith(
+      { groupJid: 'group1@g.us', err },
+      'Unhandled error in runForGroup',
+    );
+  });
+
+  it('retries operational SQLite failures', async () => {
+    const processMessages = vi
+      .fn<() => Promise<boolean>>()
+      .mockRejectedValueOnce(
+        new Database.SqliteError('database is locked', 'SQLITE_BUSY'),
+      )
+      .mockResolvedValue(true);
+    queue.setProcessMessagesFn(processMessages);
+
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(processMessages).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(processMessages).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry uncoded TypeError failures', async () => {
+    const err = new TypeError('unexpected callback failure');
+    const logSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    const processMessages = vi.fn(async () => {
+      throw err;
+    });
+    queue.setProcessMessagesFn(processMessages);
+
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(100_000);
+
+    expect(processMessages).toHaveBeenCalledTimes(1);
     expect(logSpy).toHaveBeenCalledWith(
       { groupJid: 'group1@g.us', err },
       'Unhandled error in runForGroup',

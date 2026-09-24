@@ -59,8 +59,13 @@ function clearState(): void {
   try {
     fs.unlinkSync(STATE_FILE);
   } catch (err) {
-    if (!hasOperationalErrorCode(err, 'ENOENT')) throw err;
-    // ignore
+    if (!isFileSystemError(err)) throw err;
+    if (!hasOperationalErrorCode(err, 'ENOENT')) {
+      logger.warn(
+        { err, path: STATE_FILE },
+        'Failed to clear Remote Control state',
+      );
+    }
   }
 }
 
@@ -175,10 +180,10 @@ export async function startRemoteControl(
   }
 
   // Poll the stdout file for the URL
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const startTime = Date.now();
 
-    const poll = () => {
+    const poll = async (): Promise<void> => {
       // Check if process died
       if (!isProcessAlive(pid)) {
         resolve({ ok: false, error: 'Process exited before producing URL' });
@@ -190,7 +195,19 @@ export async function startRemoteControl(
       try {
         content = fs.readFileSync(STDOUT_FILE, 'utf-8');
       } catch (err) {
-        if (!hasOperationalErrorCode(err, 'ENOENT')) throw err;
+        const message = err instanceof Error ? err.message : String(err);
+        if (!isFileSystemError(err)) throw err;
+        if (!hasOperationalErrorCode(err, 'ENOENT')) {
+          logger.warn(
+            { err, path: STDOUT_FILE },
+            'Failed to read Remote Control output',
+          );
+          resolve({
+            ok: false,
+            error: `Failed to read Remote Control output: ${message}`,
+          });
+          return;
+        }
         // File might not have content yet
       }
 
@@ -236,10 +253,10 @@ export async function startRemoteControl(
         return;
       }
 
-      setTimeout(poll, URL_POLL_MS);
+      setTimeout(() => void poll().catch(reject), URL_POLL_MS);
     };
 
-    poll();
+    void poll().catch(reject);
   });
 }
 

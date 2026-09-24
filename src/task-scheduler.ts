@@ -90,81 +90,10 @@ async function runTask(
   deps: SchedulerDependencies,
 ): Promise<void> {
   const startTime = Date.now();
-  let groupDir: string;
-  try {
-    groupDir = resolveGroupFolderPath(task.group_folder);
-  } catch (err) {
-    if (!(err instanceof InvalidGroupFolderError)) throw err;
-    const error = err.message;
-    // Stop retry churn for malformed legacy rows.
-    updateTask(task.id, { status: 'paused' });
-    logger.error(
-      { taskId: task.id, groupFolder: task.group_folder, error },
-      'Task has invalid group folder',
-    );
-    logTaskRun({
-      task_id: task.id,
-      run_at: new Date().toISOString(),
-      duration_ms: Date.now() - startTime,
-      status: 'error',
-      result: null,
-      error,
-    });
-    return;
-  }
-  fs.mkdirSync(groupDir, { recursive: true });
-
-  logger.info(
-    { taskId: task.id, group: task.group_folder },
-    'Running scheduled task',
-  );
-
-  const groups = deps.registeredGroups();
-  const group = Object.values(groups).find(
-    (g) => g.folder === task.group_folder,
-  );
-
-  if (!group) {
-    logger.error(
-      { taskId: task.id, groupFolder: task.group_folder },
-      'Group not found for task',
-    );
-    logTaskRun({
-      task_id: task.id,
-      run_at: new Date().toISOString(),
-      duration_ms: Date.now() - startTime,
-      status: 'error',
-      result: null,
-      error: `Group not found: ${task.group_folder}`,
-    });
-    return;
-  }
-
-  // Update tasks snapshot for container to read (filtered by group)
-  const isMain = group.isMain === true;
-  const tasks = getAllTasks();
-  writeTasksSnapshot(
-    task.group_folder,
-    isMain,
-    tasks.map((t) => ({
-      id: t.id,
-      groupFolder: t.group_folder,
-      prompt: t.prompt,
-      script: t.script,
-      schedule_type: t.schedule_type,
-      schedule_value: t.schedule_value,
-      status: t.status,
-      next_run: t.next_run,
-    })),
-  );
-
   let result: string | null = null;
   let error: string | null = null;
-
-  // For group context mode, use the group's current session
-  const sessions = deps.getSessions();
-  const sessionId =
-    task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
+  let keepPausedSchedule = false;
+  let finalized = false;
 
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
@@ -180,7 +109,89 @@ async function runTask(
     }, TASK_CLOSE_DELAY_MS);
   };
 
+  const finalizeRun = () => {
+    if (finalized) return;
+    finalized = true;
+    if (closeTimer) clearTimeout(closeTimer);
+
+    logTaskRun({
+      task_id: task.id,
+      run_at: new Date().toISOString(),
+      duration_ms: Date.now() - startTime,
+      status: error ? 'error' : 'success',
+      result,
+      error,
+    });
+
+    const nextRun = keepPausedSchedule ? task.next_run : computeNextRun(task);
+    const resultSummary = error
+      ? `Error: ${error}`
+      : result
+        ? result.slice(0, 200)
+        : 'Completed';
+    updateTaskAfterRun(task.id, nextRun, resultSummary);
+  };
+
   try {
+    let groupDir: string;
+    try {
+      groupDir = resolveGroupFolderPath(task.group_folder);
+    } catch (err) {
+      if (!(err instanceof InvalidGroupFolderError)) throw err;
+      error = err.message;
+      keepPausedSchedule = true;
+      // Stop retry churn for malformed legacy rows.
+      updateTask(task.id, { status: 'paused' });
+      logger.error(
+        { taskId: task.id, groupFolder: task.group_folder, error },
+        'Task has invalid group folder',
+      );
+      return;
+    }
+    fs.mkdirSync(groupDir, { recursive: true });
+
+    logger.info(
+      { taskId: task.id, group: task.group_folder },
+      'Running scheduled task',
+    );
+
+    const groups = deps.registeredGroups();
+    const group = Object.values(groups).find(
+      (candidate) => candidate.folder === task.group_folder,
+    );
+
+    if (!group) {
+      error = `Group not found: ${task.group_folder}`;
+      logger.error(
+        { taskId: task.id, groupFolder: task.group_folder },
+        'Group not found for task',
+      );
+      return;
+    }
+
+    // Update tasks snapshot for container to read (filtered by group)
+    const isMain = group.isMain === true;
+    const tasks = getAllTasks();
+    writeTasksSnapshot(
+      task.group_folder,
+      isMain,
+      tasks.map((scheduledTask) => ({
+        id: scheduledTask.id,
+        groupFolder: scheduledTask.group_folder,
+        prompt: scheduledTask.prompt,
+        script: scheduledTask.script,
+        schedule_type: scheduledTask.schedule_type,
+        schedule_value: scheduledTask.schedule_value,
+        status: scheduledTask.status,
+        next_run: scheduledTask.next_run,
+      })),
+    );
+
+    // For group context mode, use the group's current session
+    const sessions = deps.getSessions();
+    const sessionId =
+      task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
+
     const output = await runContainerAgent(
       group,
       {
@@ -212,8 +223,6 @@ async function runTask(
       },
     );
 
-    if (closeTimer) clearTimeout(closeTimer);
-
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
     } else if (output.result) {
@@ -226,37 +235,21 @@ async function runTask(
       'Task completed',
     );
   } catch (err) {
-    if (
-      !(err instanceof MessageDeliveryError) &&
-      !isFileSystemError(err) &&
-      !isSpawnError(err) &&
-      !isExecFailure(err)
-    ) {
+    const isExpected =
+      err instanceof MessageDeliveryError ||
+      isFileSystemError(err) ||
+      isSpawnError(err) ||
+      isExecFailure(err);
+    error = err instanceof Error ? err.message : String(err);
+    if (!isExpected) {
+      logger.error({ taskId: task.id, error }, 'Task failed');
+      finalizeRun();
       throw err;
     }
-    if (closeTimer) clearTimeout(closeTimer);
-    error = err.message;
     logger.error({ taskId: task.id, error }, 'Task failed');
+  } finally {
+    finalizeRun();
   }
-
-  const durationMs = Date.now() - startTime;
-
-  logTaskRun({
-    task_id: task.id,
-    run_at: new Date().toISOString(),
-    duration_ms: durationMs,
-    status: error ? 'error' : 'success',
-    result,
-    error,
-  });
-
-  const nextRun = computeNextRun(task);
-  const resultSummary = error
-    ? `Error: ${error}`
-    : result
-      ? result.slice(0, 200)
-      : 'Completed';
-  updateTaskAfterRun(task.id, nextRun, resultSummary);
 }
 
 let schedulerRunning = false;

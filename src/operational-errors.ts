@@ -112,6 +112,7 @@ export function isMessageServiceError(err: unknown): err is Error {
 }
 
 export function isTransientMessageServiceError(err: unknown): boolean {
+  if (!isMessageServiceError(err)) return false;
   const status = serviceStatus(err);
   return isNetworkError(err) || (status !== undefined && status >= 500);
 }

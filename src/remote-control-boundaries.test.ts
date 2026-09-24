@@ -163,6 +163,29 @@ describe('restoreRemoteControl', () => {
 
     expect(() => restoreRemoteControl()).toThrow('invalid read argument');
   });
+
+  it.each(['EACCES', 'EISDIR'])(
+    'contains operational failures while clearing stale state (%s)',
+    (code) => {
+      stateFileReturns('not json{{{');
+      unlinkSpy.mockImplementation(() => {
+        throw nodeError(code);
+      });
+
+      expect(() => restoreRemoteControl()).not.toThrow();
+      expect(getActiveSession()).toBeNull();
+    },
+  );
+
+  it('propagates programming errors while clearing stale state', () => {
+    const err = new TypeError('unlink invariant failed');
+    stateFileReturns('not json{{{');
+    unlinkSpy.mockImplementation(() => {
+      throw err;
+    });
+
+    expect(() => restoreRemoteControl()).toThrow(err);
+  });
 });
 
 describe('stopRemoteControl', () => {
