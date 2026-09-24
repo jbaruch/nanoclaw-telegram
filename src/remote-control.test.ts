@@ -21,6 +21,7 @@ import {
   _resetForTesting,
   _getStateFilePath,
 } from './remote-control.js';
+import { logger } from './logger.js';
 
 // --- Helpers ---
 
@@ -207,25 +208,94 @@ describe('remote-control', () => {
     });
 
     it.each(['EACCES', 'EISDIR'])(
-      'settles when the stdout file has an operational read failure (%s)',
+      'recovers when stdout becomes readable after an operational failure (%s)',
       async (code) => {
-        const proc = createMockProcess();
+        vi.useFakeTimers();
+        const proc = createMockProcess(45678);
         spawnMock.mockReturnValue(proc);
+        let stdoutReads = 0;
+        readFileSyncSpy.mockImplementation(((p: string) => {
+          if (p.endsWith('remote-control.stdout')) {
+            stdoutReads++;
+            if (stdoutReads === 1) {
+              throw Object.assign(new Error(`${code}: cannot read stdout`), {
+                code,
+              });
+            }
+            return 'https://claude.ai/code?bridge=env_recovered\n';
+          }
+          throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        }) as typeof fs.readFileSync);
+        const killSpy = vi
+          .spyOn(process, 'kill')
+          .mockImplementation(processIsAlive);
+        const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+        const promise = startRemoteControl('user1', 'tg:123', '/project');
+        await vi.advanceTimersByTimeAsync(200);
+
+        await expect(promise).resolves.toEqual({
+          ok: true,
+          url: 'https://claude.ai/code?bridge=env_recovered',
+        });
+        expect(stdoutReads).toBe(2);
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(killSpy).not.toHaveBeenCalledWith(-45678, 'SIGTERM');
+
+        vi.useRealTimers();
+      },
+    );
+
+    it.each(['EACCES', 'EISDIR'])(
+      'retains ownership until timeout for persistent operational failures (%s)',
+      async (code) => {
+        vi.useFakeTimers();
+        const proc = createMockProcess(56789);
+        spawnMock.mockReturnValue(proc);
+        let stdoutReads = 0;
         readFileSyncSpy.mockImplementation((() => {
+          stdoutReads++;
           throw Object.assign(new Error(`${code}: cannot read stdout`), {
             code,
           });
         }) as typeof fs.readFileSync);
-        vi.spyOn(process, 'kill').mockImplementation(processIsAlive);
+        let terminationRequested = false;
+        const lifecycleEvents: string[] = [];
+        const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+        vi.spyOn(process, 'kill').mockImplementation(((
+          pid: number,
+          signal?: NodeJS.Signals | number,
+        ) => {
+          if (pid === -56789 && signal === 'SIGTERM') {
+            terminationRequested = true;
+            lifecycleEvents.push('termination-requested');
+          }
+          return true;
+        }) as typeof process.kill);
 
-        await expect(
-          startRemoteControl('user1', 'tg:123', '/project'),
-        ).resolves.toEqual({
-          ok: false,
-          error: expect.stringContaining(
-            'Failed to read Remote Control output',
-          ),
+        let settled = false;
+        const promise = startRemoteControl('user1', 'tg:123', '/project');
+        const observedPromise = promise.then((result) => {
+          settled = true;
+          lifecycleEvents.push('settled');
+          return result;
         });
+
+        await vi.advanceTimersByTimeAsync(29_800);
+        expect(settled).toBe(false);
+        expect(terminationRequested).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(200);
+        await expect(observedPromise).resolves.toEqual({
+          ok: false,
+          error: 'Timed out waiting for Remote Control URL',
+        });
+        expect(stdoutReads).toBeGreaterThan(1);
+        expect(warnSpy).toHaveBeenCalledTimes(stdoutReads);
+        expect(terminationRequested).toBe(true);
+        expect(lifecycleEvents).toEqual(['termination-requested', 'settled']);
+
+        vi.useRealTimers();
       },
     );
 

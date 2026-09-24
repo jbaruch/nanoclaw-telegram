@@ -195,18 +195,12 @@ export async function startRemoteControl(
       try {
         content = fs.readFileSync(STDOUT_FILE, 'utf-8');
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
         if (!isFileSystemError(err)) throw err;
         if (!hasOperationalErrorCode(err, 'ENOENT')) {
           logger.warn(
             { err, path: STDOUT_FILE },
             'Failed to read Remote Control output',
           );
-          resolve({
-            ok: false,
-            error: `Failed to read Remote Control output: ${message}`,
-          });
-          return;
         }
         // File might not have content yet
       }
