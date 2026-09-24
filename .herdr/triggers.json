@@ -55,7 +55,13 @@
     "setup/verify.ts",
     "setup.sh",
     "container/build.sh",
-    "setup/environment.ts"
+    "setup/environment.ts",
+    ".claude/skills/x-integration/scripts/setup.ts",
+    ".claude/skills/x-integration/scripts/post.ts",
+    ".claude/skills/x-integration/scripts/like.ts",
+    ".claude/skills/x-integration/scripts/reply.ts",
+    ".claude/skills/x-integration/scripts/retweet.ts",
+    ".claude/skills/x-integration/scripts/quote.ts"
   ],
   "cli_surface_markers": [
     "ArgumentParser(",
