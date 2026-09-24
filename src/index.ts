@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { OneCLI } from '@onecli-sh/sdk';
+import Database from 'better-sqlite3';
 
 import {
   ASSISTANT_NAME,
@@ -53,6 +54,14 @@ import {
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
+  isExecFailure,
+  isFileSystemError,
+  isMessageServiceError,
+  isSpawnError,
+  isTransientMessageServiceError,
+  MessageDeliveryError,
+} from './operational-errors.js';
+import {
   restoreRemoteControl,
   startRemoteControl,
   stopRemoteControl,
@@ -86,7 +95,6 @@ const SEND_RETRY_BASE_DELAY_MS = 2000;
 interface RetryableSendError {
   error?: { code?: unknown };
   code?: unknown;
-  error_code?: unknown;
 }
 
 async function sendWithRetry(
@@ -106,14 +114,10 @@ async function sendWithRetry(
           ? (err as RetryableSendError)
           : {};
       const code = sendError.error?.code || sendError.code || '';
-      const httpCode =
-        typeof sendError.error_code === 'number' ? sendError.error_code : 0;
-      const isTransient =
-        /ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|EPIPE/i.test(
-          String(code),
-        ) || httpCode >= 500;
+      if (!isMessageServiceError(err)) throw err;
+      const isTransient = isTransientMessageServiceError(err);
 
-      if (isLast || !isTransient) throw err;
+      if (isLast || !isTransient) throw new MessageDeliveryError(err);
 
       const delay = SEND_RETRY_BASE_DELAY_MS * (attempt + 1);
       logger.warn(
@@ -379,22 +383,26 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             try {
               await sendWithRetry(channel, chatJid, text);
             } catch (err) {
-              if (!(err instanceof Error)) throw err;
+              if (!(err instanceof MessageDeliveryError)) throw err;
+              hadError = true;
               logger.error(
                 { group: group.name, err },
                 'Failed to send agent output after retries',
               );
+              return;
             }
           }
         } else {
           try {
             await sendWithRetry(channel, chatJid, text);
           } catch (err) {
-            if (!(err instanceof Error)) throw err;
+            if (!(err instanceof MessageDeliveryError)) throw err;
+            hadError = true;
             logger.error(
               { group: group.name, err },
               'Failed to send agent output after retries',
             );
+            return;
           }
         }
         outputSentToUser = true;
@@ -520,7 +528,14 @@ async function runAgent(
 
     return 'success';
   } catch (err) {
-    if (!(err instanceof Error)) throw err;
+    if (
+      !(err instanceof MessageDeliveryError) &&
+      !isFileSystemError(err) &&
+      !isSpawnError(err) &&
+      !isExecFailure(err)
+    ) {
+      throw err;
+    }
     logger.error({ group: group.name, err }, 'Agent error');
     return 'error';
   }
@@ -622,9 +637,10 @@ async function startMessageLoop(): Promise<void> {
           }
         }
       }
-      // The timer caller sees a rejected loop as silent stoppage; this catch logs the failure and keeps polling; propagation would disable message processing.
-      // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
     } catch (err) {
+      if (!(err instanceof Database.SqliteError) && !isFileSystemError(err)) {
+        throw err;
+      }
       logger.error({ err }, 'Error in message loop');
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
@@ -803,6 +819,9 @@ async function main(): Promise<void> {
         await sendWithRetry(channel, jid, text);
       }
     },
+  }).catch((err) => {
+    logger.fatal({ err }, 'Scheduler loop crashed unexpectedly');
+    process.exit(1);
   });
   startIpcWatcher({
     sendMessage: (jid, text) => {

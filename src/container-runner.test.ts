@@ -130,6 +130,13 @@ function emitOutputMarker(
   proc.stdout.push(`${OUTPUT_START_MARKER}\n${json}\n${OUTPUT_END_MARKER}\n`);
 }
 
+function emitRawOutputMarker(
+  proc: ReturnType<typeof createFakeProcess>,
+  json: string,
+) {
+  proc.stdout.push(`${OUTPUT_START_MARKER}\n${json}\n${OUTPUT_END_MARKER}\n`);
+}
+
 describe('container-runner timeout behavior', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -225,5 +232,61 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+
+  it.each(['null', '{}', '{"status":"success","result":42}'])(
+    'contains malformed streamed output (%s)',
+    async (json) => {
+      const onOutput = vi.fn(async () => {});
+      const resultPromise = runContainerAgent(
+        testGroup,
+        testInput,
+        () => {},
+        onOutput,
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      emitRawOutputMarker(fakeProc, json);
+      fakeProc.emit('close', 0);
+      await vi.advanceTimersByTimeAsync(10);
+
+      await expect(resultPromise).resolves.toMatchObject({ status: 'success' });
+      expect(onOutput).not.toHaveBeenCalled();
+    },
+  );
+
+  it('returns an error for malformed legacy output', async () => {
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {});
+
+    await vi.advanceTimersByTimeAsync(0);
+    emitRawOutputMarker(fakeProc, 'null');
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      status: 'error',
+      error: expect.stringContaining('output must be an object'),
+    });
+  });
+
+  it('propagates callback programming failures through the runner promise', async () => {
+    const err = Object.assign(new TypeError('unexpected callback failure'), {
+      code: 'ERR_INVALID_ARG_TYPE',
+    });
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      async () => {
+        throw err;
+      },
+    );
+    const rejection = expect(resultPromise).rejects.toBe(err);
+
+    await vi.advanceTimersByTimeAsync(0);
+    emitOutputMarker(fakeProc, { status: 'success', result: 'Done' });
+    fakeProc.emit('close', 0);
+
+    await rejection;
   });
 });

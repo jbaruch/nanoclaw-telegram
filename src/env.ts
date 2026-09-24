@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { logger } from './logger.js';
+import { isFileSystemError } from './operational-errors.js';
 
 /**
  * Parse the .env file and return values for the requested keys.
@@ -14,7 +15,7 @@ export function readEnvFile(keys: string[]): Record<string, string> {
   try {
     content = fs.readFileSync(envFile, 'utf-8');
   } catch (err) {
-    if (!(err instanceof Error) || !('code' in err)) throw err;
+    if (!isFileSystemError(err)) throw err;
     logger.debug({ err }, '.env file not found, using defaults');
     return {};
   }

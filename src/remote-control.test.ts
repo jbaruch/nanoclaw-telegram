@@ -254,6 +254,7 @@ describe('remote-control', () => {
         ok: false,
         error: 'Failed to start: ENOENT',
       });
+      expect(closeSyncSpy).toHaveBeenCalledTimes(2);
     });
 
     it('propagates unexpected spawn implementation failures', async () => {
@@ -264,6 +265,21 @@ describe('remote-control', () => {
       await expect(
         startRemoteControl('user1', 'tg:123', '/project'),
       ).rejects.toThrow('unexpected implementation failure');
+      expect(closeSyncSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('propagates coded TypeErrors and closes both descriptors', async () => {
+      const err = Object.assign(new TypeError('invalid spawn argument'), {
+        code: 'ERR_INVALID_ARG_TYPE',
+      });
+      spawnMock.mockImplementation(() => {
+        throw err;
+      });
+
+      await expect(
+        startRemoteControl('user1', 'tg:123', '/project'),
+      ).rejects.toBe(err);
+      expect(closeSyncSpy).toHaveBeenCalledTimes(2);
     });
   });
 

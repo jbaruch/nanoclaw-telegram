@@ -9,6 +9,7 @@ import { createDraftStream, DraftStream } from '../draft-stream.js';
 import { getLatestMessage, getMessageById, storeReaction } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
+import { isFileSystemError, isNetworkError } from '../operational-errors.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
@@ -50,7 +51,7 @@ function isTelegramError(err: unknown): err is GrammyError | HttpError {
 }
 
 function isTelegramFileError(err: unknown): err is Error {
-  return isTelegramError(err) || (err instanceof Error && 'code' in err);
+  return isTelegramError(err) || isFileSystemError(err) || isNetworkError(err);
 }
 
 /**
@@ -912,6 +913,7 @@ export class TelegramChannel implements Channel {
       deleteMessage: async (messageId) => {
         await this.bot!.api.deleteMessage(numericId, messageId);
       },
+      isExpectedError: isTelegramError,
       throttleMs: 1000,
       maxLength: 4096,
       minInitialChars: 30,

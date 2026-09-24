@@ -4,6 +4,11 @@ import path from 'path';
 
 import { DATA_DIR } from './config.js';
 import { logger } from './logger.js';
+import {
+  hasOperationalErrorCode,
+  isFileSystemError,
+  isSpawnError,
+} from './operational-errors.js';
 
 interface RemoteControlSession {
   pid: number;
@@ -22,15 +27,27 @@ const STATE_FILE = path.join(DATA_DIR, 'remote-control.json');
 const STDOUT_FILE = path.join(DATA_DIR, 'remote-control.stdout');
 const STDERR_FILE = path.join(DATA_DIR, 'remote-control.stderr');
 
-function hasNodeErrorCode(
-  err: unknown,
-  ...codes: string[]
-): err is NodeJS.ErrnoException {
+function isRemoteControlSession(value: unknown): value is RemoteControlSession {
   return (
-    err instanceof Error &&
-    typeof (err as NodeJS.ErrnoException).code === 'string' &&
-    codes.includes((err as NodeJS.ErrnoException).code!)
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Number.isSafeInteger((value as RemoteControlSession).pid) &&
+    (value as RemoteControlSession).pid > 0 &&
+    (value as RemoteControlSession).pid <= 0x7fffffff &&
+    typeof (value as RemoteControlSession).url === 'string' &&
+    typeof (value as RemoteControlSession).startedBy === 'string' &&
+    typeof (value as RemoteControlSession).startedInChat === 'string' &&
+    typeof (value as RemoteControlSession).startedAt === 'string'
   );
+}
+
+function closeParentDescriptors(stdoutFd: number, stderrFd: number): void {
+  try {
+    fs.closeSync(stdoutFd);
+  } finally {
+    fs.closeSync(stderrFd);
+  }
 }
 
 function saveState(session: RemoteControlSession): void {
@@ -42,7 +59,7 @@ function clearState(): void {
   try {
     fs.unlinkSync(STATE_FILE);
   } catch (err) {
-    if (!hasNodeErrorCode(err, 'ENOENT')) throw err;
+    if (!hasOperationalErrorCode(err, 'ENOENT')) throw err;
     // ignore
   }
 }
@@ -52,7 +69,7 @@ function isProcessAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (err) {
-    if (!hasNodeErrorCode(err, 'ESRCH', 'EPERM')) throw err;
+    if (!hasOperationalErrorCode(err, 'ESRCH', 'EPERM')) throw err;
     return false;
   }
 }
@@ -66,13 +83,18 @@ export function restoreRemoteControl(): void {
   try {
     data = fs.readFileSync(STATE_FILE, 'utf-8');
   } catch (err) {
-    if (!hasNodeErrorCode(err, 'ENOENT')) throw err;
+    if (!isFileSystemError(err)) throw err;
     return;
   }
 
   try {
-    const session: RemoteControlSession = JSON.parse(data);
-    if (session.pid && isProcessAlive(session.pid)) {
+    const parsed: unknown = JSON.parse(data);
+    if (!isRemoteControlSession(parsed)) {
+      clearState();
+      return;
+    }
+    if (isProcessAlive(parsed.pid)) {
+      const session = parsed;
       activeSession = session;
       logger.info(
         { pid: session.pid, url: session.url },
@@ -130,9 +152,8 @@ export async function startRemoteControl(
       detached: true,
     });
   } catch (err) {
-    if (!(err instanceof Error) || !('code' in err)) throw err;
-    fs.closeSync(stdoutFd);
-    fs.closeSync(stderrFd);
+    closeParentDescriptors(stdoutFd, stderrFd);
+    if (!isSpawnError(err)) throw err;
     return { ok: false, error: `Failed to start: ${err.message}` };
   }
 
@@ -143,8 +164,7 @@ export async function startRemoteControl(
   }
 
   // Close FDs in the parent — the child inherited copies
-  fs.closeSync(stdoutFd);
-  fs.closeSync(stderrFd);
+  closeParentDescriptors(stdoutFd, stderrFd);
 
   // Fully detach from parent
   proc.unref();
@@ -170,7 +190,7 @@ export async function startRemoteControl(
       try {
         content = fs.readFileSync(STDOUT_FILE, 'utf-8');
       } catch (err) {
-        if (!hasNodeErrorCode(err, 'ENOENT')) throw err;
+        if (!hasOperationalErrorCode(err, 'ENOENT')) throw err;
         // File might not have content yet
       }
 
@@ -199,11 +219,13 @@ export async function startRemoteControl(
         try {
           process.kill(-pid, 'SIGTERM');
         } catch (err) {
-          if (!hasNodeErrorCode(err, 'ESRCH')) throw err;
+          if (!hasOperationalErrorCode(err, 'ESRCH')) throw err;
           try {
             process.kill(pid, 'SIGTERM');
           } catch (fallbackErr) {
-            if (!hasNodeErrorCode(fallbackErr, 'ESRCH')) throw fallbackErr;
+            if (!hasOperationalErrorCode(fallbackErr, 'ESRCH')) {
+              throw fallbackErr;
+            }
             // already dead
           }
         }
@@ -234,7 +256,7 @@ export function stopRemoteControl():
   try {
     process.kill(pid, 'SIGTERM');
   } catch (err) {
-    if (!hasNodeErrorCode(err, 'ESRCH')) throw err;
+    if (!hasOperationalErrorCode(err, 'ESRCH')) throw err;
     // already dead
   }
   activeSession = null;

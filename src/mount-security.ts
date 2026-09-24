@@ -11,6 +11,7 @@ import os from 'os';
 import path from 'path';
 import { MOUNT_ALLOWLIST_PATH } from './config.js';
 import { logger } from './logger.js';
+import { isFileSystemError } from './operational-errors.js';
 import { AdditionalMount, AllowedRoot, MountAllowlist } from './types.js';
 
 // Cache the allowlist in memory - only reloads on process restart
@@ -75,14 +76,37 @@ export function loadMountAllowlist(): MountAllowlist | null {
     }
 
     const content = fs.readFileSync(MOUNT_ALLOWLIST_PATH, 'utf-8');
-    const allowlist = JSON.parse(content) as MountAllowlist;
+    const parsed: unknown = JSON.parse(content);
+
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      throw new InvalidMountAllowlistError('allowlist must be an object');
+    }
+    const allowlist = parsed as Partial<MountAllowlist>;
 
     // Validate structure
-    if (!Array.isArray(allowlist.allowedRoots)) {
+    if (
+      !Array.isArray(allowlist.allowedRoots) ||
+      !allowlist.allowedRoots.every(
+        (root) =>
+          typeof root === 'object' &&
+          root !== null &&
+          typeof root.path === 'string' &&
+          typeof root.allowReadWrite === 'boolean' &&
+          (root.description === undefined ||
+            typeof root.description === 'string'),
+      )
+    ) {
       throw new InvalidMountAllowlistError('allowedRoots must be an array');
     }
 
-    if (!Array.isArray(allowlist.blockedPatterns)) {
+    if (
+      !Array.isArray(allowlist.blockedPatterns) ||
+      !allowlist.blockedPatterns.every((pattern) => typeof pattern === 'string')
+    ) {
       throw new InvalidMountAllowlistError('blockedPatterns must be an array');
     }
 
@@ -96,7 +120,7 @@ export function loadMountAllowlist(): MountAllowlist | null {
     ];
     allowlist.blockedPatterns = mergedBlockedPatterns;
 
-    cachedAllowlist = allowlist;
+    cachedAllowlist = allowlist as MountAllowlist;
     logger.info(
       {
         path: MOUNT_ALLOWLIST_PATH,
@@ -108,11 +132,10 @@ export function loadMountAllowlist(): MountAllowlist | null {
 
     return cachedAllowlist;
   } catch (err) {
-    const isFileError = err instanceof Error && 'code' in err;
     if (
       !(err instanceof SyntaxError) &&
       !(err instanceof InvalidMountAllowlistError) &&
-      !isFileError
+      !isFileSystemError(err)
     ) {
       throw err;
     }
@@ -150,7 +173,7 @@ function getRealPath(p: string): string | null {
   try {
     return fs.realpathSync(p);
   } catch (err) {
-    if (!(err instanceof Error) || !('code' in err)) throw err;
+    if (!isFileSystemError(err)) throw err;
     return null;
   }
 }

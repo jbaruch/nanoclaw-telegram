@@ -2,6 +2,7 @@ import fs from 'fs';
 
 import { SENDER_ALLOWLIST_PATH } from './config.js';
 import { logger } from './logger.js';
+import { isFileSystemError } from './operational-errors.js';
 
 export interface ChatAllowlistEntry {
   allow: '*' | string[];
@@ -39,8 +40,8 @@ export function loadSenderAllowlist(
   try {
     raw = fs.readFileSync(filePath, 'utf-8');
   } catch (err: unknown) {
-    if (!(err instanceof Error) || !('code' in err)) throw err;
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return DEFAULT_CONFIG;
+    if (!isFileSystemError(err)) throw err;
+    if (err.code === 'ENOENT') return DEFAULT_CONFIG;
     logger.warn(
       { err, path: filePath },
       'sender-allowlist: cannot read config',

@@ -16,6 +16,8 @@ export interface DraftStreamOpts {
   editMessage(messageId: number, text: string): Promise<void>;
   /** Delete a message by ID. */
   deleteMessage(messageId: number): Promise<void>;
+  /** Classify the transport's documented recoverable failures. */
+  isExpectedError?(err: unknown): err is Error;
   /** Minimum ms between edits. Default: 1000 */
   throttleMs?: number;
   /** Max message length before giving up on streaming. Default: 4096 */
@@ -46,7 +48,7 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
       }
       lastSentText = text;
     } catch (err) {
-      if (!(err instanceof Error)) throw err;
+      if (!opts.isExpectedError?.(err)) throw err;
       logger.debug({ err }, 'Draft stream send/edit failed');
     }
   }
@@ -87,7 +89,7 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
           try {
             await opts.deleteMessage(messageId);
           } catch (err) {
-            if (!(err instanceof Error)) throw err;
+            if (!opts.isExpectedError?.(err)) throw err;
             // ignore — best effort cleanup
           }
         }
@@ -111,7 +113,7 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
         try {
           await opts.deleteMessage(messageId);
         } catch (err) {
-          if (!(err instanceof Error)) throw err;
+          if (!opts.isExpectedError?.(err)) throw err;
           // ignore
         }
       }

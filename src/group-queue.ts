@@ -4,6 +4,7 @@ import path from 'path';
 
 import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
 import { logger } from './logger.js';
+import { isFileSystemError } from './operational-errors.js';
 
 interface QueuedTask {
   id: string;
@@ -173,7 +174,7 @@ export class GroupQueue {
       fs.renameSync(tempPath, filepath);
       return true;
     } catch (err) {
-      if (!(err instanceof Error) || !('code' in err)) throw err;
+      if (!isFileSystemError(err)) throw err;
       return false;
     }
   }
@@ -190,7 +191,7 @@ export class GroupQueue {
       fs.mkdirSync(inputDir, { recursive: true });
       fs.writeFileSync(path.join(inputDir, '_close'), '');
     } catch (err) {
-      if (!(err instanceof Error) || !('code' in err)) throw err;
+      if (!isFileSystemError(err)) throw err;
       // ignore
     }
   }
@@ -220,10 +221,6 @@ export class GroupQueue {
           this.scheduleRetry(groupJid, state);
         }
       }
-    } catch (err) {
-      if (!(err instanceof Error)) throw err;
-      logger.error({ groupJid, err }, 'Error processing messages for group');
-      this.scheduleRetry(groupJid, state);
     } finally {
       state.active = false;
       state.process = null;
@@ -249,9 +246,6 @@ export class GroupQueue {
 
     try {
       await task.fn();
-    } catch (err) {
-      if (!(err instanceof Error)) throw err;
-      logger.error({ groupJid, taskId: task.id, err }, 'Error running task');
     } finally {
       state.active = false;
       state.isTaskContainer = false;

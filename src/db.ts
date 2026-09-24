@@ -5,6 +5,7 @@ import path from 'path';
 import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { InvalidGroupFolderError, isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+import { isFileSystemError } from './operational-errors.js';
 import {
   NewMessage,
   RegisteredGroup,
@@ -722,7 +723,9 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   if (!isValidGroupFolder(group.folder)) {
-    throw new Error(`Invalid group folder "${group.folder}" for JID ${jid}`);
+    throw new InvalidGroupFolderError(
+      `Invalid group folder "${group.folder}" for JID ${jid}`,
+    );
   }
   db.prepare(
     `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)
@@ -786,8 +789,7 @@ function migrateJsonState(): void {
       fs.renameSync(filePath, `${filePath}.migrated`);
       return data;
     } catch (err) {
-      const isFileError = err instanceof Error && 'code' in err;
-      if (!(err instanceof SyntaxError) && !isFileError) throw err;
+      if (!(err instanceof SyntaxError) && !isFileSystemError(err)) throw err;
       return null;
     }
   };

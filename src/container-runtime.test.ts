@@ -29,8 +29,16 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-function execFailure(message: string): Error & { status: number } {
-  return Object.assign(new Error(message), { status: 1 });
+function execFailure(message: string): Error & {
+  status: number;
+  stdout: Buffer;
+  stderr: Buffer;
+} {
+  return Object.assign(new Error(message), {
+    status: 1,
+    stdout: Buffer.alloc(0),
+    stderr: Buffer.from(message),
+  });
 }
 
 // --- Pure functions ---
@@ -152,6 +160,18 @@ describe('cleanupOrphans', () => {
     });
 
     expect(() => cleanupOrphans()).toThrow('unexpected implementation failure');
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('rethrows coded TypeErrors from the runtime client', () => {
+    const err = Object.assign(new TypeError('invalid argument'), {
+      code: 'ERR_INVALID_ARG_TYPE',
+    });
+    mockExecSync.mockImplementationOnce(() => {
+      throw err;
+    });
+
+    expect(() => cleanupOrphans()).toThrow(err);
     expect(logger.warn).not.toHaveBeenCalled();
   });
 

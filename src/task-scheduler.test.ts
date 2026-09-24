@@ -53,6 +53,38 @@ describe('task scheduler', () => {
     expect(task?.status).toBe('paused');
   });
 
+  it('rejects the scheduler loop on unexpected consumer failures', async () => {
+    createTask({
+      id: 'task-unexpected-failure',
+      group_folder: 'test-group',
+      chat_jid: 'test@g.us',
+      prompt: 'run',
+      schedule_type: 'once',
+      schedule_value: '2026-02-22T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 60_000).toISOString(),
+      status: 'active',
+      created_at: '2026-02-22T00:00:00.000Z',
+    });
+    const err = Object.assign(new TypeError('queue invariant failed'), {
+      code: 'ERR_INVALID_ARG_TYPE',
+    });
+
+    const promise = startSchedulerLoop({
+      registeredGroups: () => ({}),
+      getSessions: () => ({}),
+      queue: {
+        enqueueTask: () => {
+          throw err;
+        },
+      } as unknown as SchedulerDependencies['queue'],
+      onProcess: () => {},
+      sendMessage: async () => {},
+    });
+
+    await expect(promise).rejects.toBe(err);
+  });
+
   it('computeNextRun anchors interval tasks to scheduled time to prevent drift', () => {
     const scheduledTime = new Date(Date.now() - 2000).toISOString(); // 2s ago
     const task = {

@@ -2,12 +2,17 @@ import fs from 'fs';
 import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
+import Database from 'better-sqlite3';
 
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+import {
+  isFileSystemError,
+  MessageDeliveryError,
+} from './operational-errors.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -32,6 +37,15 @@ export interface IpcDeps {
 
 let ipcWatcherRunning = false;
 
+function isExpectedIpcFileError(err: unknown): err is Error {
+  return (
+    err instanceof SyntaxError ||
+    err instanceof Database.SqliteError ||
+    err instanceof MessageDeliveryError ||
+    isFileSystemError(err)
+  );
+}
+
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
     logger.debug('IPC watcher already running, skipping duplicate start');
@@ -51,7 +65,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
         return stat.isDirectory() && f !== 'errors';
       });
     } catch (err) {
-      if (!(err instanceof Error) || !('code' in err)) throw err;
+      if (!isFileSystemError(err)) throw err;
       logger.error({ err }, 'Error reading IPC base directory');
       setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
       return;
@@ -131,7 +145,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
               }
               fs.unlinkSync(filePath);
             } catch (err) {
-              if (!(err instanceof Error)) throw err;
+              if (!isExpectedIpcFileError(err)) throw err;
               logger.error(
                 { file, sourceGroup, err },
                 'Error processing IPC message',
@@ -146,7 +160,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
           }
         }
       } catch (err) {
-        if (!(err instanceof Error) || !('code' in err)) throw err;
+        if (!isFileSystemError(err)) throw err;
         logger.error(
           { err, sourceGroup },
           'Error reading IPC messages directory',
@@ -167,7 +181,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
               await processTaskIpc(data, sourceGroup, isMain, deps);
               fs.unlinkSync(filePath);
             } catch (err) {
-              if (!(err instanceof Error)) throw err;
+              if (!isExpectedIpcFileError(err)) throw err;
               logger.error(
                 { file, sourceGroup, err },
                 'Error processing IPC task',
@@ -182,7 +196,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
           }
         }
       } catch (err) {
-        if (!(err instanceof Error) || !('code' in err)) throw err;
+        if (!isFileSystemError(err)) throw err;
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
       }
     }

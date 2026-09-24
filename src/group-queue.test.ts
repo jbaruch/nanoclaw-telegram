@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import type { ChildProcess } from 'child_process';
 
 import { GroupQueue } from './group-queue.js';
+import { logger } from './logger.js';
 
 // Mock config to control concurrency limit
 vi.mock('./config.js', () => ({
@@ -165,6 +166,24 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10000);
     await vi.advanceTimersByTimeAsync(10);
     expect(callCount).toBe(3);
+  });
+
+  it('lets callback programming errors reach the detached-task boundary', async () => {
+    const err = Object.assign(new TypeError('unexpected callback failure'), {
+      code: 'ERR_INVALID_ARG_TYPE',
+    });
+    const logSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    queue.setProcessMessagesFn(async () => {
+      throw err;
+    });
+
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(logSpy).toHaveBeenCalledWith(
+      { groupJid: 'group1@g.us', err },
+      'Unhandled error in runForGroup',
+    );
   });
 
   // --- Shutdown prevents new enqueues ---

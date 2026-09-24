@@ -1,5 +1,6 @@
 import { ChildProcess } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
+import Database from 'better-sqlite3';
 import fs from 'fs';
 
 import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
@@ -22,6 +23,12 @@ import {
   resolveGroupFolderPath,
 } from './group-folder.js';
 import { logger } from './logger.js';
+import {
+  isExecFailure,
+  isFileSystemError,
+  isSpawnError,
+  MessageDeliveryError,
+} from './operational-errors.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 /**
@@ -219,7 +226,14 @@ async function runTask(
       'Task completed',
     );
   } catch (err) {
-    if (!(err instanceof Error)) throw err;
+    if (
+      !(err instanceof MessageDeliveryError) &&
+      !isFileSystemError(err) &&
+      !isSpawnError(err) &&
+      !isExecFailure(err)
+    ) {
+      throw err;
+    }
     if (closeTimer) clearTimeout(closeTimer);
     error = err.message;
     logger.error({ taskId: task.id, error }, 'Task failed');
@@ -247,7 +261,9 @@ async function runTask(
 
 let schedulerRunning = false;
 
-export function startSchedulerLoop(deps: SchedulerDependencies): void {
+export async function startSchedulerLoop(
+  deps: SchedulerDependencies,
+): Promise<void> {
   if (schedulerRunning) {
     logger.debug('Scheduler loop already running, skipping duplicate start');
     return;
@@ -255,7 +271,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
   schedulerRunning = true;
   logger.info('Scheduler loop started');
 
-  const loop = async () => {
+  while (schedulerRunning) {
     try {
       const dueTasks = getDueTasks();
       if (dueTasks.length > 0) {
@@ -273,16 +289,17 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           runTask(currentTask, deps),
         );
       }
-      // The timer caller sees a rejected loop as silent stoppage; this catch logs the failure and schedules the next pass; propagation would disable scheduled tasks.
-      // eslint-disable-next-line no-catch-all/no-catch-all -- outer-boundary-process-contract
     } catch (err) {
+      if (!(err instanceof Database.SqliteError) && !isFileSystemError(err)) {
+        throw err;
+      }
       logger.error({ err }, 'Error in scheduler loop');
     }
 
-    setTimeout(loop, SCHEDULER_POLL_INTERVAL);
-  };
-
-  loop();
+    await new Promise((resolve) =>
+      setTimeout(resolve, SCHEDULER_POLL_INTERVAL),
+    );
+  }
 }
 
 /** @internal - for tests only. */

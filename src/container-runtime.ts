@@ -6,16 +6,10 @@ import { execSync } from 'child_process';
 import os from 'os';
 
 import { logger } from './logger.js';
+import { isExecFailure } from './operational-errors.js';
 
 /** The container runtime binary name. */
 export const CONTAINER_RUNTIME_BIN = 'docker';
-
-function isExecFailure(err: unknown): boolean {
-  return (
-    err instanceof Error &&
-    ('status' in err || 'signal' in err || 'code' in err)
-  );
-}
 
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {

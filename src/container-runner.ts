@@ -18,6 +18,7 @@ import {
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
+import { isExecFailure } from './operational-errors.js';
 import {
   CONTAINER_RUNTIME_BIN,
   hostGatewayArgs,
@@ -51,6 +52,56 @@ export interface ContainerOutput {
   newSessionId?: string;
   error?: string;
   streamText?: string; // Accumulated text for streaming preview
+}
+
+class InvalidContainerOutputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidContainerOutputError';
+  }
+}
+
+function parseContainerOutput(json: string): ContainerOutput {
+  const parsed: unknown = JSON.parse(json);
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new InvalidContainerOutputError('output must be an object');
+  }
+
+  const output = parsed as Partial<ContainerOutput>;
+  if (output.status !== 'success' && output.status !== 'error') {
+    throw new InvalidContainerOutputError('status must be success or error');
+  }
+  if (output.result !== null && typeof output.result !== 'string') {
+    throw new InvalidContainerOutputError('result must be a string or null');
+  }
+  for (const [field, value] of [
+    ['newSessionId', output.newSessionId],
+    ['error', output.error],
+    ['streamText', output.streamText],
+  ] as const) {
+    if (value !== undefined && typeof value !== 'string') {
+      throw new InvalidContainerOutputError(`${field} must be a string`);
+    }
+  }
+  return output as ContainerOutput;
+}
+
+type ContainerOutputParseResult =
+  | { ok: true; output: ContainerOutput }
+  | { ok: false; error: SyntaxError | InvalidContainerOutputError };
+
+function tryParseContainerOutput(json: string): ContainerOutputParseResult {
+  try {
+    return { ok: true, output: parseContainerOutput(json) };
+  } catch (err) {
+    if (
+      !(err instanceof SyntaxError) &&
+      !(err instanceof InvalidContainerOutputError)
+    ) {
+      throw err;
+    }
+    return { ok: false, error: err };
+  }
 }
 
 interface VolumeMount {
@@ -325,7 +376,7 @@ export async function runContainerAgent(
   const logsDir = path.join(groupDir, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -346,25 +397,26 @@ export async function runContainerAgent(
     let outputChain = Promise.resolve();
 
     container.stdout.on('data', (data) => {
-      const chunk = data.toString();
+      outputChain = outputChain.then(async () => {
+        const chunk = data.toString();
 
-      // Always accumulate for logging
-      if (!stdoutTruncated) {
-        const remaining = CONTAINER_MAX_OUTPUT_SIZE - stdout.length;
-        if (chunk.length > remaining) {
-          stdout += chunk.slice(0, remaining);
-          stdoutTruncated = true;
-          logger.warn(
-            { group: group.name, size: stdout.length },
-            'Container stdout truncated due to size limit',
-          );
-        } else {
-          stdout += chunk;
+        // Always accumulate for logging
+        if (!stdoutTruncated) {
+          const remaining = CONTAINER_MAX_OUTPUT_SIZE - stdout.length;
+          if (chunk.length > remaining) {
+            stdout += chunk.slice(0, remaining);
+            stdoutTruncated = true;
+            logger.warn(
+              { group: group.name, size: stdout.length },
+              'Container stdout truncated due to size limit',
+            );
+          } else {
+            stdout += chunk;
+          }
         }
-      }
 
-      // Stream-parse for output markers
-      if (onOutput) {
+        // Stream-parse for output markers
+        if (!onOutput) return;
         parseBuffer += chunk;
         let startIdx: number;
         while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
@@ -376,26 +428,28 @@ export async function runContainerAgent(
             .trim();
           parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_MARKER.length);
 
-          try {
-            const parsed: ContainerOutput = JSON.parse(jsonStr);
-            if (parsed.newSessionId) {
-              newSessionId = parsed.newSessionId;
-            }
-            hadStreamingOutput = true;
-            // Activity detected — reset the hard timeout
-            resetTimeout();
-            // Call onOutput for all markers (including null results)
-            // so idle timers start even for "silent" query completions.
-            outputChain = outputChain.then(() => onOutput(parsed));
-          } catch (err) {
-            if (!(err instanceof SyntaxError)) throw err;
+          const parsedResult = tryParseContainerOutput(jsonStr);
+          if (!parsedResult.ok) {
             logger.warn(
-              { group: group.name, error: err },
+              { group: group.name, error: parsedResult.error },
               'Failed to parse streamed output chunk',
             );
+            continue;
           }
+
+          const parsed = parsedResult.output;
+          if (parsed.newSessionId) {
+            newSessionId = parsed.newSessionId;
+          }
+          hadStreamingOutput = true;
+          // Activity detected — reset the hard timeout
+          resetTimeout();
+          // Call onOutput for all markers (including null results)
+          // so idle timers start even for "silent" query completions.
+          await onOutput(parsed);
         }
-      }
+      });
+      outputChain.then(undefined, reject);
     });
 
     container.stderr.on('data', (data) => {
@@ -436,7 +490,7 @@ export async function runContainerAgent(
       try {
         stopContainer(containerName);
       } catch (err) {
-        if (!(err instanceof Error) || !('status' in err)) throw err;
+        if (!isExecFailure(err)) throw err;
         logger.warn(
           { group: group.name, containerName, err },
           'Graceful stop failed, force killing',
@@ -455,208 +509,215 @@ export async function runContainerAgent(
 
     container.on('close', (code) => {
       clearTimeout(timeout);
-      const duration = Date.now() - startTime;
+      outputChain
+        .then(() => {
+          const duration = Date.now() - startTime;
 
-      if (timedOut) {
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const timeoutLog = path.join(logsDir, `container-${ts}.log`);
-        fs.writeFileSync(
-          timeoutLog,
-          [
-            `=== Container Run Log (TIMEOUT) ===`,
+          if (timedOut) {
+            const ts = new Date().toISOString().replace(/[:.]/g, '-');
+            const timeoutLog = path.join(logsDir, `container-${ts}.log`);
+            fs.writeFileSync(
+              timeoutLog,
+              [
+                `=== Container Run Log (TIMEOUT) ===`,
+                `Timestamp: ${new Date().toISOString()}`,
+                `Group: ${group.name}`,
+                `Container: ${containerName}`,
+                `Duration: ${duration}ms`,
+                `Exit Code: ${code}`,
+                `Had Streaming Output: ${hadStreamingOutput}`,
+              ].join('\n'),
+            );
+
+            // Timeout after output = idle cleanup, not failure.
+            // The agent already sent its response; this is just the
+            // container being reaped after the idle period expired.
+            if (hadStreamingOutput) {
+              logger.info(
+                { group: group.name, containerName, duration, code },
+                'Container timed out after output (idle cleanup)',
+              );
+              resolve({
+                status: 'success',
+                result: null,
+                newSessionId,
+              });
+              return;
+            }
+
+            logger.error(
+              { group: group.name, containerName, duration, code },
+              'Container timed out with no output',
+            );
+
+            resolve({
+              status: 'error',
+              result: null,
+              error: `Container timed out after ${configTimeout}ms`,
+            });
+            return;
+          }
+
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const logFile = path.join(logsDir, `container-${timestamp}.log`);
+          const isVerbose =
+            process.env.LOG_LEVEL === 'debug' ||
+            process.env.LOG_LEVEL === 'trace';
+
+          const logLines = [
+            `=== Container Run Log ===`,
             `Timestamp: ${new Date().toISOString()}`,
             `Group: ${group.name}`,
-            `Container: ${containerName}`,
+            `IsMain: ${input.isMain}`,
             `Duration: ${duration}ms`,
             `Exit Code: ${code}`,
-            `Had Streaming Output: ${hadStreamingOutput}`,
-          ].join('\n'),
-        );
+            `Stdout Truncated: ${stdoutTruncated}`,
+            `Stderr Truncated: ${stderrTruncated}`,
+            ``,
+          ];
 
-        // Timeout after output = idle cleanup, not failure.
-        // The agent already sent its response; this is just the
-        // container being reaped after the idle period expired.
-        if (hadStreamingOutput) {
-          logger.info(
-            { group: group.name, containerName, duration, code },
-            'Container timed out after output (idle cleanup)',
+          const isError = code !== 0;
+
+          if (isVerbose || isError) {
+            // On error, log input metadata only — not the full prompt.
+            // Full input is only included at verbose level to avoid
+            // persisting user conversation content on every non-zero exit.
+            if (isVerbose) {
+              logLines.push(
+                `=== Input ===`,
+                JSON.stringify(input, null, 2),
+                ``,
+              );
+            } else {
+              logLines.push(
+                `=== Input Summary ===`,
+                `Prompt length: ${input.prompt.length} chars`,
+                `Session ID: ${input.sessionId || 'new'}`,
+                ``,
+              );
+            }
+            logLines.push(
+              `=== Container Args ===`,
+              containerArgs.join(' '),
+              ``,
+              `=== Mounts ===`,
+              mounts
+                .map(
+                  (m) =>
+                    `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
+                )
+                .join('\n'),
+              ``,
+              `=== Stderr${stderrTruncated ? ' (TRUNCATED)' : ''} ===`,
+              stderr,
+              ``,
+              `=== Stdout${stdoutTruncated ? ' (TRUNCATED)' : ''} ===`,
+              stdout,
+            );
+          } else {
+            logLines.push(
+              `=== Input Summary ===`,
+              `Prompt length: ${input.prompt.length} chars`,
+              `Session ID: ${input.sessionId || 'new'}`,
+              ``,
+              `=== Mounts ===`,
+              mounts
+                .map((m) => `${m.containerPath}${m.readonly ? ' (ro)' : ''}`)
+                .join('\n'),
+              ``,
+            );
+          }
+
+          fs.writeFileSync(logFile, logLines.join('\n'));
+          logger.debug(
+            { logFile, verbose: isVerbose },
+            'Container log written',
           );
-          outputChain.then(() => {
+
+          if (code !== 0) {
+            logger.error(
+              {
+                group: group.name,
+                code,
+                duration,
+                stderr,
+                stdout,
+                logFile,
+              },
+              'Container exited with error',
+            );
+
+            resolve({
+              status: 'error',
+              result: null,
+              error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
+            });
+            return;
+          }
+
+          // Streaming mode: wait for output chain to settle, return completion marker
+          if (onOutput) {
+            logger.info(
+              { group: group.name, duration, newSessionId },
+              'Container completed (streaming mode)',
+            );
             resolve({
               status: 'success',
               result: null,
               newSessionId,
             });
-          });
-          return;
-        }
+            return;
+          }
 
-        logger.error(
-          { group: group.name, containerName, duration, code },
-          'Container timed out with no output',
-        );
+          // Legacy mode: parse the last output marker pair from accumulated stdout
+          // Extract JSON between sentinel markers for robust parsing
+          const startIdx = stdout.indexOf(OUTPUT_START_MARKER);
+          const endIdx = stdout.indexOf(OUTPUT_END_MARKER);
 
-        resolve({
-          status: 'error',
-          result: null,
-          error: `Container timed out after ${configTimeout}ms`,
-        });
-        return;
-      }
+          let jsonLine: string;
+          if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+            jsonLine = stdout
+              .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
+              .trim();
+          } else {
+            // Fallback: last non-empty line (backwards compatibility)
+            const lines = stdout.trim().split('\n');
+            jsonLine = lines[lines.length - 1];
+          }
 
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const logFile = path.join(logsDir, `container-${timestamp}.log`);
-      const isVerbose =
-        process.env.LOG_LEVEL === 'debug' || process.env.LOG_LEVEL === 'trace';
+          const parsedResult = tryParseContainerOutput(jsonLine);
+          if (!parsedResult.ok) {
+            logger.error(
+              {
+                group: group.name,
+                stdout,
+                stderr,
+                error: parsedResult.error,
+              },
+              'Failed to parse container output',
+            );
 
-      const logLines = [
-        `=== Container Run Log ===`,
-        `Timestamp: ${new Date().toISOString()}`,
-        `Group: ${group.name}`,
-        `IsMain: ${input.isMain}`,
-        `Duration: ${duration}ms`,
-        `Exit Code: ${code}`,
-        `Stdout Truncated: ${stdoutTruncated}`,
-        `Stderr Truncated: ${stderrTruncated}`,
-        ``,
-      ];
+            resolve({
+              status: 'error',
+              result: null,
+              error: `Failed to parse container output: ${parsedResult.error.message}`,
+            });
+            return;
+          }
 
-      const isError = code !== 0;
-
-      if (isVerbose || isError) {
-        // On error, log input metadata only — not the full prompt.
-        // Full input is only included at verbose level to avoid
-        // persisting user conversation content on every non-zero exit.
-        if (isVerbose) {
-          logLines.push(`=== Input ===`, JSON.stringify(input, null, 2), ``);
-        } else {
-          logLines.push(
-            `=== Input Summary ===`,
-            `Prompt length: ${input.prompt.length} chars`,
-            `Session ID: ${input.sessionId || 'new'}`,
-            ``,
-          );
-        }
-        logLines.push(
-          `=== Container Args ===`,
-          containerArgs.join(' '),
-          ``,
-          `=== Mounts ===`,
-          mounts
-            .map(
-              (m) =>
-                `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
-            )
-            .join('\n'),
-          ``,
-          `=== Stderr${stderrTruncated ? ' (TRUNCATED)' : ''} ===`,
-          stderr,
-          ``,
-          `=== Stdout${stdoutTruncated ? ' (TRUNCATED)' : ''} ===`,
-          stdout,
-        );
-      } else {
-        logLines.push(
-          `=== Input Summary ===`,
-          `Prompt length: ${input.prompt.length} chars`,
-          `Session ID: ${input.sessionId || 'new'}`,
-          ``,
-          `=== Mounts ===`,
-          mounts
-            .map((m) => `${m.containerPath}${m.readonly ? ' (ro)' : ''}`)
-            .join('\n'),
-          ``,
-        );
-      }
-
-      fs.writeFileSync(logFile, logLines.join('\n'));
-      logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
-
-      if (code !== 0) {
-        logger.error(
-          {
-            group: group.name,
-            code,
-            duration,
-            stderr,
-            stdout,
-            logFile,
-          },
-          'Container exited with error',
-        );
-
-        resolve({
-          status: 'error',
-          result: null,
-          error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
-        });
-        return;
-      }
-
-      // Streaming mode: wait for output chain to settle, return completion marker
-      if (onOutput) {
-        outputChain.then(() => {
+          const output = parsedResult.output;
           logger.info(
-            { group: group.name, duration, newSessionId },
-            'Container completed (streaming mode)',
+            {
+              group: group.name,
+              duration,
+              status: output.status,
+              hasResult: !!output.result,
+            },
+            'Container completed',
           );
-          resolve({
-            status: 'success',
-            result: null,
-            newSessionId,
-          });
-        });
-        return;
-      }
-
-      // Legacy mode: parse the last output marker pair from accumulated stdout
-      try {
-        // Extract JSON between sentinel markers for robust parsing
-        const startIdx = stdout.indexOf(OUTPUT_START_MARKER);
-        const endIdx = stdout.indexOf(OUTPUT_END_MARKER);
-
-        let jsonLine: string;
-        if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-          jsonLine = stdout
-            .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
-            .trim();
-        } else {
-          // Fallback: last non-empty line (backwards compatibility)
-          const lines = stdout.trim().split('\n');
-          jsonLine = lines[lines.length - 1];
-        }
-
-        const output: ContainerOutput = JSON.parse(jsonLine);
-
-        logger.info(
-          {
-            group: group.name,
-            duration,
-            status: output.status,
-            hasResult: !!output.result,
-          },
-          'Container completed',
-        );
-
-        resolve(output);
-      } catch (err) {
-        if (!(err instanceof SyntaxError)) throw err;
-        logger.error(
-          {
-            group: group.name,
-            stdout,
-            stderr,
-            error: err,
-          },
-          'Failed to parse container output',
-        );
-
-        resolve({
-          status: 'error',
-          result: null,
-          error: `Failed to parse container output: ${err instanceof Error ? err.message : String(err)}`,
-        });
-      }
+          resolve(output);
+        })
+        .catch(reject);
     });
 
     container.on('error', (err) => {
