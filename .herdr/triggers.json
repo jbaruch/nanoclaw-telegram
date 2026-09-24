@@ -56,6 +56,9 @@
     "setup.sh",
     "container/build.sh",
     "setup/environment.ts",
+    ".claude/skills/*/SKILL.md",
+    "container/skills/*/SKILL.md",
+    "package.json",
     ".claude/skills/x-integration/scripts/setup.ts",
     ".claude/skills/x-integration/scripts/post.ts",
     ".claude/skills/x-integration/scripts/like.ts",
@@ -77,7 +80,14 @@
     "process.exit(",
     "sys.exit(",
     "  exit ",
-    "${1"
+    "${1",
+    "description:",
+    "# /",
+    "`/",
+    " --",
+    "This command",
+    "Then stop",
+    "\": \""
   ],
   "user_doc_paths": [
     "README*.md",
