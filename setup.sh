@@ -3,7 +3,7 @@ set -euo pipefail
 
 # setup.sh — Bootstrap script for NanoClaw
 # Handles Node.js/npm setup, then hands off to the Node.js setup modules.
-# This is the only bash script in the setup flow.
+# setup/install-node.sh installs the exact runtime when this gate fails.
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="$PROJECT_ROOT/logs/setup.log"
@@ -46,11 +46,23 @@ check_node() {
   NODE_PATH_FOUND=""
 
   if command -v node >/dev/null 2>&1; then
-    NODE_VERSION=$(node --version 2>/dev/null | sed 's/^v//')
+    local version_rc=0
+    NODE_VERSION=$(node --version) || version_rc=$?
+    if [ "$version_rc" -ne 0 ]; then
+      echo "Cannot read the Node version (exit $version_rc). Repair Node or run setup/install-node.sh, then retry setup." >&2
+      return "$version_rc"
+    fi
+    NODE_VERSION="${NODE_VERSION#v}"
     NODE_PATH_FOUND=$(command -v node)
-    local major
-    major=$(echo "$NODE_VERSION" | cut -d. -f1)
-    if [ "$major" -ge 24 ] 2>/dev/null; then
+    local major minimum
+    major="${NODE_VERSION%%.*}"
+    minimum=$(<"$PROJECT_ROOT/.nvmrc")
+    if [[ ! "$minimum" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ ! "$NODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.-]+)?$ ]]; then
+      echo "Invalid Node version or .nvmrc pin. Use setup/install-node.sh and keep .nvmrc at an exact release version." >&2
+      return 2
+    fi
+    minimum="${minimum%%.*}"
+    if [ "$major" -ge "$minimum" ]; then
       NODE_OK="true"
     fi
     log "Node $NODE_VERSION at $NODE_PATH_FOUND (major=$major, ok=$NODE_OK)"

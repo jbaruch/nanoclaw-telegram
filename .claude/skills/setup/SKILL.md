@@ -54,10 +54,7 @@ Already configured. Continue.
 
 Run `bash setup.sh` and parse the status block.
 
-- If NODE_OK=false → Node.js is missing or too old. Use `AskUserQuestion: Would you like me to install Node.js 24?` If confirmed:
-  - macOS: `brew install node@24` (if brew available) or install nvm then `nvm install 24`
-  - Linux: `curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - && sudo apt-get install -y nodejs`, or nvm
-  - After installing Node, re-run `bash setup.sh`
+- If NODE_OK=false → Node.js is missing or unsupported. Ask whether to install the pinned runtime. If confirmed, run `bash setup/install-node.sh`. Exit 0 prints only the installed binary directory on stdout; prepend that directory to PATH for subsequent commands and re-run `bash setup.sh`. A nonzero exit prints the failure and recovery guidance on stderr; resolve it before retrying. The installer reads `.nvmrc` and manages its own per-user runtime without editing shell profiles.
 - If DEPS_OK=false → Read `logs/setup.log`. Try: delete `node_modules`, re-run `bash setup.sh`. If native module build fails, install build tools (`xcode-select --install` on macOS, `build-essential` on Linux), then retry.
 - If NATIVE_OK=false → better-sqlite3 failed to load. Install build tools and re-run.
 - Record PLATFORM and IS_WSL for later steps.
