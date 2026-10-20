@@ -23,5 +23,13 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      - name: Bootstrap lint
+        run: |
+          npx prettier --check setup/bootstrap.test.ts
+          npx eslint setup/bootstrap.test.ts
+
+      - name: Bootstrap test typecheck
+        run: npx tsc --noEmit -p tsconfig.setup.json
+
       - name: Tests
         run: npx vitest run

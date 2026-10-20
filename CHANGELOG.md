@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+### Runtime compatibility
+
+- Require Node.js 24 or newer for the SQLite 13 upgrade. CI and the exact installation release come from `.nvmrc`; the bootstrap rejects older or malformed runtime versions before installing dependencies. `setup/install-node.sh` installs that pinned release through a separately pinned nvm checkout without changing shell profiles, and returns a JSON `bin_dir` for subsequent setup commands. Downloads are validated in a temporary sibling before installation; incomplete managed caches are preserved and replaced, so retrying an interrupted clone needs no manual cleanup. Sourcing it exposes its entrypoint without installing or changing shell state. Bootstrap regressions run with their own formatting, lint and TypeScript gates in CI.
+
 ## [1.2.35] - 2026-03-26
 
 - [BREAKING] OneCLI Agent Vault replaces the built-in credential proxy. Existing `.env` credentials must be migrated to the vault. Run `/init-onecli` to install OneCLI and migrate credentials.
