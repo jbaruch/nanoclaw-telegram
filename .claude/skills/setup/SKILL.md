@@ -56,6 +56,7 @@ Run `bash setup.sh` and parse the status block.
 
 - If NODE_OK=false → Ask whether to install the pinned Node runtime.
 - If the operator authorizes installation → Run `bash setup/install-node.sh`.
+- If the operator declines installation → State that Node.js 24 or newer is required. Finish here.
 - If the installer exits 0 → Prepend its stdout binary directory to PATH for subsequent commands.
 - After a successful installation → Re-run `bash setup.sh`.
 - If the installer exits nonzero → Resolve its stderr diagnostic before retrying.
