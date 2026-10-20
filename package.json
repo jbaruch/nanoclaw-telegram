@@ -24,7 +24,7 @@
     "@onecli-sh/sdk": "^0.2.0",
     "better-sqlite3": "13.0.3",
     "cron-parser": "5.5.0",
-    "grammy": "^1.39.3",
+    "grammy": "^1.46.0",
     "openai": "6.33.0"
   },
   "devDependencies": {
@@ -36,7 +36,7 @@
     "globals": "^15.12.0",
     "husky": "^9.1.7",
     "prettier": "^3.8.1",
-    "tsx": "^4.19.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.35.0",
     "vitest": "^4.0.18"
