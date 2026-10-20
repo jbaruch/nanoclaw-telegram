@@ -106,6 +106,27 @@ nvm() {
     executable('node', 'echo v24.22.0');
   });
 
+  it('can be sourced without installing or changing caller shell state', () => {
+    fs.writeFileSync(
+      path.join(tmp, 'source-only.sh'),
+      `#!/usr/bin/env bash
+set +eu
+before_flags=$-
+before_nvm="\${NVM_DIR-__unset__}"
+source "$BOOTSTRAP_FIXTURE/setup/install-node.sh"
+[ "$-" = "$before_flags" ] || exit 7
+[ "\${NVM_DIR-__unset__}" = "$before_nvm" ] || exit 8
+printf 'source-only\\n'
+`,
+    );
+    const result = run('source-only.sh');
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('source-only\n');
+    expect(fs.existsSync(path.join(tmp, 'git-calls'))).toBe(false);
+    expect(fs.existsSync(path.join(tmp, 'installed-version'))).toBe(false);
+    expect(fs.existsSync(path.join(tmp, 'runtime'))).toBe(false);
+  });
+
   it('installs the exact .nvmrc release through the pinned upstream installer', () => {
     const result = run('setup/install-node.sh');
     expect(result.status, result.stderr).toBe(0);

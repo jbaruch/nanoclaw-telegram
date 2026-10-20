@@ -54,10 +54,16 @@ Already configured. Continue.
 
 Run `bash setup.sh` and parse the status block.
 
-- If NODE_OK=false → Node.js is missing or unsupported. Ask whether to install the pinned runtime. If confirmed, run `bash setup/install-node.sh`. Exit 0 prints only the installed binary directory on stdout; prepend that directory to PATH for subsequent commands and re-run `bash setup.sh`. A nonzero exit prints the failure and recovery guidance on stderr; resolve it before retrying. The installer reads `.nvmrc` and manages its own per-user runtime without editing shell profiles.
+- If NODE_OK=false → Ask whether to install the pinned Node runtime.
+- If the operator authorizes installation → Run `bash setup/install-node.sh`.
+- If the installer exits 0 → Prepend its stdout binary directory to PATH for subsequent commands.
+- After a successful installation → Re-run `bash setup.sh`.
+- If the installer exits nonzero → Resolve its stderr diagnostic before retrying.
 - If DEPS_OK=false → Read `logs/setup.log`. Try: delete `node_modules`, re-run `bash setup.sh`. If native module build fails, install build tools (`xcode-select --install` on macOS, `build-essential` on Linux), then retry.
 - If NATIVE_OK=false → better-sqlite3 failed to load. Install build tools and re-run.
 - Record PLATFORM and IS_WSL for later steps.
+
+Proceed immediately to Step 2 after the bootstrap checks pass.
 
 ## 2. Check Environment
 
