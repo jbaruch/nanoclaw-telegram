@@ -323,6 +323,65 @@ it.each(['operational', 'unexpected'] as const)(
   },
 );
 
+it.each(['cancel', 'oversized'] as const)(
+  'retains an acknowledged undeletable preview without queue replay (%s)',
+  async (kind) => {
+    const jid = `tg:uncertain-preview-${kind}`;
+    await seed(jid);
+    const { TelegramChannel } = await vi.importActual<
+      typeof import('./channels/telegram.js')
+    >('./channels/telegram.js');
+    const { GroupQueue } =
+      await vi.importActual<typeof import('./group-queue.js')>(
+        './group-queue.js',
+      );
+    const nativeSend = vi.fn(async () => ({ message_id: 91 }));
+    const nativeDelete = vi
+      .fn()
+      .mockRejectedValue(
+        new HttpError('fixed delete failure', new Error('fixed transport')),
+      );
+    const nativeChannel = new TelegramChannel('123:synthetic', {
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+    });
+    Object.defineProperty(nativeChannel, 'bot', {
+      value: { api: { sendMessage: nativeSend, deleteMessage: nativeDelete } },
+    });
+    channel = nativeChannel;
+    channel.setTyping = vi.fn(async () => {});
+    vi.mocked(findChannel).mockReturnValue(channel);
+    vi.mocked(runContainerAgent).mockImplementationOnce(
+      async (_group, _input, _process, onOutput) => {
+        await onOutput!({
+          status: 'success',
+          result: null,
+          streamText:
+            'fixed acknowledged preview longer than thirty characters',
+        });
+        if (kind === 'oversized')
+          await onOutput!({ status: 'success', result: 'x'.repeat(5000) });
+        return { status: 'error', result: null, error: 'fixed failed query' };
+      },
+    );
+    const run = vi.fn(processGroupMessages),
+      queue = new GroupQueue();
+    queue.setProcessMessagesFn(run);
+    queue.enqueueMessageCheck(jid);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(nativeSend).toHaveBeenCalledTimes(1);
+    expect(nativeDelete).toHaveBeenCalledExactlyOnceWith(
+      `uncertain-preview-${kind}`,
+      91,
+    );
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(storedCursor(jid)).toBe(current);
+    expect(vi.getTimerCount()).toBe(0);
+    await queue.shutdown(0);
+  },
+);
+
 it('classifies a missing native IPC route without consuming a valid later send', async () => {
   vi.mocked(findChannel).mockReturnValueOnce(undefined);
   const missing = sendIpcMessage('tg:route-recovery', 'fixed route payload');

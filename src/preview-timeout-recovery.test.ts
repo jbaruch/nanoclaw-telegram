@@ -152,6 +152,7 @@ it.each([
   'session-timeout',
   'ipc-sdk-complete',
   'sdk-error',
+  'sdk-error-close',
   'sdk-is-error',
   'markerless-clean',
   'unfinished-clean',
@@ -205,6 +206,7 @@ it.each([
       failure === 'session-timeout' ||
       failure === 'ipc-sdk-complete' ||
       failure === 'sdk-error' ||
+      failure === 'sdk-error-close' ||
       failure === 'sdk-is-error'
     ) {
       if (failure === 'ipc-sdk-complete')
@@ -219,7 +221,9 @@ it.each([
                 newSessionId: 'fixed-session',
               }
             : sdkOutput(
-                failure === 'sdk-error' ? 'error_during_execution' : 'success',
+                failure.startsWith('sdk-error')
+                  ? 'error_during_execution'
+                  : 'success',
                 failure !== 'ipc-sdk-complete',
               );
       if (failure === 'ipc-sdk-complete') {
@@ -228,7 +232,10 @@ it.each([
           result: null,
           completion: 'sdk_turn_completed',
         });
-      } else if (failure === 'sdk-error' || failure === 'sdk-is-error') {
+      } else if (
+        failure.startsWith('sdk-error') ||
+        failure === 'sdk-is-error'
+      ) {
         expect(output.status).toBe('error');
         expect(output).not.toHaveProperty('completion');
       }
@@ -238,8 +245,11 @@ it.each([
           '\n---NANOCLAW_OUTPUT_END---\n',
       );
       await vi.advanceTimersByTimeAsync(1);
-      await vi.advanceTimersByTimeAsync(31001);
-      fixture.proc.emit('close', 137);
+      if (failure === 'sdk-error-close') fixture.proc.emit('close', 1);
+      else {
+        await vi.advanceTimersByTimeAsync(31001);
+        fixture.proc.emit('close', 137);
+      }
     } else if (failure.endsWith('-clean')) {
       const session = JSON.stringify({
         status: 'success',
@@ -285,7 +295,7 @@ it.each([
       );
     else expect(channel.sendMessage).not.toHaveBeenCalled();
     expect(channel.setTyping).toHaveBeenLastCalledWith(jid, false);
-    if (failure.endsWith('-clean'))
+    if (failure.endsWith('-clean') || failure === 'sdk-error-close')
       expect(stopContainer).not.toHaveBeenCalled();
     else
       expect(stopContainer).toHaveBeenCalledExactlyOnceWith(

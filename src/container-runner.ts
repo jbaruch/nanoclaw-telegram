@@ -10,6 +10,7 @@ import {
 import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
 import { StringDecoder } from 'string_decoder';
+import { protectIpcClaimMounts } from './ipc-mounts.js';
 import path from 'path';
 
 import {
@@ -320,7 +321,7 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const mounts = protectIpcClaimMounts(buildVolumeMounts(group, input.isMain));
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   // Main group uses the default OneCLI agent; others use their own agent.
@@ -520,7 +521,7 @@ export async function runContainerAgent(
               if (!(err instanceof SyntaxError)) throw err;
               outputProtocolError = true;
               logger.warn(
-                { group: group.name, error: err },
+                { group: group.name },
                 'Failed to parse streamed output chunk',
               );
             }
@@ -534,7 +535,11 @@ export async function runContainerAgent(
         const chunk = data.toString();
         const lines = chunk.trim().split('\n');
         for (const line of lines) {
-          if (line) logger.debug({ container: group.folder }, line);
+          if (line)
+            logger.debug(
+              { container: group.folder, length: line.length },
+              'Container stderr activity',
+            );
         }
         // Don't reset timeout on stderr — SDK writes debug logs continuously.
         // Timeout only resets on actual output (OUTPUT_MARKER in stdout).
@@ -647,72 +652,21 @@ export async function runContainerAgent(
 
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         const logFile = path.join(logsDir, `container-${timestamp}.log`);
-        const isVerbose =
-          process.env.LOG_LEVEL === 'debug' ||
-          process.env.LOG_LEVEL === 'trace';
-
         const logLines = [
-          `=== Container Run Log ===`,
+          '=== Container Run Metadata ===',
           `Timestamp: ${new Date().toISOString()}`,
-          `Group: ${group.name}`,
-          `IsMain: ${input.isMain}`,
           `Duration: ${duration}ms`,
           `Exit Code: ${code}`,
+          `Prompt length: ${input.prompt.length} chars`,
+          `Script length: ${input.script?.length ?? 0} chars`,
+          `Stdout length: ${stdout.length} chars`,
+          `Stderr length: ${stderr.length} chars`,
           `Stdout Truncated: ${stdoutTruncated}`,
           `Stderr Truncated: ${stderrTruncated}`,
-          ``,
         ];
 
-        const isError = code !== 0;
-
-        if (isVerbose || isError) {
-          // On error, log input metadata only — not the full prompt.
-          // Full input is only included at verbose level to avoid
-          // persisting user conversation content on every non-zero exit.
-          if (isVerbose) {
-            logLines.push(`=== Input ===`, JSON.stringify(input, null, 2), ``);
-          } else {
-            logLines.push(
-              `=== Input Summary ===`,
-              `Prompt length: ${input.prompt.length} chars`,
-              `Session ID: ${input.sessionId || 'new'}`,
-              ``,
-            );
-          }
-          logLines.push(
-            `=== Container Args ===`,
-            containerArgs.join(' '),
-            ``,
-            `=== Mounts ===`,
-            mounts
-              .map(
-                (m) =>
-                  `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
-              )
-              .join('\n'),
-            ``,
-            `=== Stderr${stderrTruncated ? ' (TRUNCATED)' : ''} ===`,
-            stderr,
-            ``,
-            `=== Stdout${stdoutTruncated ? ' (TRUNCATED)' : ''} ===`,
-            stdout,
-          );
-        } else {
-          logLines.push(
-            `=== Input Summary ===`,
-            `Prompt length: ${input.prompt.length} chars`,
-            `Session ID: ${input.sessionId || 'new'}`,
-            ``,
-            `=== Mounts ===`,
-            mounts
-              .map((m) => `${m.containerPath}${m.readonly ? ' (ro)' : ''}`)
-              .join('\n'),
-            ``,
-          );
-        }
-
         fs.writeFileSync(logFile, logLines.join('\n'));
-        logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
+        logger.debug({ logFile }, 'Container metadata log written');
 
         if (code !== 0) {
           logger.error(
@@ -720,8 +674,8 @@ export async function runContainerAgent(
               group: group.name,
               code,
               duration,
-              stderr,
-              stdout,
+              stderrLength: stderr.length,
+              stdoutLength: stdout.length,
               logFile,
             },
             'Container exited with error',
@@ -731,7 +685,7 @@ export async function runContainerAgent(
             resolve({
               status: 'error',
               result: null,
-              error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
+              error: `Container exited with code ${code}; inspect native runtime health before retrying.`,
             }),
           );
           return;
@@ -810,9 +764,8 @@ export async function runContainerAgent(
           logger.error(
             {
               group: group.name,
-              stdout,
-              stderr,
-              error: err,
+              stdoutLength: stdout.length,
+              stderrLength: stderr.length,
             },
             'Failed to parse container output',
           );
@@ -821,7 +774,8 @@ export async function runContainerAgent(
             resolve({
               status: 'error',
               result: null,
-              error: `Failed to parse container output: ${err instanceof Error ? err.message : String(err)}`,
+              error:
+                'Failed to parse container output; inspect the agent output protocol before retrying.',
             }),
           );
         }
@@ -832,15 +786,23 @@ export async function runContainerAgent(
       spawnErrored = true;
       runGuarded(() => {
         clearTimeout(timeout);
+        const nativeCode =
+          'code' in err &&
+          typeof err.code === 'string' &&
+          ['ENOENT', 'EACCES', 'EPERM', 'EAGAIN', 'ENOMEM', 'EIO'].includes(
+            err.code,
+          )
+            ? err.code
+            : 'unknown';
         logger.error(
-          { group: group.name, containerName, error: err },
+          { group: group.name, containerName, nativeCode },
           'Container spawn error',
         );
         afterOutput(() =>
           resolve({
             status: 'error',
             result: null,
-            error: `Container spawn error: ${err.message}`,
+            error: `Container spawn error (${nativeCode}); verify the native container runtime before retrying.`,
           }),
         );
       });

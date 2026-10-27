@@ -9,7 +9,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
-import { CronExpressionParser } from 'cron-parser';
+import { scheduleInputError } from './schedule-input.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -102,52 +102,21 @@ MESSAGING BEHAVIOR - The task agent's output is sent to the user or group. It ca
 \u2022 Only send a message when there's something to report (e.g., "notify me if...")
 \u2022 Never send a message (background maintenance tasks)
 
-SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
+SCHEDULE VALUE FORMAT (timestamps without a suffix use LOCAL timezone):
 \u2022 cron: Standard cron expression (e.g., "*/5 * * * *" for every 5 minutes, "0 9 * * *" for daily at 9am LOCAL time)
 \u2022 interval: Milliseconds between runs (e.g., "300000" for 5 minutes, "3600000" for 1 hour)
-\u2022 once: Local time WITHOUT "Z" suffix (e.g., "2026-02-01T15:30:00"). Do NOT use UTC/Z suffix.`,
+\u2022 once: ISO timestamp with seconds (e.g., "2026-02-01T15:30:00"). Offset-free values use configured local time; Z or a numeric offset is allowed and required for ambiguous/nonexistent DST wall times.`,
   {
     prompt: z.string().describe('What the agent should do when the task runs. For isolated mode, include all necessary context here.'),
     schedule_type: z.enum(['cron', 'interval', 'once']).describe('cron=recurring at specific times, interval=recurring every N ms, once=run once at specific time'),
-    schedule_value: z.string().describe('cron: "*/5 * * * *" | interval: milliseconds like "300000" | once: local timestamp like "2026-02-01T15:30:00" (no Z suffix!)'),
+    schedule_value: z.string().describe('cron: "*/5 * * * *" | interval: milliseconds like "300000" | once: local timestamp like "2026-02-01T15:30:00" (optional Z or numeric timezone offset)'),
     context_mode: z.enum(['group', 'isolated']).default('group').describe('group=runs with chat history and memory, isolated=fresh session (include context in prompt)'),
     target_group_jid: z.string().optional().describe('(Main group only) JID of the group to schedule the task for. Defaults to the current group.'),
     script: z.string().optional().describe('Optional bash script to run before waking the agent. Script must output JSON on the last line of stdout: { "wakeAgent": boolean, "data"?: any }. If wakeAgent is false, the agent is not called. Test your script with bash -c "..." before scheduling.'),
   },
   async (args) => {
-    // Validate schedule_value before writing IPC
-    if (args.schedule_type === 'cron') {
-      try {
-        CronExpressionParser.parse(args.schedule_value);
-      } catch {
-        return {
-          content: [{ type: 'text' as const, text: `Invalid cron: "${args.schedule_value}". Use format like "0 9 * * *" (daily 9am) or "*/5 * * * *" (every 5 min).` }],
-          isError: true,
-        };
-      }
-    } else if (args.schedule_type === 'interval') {
-      const ms = parseInt(args.schedule_value, 10);
-      if (isNaN(ms) || ms <= 0) {
-        return {
-          content: [{ type: 'text' as const, text: `Invalid interval: "${args.schedule_value}". Must be positive milliseconds (e.g., "300000" for 5 min).` }],
-          isError: true,
-        };
-      }
-    } else if (args.schedule_type === 'once') {
-      if (/[Zz]$/.test(args.schedule_value) || /[+-]\d{2}:\d{2}$/.test(args.schedule_value)) {
-        return {
-          content: [{ type: 'text' as const, text: `Timestamp must be local time without timezone suffix. Got "${args.schedule_value}" — use format like "2026-02-01T15:30:00".` }],
-          isError: true,
-        };
-      }
-      const date = new Date(args.schedule_value);
-      if (isNaN(date.getTime())) {
-        return {
-          content: [{ type: 'text' as const, text: `Invalid timestamp: "${args.schedule_value}". Use local time format like "2026-02-01T15:30:00".` }],
-          isError: true,
-        };
-      }
-    }
+    const validationError=scheduleInputError(args.schedule_type,args.schedule_value);
+    if(validationError)return {content:[{type:'text' as const,text:validationError}],isError:true};
 
     // Non-main groups can only schedule for themselves
     const targetJid = isMain && args.target_group_jid ? args.target_group_jid : chatJid;
@@ -170,7 +139,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
     writeIpcFile(TASKS_DIR, data);
 
     return {
-      content: [{ type: 'text' as const, text: `Task ${taskId} scheduled: ${args.schedule_type} - ${args.schedule_value}` }],
+      content: [{ type: 'text' as const, text: `Task ${taskId} request queued: ${args.schedule_type} - ${args.schedule_value}` }],
     };
   },
 );
@@ -281,27 +250,25 @@ server.tool(
     script: z.string().optional().describe('New script for the task. Set to empty string to remove the script.'),
   },
   async (args) => {
-    // Validate schedule_value if provided
-    if (args.schedule_type === 'cron' || (!args.schedule_type && args.schedule_value)) {
-      if (args.schedule_value) {
-        try {
-          CronExpressionParser.parse(args.schedule_value);
-        } catch {
-          return {
-            content: [{ type: 'text' as const, text: `Invalid cron: "${args.schedule_value}".` }],
-            isError: true,
-          };
+    if(args.schedule_type!==undefined||args.schedule_value!==undefined){
+      let type=args.schedule_type;
+      let value=args.schedule_value;
+      if(type===undefined||value===undefined){
+        try{
+          const tasks:unknown=JSON.parse(fs.readFileSync(path.join(IPC_DIR,'current_tasks.json'),'utf8'));
+          if(!Array.isArray(tasks))return {content:[{type:'text' as const,text:'Task schedule snapshot is unavailable; refresh tasks before updating.'}],isError:true};
+          const existing=tasks.filter((task:unknown)=>task!==null&&typeof task==='object'&&'id' in task&&task.id===args.task_id);
+          if(existing.length!==1)return {content:[{type:'text' as const,text:'Task schedule is unavailable or ambiguous; refresh tasks before updating.'}],isError:true};
+          const task=existing[0] as Record<string,unknown>;
+          if(type===undefined && (task.schedule_type==='cron'||task.schedule_type==='once'||task.schedule_type==='interval'))type=task.schedule_type;
+          if(value===undefined&&typeof task.schedule_value==='string')value=task.schedule_value;
+        }catch(error){
+          if(!(error instanceof SyntaxError)&&!(error instanceof Error&&'code' in error&&['ENOENT','EACCES','EIO'].includes(String(error.code))))throw error;
+          return {content:[{type:'text' as const,text:'Task schedule snapshot could not be read; refresh tasks before updating.'}],isError:true};
         }
       }
-    }
-    if (args.schedule_type === 'interval' && args.schedule_value) {
-      const ms = parseInt(args.schedule_value, 10);
-      if (isNaN(ms) || ms <= 0) {
-        return {
-          content: [{ type: 'text' as const, text: `Invalid interval: "${args.schedule_value}".` }],
-          isError: true,
-        };
-      }
+      const validationError=scheduleInputError(type??'',value??'');
+      if(validationError)return {content:[{type:'text' as const,text:validationError}],isError:true};
     }
 
     const data: Record<string, string | undefined> = {

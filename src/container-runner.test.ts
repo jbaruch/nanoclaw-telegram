@@ -55,6 +55,9 @@ vi.mock('fs', async () => {
 });
 
 // Mock mount-security
+vi.mock('./ipc-mounts.js', () => ({
+  protectIpcClaimMounts: vi.fn((mounts) => mounts),
+}));
 vi.mock('./mount-security.js', () => ({
   validateAdditionalMounts: vi.fn(() => []),
 }));
@@ -114,6 +117,7 @@ vi.mock('child_process', async () => {
 });
 
 import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import { protectIpcClaimMounts } from './ipc-mounts.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -145,7 +149,87 @@ describe('container-runner timeout behavior', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     vi.useRealTimers();
+  });
+
+  it('requires the fixed IPC mount closure before configuring or spawning a container', async () => {
+    const { spawn } = await import('child_process');
+    vi.mocked(spawn).mockClear();
+    vi.mocked(protectIpcClaimMounts).mockImplementationOnce(() => {
+      throw new Error('fixed unsafe mount');
+    });
+    await expect(
+      runContainerAgent(testGroup, testInput, () => {}),
+    ).rejects.toThrow('fixed unsafe mount');
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('keeps prompt, script and raw native output out of debug and error logs', async () => {
+    vi.stubEnv('LOG_LEVEL', 'debug');
+    vi.mocked(fs.writeFileSync).mockClear();
+    for (const method of ['debug', 'error', 'warn', 'info'] as const)
+      vi.mocked(logger[method]).mockClear();
+    const secrets = [
+      'fixed-prompt-secret',
+      'fixed-script-secret',
+      'fixed-stdout-secret',
+      'fixed-stderr-secret',
+    ];
+    const pending = runContainerAgent(
+      testGroup,
+      { ...testInput, prompt: secrets[0], script: secrets[1] },
+      () => {},
+      vi.fn(async () => {}),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    emitOutputMarker(fakeProc, { status: 'success', result: secrets[2] });
+    fakeProc.stderr.push(secrets[3]);
+    await vi.advanceTimersByTimeAsync(0);
+    fakeProc.emit('close', 1);
+    const output = await pending;
+    const logs = JSON.stringify([
+      ...vi
+        .mocked(fs.writeFileSync)
+        .mock.calls.filter(([file]) => String(file).endsWith('.log')),
+      ...['debug', 'error', 'warn', 'info'].flatMap(
+        (method) => vi.mocked(logger[method as keyof typeof logger]).mock.calls,
+      ),
+      output,
+    ]);
+    for (const secret of secrets) expect(logs).not.toContain(secret);
+    expect(logs).toContain('Stdout length:');
+    expect(output.status).toBe('error');
+  });
+
+  it('retains a fixed native spawn code without logging its raw message or arguments', async () => {
+    vi.mocked(logger.error).mockClear();
+    const pending = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    fakeProc.emit(
+      'error',
+      Object.assign(new Error('fixed-private-native-message'), {
+        code: 'ENOENT',
+        spawnargs: ['fixed-private-native-argument'],
+      }),
+    );
+    const output = await pending;
+    expect(output).toMatchObject({
+      status: 'error',
+      error: expect.stringContaining('ENOENT'),
+    });
+    const emitted = JSON.stringify([
+      vi.mocked(logger.error).mock.calls,
+      output,
+    ]);
+    expect(emitted).not.toContain('fixed-private-native-message');
+    expect(emitted).not.toContain('fixed-private-native-argument');
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('decodes split multibyte stdout frames without altering delivered text', async () => {

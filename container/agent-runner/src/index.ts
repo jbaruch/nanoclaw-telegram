@@ -332,7 +332,7 @@ async function runQuery(
   containerInput: ContainerInput,
   sdkEnv: Record<string, string | undefined>,
   resumeAt?: string,
-): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
+): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean; failed?: boolean }> {
   const stream = new MessageStream();
   stream.push(prompt);
 
@@ -461,14 +461,19 @@ async function runQuery(
 
     if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
       const tn = message as { task_id: string; status: string; summary: string };
-      log(`Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`);
+      log(`Task notification: status=${tn.status}`);
     }
 
     if (message.type === 'result') {
       resultCount++;
-      const textResult = 'result' in message ? (message as { result?: string }).result : null;
-      log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
-      writeOutput(sdkResultOutput(message, newSessionId));
+      log(`Result #${resultCount}: subtype=${message.subtype}`);
+      const output = sdkResultOutput(message, newSessionId);
+      writeOutput(output);
+      if (output.status === 'error') {
+        ipcPolling = false;
+        stream.end();
+        return {newSessionId,lastAssistantUuid,closedDuringQuery,failed:true};
+      }
     }
   }
 
@@ -495,11 +500,11 @@ async function runScript(script: string): Promise<ScriptResult | null> {
       env: process.env,
     }, (error, stdout, stderr) => {
       if (stderr) {
-        log(`Script stderr: ${stderr.slice(0, 500)}`);
+        log(`Script stderr length: ${stderr.length}`);
       }
 
       if (error) {
-        log(`Script error: ${error.message}`);
+        log('Script execution failed; inspect the scheduled precheck configuration.');
         return resolve(null);
       }
 
@@ -514,12 +519,12 @@ async function runScript(script: string): Promise<ScriptResult | null> {
       try {
         const result = JSON.parse(lastLine);
         if (typeof result.wakeAgent !== 'boolean') {
-          log(`Script output missing wakeAgent boolean: ${lastLine.slice(0, 200)}`);
+          log('Script output is missing its wakeAgent boolean.');
           return resolve(null);
         }
         resolve(result as ScriptResult);
       } catch {
-        log(`Script output is not valid JSON: ${lastLine.slice(0, 200)}`);
+        log('Script output is not valid JSON.');
         resolve(null);
       }
     });
@@ -538,7 +543,7 @@ async function main(): Promise<void> {
     writeOutput({
       status: 'error',
       result: null,
-      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`
+      error: 'Failed to parse agent input; provide a valid container input record.'
     });
     process.exit(1);
   }
@@ -597,6 +602,12 @@ async function main(): Promise<void> {
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
       const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      if (queryResult.failed) {
+        await new Promise<void>((resolve,reject)=>{
+          process.stdout.write('',error=>error?reject(error):resolve());
+        });
+        process.exit(1);
+      }
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
@@ -628,8 +639,8 @@ async function main(): Promise<void> {
       prompt = nextMessage;
     }
   } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : String(err);
-    log(`Agent error: ${errorMessage}`);
+    const errorMessage = 'Agent execution failed; inspect the native SDK configuration before retrying.';
+    log(`Agent error kind: ${err instanceof TypeError ? 'TypeError' : err instanceof SyntaxError ? 'SyntaxError' : 'execution_failure'}`);
     writeOutput({
       status: 'error',
       result: null,

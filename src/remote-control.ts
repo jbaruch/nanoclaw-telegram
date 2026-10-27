@@ -2,6 +2,7 @@ import { hasErrno } from './operational-errors.js';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 
 import { DATA_DIR } from './config.js';
 import { logger } from './logger.js';
@@ -32,6 +33,83 @@ const URL_POLL_MS = 200;
 const STATE_FILE = path.join(DATA_DIR, 'remote-control.json');
 const STDOUT_FILE = path.join(DATA_DIR, 'remote-control.stdout');
 const STDERR_FILE = path.join(DATA_DIR, 'remote-control.stderr');
+const START_FILE = path.join(DATA_DIR, 'remote-control-starting.json');
+type StartResult = { ok: true; url: string } | { ok: false; error: string };
+let starting: Promise<StartResult> | undefined;
+
+function reserveStart(): () => void {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const directory = fs.lstatSync(DATA_DIR);
+  if (
+    !directory.isDirectory() ||
+    directory.isSymbolicLink() ||
+    directory.uid !== process.geteuid!() ||
+    (directory.mode & 0o022) !== 0
+  )
+    throw new Error(
+      'Remote Control storage is not owned and private for the runtime writer; preserve it for repair.',
+    );
+  const syncParent = () => {
+    const parent = fs.openSync(
+      DATA_DIR,
+      fs.constants.O_RDONLY |
+        fs.constants.O_NOFOLLOW |
+        fs.constants.O_DIRECTORY,
+    );
+    try {
+      fs.fsyncSync(parent);
+    } finally {
+      fs.closeSync(parent);
+    }
+  };
+  let fd: number;
+  try {
+    fd = fs.openSync(
+      START_FILE,
+      fs.constants.O_WRONLY |
+        fs.constants.O_CREAT |
+        fs.constants.O_EXCL |
+        fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+  } catch (error) {
+    if (!hasErrno(error, 'EEXIST')) throw error;
+    throw new Error(
+      'Remote Control starting gate is occupied; preserve it and inspect the owned process before retrying.',
+      { cause: error },
+    );
+  }
+  const bytes = JSON.stringify({
+    schema_version: 1,
+    state: 'starting',
+    owner_pid: process.pid,
+    attempt_id: randomUUID(),
+  });
+  let identity: fs.Stats;
+  try {
+    fs.writeFileSync(fd, bytes);
+    fs.fsyncSync(fd);
+    identity = fs.fstatSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  syncParent();
+  return () => {
+    const current = fs.lstatSync(START_FILE);
+    if (
+      !current.isFile() ||
+      current.nlink !== 1 ||
+      current.dev !== identity.dev ||
+      current.ino !== identity.ino ||
+      fs.readFileSync(START_FILE, 'utf8') !== bytes
+    )
+      throw new Error(
+        'Remote Control starting gate changed; preserve it for owner inspection.',
+      );
+    fs.unlinkSync(START_FILE);
+    syncParent();
+  };
+}
 
 function saveState(session: RemoteControlSession): void {
   fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
@@ -123,7 +201,7 @@ export function restoreRemoteControl(): void {
       if (legacy) saveState(session);
       activeSession = session;
       logger.info(
-        { pid: session.pid, url: session.url },
+        { pid: session.pid },
         'Restored Remote Control session from previous run',
       );
     } else {
@@ -152,10 +230,59 @@ export function _getStateFilePath(): string {
   return STATE_FILE;
 }
 
-export async function startRemoteControl(
+export function startRemoteControl(
   sender: string,
   chatJid: string,
   cwd: string,
+): Promise<StartResult> {
+  if (starting) return starting;
+  const work = (async () => {
+    // Refuse malformed occupied state before creating another reservation.
+    if (!activeSession) restoreRemoteControl();
+    if (activeSession && isProcessAlive(activeSession.pid))
+      return { ok: true as const, url: activeSession.url };
+    const release = reserveStart();
+    let disposition: 'no_child' | 'tracked' | 'absent' | 'unknown' = 'no_child';
+    const [result] = await Promise.allSettled([
+      startRemoteControlOwned(sender, chatJid, cwd, (state) => {
+        disposition = state;
+      }),
+    ]);
+    const cleanup = await Promise.allSettled([
+      Promise.resolve().then(() => {
+        // A mere kill signal is not native absence. Keep the gate on uncertainty.
+        if (disposition !== 'unknown') release();
+      }),
+    ]);
+    if (cleanup[0].status === 'rejected') {
+      if (result.status === 'rejected')
+        throw new AggregateError(
+          [result.reason, cleanup[0].reason],
+          'Remote Control start and reservation cleanup failed.',
+          { cause: result.reason },
+        );
+      throw cleanup[0].reason;
+    }
+    if (result.status === 'rejected') throw result.reason;
+    return result.value;
+  })();
+  starting = work;
+  void work.then(
+    () => {
+      starting = undefined;
+    },
+    () => {
+      starting = undefined;
+    },
+  );
+  return work;
+}
+
+async function startRemoteControlOwned(
+  sender: string,
+  chatJid: string,
+  cwd: string,
+  disposition: (state: 'no_child' | 'tracked' | 'absent' | 'unknown') => void,
 ): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
   if (!activeSession) restoreRemoteControl();
   if (activeSession) {
@@ -175,6 +302,7 @@ export async function startRemoteControl(
   const stderrFd = fs.openSync(STDERR_FILE, 'w');
 
   let proc;
+  disposition('unknown');
   try {
     proc = spawn('claude', ['remote-control', '--name', 'NanoClaw Remote'], {
       cwd,
@@ -185,6 +313,7 @@ export async function startRemoteControl(
     fs.closeSync(stdoutFd);
     fs.closeSync(stderrFd);
     if (!hasErrno(err, 'ENOENT') && !hasErrno(err, 'EACCES')) throw err;
+    disposition('no_child');
     return { ok: false, error: `Failed to start: ${err.message}` };
   }
 
@@ -245,6 +374,7 @@ export async function startRemoteControl(
     proc.on('error', (error: Error) => {
       if (settled) return;
       if (!pid && (hasErrno(error, 'ENOENT') || hasErrno(error, 'EACCES'))) {
+        disposition('no_child');
         finish({ ok: false, error: `Failed to start: ${error.message}` });
       } else rejectAfterCleanup(error);
     });
@@ -254,6 +384,7 @@ export async function startRemoteControl(
       if (!pid) return; // A failed launch emits error asynchronously.
       // Check if process died
       if (!isProcessAlive(pid)) {
+        disposition('absent');
         finish({ ok: false, error: 'Process exited before producing URL' });
         return;
       }
@@ -278,11 +409,9 @@ export async function startRemoteControl(
         };
         activeSession = session;
         saveState(session);
+        disposition('tracked');
 
-        logger.info(
-          { url: match[0], pid, sender, chatJid },
-          'Remote Control session started',
-        );
+        logger.info({ pid, sender, chatJid }, 'Remote Control session started');
         finish({ ok: true, url: match[0] });
         return;
       }

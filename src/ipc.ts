@@ -8,6 +8,8 @@ import {
 import fs from 'fs';
 import path from 'path';
 
+import { createIpcInbox, IpcInboxHold } from './ipc-inbox.js';
+
 import { parseTaskSchedule } from './task-schedule.js';
 
 import { DATA_DIR, IPC_POLL_INTERVAL } from './config.js';
@@ -174,7 +176,29 @@ function quarantineIpcFile(
         if (hasErrno(collision, 'EEXIST')) continue;
         throw collision;
       }
+      const destinationDirectory = fs.openSync(
+        errorDir,
+        fs.constants.O_RDONLY |
+          fs.constants.O_DIRECTORY |
+          fs.constants.O_NOFOLLOW,
+      );
+      try {
+        fs.fsyncSync(destinationDirectory);
+      } finally {
+        fs.closeSync(destinationDirectory);
+      }
       fs.unlinkSync(filePath);
+      const sourceDirectory = fs.openSync(
+        path.dirname(filePath),
+        fs.constants.O_RDONLY |
+          fs.constants.O_DIRECTORY |
+          fs.constants.O_NOFOLLOW,
+      );
+      try {
+        fs.fsyncSync(sourceDirectory);
+      } finally {
+        fs.closeSync(sourceDirectory);
+      }
       return;
     }
     throw new Error(
@@ -211,174 +235,128 @@ export function startIpcWatcher(deps: IpcDeps): Promise<void> {
   };
   const processIpcFiles = async () => {
     try {
-      // Scan all group IPC directories (identity determined by directory)
-      let groupFolders: string[];
-      try {
-        groupFolders = fs.readdirSync(ipcBaseDir).filter((f) => {
-          const stat = fs.statSync(path.join(ipcBaseDir, f));
-          return stat.isDirectory() && f !== 'errors';
-        });
-      } catch (err) {
-        if (!isFileSystemError(err)) throw err;
-        logger.error({ err }, 'Error reading IPC base directory');
-        return;
-      }
-
+      // The base and group parents are host-owned; only channel entries are
+      // agent-controlled. lstat never follows a group alias.
+      const inbox = createIpcInbox(ipcBaseDir);
       const registeredGroups = deps.registeredGroups();
-
-      // Build folder→isMain lookup from registered groups
       const folderIsMain = new Map<string, boolean>();
       for (const group of Object.values(registeredGroups)) {
         if (group.isMain) folderIsMain.set(group.folder, true);
       }
-
-      for (const sourceGroup of groupFolders) {
-        const isMain = folderIsMain.get(sourceGroup) === true;
-        const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
-        const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
-
-        // Process messages from this group's IPC directory
-        try {
-          if (fs.existsSync(messagesDir)) {
-            const messageFiles = fs
-              .readdirSync(messagesDir)
-              .filter((f) => f.endsWith('.json'));
-            for (const file of messageFiles) {
-              const filePath = path.join(messagesDir, file);
-              try {
-                const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-                validateIpcRequest(data, 'messages');
-                if (
-                  data.type === 'react_to_message' &&
-                  data.chatJid &&
-                  data.emoji &&
-                  deps.sendReaction
-                ) {
-                  const targetGroup = registeredGroups[data.chatJid];
-                  if (
-                    isMain ||
-                    (targetGroup && targetGroup.folder === sourceGroup)
-                  ) {
-                    await deps.sendReaction(
-                      data.chatJid,
-                      data.messageId || undefined,
-                      data.emoji,
-                    );
-                    logger.info(
-                      {
-                        chatJid: data.chatJid,
-                        emoji: data.emoji,
-                        sourceGroup,
-                      },
-                      'IPC reaction sent',
-                    );
-                  } else {
-                    logger.warn(
-                      { chatJid: data.chatJid, sourceGroup },
-                      'Unauthorized IPC reaction attempt blocked',
-                    );
-                  }
-                } else if (
-                  data.type === 'message' &&
-                  data.chatJid &&
-                  data.text
-                ) {
-                  // Authorization: verify this group can send to this chatJid
-                  const targetGroup = registeredGroups[data.chatJid];
-                  if (
-                    isMain ||
-                    (targetGroup && targetGroup.folder === sourceGroup)
-                  ) {
-                    await deps.sendMessage(data.chatJid, data.text);
-                    logger.info(
-                      { chatJid: data.chatJid, sourceGroup },
-                      'IPC message sent',
-                    );
-                  } else {
-                    logger.warn(
-                      { chatJid: data.chatJid, sourceGroup },
-                      'Unauthorized IPC message attempt blocked',
-                    );
-                  }
-                }
-                fs.unlinkSync(filePath);
-              } catch (err) {
-                quarantineIpcFile(
-                  filePath,
-                  path.join(ipcBaseDir, 'errors'),
-                  sourceGroup,
-                  'messages',
-                  file,
-                  err,
-                );
-                if (
-                  !(err instanceof SyntaxError) &&
-                  !(err instanceof IpcRouteUnavailableError) &&
-                  !isFileSystemError(err) &&
-                  !isTelegramError(err) &&
-                  !isRecoverableSqliteError(err)
-                )
-                  throw err;
-                logger.error(
-                  { file, sourceGroup, err },
-                  'Error processing IPC message',
-                );
-              }
-            }
-          }
-        } catch (err) {
-          if (!isFileSystemError(err)) throw err;
-          logger.error(
-            { err, sourceGroup },
-            'Error reading IPC messages directory',
-          );
+      for (const sourceGroup of fs.readdirSync(ipcBaseDir)) {
+        if (!isValidGroupFolder(sourceGroup) || sourceGroup === 'errors')
+          continue;
+        const stat = fs.lstatSync(path.join(ipcBaseDir, sourceGroup));
+        if (!stat.isDirectory() || stat.isSymbolicLink()) {
+          logger.error('IPC group alias refused; original entry retained.');
+          continue;
         }
-
-        // Process tasks from this group's IPC directory
         try {
-          if (fs.existsSync(tasksDir)) {
-            const taskFiles = fs
-              .readdirSync(tasksDir)
-              .filter((f) => f.endsWith('.json'));
-            for (const file of taskFiles) {
-              const filePath = path.join(tasksDir, file);
-              try {
-                const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-                validateIpcRequest(data, 'tasks');
-                // Pass source group identity to processTaskIpc for authorization
-                await processTaskIpc(data, sourceGroup, isMain, deps);
-                fs.unlinkSync(filePath);
-              } catch (err) {
-                quarantineIpcFile(
-                  filePath,
-                  path.join(ipcBaseDir, 'errors'),
-                  sourceGroup,
-                  'tasks',
-                  file,
-                  err,
-                );
-                if (
-                  !(err instanceof SyntaxError) &&
-                  !isFileSystemError(err) &&
-                  !isTelegramError(err) &&
-                  !isRecoverableSqliteError(err)
-                )
-                  throw err;
-                logger.error(
-                  { file, sourceGroup, err },
-                  'Error processing IPC task',
-                );
-              }
-            }
-          }
-        } catch (err) {
-          if (!isFileSystemError(err)) throw err;
+          inbox.capture(sourceGroup, 'messages');
+          inbox.capture(sourceGroup, 'tasks');
+        } catch (error) {
+          if (!(error instanceof IpcInboxHold) && !isFileSystemError(error))
+            throw error;
           logger.error(
-            { err, sourceGroup },
-            'Error reading IPC tasks directory',
+            'IPC channel capture held; preserve its batch and inspect runtime-owned storage.',
           );
         }
       }
+      const { claims, held } = inbox.pending();
+      if (held)
+        logger.error(
+          { held },
+          'IPC batches held for inspection; unknown dispatches are never replayed.',
+        );
+      for (const claim of claims) {
+        const { sourceGroup, channel, file } = claim;
+        const isMain = folderIsMain.get(sourceGroup) === true;
+        try {
+          const data = JSON.parse(claim.read());
+          validateIpcRequest(data, channel);
+          claim.dispatch();
+          if (channel === 'messages') {
+            if (
+              data.type === 'react_to_message' &&
+              data.chatJid &&
+              data.emoji &&
+              deps.sendReaction
+            ) {
+              const targetGroup = registeredGroups[data.chatJid];
+              if (
+                isMain ||
+                (targetGroup && targetGroup.folder === sourceGroup)
+              ) {
+                await deps.sendReaction(
+                  data.chatJid,
+                  data.messageId || undefined,
+                  data.emoji,
+                );
+                logger.info(
+                  {
+                    chatJid: data.chatJid,
+                    emoji: data.emoji,
+                    sourceGroup,
+                  },
+                  'IPC reaction sent',
+                );
+              } else {
+                logger.warn(
+                  { chatJid: data.chatJid, sourceGroup },
+                  'Unauthorized IPC reaction attempt blocked',
+                );
+              }
+            } else if (data.type === 'message' && data.chatJid && data.text) {
+              // Authorization: verify this group can send to this chatJid
+              const targetGroup = registeredGroups[data.chatJid];
+              if (
+                isMain ||
+                (targetGroup && targetGroup.folder === sourceGroup)
+              ) {
+                await deps.sendMessage(data.chatJid, data.text);
+                logger.info(
+                  { chatJid: data.chatJid, sourceGroup },
+                  'IPC message sent',
+                );
+              } else {
+                logger.warn(
+                  { chatJid: data.chatJid, sourceGroup },
+                  'Unauthorized IPC message attempt blocked',
+                );
+              }
+            }
+          } else {
+            await processTaskIpc(data, sourceGroup, isMain, deps);
+          }
+          claim.complete();
+        } catch (err) {
+          quarantineIpcFile(
+            claim.filePath,
+            path.join(ipcBaseDir, 'errors'),
+            sourceGroup,
+            channel,
+            file,
+            err,
+          );
+          if (
+            !(err instanceof SyntaxError) &&
+            !(err instanceof IpcRouteUnavailableError) &&
+            !isFileSystemError(err) &&
+            !isTelegramError(err) &&
+            !isRecoverableSqliteError(err)
+          )
+            throw err;
+          logger.error(
+            { sourceGroup, channel },
+            'IPC request failed and was quarantined; inspect it before resubmitting.',
+          );
+        }
+      }
+    } catch (error) {
+      if (!isFileSystemError(error)) throw error;
+      logger.error(
+        'IPC storage scan failed; requests are retained for a later scan.',
+      );
     } finally {
       setTimeout(poll, IPC_POLL_INTERVAL);
     }

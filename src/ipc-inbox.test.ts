@@ -1,0 +1,164 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { createIpcInbox } from './ipc-inbox.js';
+let base: string;
+beforeEach(() => {
+  base = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-ipc-owner-'));
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+  fs.rmSync(base, { recursive: true, force: true });
+});
+function source(group = 'main') {
+  const p = path.join(base, group, 'messages');
+  fs.mkdirSync(p, { recursive: true });
+  return p;
+}
+function body(text = 'fixed') {
+  return JSON.stringify({ type: 'message', chatJid: 'tg:123', text });
+}
+it('processes the normal runtime-writer layout and recovers pending snapshots after restart', () => {
+  const directory = source();
+  fs.writeFileSync(path.join(directory, 'fixed.json'), body());
+  const owner = createIpcInbox(base);
+  owner.capture('main', 'messages');
+  expect(owner.pending().claims).toHaveLength(1);
+  const resumed = createIpcInbox(base).pending();
+  expect(resumed.held).toBe(0);
+  expect(resumed.claims).toHaveLength(1);
+  expect(resumed.claims[0].read()).toBe(body());
+  resumed.claims[0].dispatch();
+  resumed.claims[0].complete();
+  expect(createIpcInbox(base).pending()).toEqual({ claims: [], held: 0 });
+});
+it('refuses group aliases and captures final-channel ABA aliases without touching foreign requests', () => {
+  const foreign = source('other');
+  const file = path.join(foreign, 'private.json');
+  fs.writeFileSync(file, body('private'));
+  fs.symlinkSync(path.join(base, 'other'), path.join(base, 'alias'));
+  const owner = createIpcInbox(base);
+  expect(() => owner.capture('alias', 'messages')).toThrow('parent identity');
+  const own = source();
+  fs.writeFileSync(path.join(own, 'own.json'), body());
+  const rename = fs.renameSync.bind(fs);
+  vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+    if (from === own) {
+      rename(own, path.join(base, 'main', 'old-own'));
+      fs.symlinkSync(foreign, own);
+    }
+    return rename(from, to);
+  });
+  owner.capture('main', 'messages');
+  expect(owner.pending()).toEqual({ claims: [], held: 1 });
+  expect(fs.readFileSync(file, 'utf8')).toBe(body('private'));
+});
+it.each(['symlink', 'hardlink'] as const)(
+  'holds a %s leaf without reading or deleting its foreign target',
+  (kind) => {
+    const foreign = source('other'),
+      file = path.join(foreign, 'private.json');
+    fs.writeFileSync(file, body('private'));
+    const own = source(),
+      alias = path.join(own, 'alias.json');
+    if (kind === 'symlink') fs.symlinkSync(file, alias);
+    else fs.linkSync(file, alias);
+    const owner = createIpcInbox(base);
+    owner.capture('main', 'messages');
+    expect(owner.pending()).toEqual({ claims: [], held: 1 });
+    expect(fs.readFileSync(file, 'utf8')).toBe(body('private'));
+  },
+);
+it('a guest-held old file descriptor cannot mutate the pending or in-flight snapshot', () => {
+  const directory = source(),
+    file = path.join(directory, 'fixed.json');
+  fs.writeFileSync(file, body());
+  const fd = fs.openSync(file, 'r+');
+  try {
+    const owner = createIpcInbox(base);
+    owner.capture('main', 'messages');
+    const claim = owner.pending().claims[0];
+    fs.writeSync(
+      fd,
+      Buffer.from(body('changed')),
+      0,
+      body('changed').length,
+      0,
+    );
+    expect(claim.read()).toBe(body());
+    claim.dispatch();
+    fs.ftruncateSync(fd, 0);
+    expect(claim.read()).toBe(body());
+    expect(fs.lstatSync(claim.filePath).nlink).toBe(1);
+    claim.complete();
+  } finally {
+    fs.closeSync(fd);
+  }
+});
+it('holds unknown in-flight work across restart while an independent batch progresses', () => {
+  for (const group of ['main', 'other']) {
+    const directory = source(group);
+    fs.writeFileSync(path.join(directory, 'fixed.json'), body(group));
+  }
+  const owner = createIpcInbox(base);
+  owner.capture('main', 'messages');
+  owner.capture('other', 'messages');
+  const first = owner
+    .pending()
+    .claims.find((claim) => claim.sourceGroup === 'main')!;
+  first.dispatch();
+  const resumed = createIpcInbox(base).pending();
+  expect(resumed.held).toBe(1);
+  expect(resumed.claims).toHaveLength(1);
+  expect(resumed.claims[0].sourceGroup).toBe('other');
+  resumed.claims[0].dispatch();
+  resumed.claims[0].complete();
+  expect(fs.readFileSync(first.filePath, 'utf8')).toBe(body('main'));
+  expect(createIpcInbox(base).pending()).toEqual({ claims: [], held: 1 });
+});
+it('recovers a durably committed snapshot after a crash before captured-inode cleanup', () => {
+  const directory = source();
+  fs.writeFileSync(path.join(directory, 'fixed.json'), body());
+  const owner = createIpcInbox(base);
+  owner.capture('main', 'messages');
+  const unlink = fs.unlinkSync.bind(fs);
+  const fault = vi.spyOn(fs, 'unlinkSync').mockImplementation((p) => {
+    if (String(p).endsWith('/captured'))
+      throw Object.assign(new Error('fixed crash seam'), { code: 'EIO' });
+    unlink(p);
+  });
+  expect(owner.pending()).toEqual({ claims: [], held: 1 });
+  fault.mockRestore();
+  const resumed = createIpcInbox(base).pending();
+  expect(resumed.held).toBe(0);
+  expect(resumed.claims[0].read()).toBe(body());
+});
+it('preserves unknown owner metadata instead of treating it as an empty inbox', () => {
+  const directory = source();
+  fs.writeFileSync(path.join(directory, 'fixed.json'), body());
+  const owner = createIpcInbox(base);
+  owner.capture('main', 'messages');
+  const root = path.join(base, '.claimed-v1');
+  const batch = path.join(root, fs.readdirSync(root)[0]);
+  const future = JSON.stringify({
+    schema_version: 2,
+    source_group: 'main',
+    channel: 'messages',
+  });
+  fs.writeFileSync(path.join(batch, 'owner.json'), future);
+  expect(owner.pending()).toEqual({ claims: [], held: 1 });
+  expect(fs.readFileSync(path.join(batch, 'owner.json'), 'utf8')).toBe(future);
+});
+
+it('holds an over-budget channel without parsing, evicting or dispatching its requests', () => {
+  const directory = source();
+  for (let index = 0; index < 1025; index++)
+    fs.writeFileSync(path.join(directory, `fixed-${index}.json`), '{}');
+  const owner = createIpcInbox(base);
+  owner.capture('main', 'messages');
+  expect(owner.pending()).toEqual({ claims: [], held: 1 });
+  const root = path.join(base, '.claimed-v1'),
+    batch = path.join(root, fs.readdirSync(root)[0]);
+  expect(fs.readdirSync(path.join(batch, 'inbox'))).toHaveLength(1025);
+});

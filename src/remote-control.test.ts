@@ -44,11 +44,13 @@ describe('remote-control', () => {
 
   // Track what readFileSync should return for the stdout file
   let stdoutFileContent: string;
+  let startingBytes: string;
 
   beforeEach(() => {
     _resetForTesting();
     spawnMock.mockReset();
     stdoutFileContent = '';
+    startingBytes = '';
 
     // Default fs mocks
     vi.spyOn(fs, 'mkdtempSync').mockReturnValue(
@@ -61,16 +63,32 @@ describe('remote-control', () => {
       .mockImplementation(() => undefined);
     writeFileSyncSpy = vi
       .spyOn(fs, 'writeFileSync')
-      .mockImplementation(() => {});
+      .mockImplementation((file, bytes) => {
+        if (typeof file === 'number') startingBytes = String(bytes);
+      });
     unlinkSyncSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation(() => {});
     openSyncSpy = vi.spyOn(fs, 'openSync').mockReturnValue(42);
     closeSyncSpy = vi.spyOn(fs, 'closeSync').mockImplementation(() => {});
+    vi.spyOn(fs, 'fsyncSync').mockImplementation(() => {});
+    const identity = {
+      dev: 1,
+      ino: 2,
+      uid: process.geteuid!(),
+      mode: 0o700,
+      nlink: 1,
+      isFile: () => true,
+      isDirectory: () => true,
+      isSymbolicLink: () => false,
+    } as fs.Stats;
+    vi.spyOn(fs, 'fstatSync').mockReturnValue(identity);
+    vi.spyOn(fs, 'lstatSync').mockReturnValue(identity);
 
     // readFileSync: return stdoutFileContent for the stdout file, state file, etc.
     readFileSyncSpy = vi.spyOn(fs, 'readFileSync').mockImplementation(((
       p: string,
     ) => {
       if (p.endsWith('remote-control.stdout')) return stdoutFileContent;
+      if (p.endsWith('remote-control-starting.json')) return startingBytes;
       if (p.endsWith('remote-control.json')) {
         throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
       }
@@ -86,6 +104,28 @@ describe('remote-control', () => {
   // --- startRemoteControl ---
 
   describe('startRemoteControl', () => {
+    it('shares one pending launch across concurrent callers before URL discovery', async () => {
+      vi.useFakeTimers();
+      spawnMock.mockReturnValue(createMockProcess(12345));
+      vi.spyOn(process, 'kill').mockReturnValue(true);
+      const first = startRemoteControl('owner', 'tg:123', '/project');
+      const second = startRemoteControl('owner', 'tg:123', '/project');
+      expect(second).toBe(first);
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      stdoutFileContent = 'https://claude.ai/code?bridge=env_concurrent';
+      await vi.advanceTimersByTimeAsync(200);
+      await expect(first).resolves.toEqual({
+        ok: true,
+        url: stdoutFileContent,
+      });
+      await expect(second).resolves.toEqual({
+        ok: true,
+        url: stdoutFileContent,
+      });
+      expect(getActiveSession()?.pid).toBe(12345);
+      expect(vi.getTimerCount()).toBe(0);
+      vi.useRealTimers();
+    });
     it('spawns claude remote-control and returns the URL', async () => {
       const proc = createMockProcess();
       spawnMock.mockReturnValue(proc);
@@ -133,9 +173,9 @@ describe('remote-control', () => {
 
       await startRemoteControl('user1', 'tg:123', '/project');
 
-      // Two openSync calls (stdout + stderr), two closeSync calls
-      expect(openSyncSpy).toHaveBeenCalledTimes(2);
-      expect(closeSyncSpy).toHaveBeenCalledTimes(2);
+      // Two child log descriptors, the reservation and two parent fsyncs.
+      expect(openSyncSpy).toHaveBeenCalledTimes(5);
+      expect(closeSyncSpy).toHaveBeenCalledTimes(5);
     });
 
     it('saves state to disk after capturing URL', async () => {
@@ -330,7 +370,7 @@ describe('remote-control', () => {
         await vi.advanceTimersByTimeAsync(0);
         await rejected;
         expect(kill).toHaveBeenCalledWith(-12345, 'SIGTERM');
-        expect(closeSyncSpy).toHaveBeenCalledTimes(2);
+        expect(closeSyncSpy).toHaveBeenCalledTimes(4);
         expect(vi.getTimerCount()).toBe(0);
         vi.useRealTimers();
       },
@@ -347,6 +387,7 @@ describe('remote-control', () => {
       const session = getActiveSession();
       kill.mockClear();
       const writes = writeFileSyncSpy.mock.calls.length;
+      unlinkSyncSpy.mockClear();
       proc.stdin.emit(
         'error',
         Object.assign(new Error('fixed late closed pipe'), { code: 'EPIPE' }),
@@ -366,7 +407,7 @@ describe('remote-control', () => {
       await expect(
         startRemoteControl('user1', 'tg:123', '/project'),
       ).rejects.toBe(defect);
-      expect(closeSyncSpy).toHaveBeenCalledTimes(2);
+      expect(closeSyncSpy).toHaveBeenCalledTimes(4);
       expect(getActiveSession()).toBeNull();
     });
 
@@ -378,6 +419,7 @@ describe('remote-control', () => {
       const denied = Object.assign(new Error('fixed denied'), {
         code: 'EPERM',
       });
+      unlinkSyncSpy.mockClear();
       kill.mockImplementation(() => {
         throw denied;
       });

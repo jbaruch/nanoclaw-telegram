@@ -94,8 +94,7 @@ describe('draft stream failure boundaries', () => {
       await failed;
       if (cleanupFails)
         await expect(stream.cancel()).rejects.toMatchObject({
-          cause: defect,
-          errors: [defect, cleanup],
+          cause: { cause: defect, errors: [defect, cleanup] },
         });
       else await expect(stream.cancel()).rejects.toBe(defect);
       expect(remove).toHaveBeenCalledExactlyOnceWith(17);
@@ -231,7 +230,7 @@ describe('draft stream failure boundaries', () => {
     await expect(stream.finish('fixed final output')).rejects.toBe(failure);
   });
 
-  it('keeps expected Telegram cleanup failure best-effort and propagates an unexpected one', async () => {
+  it('preserves uncertain preview cleanup failures and their native or unexpected causes', async () => {
     const remove = vi.fn(async (_id: number) => {});
     const stream = createDraftStream({
       sendMessage: vi.fn(async () => 17),
@@ -242,10 +241,12 @@ describe('draft stream failure boundaries', () => {
     remove.mockRejectedValueOnce(
       new HttpError('fixed transport failure', new Error('synthetic')),
     );
-    await expect(stream.cancel()).resolves.toBeUndefined();
+    await expect(stream.cancel()).rejects.toMatchObject({
+      cause: expect.any(HttpError),
+    });
     const defect = new TypeError('fixed delete defect');
     remove.mockRejectedValueOnce(defect);
-    await expect(stream.cancel()).rejects.toBe(defect);
+    await expect(stream.cancel()).rejects.toMatchObject({ cause: defect });
     expect(remove).toHaveBeenCalledTimes(2);
     expect(remove).toHaveBeenLastCalledWith(17);
   });

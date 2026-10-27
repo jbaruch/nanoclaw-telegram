@@ -5,6 +5,7 @@ import {
   isTelegramError,
   isOperationalRunError,
   TelegramPartialDeliveryError,
+  TelegramPreviewUncertainError,
 } from './operational-errors.js';
 import fs from 'fs';
 import path from 'path';
@@ -478,7 +479,10 @@ export async function processGroupMessages(chatJid: string): Promise<boolean> {
                 }
                 outputSentToUser = true;
               } catch (error) {
-                if (error instanceof TelegramPartialDeliveryError)
+                if (
+                  error instanceof TelegramPartialDeliveryError ||
+                  error instanceof TelegramPreviewUncertainError
+                )
                   outputSentToUser = true;
                 throw error;
               }
@@ -510,6 +514,10 @@ export async function processGroupMessages(chatJid: string): Promise<boolean> {
   const cleanupErrors = cleanup.flatMap((result) =>
     result.status === 'rejected' ? [result.reason as unknown] : [],
   );
+  const uncertainPreview = cleanupErrors.some(
+    (error) => error instanceof TelegramPreviewUncertainError,
+  );
+  if (uncertainPreview) outputSentToUser = true;
   if (execution.status === 'rejected' || cleanupErrors.length > 0) {
     const errors: unknown[] =
       execution.status === 'rejected'
@@ -523,6 +531,13 @@ export async function processGroupMessages(chatJid: string): Promise<boolean> {
         result.status === 'rejected' ? [result.reason as unknown] : [],
       ),
     );
+    if (uncertainPreview && errors.every(isOperationalRunError)) {
+      logger.error(
+        { group: group.name },
+        'Acknowledged preview retirement is uncertain; preserving cursor without automatic replay. Inspect the preview before retrying.',
+      );
+      return true;
+    }
     if (execution.status === 'rejected' && errors.length === 1) throw errors[0];
     throw new AggregateError(
       errors,

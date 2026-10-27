@@ -1,6 +1,7 @@
 import {
   isTelegramError,
   TelegramDeliveryError,
+  TelegramPreviewUncertainError,
 } from './operational-errors.js';
 import { logger } from './logger.js';
 
@@ -129,10 +130,9 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
           try {
             await opts.deleteMessage(messageId);
           } catch (err) {
-            if (!isTelegramError(err)) throw err;
-            logger.debug(
-              { err },
-              'Could not delete draft preview; check Telegram connectivity',
+            throw new TelegramPreviewUncertainError(
+              'Acknowledged preview could not be deleted; inspect it before retrying output.',
+              { cause: err },
             );
           }
         }
@@ -154,25 +154,21 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
       const [cleanup] = await Promise.allSettled([
         (async () => {
           if (!messageId) return;
-          try {
-            await opts.deleteMessage(messageId);
-          } catch (err) {
-            if (!isTelegramError(err)) throw err;
-            logger.debug(
-              { err },
-              'Could not delete draft preview; check Telegram connectivity',
-            );
-          }
+          await opts.deleteMessage(messageId);
         })(),
       ]);
       if (cleanup.status === 'rejected') {
-        if (unexpectedFailure)
-          throw new AggregateError(
-            [unexpectedFailure.error, cleanup.reason],
-            'Draft update and preview cleanup failed; inspect the preview before retrying.',
-            { cause: unexpectedFailure.error },
-          );
-        throw cleanup.reason;
+        const cause = unexpectedFailure
+          ? new AggregateError(
+              [unexpectedFailure.error, cleanup.reason],
+              'Draft update and preview cleanup failed; inspect the preview before retrying.',
+              { cause: unexpectedFailure.error },
+            )
+          : cleanup.reason;
+        throw new TelegramPreviewUncertainError(
+          'Acknowledged preview deletion is uncertain; preserve input without automatic replay and inspect Telegram.',
+          { cause },
+        );
       }
       throwUnexpectedFailure();
     },

@@ -91,6 +91,84 @@ function dependencies(
 }
 
 describe('task lifecycle recovery', () => {
+  it('keeps preview and session markers active until genuine completion starts the close timer', async () => {
+    task('once');
+    let execute!: () => Promise<void>;
+    let emit!: NonNullable<Parameters<typeof runContainerAgent>[3]>;
+    let settle!: (output: { status: 'success'; result: null }) => void;
+    vi.mocked(runContainerAgent).mockImplementationOnce(
+      async (_group, _input, _process, onOutput) => {
+        emit = onOutput!;
+        return new Promise((resolve) => {
+          settle = resolve;
+        });
+      },
+    );
+    const deps = dependencies((_jid, _id, fn) => {
+      execute = fn;
+    });
+    startSchedulerLoop(deps);
+    await vi.advanceTimersByTimeAsync(0);
+    const pending = execute();
+    await vi.advanceTimersByTimeAsync(0);
+    await emit({
+      status: 'success',
+      result: null,
+      streamText: 'fixed preview',
+    });
+    await vi.advanceTimersByTimeAsync(11000);
+    await emit({
+      status: 'success',
+      result: null,
+      newSessionId: 'fixed-session',
+    });
+    await vi.advanceTimersByTimeAsync(11000);
+    expect(deps.queue.notifyIdle).not.toHaveBeenCalled();
+    expect(deps.queue.closeStdin).not.toHaveBeenCalled();
+    await emit({
+      status: 'success',
+      result: null,
+      completion: 'sdk_turn_completed',
+    });
+    expect(deps.queue.notifyIdle).toHaveBeenCalledExactlyOnceWith('tg:123');
+    await vi.advanceTimersByTimeAsync(9999);
+    expect(deps.queue.closeStdin).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(deps.queue.closeStdin).toHaveBeenCalledExactlyOnceWith('tg:123');
+    settle({ status: 'success', result: null });
+    await pending;
+    expect(database.getTaskById('fixed-task')?.status).toBe('completed');
+  });
+  it('settles an immediate SDK-error native close without waiting for a hard timeout', async () => {
+    task('once');
+    // The native container transport is mocked; actual agent failure exit is
+    // exercised by agent-protocol.test.ts through its unmodified entrypoint.
+    vi.mocked(runContainerAgent).mockResolvedValueOnce({
+      status: 'error',
+      result: null,
+      error: 'SDK query did not complete successfully (error_during_execution)',
+    });
+    let execute!: () => Promise<void>;
+    const enqueue = vi.fn(
+      (_jid: string, _id: string, fn: () => Promise<void>) => {
+        execute = fn;
+      },
+    );
+    const log = vi.spyOn(database, 'logTaskRun');
+    startSchedulerLoop(dependencies(enqueue));
+    await vi.advanceTimersByTimeAsync(0);
+    const now = Date.now();
+    await execute();
+    expect(Date.now()).toBe(now);
+    expect(log).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ status: 'error' }),
+    );
+    expect(database.getTaskById('fixed-task')).toMatchObject({
+      status: 'completed',
+      next_run: null,
+    });
+    expect(vi.getTimerCount()).toBe(1);
+  });
   it.each(['once', 'interval'] as const)(
     'records an unexpected %s failure and advances the task before propagating it',
     async (kind) => {

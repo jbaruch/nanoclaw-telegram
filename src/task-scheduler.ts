@@ -228,9 +228,12 @@ async function runTask(
             result = streamedOutput.result;
             // Forward result to user (sendMessage handles formatting)
             await deps.sendMessage(task.chat_jid, streamedOutput.result);
-            scheduleClose();
           }
-          if (streamedOutput.status === 'success') {
+          if (
+            streamedOutput.status === 'success' &&
+            (streamedOutput.completion !== undefined ||
+              (streamedOutput.result !== null && streamedOutput.result.trim()))
+          ) {
             deps.queue.notifyIdle(task.chat_jid);
             scheduleClose(); // Close promptly even when result is null (e.g. IPC-only tasks)
           }

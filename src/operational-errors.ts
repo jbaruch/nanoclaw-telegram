@@ -7,6 +7,9 @@ export class TelegramDeliveryError extends Error {}
 /** Some native chunks were acknowledged; never automatically replay the prompt. */
 export class TelegramPartialDeliveryError extends TelegramDeliveryError {}
 
+/** An acknowledged preview could not be retired; retain the cursor without replay. */
+export class TelegramPreviewUncertainError extends Error {}
+
 /** A destination lacks a connected channel, operation or native target. */
 export class IpcRouteUnavailableError extends Error {}
 
@@ -61,6 +64,8 @@ export function isOperationalRunError(error: unknown): boolean {
     depth: number,
   ): boolean => {
     if (--remaining < 0 || depth > 8) return false;
+    if (value instanceof TelegramPreviewUncertainError)
+      return classify(value.cause, parents, depth + 1);
     if (value instanceof AggregateError) {
       if (
         parents.has(value) ||

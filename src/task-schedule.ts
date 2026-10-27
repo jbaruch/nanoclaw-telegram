@@ -1,6 +1,54 @@
-import { CronExpressionParser } from 'cron-parser';
+import { CronDate, CronExpressionParser } from 'cron-parser';
 import { TIMEZONE } from './config.js';
 import { isCronInputError } from './operational-errors.js';
+
+/** Offset-free wall times use the configured IANA zone. Check nearby native
+ * offsets and require exactly one matching instant; DST gaps/folds require an
+ * explicit offset instead of silently normalizing or guessing a fold.
+ */
+function onceInstant(value: string, timezone: string): string {
+  if (/(?:Z|[+-]\d{2}:\d{2})$/.test(value))
+    return new Date(value).toISOString();
+  const wall = new Date(value + 'Z');
+  const fields = [
+    wall.getUTCFullYear(),
+    wall.getUTCMonth(),
+    wall.getUTCDate(),
+    wall.getUTCHours(),
+    wall.getUTCMinutes(),
+    wall.getUTCSeconds(),
+    wall.getUTCMilliseconds(),
+  ];
+  const offsets = new Set<number>();
+  for (let hours = -48; hours <= 48; hours += 6)
+    offsets.add(
+      new CronDate(
+        new Date(wall.getTime() + hours * 3600000),
+        timezone,
+      ).getUTCOffset(),
+    );
+  const matches: number[] = [];
+  for (const offset of offsets) {
+    const instant = wall.getTime() - offset * 60000;
+    const local = new CronDate(new Date(instant), timezone);
+    const observed = [
+      local.getFullYear(),
+      local.getMonth(),
+      local.getDate(),
+      local.getHours(),
+      local.getMinutes(),
+      local.getSeconds(),
+      local.getMilliseconds(),
+    ];
+    if (observed.every((field, index) => field === fields[index]))
+      matches.push(instant);
+  }
+  if (matches.length !== 1)
+    throw new SyntaxError(
+      'Local once time is nonexistent or ambiguous in the configured timezone; provide an explicit offset.',
+    );
+  return new Date(matches[0]).toISOString();
+}
 
 /** One runtime-owned schedule grammar for IPC create/update and stored-task reads. */
 export type ParsedTaskSchedule =
@@ -72,7 +120,7 @@ export function parseTaskSchedule(
       !Number.isFinite(timestamp.getTime())
     )
       throw new SyntaxError('Task once schedule must be a valid timestamp.');
-    return { type, nextRun: timestamp.toISOString() };
+    return { type, nextRun: onceInstant(value, TIMEZONE) };
   }
   throw new SyntaxError('Unsupported task schedule type.');
 }
