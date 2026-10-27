@@ -1,3 +1,9 @@
+import Database from 'better-sqlite3';
+import {
+  isFileSystemError,
+  isTelegramError,
+  isCommandError,
+} from './operational-errors.js';
 import { ChildProcess } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
@@ -17,7 +23,10 @@ import {
   updateTaskAfterRun,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { resolveGroupFolderPath } from './group-folder.js';
+import {
+  InvalidGroupFolderError,
+  resolveGroupFolderPath,
+} from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
@@ -65,7 +74,7 @@ export function computeNextRun(task: ScheduledTask): string | null {
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
-  queue: GroupQueue;
+  queue: Pick<GroupQueue, 'enqueueTask' | 'closeStdin' | 'notifyIdle'>;
   onProcess: (
     groupJid: string,
     proc: ChildProcess,
@@ -84,6 +93,7 @@ async function runTask(
   try {
     groupDir = resolveGroupFolderPath(task.group_folder);
   } catch (err) {
+    if (!(err instanceof InvalidGroupFolderError)) throw err;
     const error = err instanceof Error ? err.message : String(err);
     // Stop retry churn for malformed legacy rows.
     updateTask(task.id, { status: 'paused' });
@@ -216,6 +226,13 @@ async function runTask(
     );
   } catch (err) {
     if (closeTimer) clearTimeout(closeTimer);
+    if (
+      !isFileSystemError(err) &&
+      !isTelegramError(err) &&
+      !isCommandError(err) &&
+      !(err instanceof Database.SqliteError)
+    )
+      throw err;
     error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, error }, 'Task failed');
   }
@@ -269,6 +286,8 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         );
       }
     } catch (err) {
+      if (!isFileSystemError(err) && !(err instanceof Database.SqliteError))
+        throw err;
       logger.error({ err }, 'Error in scheduler loop');
     }
 

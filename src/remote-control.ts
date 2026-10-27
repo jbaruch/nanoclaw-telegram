@@ -1,3 +1,4 @@
+import { hasErrno } from './operational-errors.js';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -30,8 +31,8 @@ function saveState(session: RemoteControlSession): void {
 function clearState(): void {
   try {
     fs.unlinkSync(STATE_FILE);
-  } catch {
-    // ignore
+  } catch (err) {
+    if (!hasErrno(err, 'ENOENT')) throw err;
   }
 }
 
@@ -39,7 +40,8 @@ function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (err) {
+    if (!hasErrno(err, 'ESRCH')) throw err;
     return false;
   }
 }
@@ -52,12 +54,29 @@ export function restoreRemoteControl(): void {
   let data: string;
   try {
     data = fs.readFileSync(STATE_FILE, 'utf-8');
-  } catch {
+  } catch (err) {
+    if (!hasErrno(err, 'ENOENT')) throw err;
     return;
   }
 
   try {
-    const session: RemoteControlSession = JSON.parse(data);
+    const parsed: unknown = JSON.parse(data);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new SyntaxError('Remote Control state must be an object');
+    }
+    const candidate = parsed as Record<string, unknown>;
+    if (
+      typeof candidate.pid !== 'number' ||
+      !Number.isSafeInteger(candidate.pid) ||
+      candidate.pid <= 0 ||
+      typeof candidate.url !== 'string' ||
+      typeof candidate.startedBy !== 'string' ||
+      typeof candidate.startedInChat !== 'string' ||
+      typeof candidate.startedAt !== 'string'
+    ) {
+      throw new SyntaxError('Remote Control state has invalid session fields');
+    }
+    const session = candidate as unknown as RemoteControlSession;
     if (session.pid && isProcessAlive(session.pid)) {
       activeSession = session;
       logger.info(
@@ -67,7 +86,8 @@ export function restoreRemoteControl(): void {
     } else {
       clearState();
     }
-  } catch {
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     clearState();
   }
 }
@@ -114,9 +134,10 @@ export async function startRemoteControl(
       stdio: ['pipe', stdoutFd, stderrFd],
       detached: true,
     });
-  } catch (err: any) {
+  } catch (err) {
     fs.closeSync(stdoutFd);
     fs.closeSync(stderrFd);
+    if (!hasErrno(err, 'ENOENT') && !hasErrno(err, 'EACCES')) throw err;
     return { ok: false, error: `Failed to start: ${err.message}` };
   }
 
@@ -153,7 +174,8 @@ export async function startRemoteControl(
       let content = '';
       try {
         content = fs.readFileSync(STDOUT_FILE, 'utf-8');
-      } catch {
+      } catch (err) {
+        if (!hasErrno(err, 'ENOENT')) throw err;
         // File might not have content yet
       }
 
@@ -181,10 +203,12 @@ export async function startRemoteControl(
       if (Date.now() - startTime >= URL_TIMEOUT_MS) {
         try {
           process.kill(-pid, 'SIGTERM');
-        } catch {
+        } catch (err) {
+          if (!hasErrno(err, 'ESRCH')) throw err;
           try {
             process.kill(pid, 'SIGTERM');
-          } catch {
+          } catch (err) {
+            if (!hasErrno(err, 'ESRCH')) throw err;
             // already dead
           }
         }
@@ -214,7 +238,8 @@ export function stopRemoteControl():
   const { pid } = activeSession;
   try {
     process.kill(pid, 'SIGTERM');
-  } catch {
+  } catch (err) {
+    if (!hasErrno(err, 'ESRCH')) throw err;
     // already dead
   }
   activeSession = null;

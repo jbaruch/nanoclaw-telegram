@@ -1,9 +1,10 @@
+import { isFileSystemError } from './operational-errors.js';
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
 import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
-import { isValidGroupFolder } from './group-folder.js';
+import { InvalidGroupFolderError, isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
   NewMessage,
@@ -15,6 +16,10 @@ import {
 let db: Database.Database;
 
 function createSchema(database: Database.Database): void {
+  const hasColumn = (table: string, column: string): boolean =>
+    (database.pragma(`table_info(${table})`) as { name: string }[]).some(
+      (row) => row.name === column,
+    );
   database.exec(`
     CREATE TABLE IF NOT EXISTS chats (
       jid TEXT PRIMARY KEY,
@@ -96,23 +101,19 @@ function createSchema(database: Database.Database): void {
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
-  try {
+  if (!hasColumn('scheduled_tasks', 'context_mode')) {
     database.exec(
       `ALTER TABLE scheduled_tasks ADD COLUMN context_mode TEXT DEFAULT 'isolated'`,
     );
-  } catch {
-    /* column already exists */
   }
 
   // Add script column if it doesn't exist (migration for existing DBs)
-  try {
+  if (!hasColumn('scheduled_tasks', 'script')) {
     database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN script TEXT`);
-  } catch {
-    /* column already exists */
   }
 
   // Add is_bot_message column if it doesn't exist (migration for existing DBs)
-  try {
+  if (!hasColumn('messages', 'is_bot_message')) {
     database.exec(
       `ALTER TABLE messages ADD COLUMN is_bot_message INTEGER DEFAULT 0`,
     );
@@ -120,12 +121,10 @@ function createSchema(database: Database.Database): void {
     database
       .prepare(`UPDATE messages SET is_bot_message = 1 WHERE content LIKE ?`)
       .run(`${ASSISTANT_NAME}:%`);
-  } catch {
-    /* column already exists */
   }
 
   // Add is_main column if it doesn't exist (migration for existing DBs)
-  try {
+  if (!hasColumn('registered_groups', 'is_main')) {
     database.exec(
       `ALTER TABLE registered_groups ADD COLUMN is_main INTEGER DEFAULT 0`,
     );
@@ -133,14 +132,16 @@ function createSchema(database: Database.Database): void {
     database.exec(
       `UPDATE registered_groups SET is_main = 1 WHERE folder = 'main' OR folder LIKE '%\\_main' ESCAPE '\\'`,
     );
-  } catch {
-    /* column already exists */
   }
 
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
-  try {
+  const needsChatBackfill =
+    !hasColumn('chats', 'channel') || !hasColumn('chats', 'is_group');
+  if (!hasColumn('chats', 'channel'))
     database.exec(`ALTER TABLE chats ADD COLUMN channel TEXT`);
+  if (!hasColumn('chats', 'is_group'))
     database.exec(`ALTER TABLE chats ADD COLUMN is_group INTEGER DEFAULT 0`);
+  if (needsChatBackfill) {
     // Backfill from JID patterns
     database.exec(
       `UPDATE chats SET channel = 'whatsapp', is_group = 1 WHERE jid LIKE '%@g.us'`,
@@ -154,8 +155,6 @@ function createSchema(database: Database.Database): void {
     database.exec(
       `UPDATE chats SET channel = 'telegram', is_group = 0 WHERE jid LIKE 'tg:%'`,
     );
-  } catch {
-    /* columns already exist */
   }
 }
 
@@ -164,7 +163,7 @@ export function initDatabase(): void {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
   db = new Database(dbPath);
-  createSchema(db);
+  db.transaction(() => createSchema(db))();
 
   // Migrate from JSON files if they exist
   migrateJsonState();
@@ -173,7 +172,7 @@ export function initDatabase(): void {
 /** @internal - for tests only. Creates a fresh in-memory database. */
 export function _initTestDatabase(): void {
   db = new Database(':memory:');
-  createSchema(db);
+  db.transaction(() => createSchema(db))();
 }
 
 /** @internal - for tests only. */
@@ -709,7 +708,9 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   if (!isValidGroupFolder(group.folder)) {
-    throw new Error(`Invalid group folder "${group.folder}" for JID ${jid}`);
+    throw new InvalidGroupFolderError(
+      `Invalid group folder "${group.folder}" for JID ${jid}`,
+    );
   }
   db.prepare(
     `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)
@@ -772,7 +773,12 @@ function migrateJsonState(): void {
       const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       fs.renameSync(filePath, `${filePath}.migrated`);
       return data;
-    } catch {
+    } catch (err) {
+      if (!(err instanceof SyntaxError) && !isFileSystemError(err)) throw err;
+      logger.warn(
+        { err, filename },
+        'Could not migrate JSON state; repair the file or filesystem and restart',
+      );
       return null;
     }
   };
@@ -815,6 +821,7 @@ function migrateJsonState(): void {
       try {
         setRegisteredGroup(jid, group);
       } catch (err) {
+        if (!(err instanceof InvalidGroupFolderError)) throw err;
         logger.warn(
           { jid, folder: group.folder, err },
           'Skipping migrated registered group with invalid folder',

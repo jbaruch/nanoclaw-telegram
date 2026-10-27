@@ -1,3 +1,9 @@
+import Database from 'better-sqlite3';
+import {
+  isFileSystemError,
+  isTelegramError,
+  isCommandError,
+} from './operational-errors.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -46,7 +52,10 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { resolveGroupFolderPath } from './group-folder.js';
+import {
+  InvalidGroupFolderError,
+  resolveGroupFolderPath,
+} from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
@@ -92,8 +101,20 @@ async function sendWithRetry(
       return;
     } catch (err: unknown) {
       const isLast = attempt === SEND_RETRY_ATTEMPTS - 1;
-      const code = (err as any)?.error?.code || (err as any)?.code || '';
-      const httpCode = (err as any)?.error_code ?? 0;
+      const details = err !== null && typeof err === 'object' ? err : {};
+      const nested =
+        'error' in details &&
+        details.error !== null &&
+        typeof details.error === 'object'
+          ? details.error
+          : {};
+      const code =
+        ('code' in nested ? nested.code : undefined) ||
+        ('code' in details ? details.code : '');
+      const httpCode =
+        'error_code' in details && typeof details.error_code === 'number'
+          ? details.error_code
+          : 0;
       const isTransient =
         /ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|EPIPE/i.test(
           String(code),
@@ -155,7 +176,8 @@ function loadState(): void {
   const agentTs = getRouterState('last_agent_timestamp');
   try {
     lastAgentTimestamp = agentTs ? JSON.parse(agentTs) : {};
-  } catch {
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
@@ -198,6 +220,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   try {
     groupDir = resolveGroupFolderPath(group.folder);
   } catch (err) {
+    if (!(err instanceof InvalidGroupFolderError)) throw err;
     logger.warn(
       { jid, folder: group.folder, err },
       'Rejecting group registration with invalid folder',
@@ -363,6 +386,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             try {
               await sendWithRetry(channel, chatJid, text);
             } catch (err) {
+              if (!isTelegramError(err)) throw err;
               logger.error(
                 { group: group.name, err },
                 'Failed to send agent output after retries',
@@ -373,6 +397,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           try {
             await sendWithRetry(channel, chatJid, text);
           } catch (err) {
+            if (!isTelegramError(err)) throw err;
             logger.error(
               { group: group.name, err },
               'Failed to send agent output after retries',
@@ -502,6 +527,13 @@ async function runAgent(
 
     return 'success';
   } catch (err) {
+    if (
+      !isFileSystemError(err) &&
+      !isCommandError(err) &&
+      !isTelegramError(err) &&
+      !(err instanceof Database.SqliteError)
+    )
+      throw err;
     logger.error({ group: group.name, err }, 'Agent error');
     return 'error';
   }
@@ -604,6 +636,12 @@ async function startMessageLoop(): Promise<void> {
         }
       }
     } catch (err) {
+      if (
+        !isFileSystemError(err) &&
+        !isTelegramError(err) &&
+        !(err instanceof Database.SqliteError)
+      )
+        throw err;
       logger.error({ err }, 'Error in message loop');
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));

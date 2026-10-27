@@ -1,3 +1,4 @@
+import { isTelegramError } from './operational-errors.js';
 import { logger } from './logger.js';
 
 export interface DraftStream {
@@ -46,6 +47,7 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
       }
       lastSentText = text;
     } catch (err) {
+      if (!isTelegramError(err)) throw err;
       logger.debug({ err }, 'Draft stream send/edit failed');
     }
   }
@@ -85,8 +87,12 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
         if (messageId) {
           try {
             await opts.deleteMessage(messageId);
-          } catch {
-            // ignore — best effort cleanup
+          } catch (err) {
+            if (!isTelegramError(err)) throw err;
+            logger.debug(
+              { err },
+              'Could not delete draft preview; check Telegram connectivity',
+            );
           }
         }
         return false;
@@ -108,8 +114,12 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
       if (messageId) {
         try {
           await opts.deleteMessage(messageId);
-        } catch {
-          // ignore
+        } catch (err) {
+          if (!isTelegramError(err)) throw err;
+          logger.debug(
+            { err },
+            'Could not delete draft preview; check Telegram connectivity',
+          );
         }
       }
     },

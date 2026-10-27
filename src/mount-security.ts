@@ -1,3 +1,4 @@
+import { isFileSystemError } from './operational-errors.js';
 /**
  * Mount Security Module for NanoClaw
  *
@@ -71,16 +72,19 @@ export function loadMountAllowlist(): MountAllowlist | null {
     const allowlist = JSON.parse(content) as MountAllowlist;
 
     // Validate structure
+    if (!allowlist || typeof allowlist !== 'object') {
+      throw new SyntaxError('Mount allowlist must be an object');
+    }
     if (!Array.isArray(allowlist.allowedRoots)) {
-      throw new Error('allowedRoots must be an array');
+      throw new SyntaxError('allowedRoots must be an array');
     }
 
     if (!Array.isArray(allowlist.blockedPatterns)) {
-      throw new Error('blockedPatterns must be an array');
+      throw new SyntaxError('blockedPatterns must be an array');
     }
 
     if (typeof allowlist.nonMainReadOnly !== 'boolean') {
-      throw new Error('nonMainReadOnly must be a boolean');
+      throw new SyntaxError('nonMainReadOnly must be a boolean');
     }
 
     // Merge with default blocked patterns
@@ -101,6 +105,7 @@ export function loadMountAllowlist(): MountAllowlist | null {
 
     return cachedAllowlist;
   } catch (err) {
+    if (!(err instanceof SyntaxError) && !isFileSystemError(err)) throw err;
     allowlistLoadError = err instanceof Error ? err.message : String(err);
     logger.error(
       {
@@ -134,7 +139,8 @@ function expandPath(p: string): string {
 function getRealPath(p: string): string | null {
   try {
     return fs.realpathSync(p);
-  } catch {
+  } catch (err) {
+    if (!isFileSystemError(err)) throw err;
     return null;
   }
 }

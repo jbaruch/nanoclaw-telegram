@@ -1,3 +1,4 @@
+import { isFileSystemError } from './operational-errors.js';
 import fs from 'fs';
 import path from 'path';
 import { logger } from './logger.js';
@@ -14,6 +15,7 @@ export function readEnvFile(keys: string[]): Record<string, string> {
   try {
     content = fs.readFileSync(envFile, 'utf-8');
   } catch (err) {
+    if (!isFileSystemError(err)) throw err;
     logger.debug({ err }, '.env file not found, using defaults');
     return {};
   }

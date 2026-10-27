@@ -605,7 +605,7 @@ describe('schedule_task context_mode', () => {
         prompt: 'bad context',
         schedule_type: 'once',
         schedule_value: '2025-06-01T00:00:00',
-        context_mode: 'bogus' as any,
+        context_mode: 'bogus',
         targetJid: 'other@g.us',
       },
       'whatsapp_main',

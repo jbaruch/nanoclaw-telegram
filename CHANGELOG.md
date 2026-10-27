@@ -4,6 +4,10 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+### Runtime diagnostics
+
+- Type Telegram handlers and test doubles with the installed SDK contracts. Handle expected filesystem, database, command and provider failures explicitly; let unexpected implementation errors propagate. Keep legacy schema migration transactional and retryable after a failed backfill, and report only successfully stopped orphan containers.
+
 ### Runtime compatibility
 
 - Require Node.js 24 or newer for the SQLite 13 upgrade. CI and the exact installation release come from `.nvmrc`; the bootstrap rejects older or malformed runtime versions before installing dependencies. `setup/install-node.sh` installs that pinned release through a separately pinned nvm checkout without changing shell profiles, and returns a JSON `bin_dir` for subsequent setup commands. Downloads are validated in a temporary sibling before installation; incomplete managed caches are preserved and replaced, so retrying an interrupted clone needs no manual cleanup. Sourcing it exposes its entrypoint without installing or changing shell state. Bootstrap regressions run with their own formatting, lint and TypeScript gates in CI.

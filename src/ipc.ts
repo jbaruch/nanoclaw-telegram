@@ -1,3 +1,9 @@
+import Database from 'better-sqlite3';
+import {
+  isFileSystemError,
+  isTelegramError,
+  isCronInputError,
+} from './operational-errors.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -51,6 +57,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
         return stat.isDirectory() && f !== 'errors';
       });
     } catch (err) {
+      if (!isFileSystemError(err)) throw err;
       logger.error({ err }, 'Error reading IPC base directory');
       setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
       return;
@@ -79,6 +86,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              if (!data || typeof data !== 'object' || Array.isArray(data))
+                throw new SyntaxError('IPC request must be an object');
               if (
                 data.type === 'react_to_message' &&
                 data.chatJid &&
@@ -130,6 +139,13 @@ export function startIpcWatcher(deps: IpcDeps): void {
               }
               fs.unlinkSync(filePath);
             } catch (err) {
+              if (
+                !(err instanceof SyntaxError) &&
+                !isFileSystemError(err) &&
+                !isTelegramError(err) &&
+                !(err instanceof Database.SqliteError)
+              )
+                throw err;
               logger.error(
                 { file, sourceGroup, err },
                 'Error processing IPC message',
@@ -144,6 +160,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
           }
         }
       } catch (err) {
+        if (!isFileSystemError(err)) throw err;
         logger.error(
           { err, sourceGroup },
           'Error reading IPC messages directory',
@@ -160,10 +177,19 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(tasksDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              if (!data || typeof data !== 'object' || Array.isArray(data))
+                throw new SyntaxError('IPC request must be an object');
               // Pass source group identity to processTaskIpc for authorization
               await processTaskIpc(data, sourceGroup, isMain, deps);
               fs.unlinkSync(filePath);
             } catch (err) {
+              if (
+                !(err instanceof SyntaxError) &&
+                !isFileSystemError(err) &&
+                !isTelegramError(err) &&
+                !(err instanceof Database.SqliteError)
+              )
+                throw err;
               logger.error(
                 { file, sourceGroup, err },
                 'Error processing IPC task',
@@ -178,6 +204,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
           }
         }
       } catch (err) {
+        if (!isFileSystemError(err)) throw err;
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
       }
     }
@@ -255,7 +282,8 @@ export async function processTaskIpc(
               tz: TIMEZONE,
             });
             nextRun = interval.next().toISOString();
-          } catch {
+          } catch (err) {
+            if (!isCronInputError(err)) throw err;
             logger.warn(
               { scheduleValue: data.schedule_value },
               'Invalid cron expression',
@@ -411,7 +439,8 @@ export async function processTaskIpc(
                 { tz: TIMEZONE },
               );
               updates.next_run = interval.next().toISOString();
-            } catch {
+            } catch (err) {
+              if (!isCronInputError(err)) throw err;
               logger.warn(
                 { taskId: data.taskId, value: updatedTask.schedule_value },
                 'Invalid cron in task update',

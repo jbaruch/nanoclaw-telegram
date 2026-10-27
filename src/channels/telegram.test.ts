@@ -1,3 +1,5 @@
+import { HttpError } from 'grammy';
+import type { MessageEntity } from 'grammy/types';
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
 // --- Mocks ---
@@ -26,11 +28,21 @@ vi.mock('../logger.js', () => ({
 
 // --- Grammy mock ---
 
-type Handler = (...args: any[]) => any;
+type Handler = (context: unknown) => unknown;
+interface MockBotState {
+  commandHandlers: Map<string, Handler>;
+  filterHandlers: Map<string, Handler[]>;
+  errorHandler: Handler | null;
+  api: {
+    sendMessage: ReturnType<typeof vi.fn>;
+    sendChatAction: ReturnType<typeof vi.fn>;
+  };
+}
 
-const botRef = vi.hoisted(() => ({ current: null as any }));
+const botRef = vi.hoisted(() => ({ current: null as MockBotState | null }));
 
-vi.mock('grammy', () => ({
+vi.mock('grammy', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('grammy')>()),
   Bot: class MockBot {
     token: string;
     commandHandlers = new Map<string, Handler>();
@@ -38,6 +50,11 @@ vi.mock('grammy', () => ({
     errorHandler: Handler | null = null;
 
     api = {
+      getFile: vi
+        .fn()
+        .mockRejectedValue(
+          new HttpError('Synthetic unavailable file', new Error('ECONNRESET')),
+        ),
       sendMessage: vi.fn().mockResolvedValue(undefined),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
     };
@@ -61,7 +78,9 @@ vi.mock('grammy', () => ({
       this.errorHandler = handler;
     }
 
-    start(opts: { onStart: (botInfo: any) => void }) {
+    start(opts: {
+      onStart: (botInfo: { username: string; id: number }) => void;
+    }) {
       opts.onStart({ username: 'andy_ai_bot', id: 12345 });
     }
 
@@ -105,7 +124,7 @@ function createTextCtx(overrides: {
   username?: string;
   messageId?: number;
   date?: number;
-  entities?: any[];
+  entities?: MessageEntity[];
 }) {
   const chatId = overrides.chatId ?? 100200300;
   const chatType = overrides.chatType ?? 'group';
@@ -117,8 +136,8 @@ function createTextCtx(overrides: {
     },
     from: {
       id: overrides.fromId ?? 99001,
-      first_name: overrides.firstName ?? 'Alice',
-      username: overrides.username ?? 'alice_user',
+      first_name: (overrides.firstName ?? 'Alice') as string | undefined,
+      username: (overrides.username ?? 'alice_user') as string | undefined,
     },
     message: {
       text: overrides.text,
@@ -139,7 +158,7 @@ function createMediaCtx(overrides: {
   date?: number;
   messageId?: number;
   caption?: string;
-  extra?: Record<string, any>;
+  extra?: Record<string, unknown>;
 }) {
   const chatId = overrides.chatId ?? 100200300;
   return {
@@ -150,7 +169,7 @@ function createMediaCtx(overrides: {
     },
     from: {
       id: overrides.fromId ?? 99001,
-      first_name: overrides.firstName ?? 'Alice',
+      first_name: (overrides.firstName ?? 'Alice') as string | undefined,
       username: 'alice_user',
     },
     message: {
@@ -164,6 +183,7 @@ function createMediaCtx(overrides: {
 }
 
 function currentBot() {
+  if (!botRef.current) throw new Error('Test bot not connected');
   return botRef.current;
 }
 
@@ -344,7 +364,7 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       const ctx = createTextCtx({ text: 'Hi' });
-      ctx.from.first_name = undefined as any;
+      ctx.from.first_name = undefined;
       await triggerTextMessage(ctx);
 
       expect(opts.onMessage).toHaveBeenCalledWith(
@@ -359,8 +379,8 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       const ctx = createTextCtx({ text: 'Hi', fromId: 42 });
-      ctx.from.first_name = undefined as any;
-      ctx.from.username = undefined as any;
+      ctx.from.first_name = undefined;
+      ctx.from.username = undefined;
       await triggerTextMessage(ctx);
 
       expect(opts.onMessage).toHaveBeenCalledWith(
@@ -792,13 +812,24 @@ describe('TelegramChannel', () => {
       expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
     });
 
+    it('propagates a programming failure without a plain-text retry', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      const defect = new TypeError('fixed channel defect');
+      currentBot().api.sendMessage.mockRejectedValueOnce(defect);
+      await expect(
+        channel.sendMessage('tg:100200300', 'fixed text'),
+      ).rejects.toBe(defect);
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
     it('handles send failure gracefully', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
 
       currentBot().api.sendMessage.mockRejectedValueOnce(
-        new Error('Network error'),
+        new HttpError('Network error', new Error('ECONNRESET')),
       );
 
       // Should not throw
@@ -889,7 +920,7 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       currentBot().api.sendChatAction.mockRejectedValueOnce(
-        new Error('Rate limited'),
+        new HttpError('Rate limited', new Error('ETIMEDOUT')),
       );
 
       await expect(

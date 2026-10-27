@@ -1,3 +1,4 @@
+import { isFileSystemError } from './operational-errors.js';
 import fs from 'fs';
 
 import { SENDER_ALLOWLIST_PATH } from './config.js';
@@ -39,6 +40,7 @@ export function loadSenderAllowlist(
   try {
     raw = fs.readFileSync(filePath, 'utf-8');
   } catch (err: unknown) {
+    if (!isFileSystemError(err)) throw err;
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return DEFAULT_CONFIG;
     logger.warn(
       { err, path: filePath },
@@ -50,7 +52,8 @@ export function loadSenderAllowlist(
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch {
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     logger.warn({ path: filePath }, 'sender-allowlist: invalid JSON');
     return DEFAULT_CONFIG;
   }

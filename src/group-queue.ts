@@ -1,3 +1,9 @@
+import Database from 'better-sqlite3';
+import {
+  isFileSystemError,
+  isCommandError,
+  isTelegramError,
+} from './operational-errors.js';
 import { ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -172,7 +178,12 @@ export class GroupQueue {
       fs.writeFileSync(tempPath, JSON.stringify({ type: 'message', text }));
       fs.renameSync(tempPath, filepath);
       return true;
-    } catch {
+    } catch (err) {
+      if (!isFileSystemError(err)) throw err;
+      logger.warn(
+        { groupJid, err },
+        'Could not pipe input; inspect group IPC permissions before retrying',
+      );
       return false;
     }
   }
@@ -188,8 +199,12 @@ export class GroupQueue {
     try {
       fs.mkdirSync(inputDir, { recursive: true });
       fs.writeFileSync(path.join(inputDir, '_close'), '');
-    } catch {
-      // ignore
+    } catch (err) {
+      if (!isFileSystemError(err)) throw err;
+      logger.warn(
+        { groupJid, err },
+        'Could not write close sentinel; inspect group IPC permissions',
+      );
     }
   }
 
@@ -219,6 +234,13 @@ export class GroupQueue {
         }
       }
     } catch (err) {
+      if (
+        !isFileSystemError(err) &&
+        !isCommandError(err) &&
+        !isTelegramError(err) &&
+        !(err instanceof Database.SqliteError)
+      )
+        throw err;
       logger.error({ groupJid, err }, 'Error processing messages for group');
       this.scheduleRetry(groupJid, state);
     } finally {
@@ -247,6 +269,13 @@ export class GroupQueue {
     try {
       await task.fn();
     } catch (err) {
+      if (
+        !isFileSystemError(err) &&
+        !isCommandError(err) &&
+        !isTelegramError(err) &&
+        !(err instanceof Database.SqliteError)
+      )
+        throw err;
       logger.error({ groupJid, taskId: task.id, err }, 'Error running task');
     } finally {
       state.active = false;

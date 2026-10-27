@@ -1,7 +1,13 @@
+import {
+  isFileSystemError,
+  isNetworkError,
+  isTelegramError,
+} from '../operational-errors.js';
 import fs from 'fs';
 import https from 'https';
 import path from 'path';
-import { Api, Bot } from 'grammy';
+import { Api, Bot, type Context, type Filter } from 'grammy';
+import type { ReactionTypeEmoji } from 'grammy/types';
 import OpenAI from 'openai';
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
@@ -43,6 +49,7 @@ async function sendTelegramMessage(
       parse_mode: 'Markdown',
     });
   } catch (err) {
+    if (!isTelegramError(err)) throw err;
     // Fallback: send as plain text if Markdown parsing fails
     logger.debug({ err }, 'Markdown send failed, falling back to plain text');
     await api.sendMessage(chatId, text, options);
@@ -177,12 +184,14 @@ async function downloadTelegramFile(bot: Bot, fileId: string): Promise<Buffer> {
   const url = `https://api.telegram.org/file/bot${token}/${filePath}`;
 
   return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
-      const chunks: Buffer[] = [];
-      res.on('data', (chunk: Buffer) => chunks.push(chunk));
-      res.on('end', () => resolve(Buffer.concat(chunks)));
-      res.on('error', reject);
-    });
+    https
+      .get(url, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => resolve(Buffer.concat(chunks)));
+        res.on('error', reject);
+      })
+      .on('error', reject);
   });
 }
 
@@ -209,6 +218,12 @@ async function saveDocument(
     );
     return `/workspace/group/documents/${safeName}`;
   } catch (err) {
+    if (
+      !isFileSystemError(err) &&
+      !isNetworkError(err) &&
+      !isTelegramError(err)
+    )
+      throw err;
     logger.error({ err, fileName }, 'Failed to save Telegram document');
     return null;
   }
@@ -240,6 +255,12 @@ async function savePhoto(
     );
     return `/workspace/group/images/${filename}`;
   } catch (err) {
+    if (
+      !isFileSystemError(err) &&
+      !isNetworkError(err) &&
+      !isTelegramError(err)
+    )
+      throw err;
     logger.error({ err }, 'Failed to save Telegram photo');
     return null;
   }
@@ -266,6 +287,7 @@ async function transcribeVoice(audioBuffer: Buffer): Promise<string | null> {
     });
     return transcription.text;
   } catch (err) {
+    if (!(err instanceof OpenAI.APIError)) throw err;
     logger.error({ err }, 'OpenAI transcription failed');
     return null;
   }
@@ -292,6 +314,7 @@ export async function initBotPool(tokens: string[]): Promise<void> {
         'Pool bot initialized',
       );
     } catch (err) {
+      if (!isTelegramError(err)) throw err;
       logger.error({ err }, 'Failed to initialize pool bot');
     }
   }
@@ -332,6 +355,7 @@ export async function sendPoolMessage(
         'Assigned and renamed pool bot',
       );
     } catch (err) {
+      if (!isTelegramError(err)) throw err;
       logger.warn(
         { sender, err },
         'Failed to rename pool bot (sending anyway)',
@@ -357,6 +381,7 @@ export async function sendPoolMessage(
       'Pool message sent',
     );
   } catch (err) {
+    if (!isTelegramError(err)) throw err;
     logger.error({ chatId, sender, err }, 'Failed to send pool message');
   }
 }
@@ -387,7 +412,7 @@ export class TelegramChannel implements Channel {
       const chatName =
         chatType === 'private'
           ? ctx.from?.first_name || 'Private'
-          : (ctx.chat as any).title || 'Unknown';
+          : ('title' in ctx.chat ? ctx.chat.title : undefined) || 'Unknown';
 
       ctx.reply(
         `Chat ID: \`tg:${chatId}\`\nName: ${chatName}\nType: ${chatType}`,
@@ -426,7 +451,7 @@ export class TelegramChannel implements Channel {
       const chatName =
         ctx.chat.type === 'private'
           ? senderName
-          : (ctx.chat as any).title || chatJid;
+          : ('title' in ctx.chat ? ctx.chat.title : undefined) || chatJid;
 
       // Translate Telegram @bot_username mentions into TRIGGER_PATTERN format.
       // Telegram @mentions (e.g., @andy_ai_bot) won't match TRIGGER_PATTERN
@@ -503,7 +528,10 @@ export class TelegramChannel implements Channel {
     });
 
     // Handle non-text messages with placeholders so the agent knows something was sent
-    const storeNonText = (ctx: any, placeholder: string) => {
+    const storeNonText = (
+      ctx: Filter<Context, 'message'>,
+      placeholder: string,
+    ) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) return;
@@ -621,6 +649,13 @@ export class TelegramChannel implements Channel {
           );
         }
       } catch (err) {
+        if (
+          !isFileSystemError(err) &&
+          !isNetworkError(err) &&
+          !isTelegramError(err) &&
+          !(err instanceof OpenAI.APIError)
+        )
+          throw err;
         logger.error({ err }, 'Failed to process voice message');
         content = '[Voice message - transcription failed]';
       }
@@ -792,6 +827,7 @@ export class TelegramChannel implements Channel {
         'Telegram message sent',
       );
     } catch (err) {
+      if (!isTelegramError(err)) throw err;
       logger.error({ jid, err }, 'Failed to send Telegram message');
     }
   }
@@ -818,6 +854,7 @@ export class TelegramChannel implements Channel {
       const numericId = jid.replace(/^tg:/, '');
       await this.bot.api.sendChatAction(numericId, 'typing');
     } catch (err) {
+      if (!isTelegramError(err)) throw err;
       logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
     }
   }
@@ -834,10 +871,13 @@ export class TelegramChannel implements Channel {
       await this.bot.api.raw.setMessageReaction({
         chat_id: numericId,
         message_id: msgId,
-        reaction: emoji ? [{ type: 'emoji', emoji: emoji as any }] : [],
+        reaction: emoji
+          ? [{ type: 'emoji', emoji: emoji as ReactionTypeEmoji['emoji'] }]
+          : [],
       });
       logger.info({ jid, messageId, emoji }, 'Telegram reaction sent');
     } catch (err) {
+      if (!isTelegramError(err)) throw err;
       logger.error(
         { jid, messageId, emoji, err },
         'Failed to send Telegram reaction',

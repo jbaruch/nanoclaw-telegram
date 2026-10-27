@@ -41,7 +41,7 @@ describe('task scheduler', () => {
     startSchedulerLoop({
       registeredGroups: () => ({}),
       getSessions: () => ({}),
-      queue: { enqueueTask } as any,
+      queue: { enqueueTask, closeStdin: vi.fn(), notifyIdle: vi.fn() },
       onProcess: () => {},
       sendMessage: async () => {},
     });

@@ -6,7 +6,8 @@ export function isValidTimezone(tz: string): boolean {
   try {
     Intl.DateTimeFormat(undefined, { timeZone: tz });
     return true;
-  } catch {
+  } catch (err) {
+    if (!(err instanceof RangeError)) throw err;
     return false;
   }
 }

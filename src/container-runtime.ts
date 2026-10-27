@@ -1,3 +1,4 @@
+import { isCommandError } from './operational-errors.js';
 /**
  * Container runtime abstraction for NanoClaw.
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
@@ -83,20 +84,27 @@ export function cleanupOrphans(): void {
       { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
     );
     const orphans = output.trim().split('\n').filter(Boolean);
+    const stopped: string[] = [];
     for (const name of orphans) {
       try {
         stopContainer(name);
-      } catch {
-        /* already stopped */
+        stopped.push(name);
+      } catch (err) {
+        if (!isCommandError(err)) throw err;
+        logger.warn(
+          { name, err },
+          'Could not stop orphan; inspect it with docker ps before restarting',
+        );
       }
     }
-    if (orphans.length > 0) {
+    if (stopped.length > 0) {
       logger.info(
-        { count: orphans.length, names: orphans },
+        { count: stopped.length, names: stopped },
         'Stopped orphaned containers',
       );
     }
   } catch (err) {
+    if (!isCommandError(err)) throw err;
     logger.warn({ err }, 'Failed to clean up orphaned containers');
   }
 }
