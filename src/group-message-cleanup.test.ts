@@ -35,6 +35,8 @@ import {
   _setRegisteredGroups,
   sendWithRetry,
   sendIpcMessage,
+  sendIpcReaction,
+  sendScheduledMessage,
 } from './index.js';
 import { getMessagesSince, setRouterState } from './db.js';
 import { findChannel } from './router.js';
@@ -278,4 +280,124 @@ it('passes the actual preview failure signal into the native run owner', async (
   expect(vi.mocked(runContainerAgent).mock.calls.at(-1)?.[4]).toBe(
     draft.failure,
   );
+});
+
+it('does not deduplicate an unacknowledged failure, and only suppresses after a successful retry', async () => {
+  const failure = new HttpError(
+    'fixed failed delivery',
+    new Error('synthetic'),
+  );
+  vi.mocked(channel.sendMessage).mockRejectedValueOnce(failure);
+  await expect(
+    sendIpcMessage('tg:ack-dedup', 'fixed acknowledgment payload'),
+  ).rejects.toBe(failure);
+  await expect(
+    sendIpcMessage('tg:ack-dedup', 'fixed acknowledgment payload'),
+  ).resolves.toBeUndefined();
+  await expect(
+    sendIpcMessage('tg:ack-dedup', 'fixed acknowledgment payload'),
+  ).resolves.toBeUndefined();
+  expect(channel.sendMessage).toHaveBeenCalledTimes(2);
+});
+
+it('makes concurrent duplicate callers await the same actual acknowledgment', async () => {
+  let reject!: (error: unknown) => void;
+  const failure = new HttpError(
+    'fixed pending delivery failure',
+    new Error('synthetic'),
+  );
+  vi.mocked(channel.sendMessage).mockImplementationOnce(
+    () =>
+      new Promise<void>((_resolve, fail) => {
+        reject = fail;
+      }),
+  );
+  const first = sendIpcMessage('tg:concurrent-ack', 'fixed concurrent payload');
+  const second = sendIpcMessage(
+    'tg:concurrent-ack',
+    'fixed concurrent payload',
+  );
+  const one = expect(first).rejects.toBe(failure),
+    two = expect(second).rejects.toBe(failure);
+  expect(channel.sendMessage).toHaveBeenCalledTimes(1);
+  reject(failure);
+  await one;
+  await two;
+  await expect(
+    sendIpcMessage('tg:concurrent-ack', 'fixed concurrent payload'),
+  ).resolves.toBeUndefined();
+  expect(channel.sendMessage).toHaveBeenCalledTimes(2);
+});
+
+it('refuses unavailable production reaction routes and capabilities', async () => {
+  vi.mocked(findChannel).mockReturnValueOnce(undefined);
+  await expect(
+    sendIpcReaction('missing:fixed', '17', '👍'),
+  ).rejects.toBeInstanceOf(IpcRouteUnavailableError);
+  await expect(sendIpcReaction('tg:123', '17', '👍')).rejects.toBeInstanceOf(
+    IpcRouteUnavailableError,
+  );
+  await expect(
+    sendIpcReaction('tg:123', undefined, '👍'),
+  ).rejects.toBeInstanceOf(IpcRouteUnavailableError);
+  channel.sendReaction = vi.fn(async () => {});
+  await expect(sendIpcReaction('tg:123', '17', '👍')).resolves.toBeUndefined();
+  expect(channel.sendReaction).toHaveBeenCalledExactlyOnceWith(
+    'tg:123',
+    '17',
+    '👍',
+  );
+});
+
+it('refuses a missing production scheduled-result route instead of acknowledging delivery', async () => {
+  vi.mocked(findChannel).mockReturnValueOnce(undefined);
+  await expect(
+    sendScheduledMessage('missing:fixed', 'fixed task output'),
+  ).rejects.toBeInstanceOf(IpcRouteUnavailableError);
+  expect(channel.sendMessage).not.toHaveBeenCalled();
+});
+
+it.each(['EPIPE', 'ECONNRESET', 'aggregate'] as const)(
+  'contains an operational native-run %s failure to its group',
+  async (kind) => {
+    const jid = `tg:operational-run-${kind}`;
+    await seed(jid);
+    const transport = new HttpError(
+      'fixed transport failure',
+      new Error('synthetic'),
+    );
+    const failure =
+      kind === 'aggregate'
+        ? new AggregateError(
+            [
+              transport,
+              Object.assign(new Error('fixed stop failure'), {
+                status: 7,
+                signal: null,
+              }),
+            ],
+            'fixed operational aggregate',
+            { cause: transport },
+          )
+        : Object.assign(new Error('fixed closed input'), { code: kind });
+    vi.mocked(runContainerAgent).mockRejectedValueOnce(failure);
+    await expect(processGroupMessages(jid)).resolves.toBe(false);
+    expect(storedCursor(jid)).toBe(previous);
+    expect(channel.setTyping).toHaveBeenLastCalledWith(jid, false);
+    expect(vi.getTimerCount()).toBe(0);
+  },
+);
+
+it('does not contain a mixed operational and implementation aggregate as a routine run failure', async () => {
+  const jid = 'tg:mixed-run-defect';
+  await seed(jid);
+  const native = new HttpError('fixed transport', new Error('synthetic'));
+  const defect = new TypeError('fixed callback implementation defect');
+  const mixed = new AggregateError([native, defect], 'fixed mixed failure', {
+    cause: defect,
+  });
+  vi.mocked(runContainerAgent).mockRejectedValueOnce(mixed);
+  await expect(processGroupMessages(jid)).rejects.toBe(mixed);
+  expect(storedCursor(jid)).toBe(previous);
+  expect(channel.setTyping).toHaveBeenLastCalledWith(jid, false);
 });

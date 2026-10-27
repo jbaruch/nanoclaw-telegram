@@ -1,4 +1,5 @@
 import { GrammyError, HttpError } from 'grammy';
+import * as database from '../db.js';
 import type { MessageEntity } from 'grammy/types';
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
@@ -856,6 +857,16 @@ describe('TelegramChannel', () => {
         message: expect.stringContaining('acknowledged chunks'),
       });
       expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it('refuses a missing latest native reaction target', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      vi.spyOn(database, 'getLatestMessage').mockReturnValueOnce(null);
+      await expect(
+        channel.reactToLatestMessage('tg:123', '👍'),
+      ).rejects.toThrow('No native message');
+      expect(currentBot().api.raw.setMessageReaction).not.toHaveBeenCalled();
     });
 
     it('propagates native reaction failure and refuses disconnected reactions', async () => {

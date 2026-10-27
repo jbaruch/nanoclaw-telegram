@@ -1,8 +1,6 @@
-import Database from 'better-sqlite3';
 import {
   isFileSystemError,
-  isCommandError,
-  isTelegramError,
+  isOperationalRunError,
 } from './operational-errors.js';
 import { ChildProcess } from 'child_process';
 import fs from 'fs';
@@ -248,13 +246,7 @@ export class GroupQueue {
         }
       }
     } catch (err) {
-      if (
-        !isFileSystemError(err) &&
-        !isCommandError(err) &&
-        !isTelegramError(err) &&
-        !(err instanceof Database.SqliteError)
-      )
-        throw err;
+      if (!isOperationalRunError(err)) throw err;
       logger.error({ groupJid, err }, 'Error processing messages for group');
       this.scheduleRetry(groupJid, state);
     } finally {
@@ -283,13 +275,7 @@ export class GroupQueue {
     try {
       await task.fn();
     } catch (err) {
-      if (
-        !isFileSystemError(err) &&
-        !isCommandError(err) &&
-        !isTelegramError(err) &&
-        !(err instanceof Database.SqliteError)
-      )
-        throw err;
+      if (!isOperationalRunError(err)) throw err;
       logger.error({ groupJid, taskId: task.id, err }, 'Error running task');
     } finally {
       state.active = false;

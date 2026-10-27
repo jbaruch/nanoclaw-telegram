@@ -3,6 +3,7 @@ import {
   isFileSystemError,
   isTelegramError,
   isCronInputError,
+  IpcRouteUnavailableError,
 } from './operational-errors.js';
 import fs from 'fs';
 import path from 'path';
@@ -16,8 +17,7 @@ import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
-/** A valid IPC shape names a destination without an available channel. */
-export class IpcRouteUnavailableError extends Error {}
+export { IpcRouteUnavailableError } from './operational-errors.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;

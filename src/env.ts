@@ -16,6 +16,11 @@ export function readEnvFile(keys: string[]): Record<string, string> {
     content = fs.readFileSync(envFile, 'utf-8');
   } catch (err) {
     if (!isFileSystemError(err)) throw err;
+    if (err.code !== 'ENOENT')
+      throw new Error(
+        'Cannot read .env configuration; restore a readable regular file before starting NanoClaw.',
+        { cause: err },
+      );
     logger.debug({ err }, '.env file not found, using defaults');
     return {};
   }

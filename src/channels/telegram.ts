@@ -3,6 +3,7 @@ import {
   isNetworkError,
   isTelegramError,
   TelegramDeliveryError,
+  IpcRouteUnavailableError,
 } from '../operational-errors.js';
 import fs from 'fs';
 import https from 'https';
@@ -925,8 +926,9 @@ export class TelegramChannel implements Channel {
   async reactToLatestMessage(jid: string, emoji: string): Promise<void> {
     const latest = getLatestMessage(jid);
     if (!latest) {
-      logger.warn({ jid }, 'No messages found to react to');
-      return;
+      throw new IpcRouteUnavailableError(
+        'No native message is available for the reaction; select an existing message before resubmitting.',
+      );
     }
     await this.sendReaction(jid, latest.id, emoji);
   }

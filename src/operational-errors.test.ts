@@ -12,6 +12,9 @@ import {
   isTelegramError,
   isCronInputError,
   isNetworkError,
+  isOperationalRunError,
+  IpcRouteUnavailableError,
+  ContainerExitError,
 } from './operational-errors.js';
 
 function caught(operation: () => unknown): unknown {
@@ -21,6 +24,44 @@ function caught(operation: () => unknown): unknown {
 }
 
 describe('expected operational errors', () => {
+  it('recovers known pipe and all-operational aggregate failures, never mixed or cyclic defects', () => {
+    const pipe = Object.assign(new Error('fixed pipe failure'), {
+      code: 'EPIPE',
+    });
+    const reset = Object.assign(new Error('fixed reset'), {
+      code: 'ECONNRESET',
+    });
+    const transport = new HttpError('fixed transport', new Error('synthetic'));
+    const command = Object.assign(new Error('fixed native stop failure'), {
+      status: 7,
+      signal: null,
+    });
+    const combined = new AggregateError(
+      [transport, command],
+      'fixed combined failure',
+      { cause: transport },
+    );
+    for (const error of [
+      pipe,
+      reset,
+      combined,
+      new IpcRouteUnavailableError('fixed unavailable route'),
+      new ContainerExitError(1),
+    ])
+      expect(isOperationalRunError(error)).toBe(true);
+    const defect = new TypeError('fixed implementation defect');
+    for (const error of [
+      new AggregateError([transport, defect]),
+      new AggregateError([transport], 'fixed hidden cause', { cause: defect }),
+      new AggregateError([]),
+      new Error('unclassified'),
+    ])
+      expect(isOperationalRunError(error)).toBe(false);
+    const cycle = new AggregateError([]);
+    cycle.errors.push(cycle);
+    expect(isOperationalRunError(cycle)).toBe(false);
+  });
+
   it('recognizes a real failed child without classifying programming errors as command failures', () => {
     const error = caught(() =>
       execFileSync(process.execPath, ['-e', 'process.exit(7)'], {

@@ -1,7 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   isSenderAllowed,
@@ -28,6 +28,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -37,6 +38,28 @@ describe('loadSenderAllowlist', () => {
     expect(cfg.default.allow).toBe('*');
     expect(cfg.default.mode).toBe('trigger');
     expect(cfg.logDenied).toBe(true);
+  });
+
+  it.each(['EACCES', 'EIO', 'EISDIR'])(
+    'refuses a configured allowlist read failure %s',
+    (code) => {
+      const failure = Object.assign(new Error('fixed read failure'), { code });
+      vi.spyOn(fs, 'readFileSync').mockImplementationOnce(() => {
+        throw failure;
+      });
+      expect(() => loadSenderAllowlist(cfgPath())).toThrow(
+        expect.objectContaining({ cause: failure }),
+      );
+    },
+  );
+
+  it.each([
+    null,
+    [],
+    { default: { allow: '*', mode: 'trigger' }, chats: [] },
+    { default: { allow: '*', mode: 'trigger' }, logDenied: 'no' },
+  ])('refuses malformed configured restriction %j', (value) => {
+    expect(() => loadSenderAllowlist(writeConfig(value))).toThrow(SyntaxError);
   });
 
   it('loads allow=* config', () => {
@@ -79,17 +102,17 @@ describe('loadSenderAllowlist', () => {
     expect(cfg.chats['group-a'].mode).toBe('drop');
   });
 
-  it('returns allow-all on invalid JSON', () => {
+  it('refuses invalid JSON instead of relaxing the restriction', () => {
     const p = cfgPath();
     fs.writeFileSync(p, '{ not valid json }}}');
-    const cfg = loadSenderAllowlist(p);
-    expect(cfg.default.allow).toBe('*');
+    expect(() => loadSenderAllowlist(p)).toThrow(
+      'Invalid sender allowlist JSON',
+    );
   });
 
-  it('returns allow-all on invalid schema', () => {
+  it('refuses an invalid default instead of relaxing the restriction', () => {
     const p = writeConfig({ default: { oops: true } });
-    const cfg = loadSenderAllowlist(p);
-    expect(cfg.default.allow).toBe('*');
+    expect(() => loadSenderAllowlist(p)).toThrow('invalid default restriction');
   });
 
   it('rejects non-string allow array items', () => {
@@ -97,11 +120,10 @@ describe('loadSenderAllowlist', () => {
       default: { allow: [123, null, true], mode: 'trigger' },
       chats: {},
     });
-    const cfg = loadSenderAllowlist(p);
-    expect(cfg.default.allow).toBe('*'); // falls back to default
+    expect(() => loadSenderAllowlist(p)).toThrow('invalid default restriction');
   });
 
-  it('skips invalid per-chat entries', () => {
+  it('refuses invalid per-chat restrictions instead of falling through to an allow-all default', () => {
     const p = writeConfig({
       default: { allow: '*', mode: 'trigger' },
       chats: {
@@ -109,9 +131,7 @@ describe('loadSenderAllowlist', () => {
         bad: { allow: 123 },
       },
     });
-    const cfg = loadSenderAllowlist(p);
-    expect(cfg.chats['good']).toBeDefined();
-    expect(cfg.chats['bad']).toBeUndefined();
+    expect(() => loadSenderAllowlist(p)).toThrow('invalid chat restriction');
   });
 });
 

@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import {
   isFileSystemError,
   isTelegramError,
-  isCommandError,
+  isOperationalRunError,
 } from './operational-errors.js';
 import fs from 'fs';
 import path from 'path';
@@ -140,13 +140,13 @@ export async function sendIpcMessage(jid: string, text: string): Promise<void> {
     throw new IpcRouteUnavailableError(
       'No active channel owns the IPC destination; verify the destination and channel connection before resubmitting.',
     );
-  if (isDuplicateSend(jid, text)) return;
-  await sendWithRetry(channel, jid, text);
+  await sendDeduplicated(channel, jid, text);
 }
 
 // --- Outbound dedup guard ---
 const DEDUP_WINDOW_MS = 10_000;
 const recentSends = new Map<string, number>();
+const pendingSends = new Map<string, Promise<void>>();
 
 function isDuplicateSend(jid: string, text: string): boolean {
   const key = `${jid}::${text}`;
@@ -158,8 +158,64 @@ function isDuplicateSend(jid: string, text: string): boolean {
   }
 
   if (recentSends.has(key)) return true;
-  recentSends.set(key, now);
   return false;
+}
+
+async function sendDeduplicated(
+  channel: Channel,
+  jid: string,
+  text: string,
+): Promise<void> {
+  if (isDuplicateSend(jid, text)) return;
+  const key = `${jid}::${text}`;
+  const existing = pendingSends.get(key);
+  if (existing) return existing;
+  const attempt = sendWithRetry(channel, jid, text);
+  pendingSends.set(key, attempt);
+  try {
+    await attempt;
+    recentSends.set(key, Date.now());
+  } finally {
+    pendingSends.delete(key);
+  }
+}
+
+export async function sendScheduledMessage(
+  jid: string,
+  rawText: string,
+): Promise<void> {
+  const channel = findChannel(channels, jid);
+  if (!channel)
+    throw new IpcRouteUnavailableError(
+      'No active channel owns the scheduled destination; restore its route before the next task run.',
+    );
+  const text = formatOutbound(rawText);
+  if (text) await sendDeduplicated(channel, jid, text);
+}
+
+export async function sendIpcReaction(
+  jid: string,
+  messageId: string | undefined,
+  emoji: string,
+): Promise<void> {
+  const channel = findChannel(channels, jid);
+  if (!channel)
+    throw new IpcRouteUnavailableError(
+      'No active channel owns the reaction destination; verify its route before resubmitting.',
+    );
+  if (messageId) {
+    if (!channel.sendReaction)
+      throw new IpcRouteUnavailableError(
+        'The destination channel does not support reactions to a native message.',
+      );
+    await channel.sendReaction(jid, messageId, emoji);
+  } else {
+    if (!channel.reactToLatestMessage)
+      throw new IpcRouteUnavailableError(
+        'The destination channel cannot select a native reaction target.',
+      );
+    await channel.reactToLatestMessage(jid, emoji);
+  }
 }
 
 const onecli = new OneCLI({ url: ONECLI_URL });
@@ -571,13 +627,7 @@ async function runAgent(
 
     return 'success';
   } catch (err) {
-    if (
-      !isFileSystemError(err) &&
-      !isCommandError(err) &&
-      !isTelegramError(err) &&
-      !(err instanceof Database.SqliteError)
-    )
-      throw err;
+    if (!isOperationalRunError(err)) throw err;
     logger.error({ group: group.name, err }, 'Agent error');
     return 'error';
   }
@@ -853,29 +903,11 @@ async function main(): Promise<void> {
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
-    sendMessage: async (jid, rawText) => {
-      const channel = findChannel(channels, jid);
-      if (!channel) {
-        logger.warn({ jid }, 'No channel owns JID, cannot send message');
-        return;
-      }
-      const text = formatOutbound(rawText);
-      if (text && !isDuplicateSend(jid, text)) {
-        await sendWithRetry(channel, jid, text);
-      }
-    },
+    sendMessage: sendScheduledMessage,
   });
   const ipcLifecycle = startIpcWatcher({
     sendMessage: sendIpcMessage,
-    sendReaction: async (jid, messageId, emoji) => {
-      const channel = findChannel(channels, jid);
-      if (!channel) return;
-      if (messageId) {
-        await channel.sendReaction?.(jid, messageId, emoji);
-      } else {
-        await channel.reactToLatestMessage?.(jid, emoji);
-      }
-    },
+    sendReaction: sendIpcReaction,
     registeredGroups: () => registeredGroups,
     registerGroup,
     syncGroups: async (force: boolean) => {

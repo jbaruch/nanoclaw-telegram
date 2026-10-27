@@ -1,7 +1,57 @@
 import { GrammyError, HttpError } from 'grammy';
+import Database from 'better-sqlite3';
 
 /** Application-level delivery failed without a native Telegram acknowledgment. */
 export class TelegramDeliveryError extends Error {}
+
+/** A destination lacks a connected channel, operation or native target. */
+export class IpcRouteUnavailableError extends Error {}
+
+/** Native runtime exit, distinct from a callback implementation defect. */
+export class ContainerExitError extends Error {
+  constructor(readonly exitCode: number | null) {
+    super(`Container exited with code ${exitCode}`);
+  }
+}
+
+/** Recover only known operational causes; mixed/empty/cyclic aggregates remain defects. */
+export function isOperationalRunError(error: unknown): boolean {
+  let remaining = 128;
+  const classify = (
+    value: unknown,
+    parents: Set<AggregateError>,
+    depth: number,
+  ): boolean => {
+    if (--remaining < 0 || depth > 8) return false;
+    if (value instanceof AggregateError) {
+      if (
+        parents.has(value) ||
+        !Array.isArray(value.errors) ||
+        value.errors.length === 0 ||
+        value.errors.length > 32
+      )
+        return false;
+      const next = new Set(parents).add(value);
+      return (
+        value.errors.every((item: unknown) =>
+          classify(item, next, depth + 1),
+        ) &&
+        (!('cause' in value) || classify(value.cause, next, depth + 1))
+      );
+    }
+    return (
+      isFileSystemError(value) ||
+      isCommandError(value) ||
+      isTelegramError(value) ||
+      hasErrno(value, 'EPIPE') ||
+      hasErrno(value, 'ECONNRESET') ||
+      value instanceof Database.SqliteError ||
+      value instanceof IpcRouteUnavailableError ||
+      value instanceof ContainerExitError
+    );
+  };
+  return classify(error, new Set(), 0);
+}
 
 /** Node filesystem failures that callers can report or explicitly recover from. */
 export function isFileSystemError(

@@ -1,4 +1,4 @@
-import { isCommandError } from './operational-errors.js';
+import { isCommandError, ContainerExitError } from './operational-errors.js';
 /**
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
@@ -365,7 +365,15 @@ export async function runContainerAgent(
     let failurePending = false;
     let containerClosed = false;
     let spawnErrored = false;
-    const fail = (error: unknown) => {
+    let nativeTerminalFailure: ContainerExitError | undefined;
+    const fail = (callbackError: unknown) => {
+      const error = nativeTerminalFailure
+        ? new AggregateError(
+            [callbackError, nativeTerminalFailure],
+            'Container output callback and native exit failed; inspect both before retrying.',
+            { cause: callbackError },
+          )
+        : callbackError;
       if (failurePending) return;
       failurePending = true;
       callbackFailed = true;
@@ -529,6 +537,7 @@ export async function runContainerAgent(
 
     container.on('close', (code) => {
       containerClosed = true;
+      if (code !== 0) nativeTerminalFailure = new ContainerExitError(code);
       runGuarded(() => {
         clearTimeout(timeout);
         const duration = Date.now() - startTime;
@@ -572,11 +581,13 @@ export async function runContainerAgent(
             'Container timed out with no output',
           );
 
-          resolve({
-            status: 'error',
-            result: null,
-            error: `Container timed out after ${configTimeout}ms`,
-          });
+          afterOutput(() =>
+            resolve({
+              status: 'error',
+              result: null,
+              error: `Container timed out after ${configTimeout}ms`,
+            }),
+          );
           return;
         }
 
@@ -662,11 +673,13 @@ export async function runContainerAgent(
             'Container exited with error',
           );
 
-          resolve({
-            status: 'error',
-            result: null,
-            error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
-          });
+          afterOutput(() =>
+            resolve({
+              status: 'error',
+              result: null,
+              error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
+            }),
+          );
           return;
         }
 
@@ -727,7 +740,7 @@ export async function runContainerAgent(
             'Container completed',
           );
 
-          resolve(output);
+          afterOutput(() => resolve(output));
         } catch (err) {
           if (!(err instanceof SyntaxError)) throw err;
           logger.error(
@@ -740,11 +753,13 @@ export async function runContainerAgent(
             'Failed to parse container output',
           );
 
-          resolve({
-            status: 'error',
-            result: null,
-            error: `Failed to parse container output: ${err instanceof Error ? err.message : String(err)}`,
-          });
+          afterOutput(() =>
+            resolve({
+              status: 'error',
+              result: null,
+              error: `Failed to parse container output: ${err instanceof Error ? err.message : String(err)}`,
+            }),
+          );
         }
       });
     });
@@ -757,11 +772,13 @@ export async function runContainerAgent(
           { group: group.name, containerName, error: err },
           'Container spawn error',
         );
-        resolve({
-          status: 'error',
-          result: null,
-          error: `Container spawn error: ${err.message}`,
-        });
+        afterOutput(() =>
+          resolve({
+            status: 'error',
+            result: null,
+            error: `Container spawn error: ${err.message}`,
+          }),
+        );
       });
     });
     if (outputFailure)

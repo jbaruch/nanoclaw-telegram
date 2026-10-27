@@ -41,12 +41,11 @@ export function loadSenderAllowlist(
     raw = fs.readFileSync(filePath, 'utf-8');
   } catch (err: unknown) {
     if (!isFileSystemError(err)) throw err;
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return DEFAULT_CONFIG;
-    logger.warn(
-      { err, path: filePath },
-      'sender-allowlist: cannot read config',
+    if (err.code === 'ENOENT') return DEFAULT_CONFIG;
+    throw new Error(
+      'Cannot read the configured sender allowlist; repair access before processing messages.',
+      { cause: err },
     );
-    return DEFAULT_CONFIG;
   }
 
   let parsed: unknown;
@@ -54,33 +53,34 @@ export function loadSenderAllowlist(
     parsed = JSON.parse(raw);
   } catch (err) {
     if (!(err instanceof SyntaxError)) throw err;
-    logger.warn({ path: filePath }, 'sender-allowlist: invalid JSON');
-    return DEFAULT_CONFIG;
+    throw new SyntaxError(
+      'Invalid sender allowlist JSON; repair the configured restriction before processing messages.',
+      { cause: err },
+    );
   }
 
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+    throw new SyntaxError('Sender allowlist must be a configuration object.');
   const obj = parsed as Record<string, unknown>;
 
-  if (!isValidEntry(obj.default)) {
-    logger.warn(
-      { path: filePath },
-      'sender-allowlist: invalid or missing default entry',
+  if (!isValidEntry(obj.default))
+    throw new SyntaxError(
+      'Sender allowlist has an invalid default restriction; repair it before processing messages.',
     );
-    return DEFAULT_CONFIG;
-  }
-
+  if (obj.logDenied !== undefined && typeof obj.logDenied !== 'boolean')
+    throw new SyntaxError('Sender allowlist logDenied must be a Boolean.');
   const chats: Record<string, ChatAllowlistEntry> = {};
-  if (obj.chats && typeof obj.chats === 'object') {
-    for (const [jid, entry] of Object.entries(
-      obj.chats as Record<string, unknown>,
-    )) {
-      if (isValidEntry(entry)) {
-        chats[jid] = entry;
-      } else {
-        logger.warn(
-          { jid, path: filePath },
-          'sender-allowlist: skipping invalid chat entry',
+  if (obj.chats !== undefined) {
+    if (!obj.chats || typeof obj.chats !== 'object' || Array.isArray(obj.chats))
+      throw new SyntaxError(
+        'Sender allowlist chats must be a restriction map.',
+      );
+    for (const [jid, entry] of Object.entries(obj.chats)) {
+      if (!isValidEntry(entry))
+        throw new SyntaxError(
+          'Sender allowlist contains an invalid chat restriction; repair it before processing messages.',
         );
-      }
+      Object.defineProperty(chats, jid, { value: entry, enumerable: true });
     }
   }
 

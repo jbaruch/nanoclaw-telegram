@@ -216,6 +216,7 @@ export async function startRemoteControl(
       }
     };
     const rejectAfterCleanup = (error: unknown) => {
+      if (settled) return;
       clearTimeout(timer);
       settled = true;
       if (activeSession?.pid === pid) activeSession = null;

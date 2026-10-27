@@ -1,5 +1,6 @@
 import fs from 'fs';
 import { ChildProcess } from 'child_process';
+import { IpcRouteUnavailableError } from './operational-errors.js';
 import { GroupQueue } from './group-queue.js';
 import { stopContainer } from './container-runtime.js';
 import os from 'os';
@@ -124,6 +125,73 @@ describe('task lifecycle recovery', () => {
       expect(enqueue).toHaveBeenCalledTimes(1);
     },
   );
+
+  it.each(['once', 'interval'] as const)(
+    'settles a missing registered group for a %s task instead of replaying each poll',
+    async (kind) => {
+      task(kind);
+      let execute!: () => Promise<void>;
+      const enqueue = vi.fn(
+        (_jid: string, _id: string, fn: () => Promise<void>) => {
+          execute = fn;
+        },
+      );
+      const deps = dependencies(enqueue);
+      deps.registeredGroups = () => ({});
+      const log = vi.spyOn(database, 'logTaskRun');
+      startSchedulerLoop(deps);
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(execute()).resolves.toBeUndefined();
+      expect(log).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          task_id: 'fixed-task',
+          status: 'error',
+          error: 'Group not found: fixed',
+        }),
+      );
+      expect(database.getTaskById('fixed-task')).toMatchObject({
+        status: kind === 'once' ? 'completed' : 'active',
+        next_run: kind === 'once' ? null : '2024-01-01T00:01:04.000Z',
+        last_result: 'Error: Group not found: fixed',
+      });
+      expect(runContainerAgent).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(enqueue).toHaveBeenCalledTimes(1);
+      expect(log).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('records scheduled route-unavailable delivery as a failed run before advancing', async () => {
+    task('once');
+    let execute!: () => Promise<void>;
+    const deps = dependencies((_jid, _id, fn) => {
+      execute = fn;
+    });
+    const unavailable = new IpcRouteUnavailableError(
+      'fixed unavailable scheduled route',
+    );
+    deps.sendMessage = vi.fn(async () => {
+      throw unavailable;
+    });
+    vi.mocked(runContainerAgent).mockImplementationOnce(
+      async (_group, _input, _process, onOutput) => {
+        await onOutput!({ status: 'success', result: 'fixed scheduled body' });
+        return { status: 'success', result: null };
+      },
+    );
+    const log = vi.spyOn(database, 'logTaskRun');
+    startSchedulerLoop(deps);
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(execute()).resolves.toBeUndefined();
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'error', error: unavailable.message }),
+    );
+    expect(database.getTaskById('fixed-task')).toMatchObject({
+      status: 'completed',
+      next_run: null,
+      last_result: `Error: ${unavailable.message}`,
+    });
+  });
 
   it.each([false, true])(
     'surfaces an actual queued task close-timer defect after bookkeeping (cleanup failure: %s)',

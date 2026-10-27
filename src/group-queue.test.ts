@@ -1,6 +1,7 @@
 import { ChildProcess } from 'child_process';
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
+import { HttpError } from 'grammy';
 import { GroupQueue } from './group-queue.js';
 
 // Mock config to control concurrency limit
@@ -83,6 +84,32 @@ describe('GroupQueue', () => {
     release();
     await vi.advanceTimersByTimeAsync(0);
     await rejected;
+  });
+
+  it('keeps all-operational task aggregates contained and permits later queued work', async () => {
+    const failed = vi.fn();
+    void queue.waitForFailure().then(undefined, failed);
+    const transport = new HttpError('fixed transport', new Error('synthetic'));
+    const combined = new AggregateError(
+      [
+        transport,
+        Object.assign(new Error('fixed stop failure'), {
+          status: 7,
+          signal: null,
+        }),
+      ],
+      'fixed operational aggregate',
+      { cause: transport },
+    );
+    queue.enqueueTask('tg:123', 'failed-task', async () => {
+      throw combined;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const later = vi.fn(async () => {});
+    queue.enqueueTask('tg:123', 'later-task', later);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(later).toHaveBeenCalledTimes(1);
+    expect(failed).not.toHaveBeenCalled();
   });
 
   // --- Single group at a time ---

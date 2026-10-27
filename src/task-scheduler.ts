@@ -1,8 +1,7 @@
 import Database from 'better-sqlite3';
 import {
   isFileSystemError,
-  isTelegramError,
-  isCommandError,
+  isOperationalRunError,
 } from './operational-errors.js';
 import { ChildProcess } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
@@ -141,15 +140,8 @@ async function runTask(
           { taskId: task.id, groupFolder: task.group_folder },
           'Group not found for task',
         );
-        logTaskRun({
-          task_id: task.id,
-          run_at: new Date().toISOString(),
-          duration_ms: Date.now() - startTime,
-          status: 'error',
-          result: null,
-          error: `Group not found: ${task.group_folder}`,
-        });
-        return true;
+        error = `Group not found: ${task.group_folder}`;
+        return false;
       }
 
       // Update tasks snapshot for container to read (filtered by group)
@@ -309,13 +301,7 @@ async function runTask(
   }
   if (taskExecution.status === 'rejected') {
     const failure: unknown = taskExecution.reason;
-    if (
-      !isFileSystemError(failure) &&
-      !isTelegramError(failure) &&
-      !isCommandError(failure) &&
-      !(failure instanceof Database.SqliteError)
-    )
-      throw failure;
+    if (!isOperationalRunError(failure)) throw failure;
   }
 }
 

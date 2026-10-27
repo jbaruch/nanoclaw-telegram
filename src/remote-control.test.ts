@@ -336,6 +336,28 @@ describe('remote-control', () => {
       },
     );
 
+    it('does not mutate a successful session after a late stdin error', async () => {
+      const proc = createMockProcess();
+      spawnMock.mockReturnValue(proc);
+      stdoutFileContent = 'https://claude.ai/code?bridge=env_fixed';
+      const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+      await expect(
+        startRemoteControl('user1', 'tg:123', '/project'),
+      ).resolves.toMatchObject({ ok: true });
+      const session = getActiveSession();
+      kill.mockClear();
+      const writes = writeFileSyncSpy.mock.calls.length;
+      proc.stdin.emit(
+        'error',
+        Object.assign(new Error('fixed late closed pipe'), { code: 'EPIPE' }),
+      );
+      await Promise.resolve();
+      expect(getActiveSession()).toBe(session);
+      expect(kill).not.toHaveBeenCalled();
+      expect(writeFileSyncSpy).toHaveBeenCalledTimes(writes);
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
+
     it('propagates an unexpected spawn error while closing parent descriptors', async () => {
       const defect = new TypeError('fixed spawn defect');
       spawnMock.mockImplementation(() => {

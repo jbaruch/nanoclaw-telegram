@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { ContainerExitError } from './operational-errors.js';
 import { createDraftStream } from './draft-stream.js';
 import { logger } from './logger.js';
 import { stopContainer } from './container-runtime.js';
@@ -246,6 +247,47 @@ describe('container-runner timeout behavior', () => {
       });
     },
   );
+
+  it('waits for a pending output callback after nonzero native close and retains both failures', async () => {
+    vi.mocked(stopContainer).mockClear();
+    const defect = new TypeError('fixed late output defect');
+    let rejectOutput!: (error: unknown) => void;
+    const pending = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectOutput = reject;
+        }),
+    );
+    const rejected = expect(pending).rejects.toMatchObject({
+      cause: defect,
+      errors: [defect, expect.any(ContainerExitError)],
+    });
+    let settled = false;
+    void pending.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.stdout.push(
+      `${OUTPUT_START_MARKER}\n${JSON.stringify({ status: 'success', result: 'fixed output' })}\n${OUTPUT_END_MARKER}\n`,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    fakeProc.emit('close', 1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+    rejectOutput(defect);
+    await vi.advanceTimersByTimeAsync(0);
+    await rejected;
+    expect(stopContainer).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 
   it('owns a throttled preview defect without another output marker or finalization', async () => {
     vi.mocked(stopContainer).mockClear();
