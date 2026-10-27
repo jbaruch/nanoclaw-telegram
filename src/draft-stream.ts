@@ -5,8 +5,8 @@ import {
 import { logger } from './logger.js';
 
 export interface DraftStream {
-  /** Send or edit the preview with accumulated text. Throttled. */
-  update(text: string): void;
+  /** Send or edit a throttled preview; callers must await unexpected failures. */
+  update(text: string): Promise<void>;
   /** Finalize the preview. Returns false if text exceeded maxLength (caller should fall back to sendMessage). */
   finish(text: string): Promise<boolean>;
   /** Delete the preview message (e.g., if agent produced no output). */
@@ -41,6 +41,14 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
   let stopped = false;
   let inFlight: Promise<void> = Promise.resolve();
   let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+  let throttleOutcome: Promise<void> = Promise.resolve();
+  let releaseThrottle: (() => void) | undefined;
+  const clearThrottle = () => {
+    if (throttleTimer) clearTimeout(throttleTimer);
+    throttleTimer = null;
+    releaseThrottle?.();
+    releaseThrottle = undefined;
+  };
 
   async function doSendOrEdit(text: string): Promise<void> {
     if (text === lastSentText && !deliveryFailure) return;
@@ -78,34 +86,45 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
       .then(undefined, (error: unknown) => {
         unexpectedFailure = { error };
         stopped = true;
-        if (throttleTimer) clearTimeout(throttleTimer);
-        throttleTimer = null;
+        clearThrottle();
       });
   }
 
   return {
-    update(text: string): void {
-      if (stopped) return;
+    async update(text: string): Promise<void> {
+      if (stopped) {
+        throwUnexpectedFailure();
+        return;
+      }
       pendingText = text;
 
       // Wait for minimum content before first message
       if (!messageId && text.length < minInitialChars) return;
 
       // Throttle edits
-      if (throttleTimer) return;
+      if (throttleTimer) {
+        await throttleOutcome;
+        await inFlight;
+        throwUnexpectedFailure();
+        return;
+      }
       flush();
+      throttleOutcome = new Promise<void>((resolve) => {
+        releaseThrottle = resolve;
+      });
       throttleTimer = setTimeout(() => {
         throttleTimer = null;
         if (!stopped) flush();
+        releaseThrottle?.();
+        releaseThrottle = undefined;
       }, throttleMs);
+      await inFlight;
+      throwUnexpectedFailure();
     },
 
     async finish(text: string): Promise<boolean> {
       stopped = true;
-      if (throttleTimer) {
-        clearTimeout(throttleTimer);
-        throttleTimer = null;
-      }
+      clearThrottle();
 
       await inFlight;
       throwUnexpectedFailure();
@@ -136,10 +155,7 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
 
     async cancel(): Promise<void> {
       stopped = true;
-      if (throttleTimer) {
-        clearTimeout(throttleTimer);
-        throttleTimer = null;
-      }
+      clearThrottle();
       await inFlight;
       const [cleanup] = await Promise.allSettled([
         (async () => {

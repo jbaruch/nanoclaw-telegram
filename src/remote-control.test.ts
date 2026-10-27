@@ -315,23 +315,26 @@ describe('remote-control', () => {
       },
     );
 
-    it('rejects a delayed child error and cleans up only its started process', async () => {
-      vi.useFakeTimers();
-      const proc = createMockProcess();
-      spawnMock.mockReturnValue(proc);
-      const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
-      const defect = new TypeError('fixed asynchronous child defect');
-      const pending = startRemoteControl('user1', 'tg:123', '/project');
-      const rejected = expect(pending).rejects.toBe(defect);
-      await vi.advanceTimersByTimeAsync(0);
-      proc.emit('error', defect);
-      await vi.advanceTimersByTimeAsync(0);
-      await rejected;
-      expect(kill).toHaveBeenCalledWith(-12345, 'SIGTERM');
-      expect(closeSyncSpy).toHaveBeenCalledTimes(2);
-      expect(vi.getTimerCount()).toBe(0);
-      vi.useRealTimers();
-    });
+    it.each(['child', 'stdin'] as const)(
+      'rejects a delayed %s error and cleans up only its started process',
+      async (emitter) => {
+        vi.useFakeTimers();
+        const proc = createMockProcess();
+        spawnMock.mockReturnValue(proc);
+        const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+        const defect = new TypeError('fixed asynchronous child defect');
+        const pending = startRemoteControl('user1', 'tg:123', '/project');
+        const rejected = expect(pending).rejects.toBe(defect);
+        await vi.advanceTimersByTimeAsync(0);
+        (emitter === 'child' ? proc : proc.stdin).emit('error', defect);
+        await vi.advanceTimersByTimeAsync(0);
+        await rejected;
+        expect(kill).toHaveBeenCalledWith(-12345, 'SIGTERM');
+        expect(closeSyncSpy).toHaveBeenCalledTimes(2);
+        expect(vi.getTimerCount()).toBe(0);
+        vi.useRealTimers();
+      },
+    );
 
     it('propagates an unexpected spawn error while closing parent descriptors', async () => {
       const defect = new TypeError('fixed spawn defect');

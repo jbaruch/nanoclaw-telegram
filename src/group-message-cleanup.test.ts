@@ -65,7 +65,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2024-01-01T00:00:00Z'));
   draft = {
-    update: vi.fn(),
+    update: vi.fn(async () => {}),
     finish: vi.fn(async () => true),
     cancel: vi.fn(async () => {}),
   };

@@ -376,7 +376,7 @@ export async function processGroupMessages(chatJid: string): Promise<boolean> {
           const text = result.streamText
             .replace(/<internal>[\s\S]*?<\/internal>/g, '')
             .trim();
-          if (text) draftStream.update(text);
+          if (text) await draftStream.update(text);
         }
 
         // Streaming output callback — called for each agent result

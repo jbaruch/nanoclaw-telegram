@@ -44,12 +44,14 @@ describe('draft stream failure boundaries', () => {
         deleteMessage: vi.fn(async () => {}),
       });
       try {
-        stream.update(
+        const updated = stream.update(
           'fixed preview longer than the minimum thirty characters',
         );
+        const updateRejected = expect(updated).rejects.toBe(defect);
         await vi.advanceTimersByTimeAsync(0);
         reject(defect);
         await vi.advanceTimersByTimeAsync(10);
+        await updateRejected;
         expect(unhandled).not.toHaveBeenCalled();
         expect(vi.getTimerCount()).toBe(0);
         const result =
@@ -83,8 +85,12 @@ describe('draft stream failure boundaries', () => {
       });
       stream.update('fixed first preview longer than thirty characters');
       await vi.advanceTimersByTimeAsync(0);
-      stream.update('fixed second preview longer than thirty characters');
+      const updated = stream.update(
+        'fixed second preview longer than thirty characters',
+      );
+      const updateRejected = expect(updated).rejects.toBe(defect);
       await vi.advanceTimersByTimeAsync(1000);
+      await updateRejected;
       if (cleanupFails)
         await expect(stream.cancel()).rejects.toMatchObject({
           cause: defect,
@@ -95,6 +101,22 @@ describe('draft stream failure boundaries', () => {
       expect(vi.getTimerCount()).toBe(0);
     },
   );
+
+  it('surfaces a rejected preview through update without requiring finalization', async () => {
+    vi.useFakeTimers();
+    const defect = new TypeError('fixed unfinalized preview defect');
+    const stream = createDraftStream({
+      sendMessage: vi.fn(async () => {
+        throw defect;
+      }),
+      editMessage: vi.fn(async () => {}),
+      deleteMessage: vi.fn(async () => {}),
+    });
+    await expect(
+      stream.update('fixed preview longer than thirty characters'),
+    ).rejects.toBe(defect);
+    expect(vi.getTimerCount()).toBe(0);
+  });
 
   it('reports a failed final send and permits a later successful final attempt', async () => {
     const failure = new HttpError(

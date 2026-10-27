@@ -1,4 +1,7 @@
 import fs from 'fs';
+import { ChildProcess } from 'child_process';
+import { GroupQueue } from './group-queue.js';
+import { stopContainer } from './container-runtime.js';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,6 +10,7 @@ import type { SchedulerDependencies } from './task-scheduler.js';
 const fixture = vi.hoisted(() => ({ directory: '' }));
 vi.mock('./config.js', () => ({
   ASSISTANT_NAME: 'Andy',
+  MAX_CONCURRENT_CONTAINERS: 2,
   TIMEZONE: 'UTC',
   SCHEDULER_POLL_INTERVAL: 1000,
   get GROUPS_DIR() {
@@ -19,6 +23,7 @@ vi.mock('./config.js', () => ({
     return fixture.directory;
   },
 }));
+vi.mock('./container-runtime.js', () => ({ stopContainer: vi.fn() }));
 vi.mock('./container-runner.js', () => ({
   runContainerAgent: vi.fn(),
   writeTasksSnapshot: vi.fn(),
@@ -32,6 +37,8 @@ import {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(runContainerAgent).mockReset();
+  vi.mocked(stopContainer).mockReset();
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2024-01-01T00:01:00Z'));
   fixture.directory = fs.mkdtempSync(
@@ -115,6 +122,64 @@ describe('task lifecycle recovery', () => {
       expect(updated?.status).toBe(kind === 'once' ? 'completed' : 'active');
       await vi.advanceTimersByTimeAsync(1000);
       expect(enqueue).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([false, true])(
+    'surfaces an actual queued task close-timer defect after bookkeeping (cleanup failure: %s)',
+    async (cleanupFails) => {
+      task('once');
+      const defect = new TypeError('fixed delayed task close defect');
+      const cleanup = new TypeError('fixed task native cleanup defect');
+      const queue = new GroupQueue();
+      vi.spyOn(queue, 'closeStdin').mockImplementation(() => {
+        throw defect;
+      });
+      vi.mocked(stopContainer).mockReset();
+      if (cleanupFails)
+        vi.mocked(stopContainer).mockImplementation(() => {
+          throw cleanup;
+        });
+      let settleNative!: (output: { status: 'success'; result: null }) => void;
+      vi.mocked(runContainerAgent).mockImplementationOnce(
+        async (_group, _input, onProcess, onOutput) => {
+          onProcess(new ChildProcess(), 'owned-scheduled-close');
+          await onOutput!({
+            status: 'success',
+            result: 'fixed synthetic result',
+          });
+          return new Promise((resolve) => {
+            settleNative = resolve;
+          });
+        },
+      );
+      const deps = dependencies(queue.enqueueTask.bind(queue));
+      deps.queue = queue;
+      const lifecycle = queue.waitForFailure();
+      const rejected = cleanupFails
+        ? expect(lifecycle).rejects.toMatchObject({
+            cause: defect,
+            errors: [defect, cleanup],
+          })
+        : expect(lifecycle).rejects.toBe(defect);
+      startSchedulerLoop(deps);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(10000);
+      await rejected;
+      expect(stopContainer).toHaveBeenCalledExactlyOnceWith(
+        'owned-scheduled-close',
+      );
+      expect(database.getTaskById('fixed-task')).toMatchObject({
+        status: 'completed',
+        next_run: null,
+        last_result: expect.stringContaining('Error:'),
+      });
+      const snapshot = database.getTaskById('fixed-task');
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(runContainerAgent).toHaveBeenCalledTimes(1);
+      expect(database.getTaskById('fixed-task')).toEqual(snapshot);
+      settleNative({ status: 'success', result: null });
+      await vi.advanceTimersByTimeAsync(0);
     },
   );
 

@@ -23,6 +23,7 @@ import {
   updateTaskAfterRun,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
+import { stopContainer } from './container-runtime.js';
 import {
   InvalidGroupFolderError,
   resolveGroupFolderPath,
@@ -92,6 +93,13 @@ async function runTask(
   let result: string | null = null;
   let error: string | null = null;
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
+  let ownedContainer: string | undefined;
+  let closeFailure: { error: unknown } | undefined;
+  let closeCallbacks: Promise<void> = Promise.resolve();
+  let rejectClose!: (error: unknown) => void;
+  const closeOutcome = new Promise<never>((_resolve, reject) => {
+    rejectClose = reject;
+  });
   const [execution] = await Promise.allSettled([
     (async () => {
       let groupDir: string;
@@ -175,15 +183,22 @@ async function runTask(
       const scheduleClose = () => {
         if (closeTimer) return; // already scheduled
         closeTimer = setTimeout(() => {
-          logger.debug(
-            { taskId: task.id },
-            'Closing task container after result',
-          );
-          deps.queue.closeStdin(task.chat_jid);
+          closeCallbacks = Promise.resolve()
+            .then(() => {
+              logger.debug(
+                { taskId: task.id },
+                'Closing task container after result',
+              );
+              deps.queue.closeStdin(task.chat_jid);
+            })
+            .then(undefined, (error: unknown) => {
+              closeFailure = { error };
+              rejectClose(error);
+            });
         }, TASK_CLOSE_DELAY_MS);
       };
 
-      const output = await runContainerAgent(
+      const running = runContainerAgent(
         group,
         {
           prompt: task.prompt,
@@ -195,8 +210,10 @@ async function runTask(
           assistantName: ASSISTANT_NAME,
           script: task.script || undefined,
         },
-        (proc, containerName) =>
-          deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
+        (proc, containerName) => {
+          ownedContainer = containerName;
+          deps.onProcess(task.chat_jid, proc, containerName, task.group_folder);
+        },
         async (streamedOutput: ContainerOutput) => {
           if (streamedOutput.result) {
             result = streamedOutput.result;
@@ -214,6 +231,10 @@ async function runTask(
         },
       );
 
+      const output = await Promise.race([running, closeOutcome]);
+      // A same-tick native exit cannot discard a close callback already started.
+      await closeCallbacks;
+      if (closeFailure) throw closeFailure.error;
       if (closeTimer) clearTimeout(closeTimer);
 
       if (output.status === 'error') {
@@ -233,11 +254,26 @@ async function runTask(
   ]);
   if (closeTimer) clearTimeout(closeTimer);
   if (execution.status === 'fulfilled' && execution.value) return;
-  if (execution.status === 'rejected') {
+  let taskExecution = execution;
+  if (execution.status === 'rejected' && closeFailure && ownedContainer) {
+    const [cleanup] = await Promise.allSettled([
+      Promise.resolve().then(() => stopContainer(ownedContainer!)),
+    ]);
+    if (cleanup.status === 'rejected')
+      taskExecution = {
+        status: 'rejected',
+        reason: new AggregateError(
+          [execution.reason as unknown, cleanup.reason as unknown],
+          'Task close and owned-container cleanup failed; inspect before retrying.',
+          { cause: execution.reason as unknown },
+        ),
+      };
+  }
+  if (taskExecution.status === 'rejected') {
     error =
-      execution.reason instanceof Error
-        ? execution.reason.message
-        : String(execution.reason);
+      taskExecution.reason instanceof Error
+        ? taskExecution.reason.message
+        : String(taskExecution.reason);
     logger.error({ taskId: task.id, error }, 'Task failed');
   }
   const [bookkeeping] = await Promise.allSettled([
@@ -263,16 +299,16 @@ async function runTask(
     }),
   ]);
   if (bookkeeping.status === 'rejected') {
-    if (execution.status === 'rejected')
+    if (taskExecution.status === 'rejected')
       throw new AggregateError(
-        [execution.reason as unknown, bookkeeping.reason as unknown],
+        [taskExecution.reason as unknown, bookkeeping.reason as unknown],
         'Task execution and run bookkeeping failed; repair task storage before retrying.',
         { cause: bookkeeping.reason as unknown },
       );
     throw bookkeeping.reason;
   }
-  if (execution.status === 'rejected') {
-    const failure: unknown = execution.reason;
+  if (taskExecution.status === 'rejected') {
+    const failure: unknown = taskExecution.reason;
     if (
       !isFileSystemError(failure) &&
       !isTelegramError(failure) &&
