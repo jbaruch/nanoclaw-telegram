@@ -376,6 +376,8 @@ export async function runContainerAgent(
     let parseBuffer = Buffer.alloc(0);
     let newSessionId: string | undefined;
     let outputProtocolError = false;
+    const hasInvalidFrame = () =>
+      outputProtocolError || parseBuffer.includes(OUTPUT_START_MARKER);
     let outputChain = Promise.resolve();
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let callbackFailed = false;
@@ -612,6 +614,16 @@ export async function runContainerAgent(
           // A settled result or actual SDK completion permits idle cleanup.
           // Completion does not assert that an IPC message reached its channel.
           afterOutput(() => {
+            if (hasInvalidFrame()) {
+              resolve({
+                status: 'error',
+                result: null,
+                newSessionId,
+                error:
+                  'Agent emitted malformed or unfinished output before timeout; retain undelivered input and inspect its output protocol.',
+              });
+              return;
+            }
             if (completedTerminalOutput) {
               logger.info(
                 { group: group.name, containerName, duration, code },
@@ -727,10 +739,7 @@ export async function runContainerAgent(
 
         // Streaming mode: wait for output chain to settle, return completion marker
         if (onOutput) {
-          if (
-            outputProtocolError ||
-            parseBuffer.includes(OUTPUT_START_MARKER)
-          ) {
+          if (hasInvalidFrame()) {
             afterOutput(() =>
               resolve({
                 status: 'error',

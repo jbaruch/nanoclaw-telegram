@@ -394,6 +394,31 @@ describe('container-runner timeout behavior', () => {
     await expect(pending).resolves.toMatchObject({ status: 'success' });
   });
 
+  it.each(['malformed', 'unfinished'] as const)(
+    'does not accept timeout after a completion followed by a %s frame',
+    async (kind) => {
+      const pending = runContainerAgent(
+        testGroup,
+        testInput,
+        () => {},
+        vi.fn(async () => {}),
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      emitOutputMarker(fakeProc, {
+        status: 'success',
+        result: 'fixed completed result',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      fakeProc.stdout.push(
+        `${OUTPUT_START_MARKER}\n{fixed invalid` +
+          (kind === 'malformed' ? `\n${OUTPUT_END_MARKER}\n` : ''),
+      );
+      await vi.advanceTimersByTimeAsync(1830000);
+      fakeProc.emit('close', 137);
+      await expect(pending).resolves.toMatchObject({ status: 'error' });
+    },
+  );
+
   it('does not treat preview-only activity as terminal timeout success', async () => {
     const pending = runContainerAgent(
       testGroup,
