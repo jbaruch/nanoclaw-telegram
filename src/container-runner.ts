@@ -299,6 +299,7 @@ export async function runContainerAgent(
   input: ContainerInput,
   onProcess: (proc: ChildProcess, containerName: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  outputFailure?: Promise<{ error: unknown }>,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
@@ -763,6 +764,8 @@ export async function runContainerAgent(
         });
       });
     });
+    if (outputFailure)
+      void outputFailure.then(({ error }) => fail(error)).then(undefined, fail);
     container.stdin.on('error', fail);
     runGuarded(() => {
       onProcess(container, containerName);

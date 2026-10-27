@@ -88,9 +88,10 @@ describe('draft stream failure boundaries', () => {
       const updated = stream.update(
         'fixed second preview longer than thirty characters',
       );
-      const updateRejected = expect(updated).rejects.toBe(defect);
+      await expect(updated).resolves.toBeUndefined();
+      const failed = expect(stream.failure).resolves.toEqual({ error: defect });
       await vi.advanceTimersByTimeAsync(1000);
-      await updateRejected;
+      await failed;
       if (cleanupFails)
         await expect(stream.cancel()).rejects.toMatchObject({
           cause: defect,
@@ -115,6 +116,26 @@ describe('draft stream failure boundaries', () => {
     await expect(
       stream.update('fixed preview longer than thirty characters'),
     ).rejects.toBe(defect);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('coalesces a burst without advancing the throttle clock or delaying final text', async () => {
+    vi.useFakeTimers();
+    const send = vi.fn(async () => 17);
+    const edit = vi.fn(async () => {});
+    const stream = createDraftStream({
+      sendMessage: send,
+      editMessage: edit,
+      deleteMessage: vi.fn(async () => {}),
+    });
+    await stream.update('fixed first preview longer than thirty characters');
+    for (let n = 0; n < 20; n++)
+      await stream.update(
+        `fixed queued preview number ${n} longer than thirty characters`,
+      );
+    expect(edit).not.toHaveBeenCalled();
+    await expect(stream.finish('fixed final text')).resolves.toBe(true);
+    expect(edit).toHaveBeenCalledExactlyOnceWith(17, 'fixed final text');
     expect(vi.getTimerCount()).toBe(0);
   });
 

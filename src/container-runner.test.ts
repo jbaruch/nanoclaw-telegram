@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { createDraftStream } from './draft-stream.js';
 import { logger } from './logger.js';
 import { stopContainer } from './container-runtime.js';
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
@@ -245,6 +246,35 @@ describe('container-runner timeout behavior', () => {
       });
     },
   );
+
+  it('owns a throttled preview defect without another output marker or finalization', async () => {
+    vi.mocked(stopContainer).mockClear();
+    const defect = new TypeError('fixed throttled preview defect');
+    const stream = createDraftStream({
+      sendMessage: vi.fn(async () => 17),
+      editMessage: vi.fn(async () => {
+        throw defect;
+      }),
+      deleteMessage: vi.fn(async () => {}),
+    });
+    const pending = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+      stream.failure,
+    );
+    const rejected = expect(pending).rejects.toBe(defect);
+    await vi.advanceTimersByTimeAsync(10);
+    await stream.update('fixed initial preview longer than thirty characters');
+    await stream.update('fixed later preview longer than thirty characters');
+    await vi.advanceTimersByTimeAsync(1000);
+    await rejected;
+    expect(stopContainer).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('nanoclaw-test-group-'),
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
 
   it('rejects a delayed stdin EPIPE through the owning run and retires its container', async () => {
     vi.mocked(stopContainer).mockClear();

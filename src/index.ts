@@ -381,53 +381,59 @@ export async function processGroupMessages(chatJid: string): Promise<boolean> {
     (async () => {
       await channel.setTyping?.(chatJid, true);
       draftStream = channel.createDraftStream?.(chatJid);
-      return runAgent(group, prompt, chatJid, async (result) => {
-        // Streaming preview — update draft with accumulated text
-        if (result.streamText && draftStream) {
-          const text = result.streamText
-            .replace(/<internal>[\s\S]*?<\/internal>/g, '')
-            .trim();
-          if (text) await draftStream.update(text);
-        }
+      return runAgent(
+        group,
+        prompt,
+        chatJid,
+        async (result) => {
+          // Streaming preview — update draft with accumulated text
+          if (result.streamText && draftStream) {
+            const text = result.streamText
+              .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+              .trim();
+            if (text) await draftStream.update(text);
+          }
 
-        // Streaming output callback — called for each agent result
-        if (result.result) {
-          const raw =
-            typeof result.result === 'string'
-              ? result.result
-              : JSON.stringify(result.result);
-          // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-          const text = raw
-            .replace(/<internal>[\s\S]*?<\/internal>/g, '')
-            .trim();
-          logger.info(
-            { group: group.name },
-            `Agent output: ${raw.length} chars`,
-          );
-          if (text) {
-            if (draftStream) {
-              const ok = await draftStream.finish(text);
-              if (!ok) {
-                // Text exceeded maxLength — fall back to regular send
+          // Streaming output callback — called for each agent result
+          if (result.result) {
+            const raw =
+              typeof result.result === 'string'
+                ? result.result
+                : JSON.stringify(result.result);
+            // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+            const text = raw
+              .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+              .trim();
+            logger.info(
+              { group: group.name },
+              `Agent output: ${raw.length} chars`,
+            );
+            if (text) {
+              if (draftStream) {
+                const ok = await draftStream.finish(text);
+                if (!ok) {
+                  // Text exceeded maxLength — fall back to regular send
+                  await sendWithRetry(channel, chatJid, text);
+                }
+              } else {
                 await sendWithRetry(channel, chatJid, text);
               }
-            } else {
-              await sendWithRetry(channel, chatJid, text);
+              outputSentToUser = true;
             }
-            outputSentToUser = true;
+            // Only reset idle timer on actual results, not session-update markers (result: null)
+            resetIdleTimer();
           }
-          // Only reset idle timer on actual results, not session-update markers (result: null)
-          resetIdleTimer();
-        }
 
-        if (result.status === 'success') {
-          queue.notifyIdle(chatJid);
-        }
+          if (result.status === 'success') {
+            queue.notifyIdle(chatJid);
+          }
 
-        if (result.status === 'error') {
-          hadError = true;
-        }
-      });
+          if (result.status === 'error') {
+            hadError = true;
+          }
+        },
+        draftStream?.failure,
+      );
     })(),
   ]);
   // Both cleanup actions run even when execution or another cleanup fails.
@@ -491,6 +497,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  outputFailure?: Promise<{ error: unknown }>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
   const sessionId = sessions[group.folder];
@@ -546,6 +553,7 @@ async function runAgent(
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
+      outputFailure,
     );
 
     if (output.newSessionId) {

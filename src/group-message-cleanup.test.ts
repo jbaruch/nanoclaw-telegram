@@ -67,6 +67,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2024-01-01T00:00:00Z'));
   draft = {
+    failure: new Promise(() => {}),
     update: vi.fn(async () => {}),
     finish: vi.fn(async () => true),
     cancel: vi.fn(async () => {}),
@@ -269,5 +270,12 @@ it('classifies a missing native IPC route without consuming a valid later send',
     'tg:route-recovery',
     'fixed route payload',
     undefined,
+  );
+});
+
+it('passes the actual preview failure signal into the native run owner', async () => {
+  await seed('tg:preview-owner');
+  expect(vi.mocked(runContainerAgent).mock.calls.at(-1)?.[4]).toBe(
+    draft.failure,
   );
 });
