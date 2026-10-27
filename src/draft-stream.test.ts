@@ -25,6 +25,77 @@ describe('draft stream failure boundaries', () => {
     expect(edit).not.toHaveBeenCalled();
   });
 
+  it.each(['finish', 'cancel'] as const)(
+    'retains a delayed update defect without an unhandled rejection until %s observes it',
+    async (operation) => {
+      vi.useFakeTimers();
+      const defect = new TypeError('fixed delayed preview defect');
+      const unhandled = vi.fn();
+      process.on('unhandledRejection', unhandled);
+      let reject!: (error: unknown) => void;
+      const stream = createDraftStream({
+        sendMessage: vi.fn(
+          () =>
+            new Promise<number>((_resolve, fail) => {
+              reject = fail;
+            }),
+        ),
+        editMessage: vi.fn(async () => {}),
+        deleteMessage: vi.fn(async () => {}),
+      });
+      try {
+        stream.update(
+          'fixed preview longer than the minimum thirty characters',
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        reject(defect);
+        await vi.advanceTimersByTimeAsync(10);
+        expect(unhandled).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+        const result =
+          operation === 'finish'
+            ? stream.finish('fixed final')
+            : stream.cancel();
+        await expect(result).rejects.toBe(defect);
+      } finally {
+        process.off('unhandledRejection', unhandled);
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'cleans an acknowledged preview while retaining an update defect (cleanup also fails: %s)',
+    async (cleanupFails) => {
+      vi.useFakeTimers();
+      const defect = new TypeError('fixed edit defect');
+      const cleanup = new TypeError('fixed delete defect');
+      const remove = cleanupFails
+        ? vi.fn(async () => {
+            throw cleanup;
+          })
+        : vi.fn(async () => {});
+      const stream = createDraftStream({
+        sendMessage: vi.fn(async () => 17),
+        editMessage: vi.fn(async () => {
+          throw defect;
+        }),
+        deleteMessage: remove,
+      });
+      stream.update('fixed first preview longer than thirty characters');
+      await vi.advanceTimersByTimeAsync(0);
+      stream.update('fixed second preview longer than thirty characters');
+      await vi.advanceTimersByTimeAsync(1000);
+      if (cleanupFails)
+        await expect(stream.cancel()).rejects.toMatchObject({
+          cause: defect,
+          errors: [defect, cleanup],
+        });
+      else await expect(stream.cancel()).rejects.toBe(defect);
+      expect(remove).toHaveBeenCalledExactlyOnceWith(17);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
   it('reports a failed final send and permits a later successful final attempt', async () => {
     const failure = new HttpError(
       'fixed delivery failure',

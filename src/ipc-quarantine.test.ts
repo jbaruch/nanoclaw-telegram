@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { HttpError } from 'grammy';
 import os from 'os';
 import path from 'path';
 import { spawnSync } from 'child_process';
@@ -68,6 +69,7 @@ describe('IPC file quarantine', () => {
       fs.writeFileSync(path.join(tasks, name), JSON.stringify(value));
     const deps: IpcDeps = {
       sendMessage: vi.fn(async () => {}),
+      sendReaction: vi.fn(async () => {}),
       registeredGroups: () => ({
         'tg:123': {
           name: 'fixed',
@@ -127,6 +129,39 @@ describe('IPC file quarantine', () => {
         'fixed later input',
       );
       expect(fs.existsSync(path.join(messages, 'valid.json'))).toBe(false);
+      const reactionFailure = new HttpError(
+        'fixed reaction transport refusal',
+        new Error('synthetic'),
+      );
+      vi.mocked(deps.sendReaction!).mockRejectedValueOnce(reactionFailure);
+      const reaction = {
+        type: 'react_to_message',
+        chatJid: 'tg:123',
+        messageId: '17',
+        emoji: '👍',
+      };
+      fs.writeFileSync(
+        path.join(messages, 'failed-reaction.json'),
+        JSON.stringify(reaction),
+      );
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(deps.sendReaction).toHaveBeenCalledExactlyOnceWith(
+        'tg:123',
+        '17',
+        '👍',
+      );
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(temporary, 'ipc', 'errors', 'main-failed-reaction.json'),
+            'utf8',
+          ),
+        ),
+      ).toEqual(reaction);
+      expect(fs.existsSync(path.join(messages, 'failed-reaction.json'))).toBe(
+        false,
+      );
+      expect(vi.getTimerCount()).toBe(1);
       const defect = new TypeError('fixed delayed handler defect');
       vi.mocked(deps.sendMessage).mockRejectedValueOnce(defect);
       fs.writeFileSync(

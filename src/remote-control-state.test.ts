@@ -27,10 +27,31 @@ beforeEach(async () => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   fs.rmSync(fixture.directory, { recursive: true });
 });
 
 describe('atomic Remote Control owner migration', () => {
+  it('handles an actual asynchronous missing-executable launch without an uncaught child error', async () => {
+    vi.stubEnv('PATH', fixture.directory);
+    const close = vi.spyOn(fs, 'closeSync');
+    const result = await owner.startRemoteControl(
+      'fixed-owner',
+      'tg:123',
+      fixture.directory,
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('ENOENT'),
+    });
+    expect(close).toHaveBeenCalledTimes(2);
+    expect(owner.getActiveSession()).toBeNull();
+    expect(process.kill).not.toHaveBeenCalled();
+    expect(
+      fs.existsSync(path.join(fixture.directory, 'remote-control.json')),
+    ).toBe(false);
+  });
+
   it('preserves legacy bytes on failed replacement and can retry the migration', () => {
     const state = path.join(fixture.directory, 'remote-control.json');
     const original = JSON.stringify(legacy);

@@ -763,6 +763,7 @@ export async function runContainerAgent(
         });
       });
     });
+    container.stdin.on('error', fail);
     runGuarded(() => {
       onProcess(container, containerName);
       container.stdin.write(JSON.stringify(input));

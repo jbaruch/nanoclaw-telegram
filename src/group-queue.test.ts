@@ -35,6 +35,56 @@ describe('GroupQueue', () => {
     vi.useRealTimers();
   });
 
+  it.each(['messages', 'task'] as const)(
+    'surfaces a queued %s defect to the process owner',
+    async (kind) => {
+      const defect = new TypeError('fixed queued work defect');
+      const rejected = expect(queue.waitForFailure()).rejects.toBe(defect);
+      const work = vi.fn(async () => {
+        throw defect;
+      });
+      if (kind === 'task') queue.enqueueTask('tg:123', 'fixed-task', work);
+      else {
+        queue.setProcessMessagesFn(work);
+        queue.enqueueMessageCheck('tg:123');
+      }
+      await vi.advanceTimersByTimeAsync(0);
+      await rejected;
+      expect(work).toHaveBeenCalledTimes(1);
+      queue.enqueueMessageCheck('tg:456');
+      expect(work).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('retains a completed failure until the real lifecycle owner subscribes', async () => {
+    const defect = new TypeError('fixed early queued defect');
+    queue.setProcessMessagesFn(async () => {
+      throw defect;
+    });
+    queue.enqueueMessageCheck('tg:123');
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(queue.waitForFailure()).rejects.toBe(defect);
+  });
+
+  it('surfaces a task defect from the actual same-group drain path', async () => {
+    let release!: () => void;
+    queue.setProcessMessagesFn(async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return true;
+    });
+    queue.enqueueMessageCheck('tg:123');
+    const defect = new TypeError('fixed drained task defect');
+    queue.enqueueTask('tg:123', 'fixed-task', async () => {
+      throw defect;
+    });
+    const rejected = expect(queue.waitForFailure()).rejects.toBe(defect);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    await rejected;
+  });
+
   // --- Single group at a time ---
 
   it('only runs one container per group at a time', async () => {

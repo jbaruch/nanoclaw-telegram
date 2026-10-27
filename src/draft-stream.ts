@@ -35,6 +35,7 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
 
   let messageId: number | undefined;
   let deliveryFailure: Error | undefined;
+  let unexpectedFailure: { error: unknown } | undefined;
   let lastSentText = '';
   let pendingText = '';
   let stopped = false;
@@ -62,11 +63,24 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
     }
   }
 
+  function throwUnexpectedFailure(): void {
+    if (unexpectedFailure) throw unexpectedFailure.error;
+  }
+
   function flush(): void {
     if (!pendingText || (pendingText === lastSentText && !deliveryFailure))
       return;
     const text = pendingText;
-    inFlight = inFlight.then(() => doSendOrEdit(text));
+    inFlight = inFlight
+      .then(() => {
+        if (!unexpectedFailure) return doSendOrEdit(text);
+      })
+      .then(undefined, (error: unknown) => {
+        unexpectedFailure = { error };
+        stopped = true;
+        if (throttleTimer) clearTimeout(throttleTimer);
+        throttleTimer = null;
+      });
   }
 
   return {
@@ -94,6 +108,7 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
       }
 
       await inFlight;
+      throwUnexpectedFailure();
 
       if (text.length > maxLength) {
         // Text too long for a single message — caller should fall back
@@ -114,6 +129,7 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
       pendingText = text;
       flush();
       await inFlight;
+      throwUnexpectedFailure();
       if (deliveryFailure) throw deliveryFailure;
       return true;
     },
@@ -125,17 +141,30 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
         throttleTimer = null;
       }
       await inFlight;
-      if (messageId) {
-        try {
-          await opts.deleteMessage(messageId);
-        } catch (err) {
-          if (!isTelegramError(err)) throw err;
-          logger.debug(
-            { err },
-            'Could not delete draft preview; check Telegram connectivity',
+      const [cleanup] = await Promise.allSettled([
+        (async () => {
+          if (!messageId) return;
+          try {
+            await opts.deleteMessage(messageId);
+          } catch (err) {
+            if (!isTelegramError(err)) throw err;
+            logger.debug(
+              { err },
+              'Could not delete draft preview; check Telegram connectivity',
+            );
+          }
+        })(),
+      ]);
+      if (cleanup.status === 'rejected') {
+        if (unexpectedFailure)
+          throw new AggregateError(
+            [unexpectedFailure.error, cleanup.reason],
+            'Draft update and preview cleanup failed; inspect the preview before retrying.',
+            { cause: unexpectedFailure.error },
           );
-        }
+        throw cleanup.reason;
       }
+      throwUnexpectedFailure();
     },
   };
 }

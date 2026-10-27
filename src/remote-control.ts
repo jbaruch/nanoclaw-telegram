@@ -184,31 +184,26 @@ export async function startRemoteControl(
     return { ok: false, error: `Failed to start: ${err.message}` };
   }
 
-  // Auto-accept the "Enable Remote Control?" prompt
-  if (proc.stdin) {
-    proc.stdin.write('y\n');
-    proc.stdin.end();
-  }
-
-  // Close FDs in the parent — the child inherited copies
+  // Close parent descriptors before observing the child's asynchronous launch.
   fs.closeSync(stdoutFd);
   fs.closeSync(stderrFd);
 
-  // Fully detach from parent
-  proc.unref();
-
-  const pid = proc.pid;
-  if (!pid) {
-    return { ok: false, error: 'Failed to get process PID' };
-  }
-
-  // Poll the stdout file for the URL
   return new Promise((resolve, reject) => {
     const startTime = Date.now();
-
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    const finish = (
+      result: { ok: true; url: string } | { ok: false; error: string },
+    ) => {
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const pid = proc.pid;
     let stopAttempted = false;
     const stopStartedProcess = () => {
       stopAttempted = true;
+      if (!pid) return;
       try {
         process.kill(-pid, 'SIGTERM');
       } catch (error) {
@@ -221,6 +216,8 @@ export async function startRemoteControl(
       }
     };
     const rejectAfterCleanup = (error: unknown) => {
+      clearTimeout(timer);
+      settled = true;
       if (activeSession?.pid === pid) activeSession = null;
       if (stopAttempted) {
         reject(error);
@@ -240,10 +237,19 @@ export async function startRemoteControl(
             ),
         );
     };
+    proc.on('error', (error: Error) => {
+      if (settled) return;
+      if (!pid && (hasErrno(error, 'ENOENT') || hasErrno(error, 'EACCES'))) {
+        finish({ ok: false, error: `Failed to start: ${error.message}` });
+      } else rejectAfterCleanup(error);
+    });
+    proc.stdin?.on('error', rejectAfterCleanup);
     const poll = async () => {
+      if (settled) return;
+      if (!pid) return; // A failed launch emits error asynchronously.
       // Check if process died
       if (!isProcessAlive(pid)) {
-        resolve({ ok: false, error: 'Process exited before producing URL' });
+        finish({ ok: false, error: 'Process exited before producing URL' });
         return;
       }
 
@@ -272,26 +278,35 @@ export async function startRemoteControl(
           { url: match[0], pid, sender, chatJid },
           'Remote Control session started',
         );
-        resolve({ ok: true, url: match[0] });
+        finish({ ok: true, url: match[0] });
         return;
       }
 
       // Timeout check
       if (Date.now() - startTime >= URL_TIMEOUT_MS) {
         stopStartedProcess();
-        resolve({
+        finish({
           ok: false,
           error: 'Timed out waiting for Remote Control URL',
         });
         return;
       }
 
-      setTimeout(() => {
+      timer = setTimeout(() => {
         void poll().then(undefined, rejectAfterCleanup);
       }, URL_POLL_MS);
     };
 
-    void poll().then(undefined, rejectAfterCleanup);
+    void Promise.resolve()
+      .then(() => {
+        // Error listeners exist before stdin/unref can emit a launch failure.
+        if (!pid) return;
+        proc.stdin?.write('y\n');
+        proc.stdin?.end();
+        proc.unref();
+        return poll();
+      })
+      .then(undefined, rejectAfterCleanup);
   });
 }
 

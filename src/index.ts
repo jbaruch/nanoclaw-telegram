@@ -90,7 +90,7 @@ const queue = new GroupQueue();
 const SEND_RETRY_ATTEMPTS = 3;
 const SEND_RETRY_BASE_DELAY_MS = 2000;
 
-async function sendWithRetry(
+export async function sendWithRetry(
   ch: Channel,
   jid: string,
   text: string,
@@ -894,7 +894,12 @@ async function main(): Promise<void> {
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
   // Background failures reach main's existing outer process boundary.
-  await Promise.race([schedulerLifecycle, ipcLifecycle, startMessageLoop()]);
+  await Promise.race([
+    queue.waitForFailure(),
+    schedulerLifecycle,
+    ipcLifecycle,
+    startMessageLoop(),
+  ]);
 }
 
 // Guard: only run when executed directly, not when imported by tests

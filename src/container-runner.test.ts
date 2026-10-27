@@ -246,6 +246,23 @@ describe('container-runner timeout behavior', () => {
     },
   );
 
+  it('rejects a delayed stdin EPIPE through the owning run and retires its container', async () => {
+    vi.mocked(stopContainer).mockClear();
+    const failure = Object.assign(new Error('fixed closed stdin'), {
+      code: 'EPIPE',
+    });
+    const pending = runContainerAgent(testGroup, testInput, () => {});
+    const rejected = expect(pending).rejects.toBe(failure);
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.stdin.emit('error', failure);
+    await vi.advanceTimersByTimeAsync(0);
+    await rejected;
+    expect(stopContainer).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('nanoclaw-test-group-'),
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('rejects a delayed stdout callback defect and retires only the owning container', async () => {
     vi.mocked(stopContainer).mockClear();
     const defect = new TypeError('fixed stdout callback defect');

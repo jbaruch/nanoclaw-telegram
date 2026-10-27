@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { EventEmitter } from 'events';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // Mock config before importing the module under test
@@ -24,12 +25,12 @@ import {
 // --- Helpers ---
 
 function createMockProcess(pid = 12345) {
-  return {
+  return Object.assign(new EventEmitter(), {
     pid,
     unref: vi.fn(),
     kill: vi.fn(),
-    stdin: { write: vi.fn(), end: vi.fn() },
-  };
+    stdin: Object.assign(new EventEmitter(), { write: vi.fn(), end: vi.fn() }),
+  });
 }
 
 describe('remote-control', () => {
@@ -313,6 +314,24 @@ describe('remote-control', () => {
         vi.useRealTimers();
       },
     );
+
+    it('rejects a delayed child error and cleans up only its started process', async () => {
+      vi.useFakeTimers();
+      const proc = createMockProcess();
+      spawnMock.mockReturnValue(proc);
+      const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+      const defect = new TypeError('fixed asynchronous child defect');
+      const pending = startRemoteControl('user1', 'tg:123', '/project');
+      const rejected = expect(pending).rejects.toBe(defect);
+      await vi.advanceTimersByTimeAsync(0);
+      proc.emit('error', defect);
+      await vi.advanceTimersByTimeAsync(0);
+      await rejected;
+      expect(kill).toHaveBeenCalledWith(-12345, 'SIGTERM');
+      expect(closeSyncSpy).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(0);
+      vi.useRealTimers();
+    });
 
     it('propagates an unexpected spawn error while closing parent descriptors', async () => {
       const defect = new TypeError('fixed spawn defect');

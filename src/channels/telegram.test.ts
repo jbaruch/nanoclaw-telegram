@@ -36,6 +36,7 @@ interface MockBotState {
   api: {
     sendMessage: ReturnType<typeof vi.fn>;
     sendChatAction: ReturnType<typeof vi.fn>;
+    raw: { setMessageReaction: ReturnType<typeof vi.fn> };
   };
 }
 
@@ -57,6 +58,7 @@ vi.mock('grammy', async (importOriginal) => ({
         ),
       sendMessage: vi.fn().mockResolvedValue({ message_id: 17 }),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
+      raw: { setMessageReaction: vi.fn().mockResolvedValue(true) },
     };
 
     constructor(token: string) {
@@ -834,6 +836,42 @@ describe('TelegramChannel', () => {
         channel.sendMessage('tg:100200300', 'Will fail'),
       ).rejects.toBe(failure);
       expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not expose a retryable transport error after an acknowledged first chunk', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      const failure = new HttpError(
+        'fixed second-chunk failure',
+        Object.assign(new Error('fixed reset'), { code: 'ECONNRESET' }),
+      );
+      currentBot()
+        .api.sendMessage.mockResolvedValueOnce({ message_id: 17 })
+        .mockRejectedValueOnce(failure);
+      await expect(
+        channel.sendMessage('tg:123', 'x'.repeat(5000)),
+      ).rejects.toMatchObject({
+        name: 'Error',
+        cause: failure,
+        message: expect.stringContaining('acknowledged chunks'),
+      });
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it('propagates native reaction failure and refuses disconnected reactions', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await expect(channel.sendReaction('tg:123', '17', '👍')).rejects.toThrow(
+        'not connected',
+      );
+      await channel.connect();
+      const failure = new HttpError(
+        'fixed reaction failure',
+        new Error('synthetic'),
+      );
+      currentBot().api.raw.setMessageReaction.mockRejectedValueOnce(failure);
+      await expect(channel.sendReaction('tg:123', '17', '👍')).rejects.toBe(
+        failure,
+      );
     });
 
     it('does not confirm delivery when the native response lacks a message ID', async () => {

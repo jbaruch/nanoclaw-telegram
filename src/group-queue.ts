@@ -40,6 +40,24 @@ export class GroupQueue {
   private processMessagesFn: ((groupJid: string) => Promise<boolean>) | null =
     null;
   private shuttingDown = false;
+  private reportFailure!: (failure: { error: unknown }) => void;
+  private readonly failure = new Promise<{ error: unknown }>((resolve) => {
+    this.reportFailure = resolve;
+  });
+
+  /** Main observes queued work failures through its existing process boundary. */
+  waitForFailure(): Promise<never> {
+    return this.failure.then(({ error }) => {
+      throw error;
+    });
+  }
+
+  private observe(work: Promise<void>): void {
+    void work.then(undefined, (error: unknown) => {
+      this.shuttingDown = true;
+      this.reportFailure({ error });
+    });
+  }
 
   private getGroup(groupJid: string): GroupState {
     let state = this.groups.get(groupJid);
@@ -88,9 +106,7 @@ export class GroupQueue {
       return;
     }
 
-    this.runForGroup(groupJid, 'messages').catch((err) =>
-      logger.error({ groupJid, err }, 'Unhandled error in runForGroup'),
-    );
+    this.observe(this.runForGroup(groupJid, 'messages'));
   }
 
   enqueueTask(groupJid: string, taskId: string, fn: () => Promise<void>): void {
@@ -130,9 +146,7 @@ export class GroupQueue {
     }
 
     // Run immediately
-    this.runTask(groupJid, { id: taskId, groupJid, fn }).catch((err) =>
-      logger.error({ groupJid, taskId, err }, 'Unhandled error in runTask'),
-    );
+    this.observe(this.runTask(groupJid, { id: taskId, groupJid, fn }));
   }
 
   registerProcess(
@@ -320,23 +334,13 @@ export class GroupQueue {
     // Tasks first (they won't be re-discovered from SQLite like messages)
     if (state.pendingTasks.length > 0) {
       const task = state.pendingTasks.shift()!;
-      this.runTask(groupJid, task).catch((err) =>
-        logger.error(
-          { groupJid, taskId: task.id, err },
-          'Unhandled error in runTask (drain)',
-        ),
-      );
+      this.observe(this.runTask(groupJid, task));
       return;
     }
 
     // Then pending messages
     if (state.pendingMessages) {
-      this.runForGroup(groupJid, 'drain').catch((err) =>
-        logger.error(
-          { groupJid, err },
-          'Unhandled error in runForGroup (drain)',
-        ),
-      );
+      this.observe(this.runForGroup(groupJid, 'drain'));
       return;
     }
 
@@ -355,19 +359,9 @@ export class GroupQueue {
       // Prioritize tasks over messages
       if (state.pendingTasks.length > 0) {
         const task = state.pendingTasks.shift()!;
-        this.runTask(nextJid, task).catch((err) =>
-          logger.error(
-            { groupJid: nextJid, taskId: task.id, err },
-            'Unhandled error in runTask (waiting)',
-          ),
-        );
+        this.observe(this.runTask(nextJid, task));
       } else if (state.pendingMessages) {
-        this.runForGroup(nextJid, 'drain').catch((err) =>
-          logger.error(
-            { groupJid: nextJid, err },
-            'Unhandled error in runForGroup (waiting)',
-          ),
-        );
+        this.observe(this.runForGroup(nextJid, 'drain'));
       }
       // If neither pending, skip this group
     }

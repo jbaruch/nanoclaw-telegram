@@ -822,6 +822,7 @@ export class TelegramChannel implements Channel {
       );
     }
 
+    let acknowledgedChunks = 0;
     try {
       const numericId = jid.replace(/^tg:/, '');
       const options: {
@@ -846,6 +847,7 @@ export class TelegramChannel implements Channel {
           chunks[i],
           chunkOptions,
         );
+        acknowledgedChunks++;
       }
       logger.info(
         { jid, length: text.length, replyToMessageId, chunks: chunks.length },
@@ -854,6 +856,11 @@ export class TelegramChannel implements Channel {
     } catch (err) {
       if (!isTelegramError(err)) throw err;
       logger.error({ jid, err }, 'Failed to send Telegram message');
+      if (acknowledgedChunks > 0)
+        throw new TelegramDeliveryError(
+          'Telegram delivery stopped after acknowledged chunks; inspect the partial message before retrying the full output.',
+          { cause: err },
+        );
       throw err;
     }
   }
@@ -890,7 +897,10 @@ export class TelegramChannel implements Channel {
     messageId: string,
     emoji: string,
   ): Promise<void> {
-    if (!this.bot) return;
+    if (!this.bot)
+      throw new TelegramDeliveryError(
+        'Telegram bot is not connected; reconnect it before retrying the reaction.',
+      );
     const numericId = jid.replace(/^tg:/, '');
     const msgId = parseInt(messageId, 10);
     try {
@@ -908,6 +918,7 @@ export class TelegramChannel implements Channel {
         { jid, messageId, emoji, err },
         'Failed to send Telegram reaction',
       );
+      throw err;
     }
   }
 

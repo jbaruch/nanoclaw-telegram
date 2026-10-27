@@ -1,4 +1,5 @@
 import { HttpError } from 'grammy';
+import { TelegramDeliveryError } from './operational-errors.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Channel } from './types.js';
 import type { DraftStream } from './draft-stream.js';
@@ -28,7 +29,11 @@ vi.mock('./db.js', () => ({
   getAllChats: () => [],
   setSession: vi.fn(),
 }));
-import { processGroupMessages, _setRegisteredGroups } from './index.js';
+import {
+  processGroupMessages,
+  _setRegisteredGroups,
+  sendWithRetry,
+} from './index.js';
 import { getMessagesSince, setRouterState } from './db.js';
 import { findChannel } from './router.js';
 import { runContainerAgent } from './container-runner.js';
@@ -228,4 +233,21 @@ describe('group message error cleanup', () => {
     expect(storedCursor(jid)).toBe(previous);
     expect(channel.setTyping).toHaveBeenLastCalledWith(jid, false);
   });
+});
+
+it('does not replay whole output after acknowledged chunks failed later', async () => {
+  const transport = new HttpError(
+    'fixed chunk reset',
+    Object.assign(new Error('fixed reset'), { code: 'ECONNRESET' }),
+  );
+  const partial = new TelegramDeliveryError(
+    'Inspect acknowledged chunks before retrying.',
+    { cause: transport },
+  );
+  vi.mocked(channel.sendMessage).mockRejectedValueOnce(partial);
+  await expect(
+    sendWithRetry(channel, 'tg:123', 'fixed full output'),
+  ).rejects.toBe(partial);
+  expect(channel.sendMessage).toHaveBeenCalledTimes(1);
+  expect(vi.getTimerCount()).toBe(0);
 });
