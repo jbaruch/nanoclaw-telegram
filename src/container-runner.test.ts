@@ -1,3 +1,6 @@
+import fs from 'fs';
+import { logger } from './logger.js';
+import { stopContainer } from './container-runtime.js';
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
@@ -197,6 +200,154 @@ describe('container-runner timeout behavior', () => {
     expect(result.status).toBe('error');
     expect(result.error).toContain('timed out');
     expect(onOutput).not.toHaveBeenCalled();
+  });
+
+  it.each([null, [], 7, { status: 'success', result: { invalid: true } }])(
+    'refuses malformed streaming output %j without throwing from the native data event',
+    async (payload) => {
+      const onOutput = vi.fn(async () => {});
+      const pending = runContainerAgent(
+        testGroup,
+        testInput,
+        () => {},
+        onOutput,
+      );
+      fakeProc.stdout.push(
+        `${OUTPUT_START_MARKER}\n${JSON.stringify(payload)}\n${OUTPUT_END_MARKER}\n`,
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      fakeProc.emit('close', 0);
+      await expect(pending).resolves.toMatchObject({
+        status: 'error',
+        error: expect.stringContaining('invalid output'),
+      });
+      expect(onOutput).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    null,
+    [],
+    7,
+    { status: 'success', newSessionId: { invalid: true }, result: null },
+  ])(
+    'refuses malformed legacy output %j through the result contract',
+    async (payload) => {
+      const pending = runContainerAgent(testGroup, testInput, () => {});
+      fakeProc.stdout.push(
+        `${OUTPUT_START_MARKER}\n${JSON.stringify(payload)}\n${OUTPUT_END_MARKER}\n`,
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      fakeProc.emit('close', 0);
+      await expect(pending).resolves.toMatchObject({
+        status: 'error',
+        error: expect.stringContaining('Failed to parse container output'),
+      });
+    },
+  );
+
+  it('rejects a delayed stdout callback defect and retires only the owning container', async () => {
+    vi.mocked(stopContainer).mockClear();
+    const defect = new TypeError('fixed stdout callback defect');
+    const pending = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+    );
+    const rejected = expect(pending).rejects.toBe(defect);
+    await vi.advanceTimersByTimeAsync(10);
+    vi.mocked(logger.warn).mockImplementationOnce(() => {
+      throw defect;
+    });
+    fakeProc.stdout.push(
+      `${OUTPUT_START_MARKER}\nnull\n${OUTPUT_END_MARKER}\n`,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    await rejected;
+    expect(stopContainer).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('nanoclaw-test-group-'),
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('rejects a delayed timeout defect rather than throwing out of the timer', async () => {
+    vi.mocked(stopContainer).mockClear();
+    const defect = new TypeError('fixed timeout callback defect');
+    vi.mocked(stopContainer).mockImplementationOnce(() => {
+      throw defect;
+    });
+    const pending = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+    );
+    const rejected = expect(pending).rejects.toBe(defect);
+    await vi.advanceTimersByTimeAsync(1_830_001);
+    await rejected;
+    expect(stopContainer).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('rejects a delayed close callback defect without stopping an already closed container', async () => {
+    vi.mocked(stopContainer).mockClear();
+    const defect = new TypeError('fixed close callback defect');
+    const pending = runContainerAgent(testGroup, testInput, () => {});
+    const rejected = expect(pending).rejects.toBe(defect);
+    await vi.advanceTimersByTimeAsync(10);
+    vi.mocked(fs.writeFileSync).mockImplementationOnce(() => {
+      throw defect;
+    });
+    fakeProc.emit('close', 0);
+    await rejected;
+    expect(stopContainer).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('routes an asynchronous output rejection through cleanup and the caller Promise', async () => {
+    vi.mocked(stopContainer).mockClear();
+    const defect = new TypeError('fixed output callback defect');
+    const pending = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {
+        throw defect;
+      }),
+    );
+    const rejected = expect(pending).rejects.toBe(defect);
+    emitOutputMarker(fakeProc, { status: 'success', result: 'fixed output' });
+    await vi.advanceTimersByTimeAsync(10);
+    await rejected;
+    expect(stopContainer).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    fakeProc.emit('close', 0);
+  });
+
+  it('retains callback and native cleanup failures together', async () => {
+    vi.mocked(stopContainer).mockClear();
+    const defect = new TypeError('fixed output callback defect');
+    const cleanup = new TypeError('fixed native cleanup defect');
+    vi.mocked(stopContainer).mockImplementationOnce(() => {
+      throw cleanup;
+    });
+    const pending = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {
+        throw defect;
+      }),
+    );
+    const rejected = expect(pending).rejects.toMatchObject({
+      cause: defect,
+      errors: [defect, cleanup],
+    });
+    emitOutputMarker(fakeProc, { status: 'success', result: 'fixed output' });
+    await vi.advanceTimersByTimeAsync(10);
+    await rejected;
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('normal exit after output resolves as success', async () => {

@@ -2,11 +2,12 @@ import {
   isFileSystemError,
   isNetworkError,
   isTelegramError,
+  TelegramDeliveryError,
 } from '../operational-errors.js';
 import fs from 'fs';
 import https from 'https';
 import path from 'path';
-import { Api, Bot, type Context, type Filter } from 'grammy';
+import { Api, Bot, GrammyError, type Context, type Filter } from 'grammy';
 import type { ReactionTypeEmoji } from 'grammy/types';
 import OpenAI from 'openai';
 
@@ -34,6 +35,21 @@ export interface TelegramChannelOpts {
  * Claude's output naturally matches Telegram's Markdown v1 format:
  *   *bold*, _italic_, `code`, ```code blocks```, [links](url)
  */
+function requireTelegramAcknowledgment(
+  message: { message_id?: number } | undefined,
+): void {
+  if (
+    !message ||
+    !Number.isSafeInteger(message.message_id) ||
+    !message.message_id ||
+    message.message_id <= 0
+  ) {
+    throw new TelegramDeliveryError(
+      'Telegram returned no native message acknowledgment; inspect delivery before retrying.',
+    );
+  }
+}
+
 async function sendTelegramMessage(
   api: { sendMessage: Api['sendMessage'] },
   chatId: string | number,
@@ -44,15 +60,22 @@ async function sendTelegramMessage(
   } = {},
 ): Promise<void> {
   try {
-    await api.sendMessage(chatId, text, {
+    const sent = await api.sendMessage(chatId, text, {
       ...options,
       parse_mode: 'Markdown',
     });
+    requireTelegramAcknowledgment(sent);
   } catch (err) {
-    if (!isTelegramError(err)) throw err;
-    // Fallback: send as plain text if Markdown parsing fails
+    if (
+      !(err instanceof GrammyError) ||
+      err.error_code !== 400 ||
+      !/can't parse entities|cannot parse entities/i.test(err.description)
+    )
+      throw err;
+    // A native parse rejection permits a plain-text fallback.
     logger.debug({ err }, 'Markdown send failed, falling back to plain text');
-    await api.sendMessage(chatId, text, options);
+    const sent = await api.sendMessage(chatId, text, options);
+    requireTelegramAcknowledgment(sent);
   }
 }
 
@@ -383,6 +406,7 @@ export async function sendPoolMessage(
   } catch (err) {
     if (!isTelegramError(err)) throw err;
     logger.error({ chatId, sender, err }, 'Failed to send pool message');
+    throw err;
   }
 }
 
@@ -793,8 +817,9 @@ export class TelegramChannel implements Channel {
     replyToMessageId?: string,
   ): Promise<void> {
     if (!this.bot) {
-      logger.warn('Telegram bot not initialized');
-      return;
+      throw new TelegramDeliveryError(
+        'Telegram bot is not connected; reconnect it before retrying delivery.',
+      );
     }
 
     try {
@@ -829,6 +854,7 @@ export class TelegramChannel implements Channel {
     } catch (err) {
       if (!isTelegramError(err)) throw err;
       logger.error({ jid, err }, 'Failed to send Telegram message');
+      throw err;
     }
   }
 

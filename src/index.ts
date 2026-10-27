@@ -398,26 +398,10 @@ export async function processGroupMessages(chatJid: string): Promise<boolean> {
               const ok = await draftStream.finish(text);
               if (!ok) {
                 // Text exceeded maxLength — fall back to regular send
-                try {
-                  await sendWithRetry(channel, chatJid, text);
-                } catch (err) {
-                  if (!isTelegramError(err)) throw err;
-                  logger.error(
-                    { group: group.name, err },
-                    'Failed to send agent output after retries',
-                  );
-                }
+                await sendWithRetry(channel, chatJid, text);
               }
             } else {
-              try {
-                await sendWithRetry(channel, chatJid, text);
-              } catch (err) {
-                if (!isTelegramError(err)) throw err;
-                logger.error(
-                  { group: group.name, err },
-                  'Failed to send agent output after retries',
-                );
-              }
+              await sendWithRetry(channel, chatJid, text);
             }
             outputSentToUser = true;
           }
@@ -844,7 +828,7 @@ async function main(): Promise<void> {
   }
 
   // Start subsystems (independently of connection handler)
-  startSchedulerLoop({
+  const schedulerLifecycle = startSchedulerLoop({
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
     queue,
@@ -862,7 +846,7 @@ async function main(): Promise<void> {
       }
     },
   });
-  startIpcWatcher({
+  const ipcLifecycle = startIpcWatcher({
     sendMessage: (jid, text) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
@@ -909,10 +893,8 @@ async function main(): Promise<void> {
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
-  startMessageLoop().catch((err) => {
-    logger.fatal({ err }, 'Message loop crashed unexpectedly');
-    process.exit(1);
-  });
+  // Background failures reach main's existing outer process boundary.
+  await Promise.race([schedulerLifecycle, ipcLifecycle, startMessageLoop()]);
 }
 
 // Guard: only run when executed directly, not when imported by tests
@@ -922,8 +904,15 @@ const isDirectRun =
     new URL(`file://${process.argv[1]}`).pathname;
 
 if (isDirectRun) {
+  // outer-boundary-process-contract: the service owner detects failure through
+  // stderr and a nonzero orchestrator exit. This handler logs and exits 1;
+  // propagation alone reaches the legacy rejection reporter, which only logs
+  // and could leave the process alive after a background lifecycle failed.
   main().catch((err) => {
-    logger.error({ err }, 'Failed to start NanoClaw');
+    logger.error(
+      { err },
+      'NanoClaw runtime failed; inspect the error before restarting',
+    );
     process.exit(1);
   });
 }

@@ -89,184 +89,218 @@ async function runTask(
   deps: SchedulerDependencies,
 ): Promise<void> {
   const startTime = Date.now();
-  let groupDir: string;
-  try {
-    groupDir = resolveGroupFolderPath(task.group_folder);
-  } catch (err) {
-    if (!(err instanceof InvalidGroupFolderError)) throw err;
-    const error = err instanceof Error ? err.message : String(err);
-    // Stop retry churn for malformed legacy rows.
-    updateTask(task.id, { status: 'paused' });
-    logger.error(
-      { taskId: task.id, groupFolder: task.group_folder, error },
-      'Task has invalid group folder',
-    );
-    logTaskRun({
-      task_id: task.id,
-      run_at: new Date().toISOString(),
-      duration_ms: Date.now() - startTime,
-      status: 'error',
-      result: null,
-      error,
-    });
-    return;
-  }
-  fs.mkdirSync(groupDir, { recursive: true });
-
-  logger.info(
-    { taskId: task.id, group: task.group_folder },
-    'Running scheduled task',
-  );
-
-  const groups = deps.registeredGroups();
-  const group = Object.values(groups).find(
-    (g) => g.folder === task.group_folder,
-  );
-
-  if (!group) {
-    logger.error(
-      { taskId: task.id, groupFolder: task.group_folder },
-      'Group not found for task',
-    );
-    logTaskRun({
-      task_id: task.id,
-      run_at: new Date().toISOString(),
-      duration_ms: Date.now() - startTime,
-      status: 'error',
-      result: null,
-      error: `Group not found: ${task.group_folder}`,
-    });
-    return;
-  }
-
-  // Update tasks snapshot for container to read (filtered by group)
-  const isMain = group.isMain === true;
-  const tasks = getAllTasks();
-  writeTasksSnapshot(
-    task.group_folder,
-    isMain,
-    tasks.map((t) => ({
-      id: t.id,
-      groupFolder: t.group_folder,
-      prompt: t.prompt,
-      script: t.script,
-      schedule_type: t.schedule_type,
-      schedule_value: t.schedule_value,
-      status: t.status,
-      next_run: t.next_run,
-    })),
-  );
-
   let result: string | null = null;
   let error: string | null = null;
-
-  // For group context mode, use the group's current session
-  const sessions = deps.getSessions();
-  const sessionId =
-    task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
-
-  // After the task produces a result, close the container promptly.
-  // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
-  // query loop to time out. A short delay handles any final MCP calls.
-  const TASK_CLOSE_DELAY_MS = 10000;
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
+  const [execution] = await Promise.allSettled([
+    (async () => {
+      let groupDir: string;
+      try {
+        groupDir = resolveGroupFolderPath(task.group_folder);
+      } catch (err) {
+        if (!(err instanceof InvalidGroupFolderError)) throw err;
+        const error = err instanceof Error ? err.message : String(err);
+        // Stop retry churn for malformed legacy rows.
+        updateTask(task.id, { status: 'paused' });
+        logger.error(
+          { taskId: task.id, groupFolder: task.group_folder, error },
+          'Task has invalid group folder',
+        );
+        logTaskRun({
+          task_id: task.id,
+          run_at: new Date().toISOString(),
+          duration_ms: Date.now() - startTime,
+          status: 'error',
+          result: null,
+          error,
+        });
+        return true;
+      }
+      fs.mkdirSync(groupDir, { recursive: true });
 
-  const scheduleClose = () => {
-    if (closeTimer) return; // already scheduled
-    closeTimer = setTimeout(() => {
-      logger.debug({ taskId: task.id }, 'Closing task container after result');
-      deps.queue.closeStdin(task.chat_jid);
-    }, TASK_CLOSE_DELAY_MS);
-  };
+      logger.info(
+        { taskId: task.id, group: task.group_folder },
+        'Running scheduled task',
+      );
 
-  try {
-    const output = await runContainerAgent(
-      group,
-      {
-        prompt: task.prompt,
-        sessionId,
-        groupFolder: task.group_folder,
-        chatJid: task.chat_jid,
+      const groups = deps.registeredGroups();
+      const group = Object.values(groups).find(
+        (g) => g.folder === task.group_folder,
+      );
+
+      if (!group) {
+        logger.error(
+          { taskId: task.id, groupFolder: task.group_folder },
+          'Group not found for task',
+        );
+        logTaskRun({
+          task_id: task.id,
+          run_at: new Date().toISOString(),
+          duration_ms: Date.now() - startTime,
+          status: 'error',
+          result: null,
+          error: `Group not found: ${task.group_folder}`,
+        });
+        return true;
+      }
+
+      // Update tasks snapshot for container to read (filtered by group)
+      const isMain = group.isMain === true;
+      const tasks = getAllTasks();
+      writeTasksSnapshot(
+        task.group_folder,
         isMain,
-        isScheduledTask: true,
-        assistantName: ASSISTANT_NAME,
-        script: task.script || undefined,
-      },
-      (proc, containerName) =>
-        deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
-      async (streamedOutput: ContainerOutput) => {
-        if (streamedOutput.result) {
-          result = streamedOutput.result;
-          // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
-          scheduleClose();
-        }
-        if (streamedOutput.status === 'success') {
-          deps.queue.notifyIdle(task.chat_jid);
-          scheduleClose(); // Close promptly even when result is null (e.g. IPC-only tasks)
-        }
-        if (streamedOutput.status === 'error') {
-          error = streamedOutput.error || 'Unknown error';
-        }
-      },
-    );
+        tasks.map((t) => ({
+          id: t.id,
+          groupFolder: t.group_folder,
+          prompt: t.prompt,
+          script: t.script,
+          schedule_type: t.schedule_type,
+          schedule_value: t.schedule_value,
+          status: t.status,
+          next_run: t.next_run,
+        })),
+      );
 
-    if (closeTimer) clearTimeout(closeTimer);
+      // For group context mode, use the group's current session
+      const sessions = deps.getSessions();
+      const sessionId =
+        task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
 
-    if (output.status === 'error') {
-      error = output.error || 'Unknown error';
-    } else if (output.result) {
-      // Result was already forwarded to the user via the streaming callback above
-      result = output.result;
-    }
+      // After the task produces a result, close the container promptly.
+      // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
+      // query loop to time out. A short delay handles any final MCP calls.
+      const TASK_CLOSE_DELAY_MS = 10000;
 
-    logger.info(
-      { taskId: task.id, durationMs: Date.now() - startTime },
-      'Task completed',
-    );
-  } catch (err) {
-    if (closeTimer) clearTimeout(closeTimer);
-    if (
-      !isFileSystemError(err) &&
-      !isTelegramError(err) &&
-      !isCommandError(err) &&
-      !(err instanceof Database.SqliteError)
-    )
-      throw err;
-    error = err instanceof Error ? err.message : String(err);
+      const scheduleClose = () => {
+        if (closeTimer) return; // already scheduled
+        closeTimer = setTimeout(() => {
+          logger.debug(
+            { taskId: task.id },
+            'Closing task container after result',
+          );
+          deps.queue.closeStdin(task.chat_jid);
+        }, TASK_CLOSE_DELAY_MS);
+      };
+
+      const output = await runContainerAgent(
+        group,
+        {
+          prompt: task.prompt,
+          sessionId,
+          groupFolder: task.group_folder,
+          chatJid: task.chat_jid,
+          isMain,
+          isScheduledTask: true,
+          assistantName: ASSISTANT_NAME,
+          script: task.script || undefined,
+        },
+        (proc, containerName) =>
+          deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
+        async (streamedOutput: ContainerOutput) => {
+          if (streamedOutput.result) {
+            result = streamedOutput.result;
+            // Forward result to user (sendMessage handles formatting)
+            await deps.sendMessage(task.chat_jid, streamedOutput.result);
+            scheduleClose();
+          }
+          if (streamedOutput.status === 'success') {
+            deps.queue.notifyIdle(task.chat_jid);
+            scheduleClose(); // Close promptly even when result is null (e.g. IPC-only tasks)
+          }
+          if (streamedOutput.status === 'error') {
+            error = streamedOutput.error || 'Unknown error';
+          }
+        },
+      );
+
+      if (closeTimer) clearTimeout(closeTimer);
+
+      if (output.status === 'error') {
+        error = output.error || 'Unknown error';
+      } else if (output.result) {
+        // Result was already forwarded to the user via the streaming callback above
+        result = output.result;
+      }
+
+      logger.info(
+        { taskId: task.id, durationMs: Date.now() - startTime },
+        'Task completed',
+      );
+
+      return false;
+    })(),
+  ]);
+  if (closeTimer) clearTimeout(closeTimer);
+  if (execution.status === 'fulfilled' && execution.value) return;
+  if (execution.status === 'rejected') {
+    error =
+      execution.reason instanceof Error
+        ? execution.reason.message
+        : String(execution.reason);
     logger.error({ taskId: task.id, error }, 'Task failed');
   }
+  const [bookkeeping] = await Promise.allSettled([
+    Promise.resolve().then(() => {
+      const durationMs = Date.now() - startTime;
 
-  const durationMs = Date.now() - startTime;
+      logTaskRun({
+        task_id: task.id,
+        run_at: new Date().toISOString(),
+        duration_ms: durationMs,
+        status: error ? 'error' : 'success',
+        result,
+        error,
+      });
 
-  logTaskRun({
-    task_id: task.id,
-    run_at: new Date().toISOString(),
-    duration_ms: durationMs,
-    status: error ? 'error' : 'success',
-    result,
-    error,
-  });
-
-  const nextRun = computeNextRun(task);
-  const resultSummary = error
-    ? `Error: ${error}`
-    : result
-      ? result.slice(0, 200)
-      : 'Completed';
-  updateTaskAfterRun(task.id, nextRun, resultSummary);
+      const nextRun = computeNextRun(task);
+      const resultSummary = error
+        ? `Error: ${error}`
+        : result
+          ? result.slice(0, 200)
+          : 'Completed';
+      updateTaskAfterRun(task.id, nextRun, resultSummary);
+    }),
+  ]);
+  if (bookkeeping.status === 'rejected') {
+    if (execution.status === 'rejected')
+      throw new AggregateError(
+        [execution.reason as unknown, bookkeeping.reason as unknown],
+        'Task execution and run bookkeeping failed; repair task storage before retrying.',
+        { cause: bookkeeping.reason as unknown },
+      );
+    throw bookkeeping.reason;
+  }
+  if (execution.status === 'rejected') {
+    const failure: unknown = execution.reason;
+    if (
+      !isFileSystemError(failure) &&
+      !isTelegramError(failure) &&
+      !isCommandError(failure) &&
+      !(failure instanceof Database.SqliteError)
+    )
+      throw failure;
+  }
 }
 
 let schedulerRunning = false;
+let schedulerLifecycle: Promise<void> | undefined;
 
-export function startSchedulerLoop(deps: SchedulerDependencies): void {
+export function startSchedulerLoop(deps: SchedulerDependencies): Promise<void> {
   if (schedulerRunning) {
     logger.debug('Scheduler loop already running, skipping duplicate start');
-    return;
+    return schedulerLifecycle!;
   }
   schedulerRunning = true;
   logger.info('Scheduler loop started');
 
+  let rejectLifecycle!: (error: unknown) => void;
+  schedulerLifecycle = new Promise<void>((_resolve, reject) => {
+    rejectLifecycle = reject;
+  });
+  const poll = () => {
+    void loop().then(undefined, rejectLifecycle);
+  };
   const loop = async () => {
     try {
       const dueTasks = getDueTasks();
@@ -289,15 +323,17 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
       if (!isFileSystemError(err) && !(err instanceof Database.SqliteError))
         throw err;
       logger.error({ err }, 'Error in scheduler loop');
+    } finally {
+      setTimeout(poll, SCHEDULER_POLL_INTERVAL);
     }
-
-    setTimeout(loop, SCHEDULER_POLL_INTERVAL);
   };
 
-  loop();
+  poll();
+  return schedulerLifecycle;
 }
 
 /** @internal - for tests only. */
 export function _resetSchedulerLoopForTests(): void {
   schedulerRunning = false;
+  schedulerLifecycle = undefined;
 }

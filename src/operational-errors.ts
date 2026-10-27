@@ -1,5 +1,8 @@
 import { GrammyError, HttpError } from 'grammy';
 
+/** Application-level delivery failed without a native Telegram acknowledgment. */
+export class TelegramDeliveryError extends Error {}
+
 /** Node filesystem failures that callers can report or explicitly recover from. */
 export function isFileSystemError(
   error: unknown,
@@ -51,8 +54,12 @@ export function isCommandError(error: unknown): error is Error {
 
 export function isTelegramError(
   error: unknown,
-): error is GrammyError | HttpError {
-  return error instanceof GrammyError || error instanceof HttpError;
+): error is GrammyError | HttpError | TelegramDeliveryError {
+  return (
+    error instanceof GrammyError ||
+    error instanceof HttpError ||
+    error instanceof TelegramDeliveryError
+  );
 }
 
 /** cron-parser 5.5 exposes input validation as plain Error, without an error subtype. */

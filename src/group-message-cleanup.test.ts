@@ -1,3 +1,4 @@
+import { HttpError } from 'grammy';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Channel } from './types.js';
 import type { DraftStream } from './draft-stream.js';
@@ -193,6 +194,26 @@ describe('group message error cleanup', () => {
     expect(draft.cancel).not.toHaveBeenCalled();
     expect(channel.setTyping).toHaveBeenLastCalledWith(jid, false);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('rolls back rather than marking delivery after a native operational refusal', async () => {
+    const jid = 'tg:operational-send';
+    await seed(jid);
+    channel.createDraftStream = undefined;
+    const failure = new HttpError(
+      'fixed native delivery failure',
+      new Error('synthetic'),
+    );
+    vi.mocked(channel.sendMessage).mockRejectedValueOnce(failure);
+    vi.mocked(runContainerAgent).mockImplementationOnce(
+      async (_group, _input, _process, onOutput) => {
+        await onOutput!({ status: 'success', result: 'fixed output' });
+        return { status: 'success', result: null };
+      },
+    );
+    await expect(processGroupMessages(jid)).resolves.toBe(false);
+    expect(storedCursor(jid)).toBe(previous);
+    expect(channel.setTyping).toHaveBeenLastCalledWith(jid, false);
   });
 
   it('restores undelivered input if cleanup alone fails', async () => {

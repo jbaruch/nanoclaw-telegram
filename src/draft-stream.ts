@@ -1,4 +1,7 @@
-import { isTelegramError } from './operational-errors.js';
+import {
+  isTelegramError,
+  TelegramDeliveryError,
+} from './operational-errors.js';
 import { logger } from './logger.js';
 
 export interface DraftStream {
@@ -31,6 +34,7 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
   const minInitialChars = opts.minInitialChars ?? 30;
 
   let messageId: number | undefined;
+  let deliveryFailure: Error | undefined;
   let lastSentText = '';
   let pendingText = '';
   let stopped = false;
@@ -42,12 +46,18 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
     try {
       if (!messageId) {
         messageId = await opts.sendMessage(text);
+        if (!Number.isSafeInteger(messageId) || !messageId || messageId <= 0)
+          throw new TelegramDeliveryError(
+            'Draft delivery has no native message ID; inspect Telegram delivery before retrying.',
+          );
       } else {
         await opts.editMessage(messageId, text);
       }
       lastSentText = text;
+      deliveryFailure = undefined;
     } catch (err) {
       if (!isTelegramError(err)) throw err;
+      deliveryFailure = err;
       logger.debug({ err }, 'Draft stream send/edit failed');
     }
   }
@@ -82,6 +92,9 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
         throttleTimer = null;
       }
 
+      await inFlight;
+      if (deliveryFailure) throw deliveryFailure;
+
       if (text.length > maxLength) {
         // Text too long for a single message — caller should fall back
         if (messageId) {
@@ -101,6 +114,7 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
       pendingText = text;
       flush();
       await inFlight;
+      if (deliveryFailure) throw deliveryFailure;
       return true;
     },
 

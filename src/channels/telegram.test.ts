@@ -1,4 +1,4 @@
-import { HttpError } from 'grammy';
+import { GrammyError, HttpError } from 'grammy';
 import type { MessageEntity } from 'grammy/types';
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
@@ -55,7 +55,7 @@ vi.mock('grammy', async (importOriginal) => ({
         .mockRejectedValue(
           new HttpError('Synthetic unavailable file', new Error('ECONNRESET')),
         ),
-      sendMessage: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn().mockResolvedValue({ message_id: 17 }),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
     };
 
@@ -823,29 +823,60 @@ describe('TelegramChannel', () => {
       expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
     });
 
-    it('handles send failure gracefully', async () => {
+    it('propagates a failed native send without a plain-text network retry', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
 
-      currentBot().api.sendMessage.mockRejectedValueOnce(
-        new HttpError('Network error', new Error('ECONNRESET')),
-      );
-
-      // Should not throw
+      const failure = new HttpError('Network error', new Error('ECONNRESET'));
+      currentBot().api.sendMessage.mockRejectedValueOnce(failure);
       await expect(
         channel.sendMessage('tg:100200300', 'Will fail'),
-      ).resolves.toBeUndefined();
+      ).rejects.toBe(failure);
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
     });
 
-    it('does nothing when bot is not initialized', async () => {
-      const opts = createTestOpts();
-      const channel = new TelegramChannel('test-token', opts);
+    it('does not confirm delivery when the native response lacks a message ID', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      currentBot().api.sendMessage.mockResolvedValueOnce(undefined);
+      await expect(
+        channel.sendMessage('tg:100200300', 'fixed text'),
+      ).rejects.toThrow('no native message acknowledgment');
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
+    });
 
-      // Don't connect — bot is null
-      await channel.sendMessage('tg:100200300', 'No bot');
+    it('permits plain text only after a native Markdown parse rejection', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      currentBot().api.sendMessage.mockRejectedValueOnce(
+        new GrammyError(
+          'fixed rejection',
+          {
+            ok: false,
+            error_code: 400,
+            description: "Bad Request: can't parse entities",
+          },
+          'sendMessage',
+          {},
+        ),
+      );
+      await expect(
+        channel.sendMessage('tg:100200300', 'fixed text'),
+      ).resolves.toBeUndefined();
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(2);
+      expect(currentBot().api.sendMessage).toHaveBeenLastCalledWith(
+        '100200300',
+        'fixed text',
+        {},
+      );
+    });
 
-      // No error, no API call
+    it('refuses delivery when the bot is unavailable', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await expect(
+        channel.sendMessage('tg:100200300', 'No bot'),
+      ).rejects.toThrow('not connected');
     });
   });
 

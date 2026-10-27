@@ -29,6 +29,11 @@ describe('IPC file quarantine', () => {
     const messages = path.join(temporary, 'ipc', 'main', 'messages');
     fs.mkdirSync(tasks, { recursive: true });
     fs.mkdirSync(messages);
+    const incompleteMessage = JSON.stringify({
+      type: 'message',
+      chatJid: 'tg:123',
+    });
+    fs.writeFileSync(path.join(messages, 'incomplete.json'), incompleteMessage);
     const invalid = {
       'folder.json': {
         type: 'register_group',
@@ -43,6 +48,12 @@ describe('IPC file quarantine', () => {
         prompt: 'fixed',
         schedule_type: 'cron',
         schedule_value: { invalid: true },
+      },
+      'unknown.json': { type: 'unsupported_request' },
+      'incomplete-task.json': {
+        type: 'schedule_task',
+        prompt: 'fixed',
+        schedule_type: 'cron',
       },
       'mount.json': {
         type: 'register_group',
@@ -73,9 +84,24 @@ describe('IPC file quarantine', () => {
       onTasksChanged: vi.fn(),
     };
     try {
-      startIpcWatcher(deps);
+      const scan = vi.spyOn(fs, 'readdirSync').mockImplementationOnce(() => {
+        throw Object.assign(new Error('fixed missing directory'), {
+          code: 'ENOENT',
+        });
+      });
+      const lifecycle = startIpcWatcher(deps);
       await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      scan.mockRestore();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(vi.getTimerCount()).toBe(1);
       expect(deps.registerGroup).not.toHaveBeenCalled();
+      expect(
+        fs.readFileSync(
+          path.join(temporary, 'ipc', 'errors', 'main-incomplete.json'),
+          'utf8',
+        ),
+      ).toBe(incompleteMessage);
       for (const [name, value] of Object.entries(invalid)) {
         expect(fs.existsSync(path.join(tasks, name))).toBe(false);
         expect(
@@ -101,6 +127,39 @@ describe('IPC file quarantine', () => {
         'fixed later input',
       );
       expect(fs.existsSync(path.join(messages, 'valid.json'))).toBe(false);
+      const defect = new TypeError('fixed delayed handler defect');
+      vi.mocked(deps.sendMessage).mockRejectedValueOnce(defect);
+      fs.writeFileSync(
+        path.join(messages, 'delayed-defect.json'),
+        JSON.stringify({
+          type: 'message',
+          chatJid: 'tg:123',
+          text: 'fixed failing input',
+        }),
+      );
+      const rejected = expect(lifecycle).rejects.toBe(defect);
+      await vi.advanceTimersByTimeAsync(1000);
+      await rejected;
+      expect(vi.getTimerCount()).toBe(1);
+      expect(
+        fs.existsSync(
+          path.join(temporary, 'ipc', 'errors', 'main-delayed-defect.json'),
+        ),
+      ).toBe(true);
+      fs.writeFileSync(
+        path.join(messages, 'after-defect.json'),
+        JSON.stringify({
+          type: 'message',
+          chatJid: 'tg:123',
+          text: 'fixed healthy input',
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(deps.sendMessage).toHaveBeenLastCalledWith(
+        'tg:123',
+        'fixed healthy input',
+      );
+      expect(vi.getTimerCount()).toBe(1);
     } finally {
       vi.clearAllTimers();
       fs.rmSync(temporary, { recursive: true });
@@ -119,10 +178,18 @@ describe('IPC file quarantine', () => {
       text: 'fixed input',
     });
     fs.writeFileSync(path.join(messages, 'defect.json'), body);
+    fs.writeFileSync(
+      path.join(messages, 'z-later.json'),
+      JSON.stringify({
+        type: 'message',
+        chatJid: 'tg:123',
+        text: 'fixed later input',
+      }),
+    );
     const source = fileURLToPath(new URL('./ipc.ts', import.meta.url));
     const loader = fileURLToPath(import.meta.resolve('tsx/esm'));
     const script = `import {startIpcWatcher} from ${JSON.stringify(source)};
-      startIpcWatcher({sendMessage:async()=>{throw new TypeError('fixed callback defect')},
+      startIpcWatcher({sendMessage:async(_jid,text)=>{if(text==='fixed input')throw new TypeError('fixed callback defect');process.stdout.write('FIXED_LATER_PROCESSED\\n');setImmediate(()=>process.exit(0));},
         registeredGroups:()=>({'tg:123':{name:'fixed',folder:'main',isMain:true,trigger:'@Andy',added_at:'2024-01-01T00:00:00Z'}}),
         registerGroup:()=>{},syncGroups:async()=>{},getAvailableGroups:()=>[],writeGroupsSnapshot:()=>{},onTasksChanged:()=>{}});`;
     try {
@@ -141,6 +208,8 @@ describe('IPC file quarantine', () => {
       expect(child.status).toBe(0);
       expect(child.stderr).toContain('Unhandled rejection');
       expect(child.stderr).toContain('fixed callback defect');
+      expect(child.stdout).toContain('FIXED_LATER_PROCESSED');
+      expect(fs.existsSync(path.join(messages, 'z-later.json'))).toBe(false);
       expect(fs.existsSync(path.join(messages, 'defect.json'))).toBe(false);
       expect(
         fs.readFileSync(
