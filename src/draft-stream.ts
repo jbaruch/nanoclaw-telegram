@@ -42,7 +42,7 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
   let throttleTimer: ReturnType<typeof setTimeout> | null = null;
 
   async function doSendOrEdit(text: string): Promise<void> {
-    if (text === lastSentText) return;
+    if (text === lastSentText && !deliveryFailure) return;
     try {
       if (!messageId) {
         messageId = await opts.sendMessage(text);
@@ -63,7 +63,8 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
   }
 
   function flush(): void {
-    if (!pendingText || pendingText === lastSentText) return;
+    if (!pendingText || (pendingText === lastSentText && !deliveryFailure))
+      return;
     const text = pendingText;
     inFlight = inFlight.then(() => doSendOrEdit(text));
   }
@@ -93,7 +94,6 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
       }
 
       await inFlight;
-      if (deliveryFailure) throw deliveryFailure;
 
       if (text.length > maxLength) {
         // Text too long for a single message — caller should fall back

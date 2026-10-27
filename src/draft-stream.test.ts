@@ -2,7 +2,11 @@ import { HttpError } from 'grammy';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDraftStream } from './draft-stream.js';
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.clearAllTimers();
+  vi.useRealTimers();
+});
 
 describe('draft stream failure boundaries', () => {
   it('rejects an unexpected send implementation error instead of committing the preview', async () => {
@@ -21,23 +25,73 @@ describe('draft stream failure boundaries', () => {
     expect(edit).not.toHaveBeenCalled();
   });
 
-  it('does not report success for an operational send failure or retry it blindly', async () => {
+  it('reports a failed final send and permits a later successful final attempt', async () => {
     const failure = new HttpError(
       'fixed delivery failure',
       new Error('synthetic'),
     );
-    const send = vi.fn(async () => {
-      throw failure;
-    });
+    const send = vi.fn(async () => 17).mockRejectedValueOnce(failure);
     const stream = createDraftStream({
       sendMessage: send,
       editMessage: vi.fn(async () => {}),
       deleteMessage: vi.fn(async () => {}),
     });
     await expect(stream.finish('fixed output')).rejects.toBe(failure);
-    await expect(stream.finish('fixed output')).rejects.toBe(failure);
-    expect(send).toHaveBeenCalledTimes(1);
+    await expect(stream.finish('fixed output')).resolves.toBe(true);
+    expect(send).toHaveBeenCalledTimes(2);
   });
+
+  it('attempts the final text after an intermediate initial-send failure', async () => {
+    vi.useFakeTimers();
+    const failure = new HttpError(
+      'fixed preview failure',
+      new Error('synthetic'),
+    );
+    const send = vi.fn(async () => 17).mockRejectedValueOnce(failure);
+    const stream = createDraftStream({
+      sendMessage: send,
+      editMessage: vi.fn(async () => {}),
+      deleteMessage: vi.fn(async () => {}),
+    });
+    stream.update('fixed preliminary preview longer than thirty characters');
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(stream.finish('fixed final output')).resolves.toBe(true);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenLastCalledWith('fixed final output');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    'fixed final output',
+    'fixed preliminary preview longer than thirty characters',
+  ])(
+    'confirms final text %s after an intermediate edit failure',
+    async (finalText) => {
+      vi.useFakeTimers();
+      const failure = new HttpError(
+        'fixed preview edit failure',
+        new Error('synthetic'),
+      );
+      const send = vi.fn(async () => 17);
+      const edit = vi.fn(async () => {}).mockRejectedValueOnce(failure);
+      const stream = createDraftStream({
+        sendMessage: send,
+        editMessage: edit,
+        deleteMessage: vi.fn(async () => {}),
+      });
+      stream.update('fixed preliminary preview longer than thirty characters');
+      await vi.advanceTimersByTimeAsync(0);
+      stream.update(
+        'fixed intermediate edited preview longer than thirty characters',
+      );
+      await vi.advanceTimersByTimeAsync(1000);
+      await expect(stream.finish(finalText)).resolves.toBe(true);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(edit).toHaveBeenCalledTimes(2);
+      expect(edit).toHaveBeenLastCalledWith(17, finalText);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
 
   it('requires a native message ID before committing a successful initial draft', async () => {
     const stream = createDraftStream({
