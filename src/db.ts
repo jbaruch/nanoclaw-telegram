@@ -15,7 +15,26 @@ import {
 
 let db: Database.Database;
 
-function createSchema(database: Database.Database): void {
+/**
+ * Runtime-owned schema of record. SQLite user_version 0 is the accepted legacy
+ * layout; migration 0 -> 1 creates the tables below and completes their ordered
+ * additive columns/backfills. DDL, backfills and version advance commit together.
+ * Version 1 is current; unknown newer versions refuse without mutation.
+ */
+function migrateDatabase(database: Database.Database): void {
+  const version = database.pragma('user_version', { simple: true }) as number;
+  if (version === 1) return;
+  if (version !== 0)
+    throw new Error(
+      'Unsupported database schema version; update NanoClaw before opening this database.',
+    );
+  database.transaction(() => {
+    migrateToVersion1(database);
+    database.pragma('user_version = 1');
+  })();
+}
+
+function migrateToVersion1(database: Database.Database): void {
   const hasColumn = (table: string, column: string): boolean =>
     (database.pragma(`table_info(${table})`) as { name: string }[]).some(
       (row) => row.name === column,
@@ -163,7 +182,7 @@ export function initDatabase(): void {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
   db = new Database(dbPath);
-  db.transaction(() => createSchema(db))();
+  migrateDatabase(db);
 
   // Migrate from JSON files if they exist
   migrateJsonState();
@@ -172,7 +191,7 @@ export function initDatabase(): void {
 /** @internal - for tests only. Creates a fresh in-memory database. */
 export function _initTestDatabase(): void {
   db = new Database(':memory:');
-  db.transaction(() => createSchema(db))();
+  migrateDatabase(db);
 }
 
 /** @internal - for tests only. */

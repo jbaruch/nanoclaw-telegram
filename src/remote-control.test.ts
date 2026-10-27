@@ -50,6 +50,11 @@ describe('remote-control', () => {
     stdoutFileContent = '';
 
     // Default fs mocks
+    vi.spyOn(fs, 'mkdtempSync').mockReturnValue(
+      '/tmp/nanoclaw-rc-test/.remote-control-fixed',
+    );
+    vi.spyOn(fs, 'renameSync').mockImplementation(() => {});
+    vi.spyOn(fs, 'rmSync').mockImplementation(() => {});
     _mkdirSyncSpy = vi
       .spyOn(fs, 'mkdirSync')
       .mockImplementation(() => undefined);
@@ -141,8 +146,9 @@ describe('remote-control', () => {
       await startRemoteControl('user1', 'tg:123', '/project');
 
       expect(writeFileSyncSpy).toHaveBeenCalledWith(
-        STATE_FILE,
+        '/tmp/nanoclaw-rc-test/.remote-control-fixed/state.json',
         expect.stringContaining('"pid":99999'),
+        { mode: 0o600, flag: 'wx' },
       );
     });
 
@@ -231,6 +237,83 @@ describe('remote-control', () => {
       vi.useRealTimers();
     });
 
+    it('rejects a delayed poll defect and terminates only its started process', async () => {
+      vi.useFakeTimers();
+      spawnMock.mockReturnValue(createMockProcess(12345));
+      const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+      const pending = startRemoteControl('user1', 'tg:123', '/project');
+      await vi.advanceTimersByTimeAsync(0);
+      const defect = new TypeError('fixed delayed reader defect');
+      readFileSyncSpy.mockImplementation(() => {
+        throw defect;
+      });
+      const rejected = expect(pending).rejects.toBe(defect);
+      await vi.advanceTimersByTimeAsync(200);
+      await rejected;
+      expect(kill).toHaveBeenCalledWith(-12345, 'SIGTERM');
+      expect(getActiveSession()).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+      vi.useRealTimers();
+    });
+
+    it('retains delayed poll and cleanup failures together', async () => {
+      vi.useFakeTimers();
+      spawnMock.mockReturnValue(createMockProcess(12345));
+      const cleanup = Object.assign(new Error('fixed signal denied'), {
+        code: 'EPERM',
+      });
+      vi.spyOn(process, 'kill').mockImplementation((_pid, signal) => {
+        if (signal === 'SIGTERM') throw cleanup;
+        return true;
+      });
+      const pending = startRemoteControl('user1', 'tg:123', '/project');
+      await vi.advanceTimersByTimeAsync(0);
+      const defect = new TypeError('fixed delayed reader defect');
+      readFileSyncSpy.mockImplementation(() => {
+        throw defect;
+      });
+      const rejected = expect(pending).rejects.toMatchObject({
+        cause: defect,
+        errors: [defect, cleanup],
+      });
+      await vi.advanceTimersByTimeAsync(200);
+      await rejected;
+      expect(vi.getTimerCount()).toBe(0);
+      vi.useRealTimers();
+    });
+
+    it.each(['group', 'fallback'] as const)(
+      'rejects a delayed %s termination failure through the caller Promise',
+      async (failureAt) => {
+        vi.useFakeTimers();
+        spawnMock.mockReturnValue(createMockProcess(12345));
+        const denied = Object.assign(new Error('fixed signal denied'), {
+          code: 'EPERM',
+        });
+        const missing = Object.assign(new Error('fixed missing group'), {
+          code: 'ESRCH',
+        });
+        const kill = vi
+          .spyOn(process, 'kill')
+          .mockImplementation((pid, signal) => {
+            if (signal === 'SIGTERM') {
+              if (pid < 0 && failureAt === 'fallback') throw missing;
+              throw denied;
+            }
+            return true;
+          });
+        const pending = startRemoteControl('user1', 'tg:123', '/project');
+        const rejected = expect(pending).rejects.toBe(denied);
+        await vi.advanceTimersByTimeAsync(30_001);
+        await rejected;
+        expect(
+          kill.mock.calls.filter(([, signal]) => signal === 'SIGTERM'),
+        ).toHaveLength(failureAt === 'group' ? 1 : 2);
+        expect(vi.getTimerCount()).toBe(0);
+        vi.useRealTimers();
+      },
+    );
+
     it('propagates an unexpected spawn error while closing parent descriptors', async () => {
       const defect = new TypeError('fixed spawn defect');
       spawnMock.mockImplementation(() => {
@@ -302,6 +385,62 @@ describe('remote-control', () => {
   // --- restoreRemoteControl ---
 
   describe('restoreRemoteControl', () => {
+    it('rewrites a verified legacy session to schema 1 through its owner', () => {
+      const session = {
+        pid: 77777,
+        url: 'https://claude.ai/code?bridge=env_fixed',
+        startedBy: 'user1',
+        startedInChat: 'tg:123',
+        startedAt: '2024-01-01T00:00:00Z',
+      };
+      readFileSyncSpy.mockReturnValue(JSON.stringify(session));
+      vi.spyOn(process, 'kill').mockReturnValue(true);
+      restoreRemoteControl();
+      expect(writeFileSyncSpy).toHaveBeenCalledWith(
+        '/tmp/nanoclaw-rc-test/.remote-control-fixed/state.json',
+        JSON.stringify({ schema_version: 1, ...session }),
+        { mode: 0o600, flag: 'wx' },
+      );
+      expect(getActiveSession()).toEqual(session);
+    });
+
+    it('reads a current session without rewriting it', () => {
+      const session = {
+        pid: 77777,
+        url: 'https://claude.ai/code?bridge=env_fixed',
+        startedBy: 'user1',
+        startedInChat: 'tg:123',
+        startedAt: '2024-01-01T00:00:00Z',
+      };
+      readFileSyncSpy.mockReturnValue(
+        JSON.stringify({ schema_version: 1, ...session }),
+      );
+      vi.spyOn(process, 'kill').mockReturnValue(true);
+      restoreRemoteControl();
+      expect(writeFileSyncSpy).not.toHaveBeenCalled();
+      expect(getActiveSession()).toEqual(session);
+    });
+
+    it('preserves and refuses an unsupported state version without process effects', () => {
+      const raw = JSON.stringify({
+        schema_version: 2,
+        pid: 77777,
+        url: 'https://claude.ai/code?bridge=env_fixed',
+        startedBy: 'user1',
+        startedInChat: 'tg:123',
+        startedAt: '2024-01-01T00:00:00Z',
+      });
+      readFileSyncSpy.mockReturnValue(raw);
+      const kill = vi.spyOn(process, 'kill');
+      expect(restoreRemoteControl).toThrow(
+        'Unsupported Remote Control state version',
+      );
+      expect(kill).not.toHaveBeenCalled();
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+      expect(writeFileSyncSpy).not.toHaveBeenCalled();
+      expect(getActiveSession()).toBeNull();
+    });
+
     it('restores session if state file exists and process is alive', () => {
       const session = {
         pid: 77777,

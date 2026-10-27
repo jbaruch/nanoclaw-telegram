@@ -36,6 +36,95 @@ export interface IpcDeps {
   onTasksChanged: () => void;
 }
 
+/** Validate agent-written JSON before string operations or native effects. */
+function validateIpcRequest(data: unknown): void {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new SyntaxError('IPC request must be an object');
+  }
+  const fields = data as Record<string, unknown>;
+  if (typeof fields.type !== 'string')
+    throw new SyntaxError('IPC type must be a string');
+  for (const field of [
+    'chatJid',
+    'messageId',
+    'emoji',
+    'text',
+    'taskId',
+    'prompt',
+    'schedule_type',
+    'schedule_value',
+    'context_mode',
+    'groupFolder',
+    'targetJid',
+    'jid',
+    'name',
+    'folder',
+    'trigger',
+  ]) {
+    if (fields[field] !== undefined && typeof fields[field] !== 'string') {
+      throw new SyntaxError(`IPC ${field} must be a string`);
+    }
+  }
+  if (
+    fields.script !== undefined &&
+    fields.script !== null &&
+    typeof fields.script !== 'string'
+  ) {
+    throw new SyntaxError('IPC script must be a string or null');
+  }
+  if (
+    fields.requiresTrigger !== undefined &&
+    typeof fields.requiresTrigger !== 'boolean'
+  ) {
+    throw new SyntaxError('IPC requiresTrigger must be a boolean');
+  }
+  if (fields.containerConfig !== undefined) {
+    const config = fields.containerConfig;
+    if (!config || typeof config !== 'object' || Array.isArray(config))
+      throw new SyntaxError('IPC containerConfig must be an object');
+    if (
+      'timeout' in config &&
+      (typeof config.timeout !== 'number' || !Number.isFinite(config.timeout))
+    )
+      throw new SyntaxError('IPC timeout must be a finite number');
+    if ('additionalMounts' in config) {
+      if (!Array.isArray(config.additionalMounts))
+        throw new SyntaxError('IPC additionalMounts must be an array');
+      for (const mount of config.additionalMounts) {
+        if (
+          !mount ||
+          typeof mount !== 'object' ||
+          Array.isArray(mount) ||
+          typeof mount.hostPath !== 'string' ||
+          (mount.containerPath !== undefined &&
+            typeof mount.containerPath !== 'string') ||
+          (mount.readonly !== undefined && typeof mount.readonly !== 'boolean')
+        )
+          throw new SyntaxError('IPC mount fields have invalid types');
+      }
+    }
+  }
+}
+
+function quarantineIpcFile(
+  filePath: string,
+  errorDir: string,
+  sourceGroup: string,
+  file: string,
+  error: unknown,
+): void {
+  try {
+    fs.mkdirSync(errorDir, { recursive: true });
+    fs.renameSync(filePath, path.join(errorDir, `${sourceGroup}-${file}`));
+  } catch (quarantineError) {
+    throw new AggregateError(
+      [error, quarantineError],
+      'IPC processing and quarantine failed; repair IPC storage before restarting the host.',
+      { cause: quarantineError },
+    );
+  }
+}
+
 let ipcWatcherRunning = false;
 
 export function startIpcWatcher(deps: IpcDeps): void {
@@ -86,8 +175,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (!data || typeof data !== 'object' || Array.isArray(data))
-                throw new SyntaxError('IPC request must be an object');
+              validateIpcRequest(data);
               if (
                 data.type === 'react_to_message' &&
                 data.chatJid &&
@@ -139,6 +227,13 @@ export function startIpcWatcher(deps: IpcDeps): void {
               }
               fs.unlinkSync(filePath);
             } catch (err) {
+              quarantineIpcFile(
+                filePath,
+                path.join(ipcBaseDir, 'errors'),
+                sourceGroup,
+                file,
+                err,
+              );
               if (
                 !(err instanceof SyntaxError) &&
                 !isFileSystemError(err) &&
@@ -149,12 +244,6 @@ export function startIpcWatcher(deps: IpcDeps): void {
               logger.error(
                 { file, sourceGroup, err },
                 'Error processing IPC message',
-              );
-              const errorDir = path.join(ipcBaseDir, 'errors');
-              fs.mkdirSync(errorDir, { recursive: true });
-              fs.renameSync(
-                filePath,
-                path.join(errorDir, `${sourceGroup}-${file}`),
               );
             }
           }
@@ -177,12 +266,18 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(tasksDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (!data || typeof data !== 'object' || Array.isArray(data))
-                throw new SyntaxError('IPC request must be an object');
+              validateIpcRequest(data);
               // Pass source group identity to processTaskIpc for authorization
               await processTaskIpc(data, sourceGroup, isMain, deps);
               fs.unlinkSync(filePath);
             } catch (err) {
+              quarantineIpcFile(
+                filePath,
+                path.join(ipcBaseDir, 'errors'),
+                sourceGroup,
+                file,
+                err,
+              );
               if (
                 !(err instanceof SyntaxError) &&
                 !isFileSystemError(err) &&
@@ -193,12 +288,6 @@ export function startIpcWatcher(deps: IpcDeps): void {
               logger.error(
                 { file, sourceGroup, err },
                 'Error processing IPC task',
-              );
-              const errorDir = path.join(ipcBaseDir, 'errors');
-              fs.mkdirSync(errorDir, { recursive: true });
-              fs.renameSync(
-                filePath,
-                path.join(errorDir, `${sourceGroup}-${file}`),
               );
             }
           }

@@ -58,6 +58,7 @@ describe('durable schema migration', () => {
       INSERT INTO chats(jid,name) VALUES ('tg:123','preserved');
       INSERT INTO messages(id,chat_jid,content) VALUES ('fixed-message','tg:123','Andy: preserved reply');
       INSERT INTO registered_groups(jid,name,folder,trigger_pattern,added_at) VALUES ('tg:123','main','telegram_main','@Andy','2024-01-01T00:00:00Z');`);
+    old.pragma('user_version = 0');
     old.close();
     initialize();
     _closeDatabase();
@@ -65,6 +66,7 @@ describe('durable schema migration', () => {
     initialize();
     const check = disk();
     try {
+      expect(check.pragma('user_version', { simple: true })).toBe(1);
       expect(columns(check, 'scheduled_tasks')).toEqual(
         expect.arrayContaining(['context_mode', 'script']),
       );
@@ -96,12 +98,14 @@ describe('durable schema migration', () => {
     old.exec(`ALTER TABLE registered_groups DROP COLUMN is_main;
       INSERT INTO registered_groups(jid,name,folder,trigger_pattern,added_at) VALUES ('tg:123','main','telegram_main','@Andy','2024-01-01T00:00:00Z');
       CREATE TRIGGER blocked_backfill BEFORE UPDATE ON registered_groups BEGIN SELECT RAISE(ABORT,'fixed migration failure'); END;`);
+    old.pragma('user_version = 0');
     old.close();
     expect(initialize).toThrow('fixed migration failure');
     _closeDatabase();
     opened = false;
     const check = disk();
     expect(columns(check, 'registered_groups')).not.toContain('is_main');
+    expect(check.pragma('user_version', { simple: true })).toBe(0);
     expect(check.prepare('SELECT name FROM registered_groups').all()).toEqual([
       { name: 'main' },
     ]);
@@ -116,6 +120,25 @@ describe('durable schema migration', () => {
     } finally {
       repaired.close();
     }
+  });
+
+  it('refuses a newer database without rewriting its schema or records', () => {
+    initialize();
+    _closeDatabase();
+    opened = false;
+    const newer = disk();
+    newer.exec(
+      "INSERT INTO router_state(key,value) VALUES ('fixed','preserved')",
+    );
+    newer.pragma('user_version = 2');
+    newer.close();
+    const before = fs.readFileSync(path.join(paths.store, 'messages.db'));
+    expect(initialize).toThrow('Unsupported database schema version');
+    _closeDatabase();
+    opened = false;
+    expect(fs.readFileSync(path.join(paths.store, 'messages.db'))).toEqual(
+      before,
+    );
   });
 
   it('skips only an invalid legacy group and still migrates the valid group', () => {

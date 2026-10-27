@@ -6,6 +6,16 @@ import path from 'path';
 import { DATA_DIR } from './config.js';
 import { logger } from './logger.js';
 
+/**
+ * Sole runtime reader/writer of remote-control.json. Schema 1 contains
+ * schema_version plus pid (positive integer), url, startedBy, startedInChat and
+ * startedAt (strings). Accepted legacy records omit only schema_version and are
+ * rewritten by this owner after live process verification. This occupied-session
+ * record gates a second launch: under the gate-store exception, unsupported
+ * versions refuse and are preserved instead of reading as an empty session.
+ */
+class UnsupportedRemoteControlStateError extends Error {}
+
 interface RemoteControlSession {
   pid: number;
   url: string;
@@ -25,7 +35,28 @@ const STDERR_FILE = path.join(DATA_DIR, 'remote-control.stderr');
 
 function saveState(session: RemoteControlSession): void {
   fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-  fs.writeFileSync(STATE_FILE, JSON.stringify(session));
+  const temporary = fs.mkdtempSync(path.join(DATA_DIR, '.remote-control-'));
+  const candidate = path.join(temporary, 'state.json');
+  try {
+    fs.writeFileSync(
+      candidate,
+      JSON.stringify({ schema_version: 1, ...session }),
+      { mode: 0o600, flag: 'wx' },
+    );
+    fs.renameSync(candidate, STATE_FILE);
+  } catch (error) {
+    try {
+      fs.rmSync(temporary, { recursive: true });
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        'Remote Control state write and temporary-file cleanup failed; inspect state storage before retrying.',
+        { cause: cleanupError },
+      );
+    }
+    throw error;
+  }
+  fs.rmSync(temporary, { recursive: true });
 }
 
 function clearState(): void {
@@ -65,6 +96,11 @@ export function restoreRemoteControl(): void {
       throw new SyntaxError('Remote Control state must be an object');
     }
     const candidate = parsed as Record<string, unknown>;
+    const legacy = !Object.hasOwn(candidate, 'schema_version');
+    if (!legacy && candidate.schema_version !== 1)
+      throw new UnsupportedRemoteControlStateError(
+        'Unsupported Remote Control state version; update NanoClaw before restoring or starting another session.',
+      );
     if (
       typeof candidate.pid !== 'number' ||
       !Number.isSafeInteger(candidate.pid) ||
@@ -76,8 +112,15 @@ export function restoreRemoteControl(): void {
     ) {
       throw new SyntaxError('Remote Control state has invalid session fields');
     }
-    const session = candidate as unknown as RemoteControlSession;
+    const session: RemoteControlSession = {
+      pid: candidate.pid,
+      url: candidate.url,
+      startedBy: candidate.startedBy,
+      startedInChat: candidate.startedInChat,
+      startedAt: candidate.startedAt,
+    };
     if (session.pid && isProcessAlive(session.pid)) {
+      if (legacy) saveState(session);
       activeSession = session;
       logger.info(
         { pid: session.pid, url: session.url },
@@ -160,10 +203,44 @@ export async function startRemoteControl(
   }
 
   // Poll the stdout file for the URL
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const startTime = Date.now();
 
-    const poll = () => {
+    let stopAttempted = false;
+    const stopStartedProcess = () => {
+      stopAttempted = true;
+      try {
+        process.kill(-pid, 'SIGTERM');
+      } catch (error) {
+        if (!hasErrno(error, 'ESRCH')) throw error;
+        try {
+          process.kill(pid, 'SIGTERM');
+        } catch (fallbackError) {
+          if (!hasErrno(fallbackError, 'ESRCH')) throw fallbackError;
+        }
+      }
+    };
+    const rejectAfterCleanup = (error: unknown) => {
+      if (activeSession?.pid === pid) activeSession = null;
+      if (stopAttempted) {
+        reject(error);
+        return;
+      }
+      Promise.resolve()
+        .then(stopStartedProcess)
+        .then(
+          () => reject(error),
+          (cleanupError: unknown) =>
+            reject(
+              new AggregateError(
+                [error, cleanupError],
+                'Remote Control polling and owned-process cleanup failed; inspect the started process before retrying.',
+                { cause: error },
+              ),
+            ),
+        );
+    };
+    const poll = async () => {
       // Check if process died
       if (!isProcessAlive(pid)) {
         resolve({ ok: false, error: 'Process exited before producing URL' });
@@ -201,17 +278,7 @@ export async function startRemoteControl(
 
       // Timeout check
       if (Date.now() - startTime >= URL_TIMEOUT_MS) {
-        try {
-          process.kill(-pid, 'SIGTERM');
-        } catch (err) {
-          if (!hasErrno(err, 'ESRCH')) throw err;
-          try {
-            process.kill(pid, 'SIGTERM');
-          } catch (err) {
-            if (!hasErrno(err, 'ESRCH')) throw err;
-            // already dead
-          }
-        }
+        stopStartedProcess();
         resolve({
           ok: false,
           error: 'Timed out waiting for Remote Control URL',
@@ -219,10 +286,12 @@ export async function startRemoteControl(
         return;
       }
 
-      setTimeout(poll, URL_POLL_MS);
+      setTimeout(() => {
+        void poll().then(undefined, rejectAfterCleanup);
+      }, URL_POLL_MS);
     };
 
-    poll();
+    void poll().then(undefined, rejectAfterCleanup);
   });
 }
 

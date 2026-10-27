@@ -6,6 +6,7 @@ For detailed release notes, see the [full changelog on the documentation site](h
 
 ### Runtime diagnostics
 
+- Preserve undelivered message cursors and cleanup on unexpected errors; quarantine malformed IPC before processing and quarantine unexpected per-file failures before propagation. Version the runtime-owned database migration and remote-control state, migrate accepted legacy records, refuse newer versions, and route delayed remote-control polling failures through the caller Promise with owned-process cleanup.
 - Type Telegram handlers and test doubles with the installed SDK contracts. Handle expected filesystem, database, command and provider failures explicitly; let unexpected implementation errors propagate. Keep legacy schema migration transactional and retryable after a failed backfill, and report only successfully stopped orphan containers.
 
 ### Runtime compatibility

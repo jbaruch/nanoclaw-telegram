@@ -1,3 +1,4 @@
+import type { DraftStream } from './draft-stream.js';
 import Database from 'better-sqlite3';
 import {
   isFileSystemError,
@@ -292,7 +293,7 @@ export function _setRegisteredGroups(
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
  */
-async function processGroupMessages(chatJid: string): Promise<boolean> {
+export async function processGroupMessages(chatJid: string): Promise<boolean> {
   const group = registeredGroups[chatJid];
   if (!group) return true;
 
@@ -353,79 +354,119 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
-  await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
 
   // Progressive streaming: show live preview on edit-capable channels
-  const draftStream = channel.createDraftStream?.(chatJid);
-
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Streaming preview — update draft with accumulated text
-    if (result.streamText && draftStream) {
-      const text = result.streamText
-        .replace(/<internal>[\s\S]*?<\/internal>/g, '')
-        .trim();
-      if (text) draftStream.update(text);
+  let draftStream: DraftStream | undefined;
+  const restoreUndeliveredCursor = () => {
+    if (!outputSentToUser) {
+      lastAgentTimestamp[chatJid] = previousCursor;
+      saveState();
     }
+  };
 
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      if (text) {
-        if (draftStream) {
-          const ok = await draftStream.finish(text);
-          if (!ok) {
-            // Text exceeded maxLength — fall back to regular send
-            try {
-              await sendWithRetry(channel, chatJid, text);
-            } catch (err) {
-              if (!isTelegramError(err)) throw err;
-              logger.error(
-                { group: group.name, err },
-                'Failed to send agent output after retries',
-              );
-            }
-          }
-        } else {
-          try {
-            await sendWithRetry(channel, chatJid, text);
-          } catch (err) {
-            if (!isTelegramError(err)) throw err;
-            logger.error(
-              { group: group.name, err },
-              'Failed to send agent output after retries',
-            );
-          }
+  const [execution] = await Promise.allSettled([
+    (async () => {
+      await channel.setTyping?.(chatJid, true);
+      draftStream = channel.createDraftStream?.(chatJid);
+      return runAgent(group, prompt, chatJid, async (result) => {
+        // Streaming preview — update draft with accumulated text
+        if (result.streamText && draftStream) {
+          const text = result.streamText
+            .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+            .trim();
+          if (text) draftStream.update(text);
         }
-        outputSentToUser = true;
-      }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
+        // Streaming output callback — called for each agent result
+        if (result.result) {
+          const raw =
+            typeof result.result === 'string'
+              ? result.result
+              : JSON.stringify(result.result);
+          // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+          const text = raw
+            .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+            .trim();
+          logger.info(
+            { group: group.name },
+            `Agent output: ${raw.length} chars`,
+          );
+          if (text) {
+            if (draftStream) {
+              const ok = await draftStream.finish(text);
+              if (!ok) {
+                // Text exceeded maxLength — fall back to regular send
+                try {
+                  await sendWithRetry(channel, chatJid, text);
+                } catch (err) {
+                  if (!isTelegramError(err)) throw err;
+                  logger.error(
+                    { group: group.name, err },
+                    'Failed to send agent output after retries',
+                  );
+                }
+              }
+            } else {
+              try {
+                await sendWithRetry(channel, chatJid, text);
+              } catch (err) {
+                if (!isTelegramError(err)) throw err;
+                logger.error(
+                  { group: group.name, err },
+                  'Failed to send agent output after retries',
+                );
+              }
+            }
+            outputSentToUser = true;
+          }
+          // Only reset idle timer on actual results, not session-update markers (result: null)
+          resetIdleTimer();
+        }
 
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  });
+        if (result.status === 'success') {
+          queue.notifyIdle(chatJid);
+        }
 
-  await channel.setTyping?.(chatJid, false);
+        if (result.status === 'error') {
+          hadError = true;
+        }
+      });
+    })(),
+  ]);
+  // Both cleanup actions run even when execution or another cleanup fails.
   if (idleTimer) clearTimeout(idleTimer);
-
-  // Clean up draft stream if agent produced no output
-  if (!outputSentToUser && draftStream) {
-    await draftStream.cancel();
+  const cleanup = await Promise.allSettled([
+    Promise.resolve().then(() => channel.setTyping?.(chatJid, false)),
+    Promise.resolve().then(() =>
+      !outputSentToUser ? draftStream?.cancel() : undefined,
+    ),
+  ]);
+  const cleanupErrors = cleanup.flatMap((result) =>
+    result.status === 'rejected' ? [result.reason as unknown] : [],
+  );
+  if (execution.status === 'rejected' || cleanupErrors.length > 0) {
+    const errors: unknown[] =
+      execution.status === 'rejected'
+        ? [execution.reason as unknown, ...cleanupErrors]
+        : [...cleanupErrors];
+    const rollback = await Promise.allSettled([
+      Promise.resolve().then(restoreUndeliveredCursor),
+    ]);
+    errors.push(
+      ...rollback.flatMap((result) =>
+        result.status === 'rejected' ? [result.reason as unknown] : [],
+      ),
+    );
+    if (execution.status === 'rejected' && errors.length === 1) throw errors[0];
+    throw new AggregateError(
+      errors,
+      'Agent execution or cleanup failed; inspect typing, draft and router state before retrying undelivered input.',
+      { cause: errors[0] },
+    );
   }
+  const output = execution.value;
 
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
