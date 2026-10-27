@@ -19,6 +19,7 @@ import path from 'path';
 import { execFile } from 'child_process';
 import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { sdkResultOutput, type ContainerOutput } from './sdk-result.js';
 
 interface ContainerInput {
   prompt: string;
@@ -29,14 +30,6 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
-}
-
-interface ContainerOutput {
-  status: 'success' | 'error';
-  result: string | null;
-  newSessionId?: string;
-  error?: string;
-  streamText?: string;
 }
 
 interface SessionEntry {
@@ -475,11 +468,7 @@ async function runQuery(
       resultCount++;
       const textResult = 'result' in message ? (message as { result?: string }).result : null;
       log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
-      writeOutput({
-        status: 'success',
-        result: textResult || null,
-        newSessionId
-      });
+      writeOutput(sdkResultOutput(message, newSessionId));
     }
   }
 
@@ -587,8 +576,11 @@ async function main(): Promise<void> {
       const reason = scriptResult ? 'wakeAgent=false' : 'script error/no output';
       log(`Script decided not to wake agent: ${reason}`);
       writeOutput({
-        status: 'success',
+        status: scriptResult ? 'success' : 'error',
         result: null,
+        ...(scriptResult
+          ? { completion: 'script_precheck_completed' as const }
+          : { error: 'Task script did not return a valid precheck result' }),
       });
       return;
     }

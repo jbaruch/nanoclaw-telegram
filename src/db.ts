@@ -137,45 +137,41 @@ function migrateToVersion1(database: Database.Database): void {
     database.exec(
       `ALTER TABLE messages ADD COLUMN is_bot_message INTEGER DEFAULT 0`,
     );
-    // Backfill: mark existing bot messages that used the content prefix pattern
-    database
-      .prepare(`UPDATE messages SET is_bot_message = 1 WHERE content LIKE ?`)
-      .run(`${ASSISTANT_NAME}:%`);
   }
+  // Version0 may contain committed columns but interrupted backfills.
+  database
+    .prepare(`UPDATE messages SET is_bot_message = 1 WHERE content LIKE ?`)
+    .run(`${ASSISTANT_NAME}:%`);
 
   // Add is_main column if it doesn't exist (migration for existing DBs)
   if (!hasColumn('registered_groups', 'is_main')) {
     database.exec(
       `ALTER TABLE registered_groups ADD COLUMN is_main INTEGER DEFAULT 0`,
     );
-    // Backfill: 'main' or channel-prefixed main folders like 'telegram_main'
-    database.exec(
-      `UPDATE registered_groups SET is_main = 1 WHERE folder = 'main' OR folder LIKE '%\\_main' ESCAPE '\\'`,
-    );
   }
+  // Backfill: 'main' or channel-prefixed main folders like 'telegram_main'
+  database.exec(
+    `UPDATE registered_groups SET is_main = 1 WHERE folder = 'main' OR folder LIKE '%\\_main' ESCAPE '\\'`,
+  );
 
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
-  const needsChatBackfill =
-    !hasColumn('chats', 'channel') || !hasColumn('chats', 'is_group');
   if (!hasColumn('chats', 'channel'))
     database.exec(`ALTER TABLE chats ADD COLUMN channel TEXT`);
   if (!hasColumn('chats', 'is_group'))
     database.exec(`ALTER TABLE chats ADD COLUMN is_group INTEGER DEFAULT 0`);
-  if (needsChatBackfill) {
-    // Backfill from JID patterns
-    database.exec(
-      `UPDATE chats SET channel = 'whatsapp', is_group = 1 WHERE jid LIKE '%@g.us'`,
-    );
-    database.exec(
-      `UPDATE chats SET channel = 'whatsapp', is_group = 0 WHERE jid LIKE '%@s.whatsapp.net'`,
-    );
-    database.exec(
-      `UPDATE chats SET channel = 'discord', is_group = 1 WHERE jid LIKE 'dc:%'`,
-    );
-    database.exec(
-      `UPDATE chats SET channel = 'telegram', is_group = 0 WHERE jid LIKE 'tg:%'`,
-    );
-  }
+  // Idempotent backfills run for every accepted version0 layout.
+  database.exec(
+    `UPDATE chats SET channel = 'whatsapp', is_group = 1 WHERE jid LIKE '%@g.us'`,
+  );
+  database.exec(
+    `UPDATE chats SET channel = 'whatsapp', is_group = 0 WHERE jid LIKE '%@s.whatsapp.net' AND channel IS NULL`,
+  );
+  database.exec(
+    `UPDATE chats SET channel = 'discord', is_group = 1 WHERE jid LIKE 'dc:%'`,
+  );
+  database.exec(
+    `UPDATE chats SET channel = 'telegram', is_group = 0 WHERE jid LIKE 'tg:%' AND channel IS NULL`,
+  );
 }
 
 export function initDatabase(): void {

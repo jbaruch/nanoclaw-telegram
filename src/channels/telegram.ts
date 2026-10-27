@@ -3,6 +3,7 @@ import {
   isNetworkError,
   isTelegramError,
   TelegramDeliveryError,
+  TelegramPartialDeliveryError,
   IpcRouteUnavailableError,
 } from '../operational-errors.js';
 import fs from 'fs';
@@ -878,13 +879,13 @@ export class TelegramChannel implements Channel {
         'Telegram message sent',
       );
     } catch (err) {
-      if (!isTelegramError(err)) throw err;
-      logger.error({ jid, err }, 'Failed to send Telegram message');
       if (acknowledgedChunks > 0)
-        throw new TelegramDeliveryError(
+        throw new TelegramPartialDeliveryError(
           'Telegram delivery stopped after acknowledged chunks; inspect the partial message before retrying the full output.',
           { cause: err },
         );
+      if (!isTelegramError(err)) throw err;
+      logger.error({ jid, err }, 'Failed to send Telegram message');
       throw err;
     }
   }

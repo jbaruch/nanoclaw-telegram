@@ -1,5 +1,6 @@
 import {
   isFileSystemError,
+  hasErrno,
   isRecoverableSqliteError,
   isTelegramError,
   IpcRouteUnavailableError,
@@ -155,12 +156,30 @@ function quarantineIpcFile(
   filePath: string,
   errorDir: string,
   sourceGroup: string,
+  channel: 'messages' | 'tasks',
   file: string,
   error: unknown,
 ): void {
   try {
     fs.mkdirSync(errorDir, { recursive: true });
-    fs.renameSync(filePath, path.join(errorDir, `${sourceGroup}-${file}`));
+    // link() reserves the destination without overwriting earlier evidence.
+    for (let sequence = 0; sequence < 1000; sequence++) {
+      const destination = path.join(
+        errorDir,
+        `${sourceGroup}-${channel}-${sequence}-${file}`,
+      );
+      try {
+        fs.linkSync(filePath, destination);
+      } catch (collision) {
+        if (hasErrno(collision, 'EEXIST')) continue;
+        throw collision;
+      }
+      fs.unlinkSync(filePath);
+      return;
+    }
+    throw new Error(
+      'IPC quarantine capacity exhausted; retain the source request and repair the error directory.',
+    );
   } catch (quarantineError) {
     throw new AggregateError(
       [error, quarantineError],
@@ -288,6 +307,7 @@ export function startIpcWatcher(deps: IpcDeps): Promise<void> {
                   filePath,
                   path.join(ipcBaseDir, 'errors'),
                   sourceGroup,
+                  'messages',
                   file,
                   err,
                 );
@@ -333,6 +353,7 @@ export function startIpcWatcher(deps: IpcDeps): Promise<void> {
                   filePath,
                   path.join(ipcBaseDir, 'errors'),
                   sourceGroup,
+                  'tasks',
                   file,
                   err,
                 );

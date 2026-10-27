@@ -260,6 +260,69 @@ it('does not replay whole output after acknowledged chunks failed later', async 
   expect(vi.getTimerCount()).toBe(0);
 });
 
+it.each(['operational', 'unexpected'] as const)(
+  'preserves the cursor and skips queue retry after real channel partial delivery (%s)',
+  async (kind) => {
+    const jid = 'tg:123456';
+    await seed(jid);
+    const { TelegramChannel } = await vi.importActual<
+      typeof import('./channels/telegram.js')
+    >('./channels/telegram.js');
+    const { GroupQueue } =
+      await vi.importActual<typeof import('./group-queue.js')>(
+        './group-queue.js',
+      );
+    const nativeFailure =
+      kind === 'operational'
+        ? new HttpError(
+            'fixed second chunk failure',
+            new Error('fixed transport'),
+          )
+        : new TypeError('fixed second chunk implementation defect');
+    const nativeSend = vi
+      .fn()
+      .mockResolvedValueOnce({ message_id: 71 })
+      .mockRejectedValueOnce(nativeFailure);
+    const nativeChannel = new TelegramChannel('123:synthetic', {
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+    });
+    // Native HTTP is mocked; channel splitting, IDs, partial outcome and queue
+    // retry policy below are their real production implementations.
+    Object.defineProperty(nativeChannel, 'bot', {
+      value: { api: { sendMessage: nativeSend } },
+    });
+    channel = nativeChannel;
+    channel.createDraftStream = undefined;
+    channel.setTyping = vi.fn(async () => {});
+    vi.mocked(findChannel).mockReturnValue(channel);
+    vi.mocked(runContainerAgent).mockImplementationOnce(
+      async (_group, _input, _process, onOutput) => {
+        await onOutput!({ status: 'success', result: 'a'.repeat(5000) });
+        return { status: 'success', result: null };
+      },
+    );
+    const run = vi.fn(processGroupMessages);
+    const queue = new GroupQueue();
+    const failure =
+      kind === 'unexpected'
+        ? expect(queue.waitForFailure()).rejects.toMatchObject({
+            cause: nativeFailure,
+          })
+        : undefined;
+    queue.setProcessMessagesFn(run);
+    queue.enqueueMessageCheck(jid);
+    await vi.advanceTimersByTimeAsync(60000);
+    if (failure) await failure;
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(nativeSend).toHaveBeenCalledTimes(2);
+    expect(storedCursor(jid)).toBe(current);
+    expect(vi.getTimerCount()).toBe(0);
+    await queue.shutdown(0);
+  },
+);
+
 it('classifies a missing native IPC route without consuming a valid later send', async () => {
   vi.mocked(findChannel).mockReturnValueOnce(undefined);
   const missing = sendIpcMessage('tg:route-recovery', 'fixed route payload');
@@ -425,4 +488,10 @@ it('propagates an unexpected typing defect from the actual piped-message consume
   vi.mocked(channel.setTyping!).mockRejectedValueOnce(defect);
   await expect(startMessageLoop()).rejects.toBe(defect);
   expect(channel.setTyping).toHaveBeenCalledExactlyOnceWith(jid, true);
+  const writes = vi
+    .mocked(setRouterState)
+    .mock.calls.filter(([key]) => key === 'last_agent_timestamp');
+  expect(writes.some(([, value]) => JSON.parse(value)[jid] === current)).toBe(
+    false,
+  );
 });

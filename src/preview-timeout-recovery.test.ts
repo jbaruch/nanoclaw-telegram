@@ -3,6 +3,8 @@ import os from 'os';
 import path from 'path';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
+import { execFileSync } from 'child_process';
+import { fileURLToPath } from 'url';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Channel } from './types.js';
 import type { DraftStream } from './draft-stream.js';
@@ -85,10 +87,44 @@ vi.mock('./db.js', () => ({
   getAllChats: () => [],
   setSession: vi.fn(),
 }));
-import { processGroupMessages, _setRegisteredGroups } from './index.js';
+import {
+  processGroupMessages,
+  sendIpcMessage,
+  _setRegisteredGroups,
+} from './index.js';
 import { getMessagesSince, setRouterState } from './db.js';
 import { findChannel } from './router.js';
 import { stopContainer } from './container-runtime.js';
+
+// Execute the same projection used by the real SDK result handler. The SDK
+// event and native channel transport are synthetic; this is not delivery proof.
+function sdkOutput(subtype: string, isError: boolean) {
+  return JSON.parse(
+    execFileSync(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '-e',
+        `import { sdkResultOutput } from './container/agent-runner/src/sdk-result.ts';
+         console.log(JSON.stringify(sdkResultOutput(JSON.parse(process.argv[1]), 'fixed-session')));`,
+        JSON.stringify({
+          type: 'result',
+          subtype,
+          is_error: isError,
+          result: '',
+        }),
+      ],
+      {
+        cwd: fileURLToPath(new URL('../', import.meta.url)),
+        encoding: 'utf8',
+        timeout: 10000,
+        maxBuffer: 65536,
+      },
+    ),
+  ) as Record<string, unknown>;
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -114,12 +150,18 @@ afterEach(() => {
 it.each([
   'preview-timeout',
   'session-timeout',
+  'ipc-sdk-complete',
+  'sdk-error',
+  'sdk-is-error',
+  'markerless-clean',
+  'unfinished-clean',
+  'session-clean',
   'markerless-overflow',
   'unfinished-overflow',
 ] as const)(
-  'restores the actual message cursor after real runner %s failure',
+  'classifies the actual message cursor after real runner %s',
   async (failure) => {
-    const jid = 'tg:preview-timeout';
+    const jid = `tg:${failure}`;
     _setRegisteredGroups({
       [jid]: {
         name: 'synthetic',
@@ -158,23 +200,63 @@ it.each([
     vi.mocked(findChannel).mockReturnValue(channel);
     const pending = processGroupMessages(jid);
     await vi.advanceTimersByTimeAsync(10);
-    if (failure === 'preview-timeout' || failure === 'session-timeout') {
+    if (
+      failure === 'preview-timeout' ||
+      failure === 'session-timeout' ||
+      failure === 'ipc-sdk-complete' ||
+      failure === 'sdk-error' ||
+      failure === 'sdk-is-error'
+    ) {
+      if (failure === 'ipc-sdk-complete')
+        await sendIpcMessage(jid, 'fixed queued reply');
+      const output =
+        failure === 'preview-timeout'
+          ? { status: 'success', result: null, streamText: 'fixed preview' }
+          : failure === 'session-timeout'
+            ? {
+                status: 'success',
+                result: null,
+                newSessionId: 'fixed-session',
+              }
+            : sdkOutput(
+                failure === 'sdk-error' ? 'error_during_execution' : 'success',
+                failure !== 'ipc-sdk-complete',
+              );
+      if (failure === 'ipc-sdk-complete') {
+        expect(output).toMatchObject({
+          status: 'success',
+          result: null,
+          completion: 'sdk_turn_completed',
+        });
+      } else if (failure === 'sdk-error' || failure === 'sdk-is-error') {
+        expect(output.status).toBe('error');
+        expect(output).not.toHaveProperty('completion');
+      }
       fixture.proc.stdout.push(
         '---NANOCLAW_OUTPUT_START---\n' +
-          JSON.stringify(
-            failure === 'preview-timeout'
-              ? { status: 'success', result: null, streamText: 'fixed preview' }
-              : {
-                  status: 'success',
-                  result: null,
-                  newSessionId: 'fixed-session',
-                },
-          ) +
+          JSON.stringify(output) +
           '\n---NANOCLAW_OUTPUT_END---\n',
       );
       await vi.advanceTimersByTimeAsync(1);
       await vi.advanceTimersByTimeAsync(31001);
       fixture.proc.emit('close', 137);
+    } else if (failure.endsWith('-clean')) {
+      const session = JSON.stringify({
+        status: 'success',
+        result: null,
+        newSessionId: 'fixed-session',
+      });
+      fixture.proc.stdout.push(
+        failure === 'markerless-clean'
+          ? 'fixed diagnostic only'
+          : '---NANOCLAW_OUTPUT_START---\n' +
+              session +
+              (failure === 'session-clean'
+                ? '\n---NANOCLAW_OUTPUT_END---\n'
+                : ''),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      fixture.proc.emit('close', 0);
     } else {
       fixture.proc.stdout.push(
         (failure === 'unfinished-overflow'
@@ -183,7 +265,7 @@ it.each([
       );
       await vi.advanceTimersByTimeAsync(0);
     }
-    await expect(pending).resolves.toBe(false);
+    await expect(pending).resolves.toBe(failure === 'ipc-sdk-complete');
     if (failure === 'preview-timeout')
       expect(draft.update).toHaveBeenCalledExactlyOnceWith('fixed preview');
     else expect(draft.update).not.toHaveBeenCalled();
@@ -192,11 +274,23 @@ it.each([
     const writes = vi
       .mocked(setRouterState)
       .mock.calls.filter(([key]) => key === 'last_agent_timestamp');
-    expect(JSON.parse(writes.at(-1)![1])[jid]).toBe('');
-    expect(channel.setTyping).toHaveBeenLastCalledWith(jid, false);
-    expect(stopContainer).toHaveBeenCalledExactlyOnceWith(
-      expect.stringContaining('nanoclaw-synthetic-'),
+    expect(JSON.parse(writes.at(-1)![1])[jid]).toBe(
+      failure === 'ipc-sdk-complete' ? '2024-01-01T00:00:01Z' : '',
     );
+    if (failure === 'ipc-sdk-complete')
+      expect(channel.sendMessage).toHaveBeenCalledExactlyOnceWith(
+        jid,
+        'fixed queued reply',
+        undefined,
+      );
+    else expect(channel.sendMessage).not.toHaveBeenCalled();
+    expect(channel.setTyping).toHaveBeenLastCalledWith(jid, false);
+    if (failure.endsWith('-clean'))
+      expect(stopContainer).not.toHaveBeenCalled();
+    else
+      expect(stopContainer).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining('nanoclaw-synthetic-'),
+      );
     expect(vi.getTimerCount()).toBe(0);
   },
 );

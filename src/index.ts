@@ -4,6 +4,7 @@ import {
   isRecoverableSqliteError,
   isTelegramError,
   isOperationalRunError,
+  TelegramPartialDeliveryError,
 } from './operational-errors.js';
 import fs from 'fs';
 import path from 'path';
@@ -465,16 +466,22 @@ export async function processGroupMessages(chatJid: string): Promise<boolean> {
               `Agent output: ${raw.length} chars`,
             );
             if (text) {
-              if (draftStream) {
-                const ok = await draftStream.finish(text);
-                if (!ok) {
-                  // Text exceeded maxLength — fall back to regular send
+              try {
+                if (draftStream) {
+                  const ok = await draftStream.finish(text);
+                  if (!ok) {
+                    // Text exceeded maxLength — fall back to regular send
+                    await sendWithRetry(channel, chatJid, text);
+                  }
+                } else {
                   await sendWithRetry(channel, chatJid, text);
                 }
-              } else {
-                await sendWithRetry(channel, chatJid, text);
+                outputSentToUser = true;
+              } catch (error) {
+                if (error instanceof TelegramPartialDeliveryError)
+                  outputSentToUser = true;
+                throw error;
               }
-              outputSentToUser = true;
             }
             // Only reset idle timer on actual results, not session-update markers (result: null)
             resetIdleTimer();
@@ -709,6 +716,9 @@ export async function startMessageLoop(): Promise<void> {
             allPending.length > 0 ? allPending : groupMessages;
           const formatted = formatMessages(messagesToSend, TIMEZONE);
 
+          // Typing must succeed before handing input to a live container or
+          // committing its cursor; a defect leaves the database input pending.
+          await channel.setTyping?.(chatJid, true);
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
@@ -717,8 +727,6 @@ export async function startMessageLoop(): Promise<void> {
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
-            // Show typing indicator while the container processes the piped message
-            await channel.setTyping?.(chatJid, true);
           } else {
             // No active container — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);

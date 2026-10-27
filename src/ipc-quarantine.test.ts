@@ -40,6 +40,7 @@ describe('IPC file quarantine', () => {
     });
     fs.writeFileSync(path.join(messages, 'incomplete.json'), incompleteMessage);
     const invalid = {
+      'incomplete.json': { type: 'unsupported_same_name_task' },
       'folder.json': {
         type: 'register_group',
         jid: 'tg:123',
@@ -106,7 +107,12 @@ describe('IPC file quarantine', () => {
       expect(deps.registerGroup).not.toHaveBeenCalled();
       expect(
         fs.readFileSync(
-          path.join(temporary, 'ipc', 'errors', 'main-incomplete.json'),
+          path.join(
+            temporary,
+            'ipc',
+            'errors',
+            'main-messages-0-incomplete.json',
+          ),
           'utf8',
         ),
       ).toBe(incompleteMessage);
@@ -115,12 +121,38 @@ describe('IPC file quarantine', () => {
         expect(
           JSON.parse(
             fs.readFileSync(
-              path.join(temporary, 'ipc', 'errors', `main-${name}`),
+              path.join(temporary, 'ipc', 'errors', `main-tasks-0-${name}`),
               'utf8',
             ),
           ),
         ).toEqual(value);
       }
+      const laterBody = JSON.stringify({ type: 'unsupported_later_message' });
+      fs.writeFileSync(path.join(messages, 'incomplete.json'), laterBody);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(
+        fs.readFileSync(
+          path.join(
+            temporary,
+            'ipc',
+            'errors',
+            'main-messages-0-incomplete.json',
+          ),
+          'utf8',
+        ),
+      ).toBe(incompleteMessage);
+      expect(
+        fs.readFileSync(
+          path.join(
+            temporary,
+            'ipc',
+            'errors',
+            'main-messages-1-incomplete.json',
+          ),
+          'utf8',
+        ),
+      ).toBe(laterBody);
+      expect(fs.existsSync(path.join(messages, 'incomplete.json'))).toBe(false);
       fs.writeFileSync(
         path.join(messages, 'valid.json'),
         JSON.stringify({
@@ -159,7 +191,12 @@ describe('IPC file quarantine', () => {
       expect(
         JSON.parse(
           fs.readFileSync(
-            path.join(temporary, 'ipc', 'errors', 'main-failed-reaction.json'),
+            path.join(
+              temporary,
+              'ipc',
+              'errors',
+              'main-messages-0-failed-reaction.json',
+            ),
             'utf8',
           ),
         ),
@@ -189,7 +226,7 @@ describe('IPC file quarantine', () => {
               temporary,
               'ipc',
               'errors',
-              'main-unavailable-route.json',
+              'main-messages-0-unavailable-route.json',
             ),
             'utf8',
           ),
@@ -230,7 +267,12 @@ describe('IPC file quarantine', () => {
       expect(vi.getTimerCount()).toBe(1);
       expect(
         fs.existsSync(
-          path.join(temporary, 'ipc', 'errors', 'main-delayed-defect.json'),
+          path.join(
+            temporary,
+            'ipc',
+            'errors',
+            'main-messages-0-delayed-defect.json',
+          ),
         ),
       ).toBe(true);
       fs.writeFileSync(
@@ -300,7 +342,13 @@ describe('IPC file quarantine', () => {
       expect(fs.existsSync(path.join(messages, 'defect.json'))).toBe(false);
       expect(
         fs.readFileSync(
-          path.join(temporary, 'data', 'ipc', 'errors', 'main-defect.json'),
+          path.join(
+            temporary,
+            'data',
+            'ipc',
+            'errors',
+            'main-messages-0-defect.json',
+          ),
           'utf8',
         ),
       ).toBe(body);

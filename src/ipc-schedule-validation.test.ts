@@ -86,7 +86,12 @@ it('quarantines an invalid update unchanged, applies a valid once update, and pr
   expect(
     JSON.parse(
       fs.readFileSync(
-        path.join(fixture.directory, 'ipc', 'errors', 'main-invalid.json'),
+        path.join(
+          fixture.directory,
+          'ipc',
+          'errors',
+          'main-tasks-0-invalid.json',
+        ),
         'utf8',
       ),
     ),
@@ -123,7 +128,12 @@ it('quarantines an invalid update unchanged, applies a valid once update, and pr
   await rejected;
   expect(
     fs.existsSync(
-      path.join(fixture.directory, 'ipc', 'errors', 'main-sql-defect.json'),
+      path.join(
+        fixture.directory,
+        'ipc',
+        'errors',
+        'main-messages-0-sql-defect.json',
+      ),
     ),
   ).toBe(true);
 });

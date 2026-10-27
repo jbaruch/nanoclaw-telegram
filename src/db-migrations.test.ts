@@ -45,6 +45,44 @@ function columns(database: Database.Database, table: string): string[] {
 }
 
 describe('durable schema migration', () => {
+  it('repairs version0 committed columns whose historical backfills never ran', () => {
+    initialize();
+    _closeDatabase();
+    opened = false;
+    const old = disk();
+    old.exec(`
+      INSERT INTO chats(jid,name) VALUES ('tg:123','preserved'),('123@g.us','group');
+      INSERT INTO messages(id,chat_jid,content) VALUES ('fixed','tg:123','Andy: saved response');
+      INSERT INTO registered_groups(jid,name,folder,trigger_pattern,added_at)
+        VALUES ('tg:123','main','telegram_main','@Andy','2024-01-01T00:00:00Z');
+    `);
+    old.pragma('user_version = 0');
+    old.close();
+    initialize();
+    _closeDatabase();
+    opened = false;
+    initialize();
+    const check = disk();
+    try {
+      expect(check.pragma('user_version', { simple: true })).toBe(1);
+      expect(
+        check.prepare('SELECT is_main FROM registered_groups').get(),
+      ).toEqual({ is_main: 1 });
+      expect(
+        check.prepare('SELECT content,is_bot_message FROM messages').get(),
+      ).toEqual({ content: 'Andy: saved response', is_bot_message: 1 });
+      expect(
+        check
+          .prepare('SELECT jid,channel,is_group FROM chats ORDER BY jid')
+          .all(),
+      ).toEqual([
+        { jid: '123@g.us', channel: 'whatsapp', is_group: 1 },
+        { jid: 'tg:123', channel: 'telegram', is_group: 0 },
+      ]);
+    } finally {
+      check.close();
+    }
+  });
   it('repairs a partially old schema, preserves history, and is idempotent after restart', () => {
     initialize();
     _closeDatabase();

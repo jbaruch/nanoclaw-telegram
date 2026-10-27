@@ -9,6 +9,7 @@ import {
  */
 import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
+import { StringDecoder } from 'string_decoder';
 import path from 'path';
 
 import {
@@ -56,6 +57,7 @@ export interface ContainerOutput {
   newSessionId?: string;
   error?: string;
   streamText?: string; // Accumulated text for streaming preview
+  completion?: 'sdk_turn_completed' | 'script_precheck_completed'; // Never delivery evidence
 }
 
 interface VolumeMount {
@@ -295,6 +297,14 @@ function parseContainerOutput(json: string): ContainerOutput {
     if (fields[field] !== undefined && typeof fields[field] !== 'string')
       throw new SyntaxError(`Container output ${field} must be a string`);
   }
+  if (
+    fields.completion !== undefined &&
+    ((fields.completion !== 'sdk_turn_completed' &&
+      fields.completion !== 'script_precheck_completed') ||
+      fields.status !== 'success' ||
+      fields.streamText !== undefined)
+  )
+    throw new SyntaxError('Container output has an invalid SDK completion');
   return fields as unknown as ContainerOutput;
 }
 
@@ -355,12 +365,15 @@ export async function runContainerAgent(
     });
 
     let stdout = '';
+    const stdoutDecoder = new StringDecoder('utf8');
     let stderr = '';
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
-    let parseBuffer = '';
+    // Retain raw frame bytes until both markers arrive, so UTF-8 characters
+    // split across native stdout chunks are decoded exactly once.
+    let parseBuffer = Buffer.alloc(0);
     let newSessionId: string | undefined;
     let outputProtocolError = false;
     let outputChain = Promise.resolve();
@@ -425,7 +438,7 @@ export async function runContainerAgent(
 
     container.stdout.on('data', (data) =>
       runGuarded(() => {
-        const chunk = data.toString();
+        const chunk = stdoutDecoder.write(data);
 
         // Always accumulate for logging
         if (!stdoutTruncated) {
@@ -444,16 +457,14 @@ export async function runContainerAgent(
 
         // Stream-parse for output markers
         if (onOutput) {
-          if (
-            Buffer.byteLength(parseBuffer) + Buffer.byteLength(chunk) >
-            CONTAINER_MAX_OUTPUT_SIZE
-          ) {
-            parseBuffer = '';
+          const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
+          if (parseBuffer.length + bytes.length > CONTAINER_MAX_OUTPUT_SIZE) {
+            parseBuffer = Buffer.alloc(0);
             throw new ContainerOutputProtocolError(
               'Agent output exceeded the bounded frame parser; retain undelivered input and inspect the agent protocol before retrying.',
             );
           }
-          parseBuffer += chunk;
+          parseBuffer = Buffer.concat([parseBuffer, bytes]);
           let startIdx: number;
           while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
             const endIdx = parseBuffer.indexOf(OUTPUT_END_MARKER, startIdx);
@@ -461,16 +472,25 @@ export async function runContainerAgent(
 
             const jsonStr = parseBuffer
               .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
+              .toString('utf8')
               .trim();
             parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_MARKER.length);
 
             try {
               const parsed = parseContainerOutput(jsonStr);
+              if (
+                parsed.completion === 'script_precheck_completed' &&
+                (!input.script || !input.isScheduledTask)
+              )
+                throw new SyntaxError(
+                  'Script completion requires a scheduled precheck',
+                );
               if (parsed.newSessionId) {
                 newSessionId = parsed.newSessionId;
               }
               hadStreamingOutput = true;
               const responseActivity =
+                parsed.completion !== undefined ||
                 parsed.streamText !== undefined ||
                 parsed.result !== null ||
                 parsed.status === 'error';
@@ -488,8 +508,8 @@ export async function runContainerAgent(
                 if (
                   markerSequence === latestMarkerSequence &&
                   parsed.status === 'success' &&
-                  parsed.result !== null &&
-                  parsed.result.trim()
+                  (parsed.completion !== undefined ||
+                    (parsed.result !== null && parsed.result.trim()))
                 )
                   completedTerminalOutput = true;
               });
@@ -589,8 +609,8 @@ export async function runContainerAgent(
             ].join('\n'),
           );
 
-          // Only a settled terminal result permits idle-cleanup success.
-          // Preview activity does not prove that the input received its response.
+          // A settled result or actual SDK completion permits idle cleanup.
+          // Completion does not assert that an IPC message reached its channel.
           afterOutput(() => {
             if (completedTerminalOutput) {
               logger.info(
@@ -707,7 +727,10 @@ export async function runContainerAgent(
 
         // Streaming mode: wait for output chain to settle, return completion marker
         if (onOutput) {
-          if (outputProtocolError) {
+          if (
+            outputProtocolError ||
+            parseBuffer.includes(OUTPUT_START_MARKER)
+          ) {
             afterOutput(() =>
               resolve({
                 status: 'error',
@@ -720,6 +743,16 @@ export async function runContainerAgent(
             return;
           }
           afterOutput(() => {
+            if (!completedTerminalOutput) {
+              resolve({
+                status: 'error',
+                result: null,
+                newSessionId,
+                error:
+                  'Agent exited without a completed terminal response; retain undelivered input and inspect the output protocol.',
+              });
+              return;
+            }
             logger.info(
               { group: group.name, duration, newSessionId },
               'Container completed (streaming mode)',

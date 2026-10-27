@@ -4,6 +4,9 @@ import Database from 'better-sqlite3';
 /** Application-level delivery failed without a native Telegram acknowledgment. */
 export class TelegramDeliveryError extends Error {}
 
+/** Some native chunks were acknowledged; never automatically replay the prompt. */
+export class TelegramPartialDeliveryError extends TelegramDeliveryError {}
+
 /** A destination lacks a connected channel, operation or native target. */
 export class IpcRouteUnavailableError extends Error {}
 
@@ -141,6 +144,13 @@ export function isCommandError(error: unknown): error is Error {
 export function isTelegramError(
   error: unknown,
 ): error is GrammyError | HttpError | TelegramDeliveryError {
+  if (error instanceof TelegramPartialDeliveryError)
+    return (
+      error.cause instanceof GrammyError ||
+      error.cause instanceof HttpError ||
+      (error.cause instanceof TelegramDeliveryError &&
+        !(error.cause instanceof TelegramPartialDeliveryError))
+    );
   return (
     error instanceof GrammyError ||
     error instanceof HttpError ||

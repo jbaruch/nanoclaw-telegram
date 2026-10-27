@@ -72,7 +72,11 @@ export function loadMountAllowlist(): MountAllowlist | null {
     const allowlist = JSON.parse(content) as MountAllowlist;
 
     // Validate structure
-    if (!allowlist || typeof allowlist !== 'object') {
+    if (
+      !allowlist ||
+      typeof allowlist !== 'object' ||
+      Array.isArray(allowlist)
+    ) {
       throw new SyntaxError('Mount allowlist must be an object');
     }
     if (!Array.isArray(allowlist.allowedRoots)) {
@@ -86,6 +90,28 @@ export function loadMountAllowlist(): MountAllowlist | null {
     if (typeof allowlist.nonMainReadOnly !== 'boolean') {
       throw new SyntaxError('nonMainReadOnly must be a boolean');
     }
+    for (const root of allowlist.allowedRoots) {
+      if (
+        !root ||
+        typeof root !== 'object' ||
+        Array.isArray(root) ||
+        typeof root.path !== 'string' ||
+        !root.path.trim() ||
+        root.path.includes('\0') ||
+        typeof root.allowReadWrite !== 'boolean' ||
+        (root.description !== undefined && typeof root.description !== 'string')
+      )
+        throw new SyntaxError('Mount allowlist root fields have invalid types');
+    }
+    if (
+      allowlist.blockedPatterns.some(
+        (pattern) =>
+          typeof pattern !== 'string' ||
+          !pattern.trim() ||
+          pattern.includes('\0'),
+      )
+    )
+      throw new SyntaxError('Mount blocked patterns must be nonempty strings');
 
     // Merge with default blocked patterns
     const mergedBlockedPatterns = [

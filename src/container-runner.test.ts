@@ -148,6 +148,57 @@ describe('container-runner timeout behavior', () => {
     vi.useRealTimers();
   });
 
+  it('decodes split multibyte stdout frames without altering delivered text', async () => {
+    const onOutput = vi.fn(async () => {});
+    const pending = runContainerAgent(testGroup, testInput, () => {}, onOutput);
+    await vi.advanceTimersByTimeAsync(10);
+    const text = 'café 👋 你好';
+    const frame = Buffer.from(
+      `${OUTPUT_START_MARKER}\n${JSON.stringify({ status: 'success', result: text })}\n${OUTPUT_END_MARKER}\n`,
+    );
+    for (const byte of frame) fakeProc.stdout.push(Buffer.from([byte]));
+    await vi.advanceTimersByTimeAsync(0);
+    fakeProc.emit('close', 0);
+    await expect(pending).resolves.toMatchObject({ status: 'success' });
+    expect(onOutput).toHaveBeenCalledExactlyOnceWith({
+      status: 'success',
+      result: text,
+    });
+  });
+
+  it('accepts silent completed scheduled prechecks while refusing markerless scripts', async () => {
+    const input = {
+      ...testInput,
+      isScheduledTask: true,
+      script: 'fixture only',
+    };
+    const pending = runContainerAgent(
+      testGroup,
+      input,
+      () => {},
+      vi.fn(async () => {}),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      completion: 'script_precheck_completed',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    fakeProc.emit('close', 0);
+    await expect(pending).resolves.toMatchObject({ status: 'success' });
+    fakeProc = createFakeProcess();
+    const missing = runContainerAgent(
+      testGroup,
+      input,
+      () => {},
+      vi.fn(async () => {}),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await expect(missing).resolves.toMatchObject({ status: 'error' });
+  });
+
   it('timeout after output resolves as success', async () => {
     const onOutput = vi.fn(async () => {});
     const resultPromise = runContainerAgent(
@@ -298,6 +349,29 @@ describe('container-runner timeout behavior', () => {
       status: 'error',
       error: expect.stringContaining('without a completed terminal response'),
     });
+  });
+
+  it.each([
+    { status: 'success', result: null, completion: true },
+    { status: 'success', result: null, completion: 'unknown' },
+    { status: 'error', result: null, completion: 'sdk_turn_completed' },
+    {
+      status: 'success',
+      result: null,
+      streamText: 'preview',
+      completion: 'sdk_turn_completed',
+    },
+  ])('refuses an invalid completion discriminator: %j', async (output) => {
+    const onOutput = vi.fn(async () => {});
+    const pending = runContainerAgent(testGroup, testInput, () => {}, onOutput);
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.stdout.push(
+      `${OUTPUT_START_MARKER}\n${JSON.stringify(output)}\n${OUTPUT_END_MARKER}\n`,
+    );
+    await vi.advanceTimersByTimeAsync(1830000);
+    fakeProc.emit('close', 137);
+    await expect(pending).resolves.toMatchObject({ status: 'error' });
+    expect(onOutput).not.toHaveBeenCalled();
   });
 
   it('preserves settled visible output across a later session update during idle cleanup', async () => {
