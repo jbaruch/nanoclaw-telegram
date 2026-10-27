@@ -1,5 +1,6 @@
 import { HttpError } from 'grammy';
 import { TelegramDeliveryError } from './operational-errors.js';
+import { IpcRouteUnavailableError } from './ipc.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Channel } from './types.js';
 import type { DraftStream } from './draft-stream.js';
@@ -33,6 +34,7 @@ import {
   processGroupMessages,
   _setRegisteredGroups,
   sendWithRetry,
+  sendIpcMessage,
 } from './index.js';
 import { getMessagesSince, setRouterState } from './db.js';
 import { findChannel } from './router.js';
@@ -250,4 +252,22 @@ it('does not replay whole output after acknowledged chunks failed later', async 
   ).rejects.toBe(partial);
   expect(channel.sendMessage).toHaveBeenCalledTimes(1);
   expect(vi.getTimerCount()).toBe(0);
+});
+
+it('classifies a missing native IPC route without consuming a valid later send', async () => {
+  vi.mocked(findChannel).mockReturnValueOnce(undefined);
+  const missing = sendIpcMessage('tg:route-recovery', 'fixed route payload');
+  await expect(missing).rejects.toBeInstanceOf(IpcRouteUnavailableError);
+  await expect(missing).rejects.toMatchObject({
+    message: expect.stringContaining('No active channel owns'),
+  });
+  expect(channel.sendMessage).not.toHaveBeenCalled();
+  await expect(
+    sendIpcMessage('tg:route-recovery', 'fixed route payload'),
+  ).resolves.toBeUndefined();
+  expect(channel.sendMessage).toHaveBeenCalledExactlyOnceWith(
+    'tg:route-recovery',
+    'fixed route payload',
+    undefined,
+  );
 });

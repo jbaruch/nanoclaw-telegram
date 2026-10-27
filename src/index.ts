@@ -57,7 +57,7 @@ import {
   InvalidGroupFolderError,
   resolveGroupFolderPath,
 } from './group-folder.js';
-import { startIpcWatcher } from './ipc.js';
+import { startIpcWatcher, IpcRouteUnavailableError } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   restoreRemoteControl,
@@ -131,6 +131,17 @@ export async function sendWithRetry(
       await new Promise((r) => setTimeout(r, delay));
     }
   }
+}
+
+/** The IPC watcher owns expected route failures and quarantines their request. */
+export async function sendIpcMessage(jid: string, text: string): Promise<void> {
+  const channel = findChannel(channels, jid);
+  if (!channel)
+    throw new IpcRouteUnavailableError(
+      'No active channel owns the IPC destination; verify the destination and channel connection before resubmitting.',
+    );
+  if (isDuplicateSend(jid, text)) return;
+  await sendWithRetry(channel, jid, text);
 }
 
 // --- Outbound dedup guard ---
@@ -847,12 +858,7 @@ async function main(): Promise<void> {
     },
   });
   const ipcLifecycle = startIpcWatcher({
-    sendMessage: (jid, text) => {
-      const channel = findChannel(channels, jid);
-      if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      if (isDuplicateSend(jid, text)) return Promise.resolve();
-      return sendWithRetry(channel, jid, text);
-    },
+    sendMessage: sendIpcMessage,
     sendReaction: async (jid, messageId, emoji) => {
       const channel = findChannel(channels, jid);
       if (!channel) return;

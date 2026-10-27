@@ -14,7 +14,11 @@ vi.mock('./config.js', () => ({
   IPC_POLL_INTERVAL: 1000,
   TIMEZONE: 'UTC',
 }));
-import { startIpcWatcher, type IpcDeps } from './ipc.js';
+import {
+  startIpcWatcher,
+  IpcRouteUnavailableError,
+  type IpcDeps,
+} from './ipc.js';
 
 afterEach(() => vi.useRealTimers());
 
@@ -92,6 +96,8 @@ describe('IPC file quarantine', () => {
         });
       });
       const lifecycle = startIpcWatcher(deps);
+      const lifecycleFailed = vi.fn();
+      void lifecycle.then(undefined, lifecycleFailed);
       await vi.advanceTimersByTimeAsync(0);
       expect(vi.getTimerCount()).toBe(1);
       scan.mockRestore();
@@ -161,6 +167,52 @@ describe('IPC file quarantine', () => {
       expect(fs.existsSync(path.join(messages, 'failed-reaction.json'))).toBe(
         false,
       );
+      expect(vi.getTimerCount()).toBe(1);
+      const unavailable = new IpcRouteUnavailableError(
+        'No active channel owns the IPC destination; verify its route before resubmitting.',
+      );
+      vi.mocked(deps.sendMessage).mockRejectedValueOnce(unavailable);
+      const unknownRoute = {
+        type: 'message',
+        chatJid: 'unknown:fixed',
+        text: 'fixed route payload',
+      };
+      fs.writeFileSync(
+        path.join(messages, 'unavailable-route.json'),
+        JSON.stringify(unknownRoute),
+      );
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(
+              temporary,
+              'ipc',
+              'errors',
+              'main-unavailable-route.json',
+            ),
+            'utf8',
+          ),
+        ),
+      ).toEqual(unknownRoute);
+      expect(lifecycleFailed).not.toHaveBeenCalled();
+      fs.writeFileSync(
+        path.join(messages, 'route-recovered.json'),
+        JSON.stringify({
+          type: 'message',
+          chatJid: 'tg:123',
+          text: 'fixed later routed payload',
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(deps.sendMessage).toHaveBeenLastCalledWith(
+        'tg:123',
+        'fixed later routed payload',
+      );
+      expect(fs.existsSync(path.join(messages, 'route-recovered.json'))).toBe(
+        false,
+      );
+      expect(lifecycleFailed).not.toHaveBeenCalled();
       expect(vi.getTimerCount()).toBe(1);
       const defect = new TypeError('fixed delayed handler defect');
       vi.mocked(deps.sendMessage).mockRejectedValueOnce(defect);

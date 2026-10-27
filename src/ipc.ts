@@ -16,6 +16,9 @@ import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
+/** A valid IPC shape names a destination without an available channel. */
+export class IpcRouteUnavailableError extends Error {}
+
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
   sendReaction?: (
@@ -291,6 +294,7 @@ export function startIpcWatcher(deps: IpcDeps): Promise<void> {
                 );
                 if (
                   !(err instanceof SyntaxError) &&
+                  !(err instanceof IpcRouteUnavailableError) &&
                   !isFileSystemError(err) &&
                   !isTelegramError(err) &&
                   !(err instanceof Database.SqliteError)
