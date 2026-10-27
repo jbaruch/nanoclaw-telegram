@@ -112,6 +112,32 @@ describe('GroupQueue', () => {
     expect(failed).not.toHaveBeenCalled();
   });
 
+  it.each(['messages', 'task'] as const)(
+    'does not drain pending messages or tasks after an unexpected %s failure',
+    async (origin) => {
+      const defect = new TypeError('fixed fatal work defect');
+      let reject!: (error: unknown) => void;
+      const blocked = () =>
+        new Promise<never>((_resolve, fail) => {
+          reject = fail;
+        });
+      const messages = vi.fn(async () => true),
+        pendingTask = vi.fn(async () => {});
+      if (origin === 'messages') messages.mockImplementationOnce(blocked);
+      queue.setProcessMessagesFn(messages);
+      if (origin === 'messages') queue.enqueueMessageCheck('tg:123');
+      else queue.enqueueTask('tg:123', 'initial-task', blocked);
+      queue.enqueueMessageCheck('tg:123');
+      queue.enqueueTask('tg:123', 'pending-task', pendingTask);
+      const failed = expect(queue.waitForFailure()).rejects.toBe(defect);
+      reject(defect);
+      await vi.advanceTimersByTimeAsync(0);
+      await failed;
+      expect(pendingTask).not.toHaveBeenCalled();
+      expect(messages).toHaveBeenCalledTimes(origin === 'messages' ? 1 : 0);
+    },
+  );
+
   // --- Single group at a time ---
 
   it('only runs one container per group at a time', async () => {

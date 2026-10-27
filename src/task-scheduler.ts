@@ -1,13 +1,13 @@
-import Database from 'better-sqlite3';
 import {
   isFileSystemError,
+  isRecoverableSqliteError,
   isOperationalRunError,
 } from './operational-errors.js';
 import { ChildProcess } from 'child_process';
-import { CronExpressionParser } from 'cron-parser';
+import { parseTaskSchedule } from './task-schedule.js';
 import fs from 'fs';
 
-import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL } from './config.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -38,37 +38,30 @@ import { RegisteredGroup, ScheduledTask } from './types.js';
  * Co-authored-by: @community-pr-601
  */
 export function computeNextRun(task: ScheduledTask): string | null {
-  if (task.schedule_type === 'once') return null;
-
   const now = Date.now();
-
-  if (task.schedule_type === 'cron') {
-    const interval = CronExpressionParser.parse(task.schedule_value, {
-      tz: TIMEZONE,
-    });
-    return interval.next().toISOString();
-  }
-
-  if (task.schedule_type === 'interval') {
-    const ms = parseInt(task.schedule_value, 10);
-    if (!ms || ms <= 0) {
-      // Guard against malformed interval that would cause an infinite loop
-      logger.warn(
-        { taskId: task.id, value: task.schedule_value },
-        'Invalid interval value',
-      );
-      return new Date(now + 60_000).toISOString();
-    }
-    // Anchor to the scheduled time, not now, to prevent drift.
-    // Skip past any missed intervals so we always land in the future.
-    let next = new Date(task.next_run!).getTime() + ms;
-    while (next <= now) {
-      next += ms;
-    }
-    return new Date(next).toISOString();
-  }
-
-  return null;
+  const schedule = parseTaskSchedule(
+    task.schedule_type,
+    task.schedule_value,
+    now,
+  );
+  if (schedule.type === 'once') return null;
+  if (schedule.type === 'cron') return schedule.nextRun;
+  const anchor =
+    task.next_run === null ? NaN : new Date(task.next_run).getTime();
+  if (!Number.isFinite(anchor))
+    throw new SyntaxError(
+      'Stored task next_run is invalid; pause and repair the schedule.',
+    );
+  const steps = Math.max(
+    1,
+    Math.floor((now - anchor) / schedule.intervalMs) + 1,
+  );
+  const next = new Date(anchor + steps * schedule.intervalMs);
+  if (!Number.isFinite(next.getTime()))
+    throw new SyntaxError(
+      'Stored task interval exceeds the supported date range.',
+    );
+  return next.toISOString();
 }
 
 export interface SchedulerDependencies {
@@ -101,6 +94,30 @@ async function runTask(
   });
   const [execution] = await Promise.allSettled([
     (async () => {
+      try {
+        parseTaskSchedule(task.schedule_type, task.schedule_value);
+        if (
+          !task.next_run ||
+          !Number.isFinite(new Date(task.next_run).getTime())
+        )
+          throw new SyntaxError('Stored task next_run is invalid.');
+      } catch (failure) {
+        if (!(failure instanceof SyntaxError)) throw failure;
+        updateTask(task.id, { status: 'paused' });
+        logTaskRun({
+          task_id: task.id,
+          run_at: new Date().toISOString(),
+          duration_ms: Date.now() - startTime,
+          status: 'error',
+          result: null,
+          error: failure.message,
+        });
+        logger.error(
+          { taskId: task.id, error: failure },
+          'Invalid stored task schedule; paused until repaired',
+        );
+        return true;
+      }
       let groupDir: string;
       try {
         groupDir = resolveGroupFolderPath(task.group_folder);
@@ -342,8 +359,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): Promise<void> {
         );
       }
     } catch (err) {
-      if (!isFileSystemError(err) && !(err instanceof Database.SqliteError))
-        throw err;
+      if (!isFileSystemError(err) && !isRecoverableSqliteError(err)) throw err;
       logger.error({ err }, 'Error in scheduler loop');
     } finally {
       setTimeout(poll, SCHEDULER_POLL_INTERVAL);

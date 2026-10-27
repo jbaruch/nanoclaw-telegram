@@ -1,16 +1,15 @@
-import Database from 'better-sqlite3';
 import {
   isFileSystemError,
+  isRecoverableSqliteError,
   isTelegramError,
-  isCronInputError,
   IpcRouteUnavailableError,
 } from './operational-errors.js';
 import fs from 'fs';
 import path from 'path';
 
-import { CronExpressionParser } from 'cron-parser';
+import { parseTaskSchedule } from './task-schedule.js';
 
-import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { DATA_DIR, IPC_POLL_INTERVAL } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
@@ -297,7 +296,7 @@ export function startIpcWatcher(deps: IpcDeps): Promise<void> {
                   !(err instanceof IpcRouteUnavailableError) &&
                   !isFileSystemError(err) &&
                   !isTelegramError(err) &&
-                  !(err instanceof Database.SqliteError)
+                  !isRecoverableSqliteError(err)
                 )
                   throw err;
                 logger.error(
@@ -341,7 +340,7 @@ export function startIpcWatcher(deps: IpcDeps): Promise<void> {
                   !(err instanceof SyntaxError) &&
                   !isFileSystemError(err) &&
                   !isTelegramError(err) &&
-                  !(err instanceof Database.SqliteError)
+                  !isRecoverableSqliteError(err)
                 )
                   throw err;
                 logger.error(
@@ -428,42 +427,10 @@ export async function processTaskIpc(
 
         const scheduleType = data.schedule_type as 'cron' | 'interval' | 'once';
 
-        let nextRun: string | null = null;
-        if (scheduleType === 'cron') {
-          try {
-            const interval = CronExpressionParser.parse(data.schedule_value, {
-              tz: TIMEZONE,
-            });
-            nextRun = interval.next().toISOString();
-          } catch (err) {
-            if (!isCronInputError(err)) throw err;
-            logger.warn(
-              { scheduleValue: data.schedule_value },
-              'Invalid cron expression',
-            );
-            break;
-          }
-        } else if (scheduleType === 'interval') {
-          const ms = parseInt(data.schedule_value, 10);
-          if (isNaN(ms) || ms <= 0) {
-            logger.warn(
-              { scheduleValue: data.schedule_value },
-              'Invalid interval',
-            );
-            break;
-          }
-          nextRun = new Date(Date.now() + ms).toISOString();
-        } else if (scheduleType === 'once') {
-          const date = new Date(data.schedule_value);
-          if (isNaN(date.getTime())) {
-            logger.warn(
-              { scheduleValue: data.schedule_value },
-              'Invalid timestamp',
-            );
-            break;
-          }
-          nextRun = date.toISOString();
-        }
+        const nextRun = parseTaskSchedule(
+          scheduleType,
+          data.schedule_value,
+        ).nextRun;
 
         const taskId =
           data.taskId ||
@@ -579,34 +546,17 @@ export async function processTaskIpc(
         if (data.schedule_value !== undefined)
           updates.schedule_value = data.schedule_value;
 
-        // Recompute next_run if schedule changed
-        if (data.schedule_type || data.schedule_value) {
-          const updatedTask = {
-            ...task,
-            ...updates,
-          };
-          if (updatedTask.schedule_type === 'cron') {
-            try {
-              const interval = CronExpressionParser.parse(
-                updatedTask.schedule_value,
-                { tz: TIMEZONE },
-              );
-              updates.next_run = interval.next().toISOString();
-            } catch (err) {
-              if (!isCronInputError(err)) throw err;
-              logger.warn(
-                { taskId: data.taskId, value: updatedTask.schedule_value },
-                'Invalid cron in task update',
-              );
-              break;
-            }
-          } else if (updatedTask.schedule_type === 'interval') {
-            const ms = parseInt(updatedTask.schedule_value, 10);
-            if (!isNaN(ms) && ms > 0) {
-              updates.next_run = new Date(Date.now() + ms).toISOString();
-            }
-          }
-        }
+        // Validate the complete prospective schedule before any persisted mutation.
+        const prospective = { ...task, ...updates };
+        const schedule = parseTaskSchedule(
+          prospective.schedule_type,
+          prospective.schedule_value,
+        );
+        if (
+          data.schedule_type !== undefined ||
+          data.schedule_value !== undefined
+        )
+          updates.next_run = schedule.nextRun;
 
         updateTask(data.taskId, updates);
         logger.info(

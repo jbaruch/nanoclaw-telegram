@@ -131,7 +131,10 @@ export function restoreRemoteControl(): void {
     }
   } catch (err) {
     if (!(err instanceof SyntaxError)) throw err;
-    clearState();
+    throw new Error(
+      'Remote Control occupied-session state is malformed; preserve it and inspect the owned process before repairing the record or starting another session.',
+      { cause: err },
+    );
   }
 }
 
@@ -154,6 +157,7 @@ export async function startRemoteControl(
   chatJid: string,
   cwd: string,
 ): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
+  if (!activeSession) restoreRemoteControl();
   if (activeSession) {
     // Verify the process is still alive
     if (isProcessAlive(activeSession.pid)) {

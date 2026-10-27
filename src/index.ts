@@ -1,7 +1,7 @@
 import type { DraftStream } from './draft-stream.js';
-import Database from 'better-sqlite3';
 import {
   isFileSystemError,
+  isRecoverableSqliteError,
   isTelegramError,
   isOperationalRunError,
 } from './operational-errors.js';
@@ -633,7 +633,7 @@ async function runAgent(
   }
 }
 
-async function startMessageLoop(): Promise<void> {
+export async function startMessageLoop(): Promise<void> {
   if (messageLoopRunning) {
     logger.debug('Message loop already running, skipping duplicate start');
     return;
@@ -718,11 +718,7 @@ async function startMessageLoop(): Promise<void> {
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
             // Show typing indicator while the container processes the piped message
-            channel
-              .setTyping?.(chatJid, true)
-              ?.catch((err) =>
-                logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
-              );
+            await channel.setTyping?.(chatJid, true);
           } else {
             // No active container — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);
@@ -733,7 +729,7 @@ async function startMessageLoop(): Promise<void> {
       if (
         !isFileSystemError(err) &&
         !isTelegramError(err) &&
-        !(err instanceof Database.SqliteError)
+        !isRecoverableSqliteError(err)
       )
         throw err;
       logger.error({ err }, 'Error in message loop');

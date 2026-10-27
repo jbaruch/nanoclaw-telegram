@@ -1,4 +1,8 @@
-import { isCommandError, ContainerExitError } from './operational-errors.js';
+import {
+  isCommandError,
+  ContainerExitError,
+  ContainerOutputProtocolError,
+} from './operational-errors.js';
 /**
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
@@ -440,6 +444,15 @@ export async function runContainerAgent(
 
         // Stream-parse for output markers
         if (onOutput) {
+          if (
+            Buffer.byteLength(parseBuffer) + Buffer.byteLength(chunk) >
+            CONTAINER_MAX_OUTPUT_SIZE
+          ) {
+            parseBuffer = '';
+            throw new ContainerOutputProtocolError(
+              'Agent output exceeded the bounded frame parser; retain undelivered input and inspect the agent protocol before retrying.',
+            );
+          }
           parseBuffer += chunk;
           let startIdx: number;
           while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
@@ -457,12 +470,28 @@ export async function runContainerAgent(
                 newSessionId = parsed.newSessionId;
               }
               hadStreamingOutput = true;
+              const responseActivity =
+                parsed.streamText !== undefined ||
+                parsed.result !== null ||
+                parsed.status === 'error';
+              const markerSequence = responseActivity
+                ? ++latestMarkerSequence
+                : latestMarkerSequence;
+              if (responseActivity) completedTerminalOutput = false;
               // Activity detected — reset the hard timeout
               resetTimeout();
               // Call onOutput for all markers (including null results)
               // so idle timers start even for "silent" query completions.
-              outputChain = outputChain.then(() => {
-                if (!callbackFailed) return onOutput(parsed);
+              outputChain = outputChain.then(async () => {
+                if (callbackFailed) return;
+                await onOutput(parsed);
+                if (
+                  markerSequence === latestMarkerSequence &&
+                  parsed.status === 'success' &&
+                  parsed.result !== null &&
+                  parsed.result.trim()
+                )
+                  completedTerminalOutput = true;
               });
               void outputChain.then(undefined, fail);
             } catch (err) {
@@ -504,6 +533,8 @@ export async function runContainerAgent(
 
     let timedOut = false;
     let hadStreamingOutput = false;
+    let latestMarkerSequence = 0;
+    let completedTerminalOutput = false;
     const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
     // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
     // graceful _close sentinel has time to trigger before the hard kill fires.
@@ -558,36 +589,27 @@ export async function runContainerAgent(
             ].join('\n'),
           );
 
-          // Timeout after output = idle cleanup, not failure.
-          // The agent already sent its response; this is just the
-          // container being reaped after the idle period expired.
-          if (hadStreamingOutput) {
-            logger.info(
-              { group: group.name, containerName, duration, code },
-              'Container timed out after output (idle cleanup)',
-            );
-            afterOutput(() => {
+          // Only a settled terminal result permits idle-cleanup success.
+          // Preview activity does not prove that the input received its response.
+          afterOutput(() => {
+            if (completedTerminalOutput) {
+              logger.info(
+                { group: group.name, containerName, duration, code },
+                'Container timed out after terminal output (idle cleanup)',
+              );
+              resolve({ status: 'success', result: null, newSessionId });
+            } else {
+              logger.error(
+                { group: group.name, containerName, duration, code },
+                'Container timed out without completed terminal output',
+              );
               resolve({
-                status: 'success',
+                status: 'error',
                 result: null,
-                newSessionId,
+                error: `Container timed out after ${configTimeout}ms without a completed terminal response`,
               });
-            });
-            return;
-          }
-
-          logger.error(
-            { group: group.name, containerName, duration, code },
-            'Container timed out with no output',
-          );
-
-          afterOutput(() =>
-            resolve({
-              status: 'error',
-              result: null,
-              error: `Container timed out after ${configTimeout}ms`,
-            }),
-          );
+            }
+          });
           return;
         }
 

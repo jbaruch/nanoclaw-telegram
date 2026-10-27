@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import {
   _initTestDatabase,
@@ -464,18 +464,20 @@ describe('schedule_task schedule types', () => {
   });
 
   it('rejects invalid cron expression', async () => {
-    await processTaskIpc(
-      {
-        type: 'schedule_task',
-        prompt: 'bad cron',
-        schedule_type: 'cron',
-        schedule_value: 'not a cron',
-        targetJid: 'other@g.us',
-      },
-      'whatsapp_main',
-      true,
-      deps,
-    );
+    await expect(
+      processTaskIpc(
+        {
+          type: 'schedule_task',
+          prompt: 'bad cron',
+          schedule_type: 'cron',
+          schedule_value: 'not a cron',
+          targetJid: 'other@g.us',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      ),
+    ).rejects.toBeInstanceOf(SyntaxError);
 
     expect(getAllTasks()).toHaveLength(0);
   });
@@ -506,52 +508,58 @@ describe('schedule_task schedule types', () => {
   });
 
   it('rejects invalid interval (non-numeric)', async () => {
-    await processTaskIpc(
-      {
-        type: 'schedule_task',
-        prompt: 'bad interval',
-        schedule_type: 'interval',
-        schedule_value: 'abc',
-        targetJid: 'other@g.us',
-      },
-      'whatsapp_main',
-      true,
-      deps,
-    );
+    await expect(
+      processTaskIpc(
+        {
+          type: 'schedule_task',
+          prompt: 'bad interval',
+          schedule_type: 'interval',
+          schedule_value: 'abc',
+          targetJid: 'other@g.us',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      ),
+    ).rejects.toBeInstanceOf(SyntaxError);
 
     expect(getAllTasks()).toHaveLength(0);
   });
 
   it('rejects invalid interval (zero)', async () => {
-    await processTaskIpc(
-      {
-        type: 'schedule_task',
-        prompt: 'zero interval',
-        schedule_type: 'interval',
-        schedule_value: '0',
-        targetJid: 'other@g.us',
-      },
-      'whatsapp_main',
-      true,
-      deps,
-    );
+    await expect(
+      processTaskIpc(
+        {
+          type: 'schedule_task',
+          prompt: 'zero interval',
+          schedule_type: 'interval',
+          schedule_value: '0',
+          targetJid: 'other@g.us',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      ),
+    ).rejects.toBeInstanceOf(SyntaxError);
 
     expect(getAllTasks()).toHaveLength(0);
   });
 
   it('rejects invalid once timestamp', async () => {
-    await processTaskIpc(
-      {
-        type: 'schedule_task',
-        prompt: 'bad once',
-        schedule_type: 'once',
-        schedule_value: 'not-a-date',
-        targetJid: 'other@g.us',
-      },
-      'whatsapp_main',
-      true,
-      deps,
-    );
+    await expect(
+      processTaskIpc(
+        {
+          type: 'schedule_task',
+          prompt: 'bad once',
+          schedule_type: 'once',
+          schedule_value: 'not-a-date',
+          targetJid: 'other@g.us',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      ),
+    ).rejects.toBeInstanceOf(SyntaxError);
 
     expect(getAllTasks()).toHaveLength(0);
   });
@@ -675,5 +683,96 @@ describe('register_group success', () => {
     );
 
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
+  });
+});
+
+describe('shared schedule writer validation', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2024-01-01T00:00:00Z'));
+    createTask({
+      id: 'schedule-update',
+      group_folder: OTHER_GROUP.folder,
+      chat_jid: 'other@g.us',
+      prompt: 'fixed',
+      schedule_type: 'interval',
+      schedule_value: '60000',
+      next_run: '2024-01-01T00:01:00.000Z',
+      context_mode: 'isolated',
+      status: 'active',
+      created_at: '2024-01-01T00:00:00Z',
+    });
+  });
+  it.each(['0', '-1', '1000junk', '1.5', '1e3', ''])(
+    'refuses invalid interval update %s without any row mutation',
+    async (value) => {
+      const before = getTaskById('schedule-update');
+      try {
+        await expect(
+          processTaskIpc(
+            {
+              type: 'update_task',
+              taskId: 'schedule-update',
+              schedule_type: 'interval',
+              schedule_value: value,
+              prompt: 'must not change',
+            },
+            MAIN_GROUP.folder,
+            true,
+            deps,
+          ),
+        ).rejects.toBeInstanceOf(SyntaxError);
+        expect(getTaskById('schedule-update')).toEqual(before);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+  it.each(['not-a-date', '2024-02-30T00:00:00Z', '2024-01-01T24:00:00Z'])(
+    'refuses malformed once update %s without mutation',
+    async (value) => {
+      const before = getTaskById('schedule-update');
+      try {
+        await expect(
+          processTaskIpc(
+            {
+              type: 'update_task',
+              taskId: 'schedule-update',
+              schedule_type: 'once',
+              schedule_value: value,
+            },
+            MAIN_GROUP.folder,
+            true,
+            deps,
+          ),
+        ).rejects.toBeInstanceOf(SyntaxError);
+        expect(getTaskById('schedule-update')).toEqual(before);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('recomputes a once update and retains the exact approved schedule value', async () => {
+    try {
+      await processTaskIpc(
+        {
+          type: 'update_task',
+          taskId: 'schedule-update',
+          schedule_type: 'once',
+          schedule_value: '2024-03-05T13:14:15Z',
+        },
+        MAIN_GROUP.folder,
+        true,
+        deps,
+      );
+      expect(getTaskById('schedule-update')).toMatchObject({
+        schedule_type: 'once',
+        schedule_value: '2024-03-05T13:14:15Z',
+        next_run: '2024-03-05T13:14:15.000Z',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

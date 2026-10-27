@@ -201,19 +201,42 @@ function resolveMessageLinks(content: string): string {
  * Download a file from Telegram's file API.
  * Returns a Buffer with the file contents.
  */
-async function downloadTelegramFile(bot: Bot, fileId: string): Promise<Buffer> {
+export async function downloadTelegramFile(
+  bot: Bot,
+  fileId: string,
+): Promise<Buffer> {
   const file = await bot.api.getFile(fileId);
-  const filePath = file.file_path!;
+  const filePath = file.file_path;
+  if (
+    typeof filePath !== 'string' ||
+    !filePath.trim() ||
+    [...filePath].some(
+      (character) =>
+        character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+    )
+  )
+    throw new TelegramDeliveryError(
+      'Telegram file API returned no usable download path; inspect the provider response before retrying.',
+    );
   const token = bot.token;
   const url = `https://api.telegram.org/file/bot${token}/${filePath}`;
 
   return new Promise((resolve, reject) => {
     https
       .get(url, (res) => {
+        res.on('error', reject);
+        if (res.statusCode !== 200) {
+          res.resume();
+          reject(
+            new TelegramDeliveryError(
+              `Telegram file download rejected HTTP ${res.statusCode ?? 'unknown'}; no file bytes accepted.`,
+            ),
+          );
+          return;
+        }
         const chunks: Buffer[] = [];
         res.on('data', (chunk: Buffer) => chunks.push(chunk));
         res.on('end', () => resolve(Buffer.concat(chunks)));
-        res.on('error', reject);
       })
       .on('error', reject);
   });

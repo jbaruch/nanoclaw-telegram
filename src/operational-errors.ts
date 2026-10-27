@@ -14,6 +14,41 @@ export class ContainerExitError extends Error {
   }
 }
 
+/** SQLite storage/contention codes; SQL/schema/programming errors are never recoverable here.
+ * Source: https://www.sqlite.org/rescode.html (explicit primary/extended codes).
+ */
+const RECOVERABLE_SQLITE_CODES = new Set([
+  'SQLITE_BUSY',
+  'SQLITE_BUSY_RECOVERY',
+  'SQLITE_BUSY_SNAPSHOT',
+  'SQLITE_BUSY_TIMEOUT',
+  'SQLITE_LOCKED',
+  'SQLITE_LOCKED_SHAREDCACHE',
+  'SQLITE_FULL',
+  'SQLITE_CANTOPEN',
+  'SQLITE_CANTOPEN_ISDIR',
+  'SQLITE_CANTOPEN_NOTEMPDIR',
+  'SQLITE_READONLY',
+  'SQLITE_READONLY_DBMOVED',
+  'SQLITE_READONLY_DIRECTORY',
+  'SQLITE_IOERR',
+  'SQLITE_IOERR_READ',
+  'SQLITE_IOERR_WRITE',
+  'SQLITE_IOERR_FSYNC',
+  'SQLITE_IOERR_DIR_FSYNC',
+]);
+export function isRecoverableSqliteError(
+  error: unknown,
+): error is Database.SqliteError {
+  return (
+    error instanceof Database.SqliteError &&
+    RECOVERABLE_SQLITE_CODES.has(error.code)
+  );
+}
+
+/** Untrusted container output exceeded the host's bounded protocol. */
+export class ContainerOutputProtocolError extends Error {}
+
 /** Recover only known operational causes; mixed/empty/cyclic aggregates remain defects. */
 export function isOperationalRunError(error: unknown): boolean {
   let remaining = 128;
@@ -45,7 +80,8 @@ export function isOperationalRunError(error: unknown): boolean {
       isTelegramError(value) ||
       hasErrno(value, 'EPIPE') ||
       hasErrno(value, 'ECONNRESET') ||
-      value instanceof Database.SqliteError ||
+      isRecoverableSqliteError(value) ||
+      value instanceof ContainerOutputProtocolError ||
       value instanceof IpcRouteUnavailableError ||
       value instanceof ContainerExitError
     );

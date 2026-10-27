@@ -170,6 +170,164 @@ describe('durable schema migration', () => {
     }
   });
 
+  it.each(['router_state', 'sessions', 'registered_groups'] as const)(
+    'retains %s legacy bytes and rolls back the whole file on an injected later write failure',
+    (name) => {
+      initialize();
+      _closeDatabase();
+      opened = false;
+      const source = path.join(paths.data, `${name}.json`);
+      const group = (folder: string) => ({
+        name: folder,
+        folder,
+        trigger: '@Andy',
+        added_at: '2024-01-01T00:00:00Z',
+      });
+      const data =
+        name === 'router_state'
+          ? {
+              last_timestamp: 'fixed-timestamp',
+              last_agent_timestamp: { 'tg:123': 'fixed-cursor' },
+            }
+          : name === 'sessions'
+            ? { first: 'session-first', second: 'session-second' }
+            : { 'tg:first': group('first'), 'tg:second': group('second') };
+      const raw = JSON.stringify(data);
+      fs.writeFileSync(source, raw);
+      const database = disk();
+      const key =
+        name === 'router_state'
+          ? 'key'
+          : name === 'sessions'
+            ? 'group_folder'
+            : 'jid';
+      const second =
+        name === 'router_state'
+          ? 'last_agent_timestamp'
+          : name === 'sessions'
+            ? 'second'
+            : 'tg:second';
+      database.exec(
+        `CREATE TRIGGER blocked_legacy BEFORE INSERT ON ${name} WHEN NEW.${key}='${second}' BEGIN SELECT RAISE(ABORT,'fixed legacy import failure'); END;`,
+      );
+      database.close();
+      expect(initialize).toThrow('fixed legacy import failure');
+      _closeDatabase();
+      opened = false;
+      const check = disk();
+      expect(
+        check.prepare(`SELECT COUNT(*) AS count FROM ${name}`).get(),
+      ).toEqual({ count: 0 });
+      check.exec('DROP TRIGGER blocked_legacy');
+      check.close();
+      expect(fs.readFileSync(source, 'utf8')).toBe(raw);
+      expect(fs.existsSync(`${source}.migrated`)).toBe(false);
+      initialize();
+      _closeDatabase();
+      opened = false;
+      initialize();
+      const restored = disk();
+      expect(
+        restored.prepare(`SELECT COUNT(*) AS count FROM ${name}`).get(),
+      ).toEqual({ count: 2 });
+      restored.close();
+      expect(fs.existsSync(source)).toBe(false);
+      expect(fs.readFileSync(`${source}.migrated`, 'utf8')).toBe(raw);
+    },
+  );
+
+  it('keeps a committed file retryable when archival rename fails', () => {
+    const source = path.join(paths.data, 'sessions.json'),
+      raw = JSON.stringify({ first: 'session-first' });
+    fs.writeFileSync(source, raw);
+    const defect = new TypeError('fixed archive rename defect');
+    const rename = vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
+      throw defect;
+    });
+    expect(initialize).toThrow(defect);
+    _closeDatabase();
+    opened = false;
+    expect(fs.readFileSync(source, 'utf8')).toBe(raw);
+    const committed = disk();
+    expect(
+      committed.prepare('SELECT group_folder,session_id FROM sessions').all(),
+    ).toEqual([{ group_folder: 'first', session_id: 'session-first' }]);
+    committed.close();
+    rename.mockRestore();
+    initialize();
+    expect(fs.readFileSync(`${source}.migrated`, 'utf8')).toBe(raw);
+  });
+
+  it('preserves an unsupported legacy shape instead of archiving or partially importing it', () => {
+    const source = path.join(paths.data, 'router_state.json'),
+      raw = JSON.stringify({ last_timestamp: 'fixed', schema_version: 2 });
+    fs.writeFileSync(source, raw);
+    expect(initialize).toThrow('Unknown legacy router state fields');
+    expect(fs.readFileSync(source, 'utf8')).toBe(raw);
+    expect(fs.existsSync(`${source}.migrated`)).toBe(false);
+  });
+
+  it('imports a complete typed legacy group configuration and preserves the original archive', () => {
+    const source = path.join(paths.data, 'registered_groups.json');
+    const config = {
+      timeout: 60000,
+      additionalMounts: [
+        { hostPath: '/synthetic', containerPath: 'fixed', readonly: true },
+      ],
+    };
+    const raw = JSON.stringify({
+      'tg:fixed': {
+        name: 'fixed',
+        folder: 'fixed',
+        trigger: '@Andy',
+        added_at: '2024-01-01T00:00:00Z',
+        requiresTrigger: false,
+        isMain: true,
+        containerConfig: config,
+      },
+    });
+    fs.writeFileSync(source, raw);
+    initialize();
+    const check = disk();
+    expect(
+      check
+        .prepare(
+          'SELECT container_config,requires_trigger,is_main FROM registered_groups WHERE jid=?',
+        )
+        .get('tg:fixed'),
+    ).toEqual({
+      container_config: JSON.stringify(config),
+      requires_trigger: 0,
+      is_main: 1,
+    });
+    check.close();
+    expect(fs.readFileSync(`${source}.migrated`, 'utf8')).toBe(raw);
+  });
+
+  it('preserves malformed nested legacy configuration without importing a permissive alternative', () => {
+    const source = path.join(paths.data, 'registered_groups.json');
+    const raw = JSON.stringify({
+      'tg:fixed': {
+        name: 'fixed',
+        folder: 'fixed',
+        trigger: '@Andy',
+        added_at: '2024-01-01T00:00:00Z',
+        containerConfig: {
+          additionalMounts: [{ hostPath: '/synthetic', readonly: 'false' }],
+        },
+      },
+    });
+    fs.writeFileSync(source, raw);
+    expect(initialize).toThrow('Legacy mount readonly must be Boolean');
+    expect(fs.readFileSync(source, 'utf8')).toBe(raw);
+    expect(fs.existsSync(`${source}.migrated`)).toBe(false);
+    const check = disk();
+    expect(
+      check.prepare('SELECT COUNT(*) AS count FROM registered_groups').get(),
+    ).toEqual({ count: 0 });
+    check.close();
+  });
+
   it('does not hide an unexpected JSON migration implementation failure or rename its source', () => {
     fs.writeFileSync(path.join(paths.data, 'sessions.json'), '{}');
     const defect = new TypeError('fixed migration defect');

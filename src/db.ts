@@ -1,4 +1,4 @@
-import { isFileSystemError } from './operational-errors.js';
+import { hasErrno } from './operational-errors.js';
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
@@ -9,6 +9,7 @@ import { logger } from './logger.js';
 import {
   NewMessage,
   RegisteredGroup,
+  AdditionalMount,
   ScheduledTask,
   TaskRunLog,
 } from './types.js';
@@ -785,67 +786,186 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
 // --- JSON migration ---
 
 function migrateJsonState(): void {
-  const migrateFile = (filename: string) => {
-    const filePath = path.join(DATA_DIR, filename);
-    if (!fs.existsSync(filePath)) return null;
-    try {
-      const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-      fs.renameSync(filePath, `${filePath}.migrated`);
-      return data;
-    } catch (err) {
-      if (!(err instanceof SyntaxError) && !isFileSystemError(err)) throw err;
-      logger.warn(
-        { err, filename },
-        'Could not migrate JSON state; repair the file or filesystem and restart',
+  const object = (value: unknown): Record<string, unknown> => {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+      throw new SyntaxError(
+        'Legacy state must be a JSON object; preserve and repair its source.',
       );
-      return null;
+    return value as Record<string, unknown>;
+  };
+  const text = (value: unknown): string => {
+    if (typeof value !== 'string')
+      throw new SyntaxError(
+        'Legacy state requires string fields; preserve and repair its source.',
+      );
+    return value;
+  };
+  const groupRecord = (value: unknown): RegisteredGroup => {
+    const fields = object(value);
+    if (
+      Object.keys(fields).some(
+        (key) =>
+          ![
+            'name',
+            'folder',
+            'trigger',
+            'added_at',
+            'containerConfig',
+            'requiresTrigger',
+            'isMain',
+          ].includes(key),
+      )
+    )
+      throw new SyntaxError(
+        'Unknown legacy group fields; preserve the source until supported.',
+      );
+    const group: RegisteredGroup = {
+      name: text(fields.name),
+      folder: text(fields.folder),
+      trigger: text(fields.trigger),
+      added_at: text(fields.added_at),
+    };
+    for (const key of ['requiresTrigger', 'isMain'] as const) {
+      if (fields[key] !== undefined) {
+        if (typeof fields[key] !== 'boolean')
+          throw new SyntaxError('Legacy group flags must be Boolean.');
+        group[key] = fields[key];
+      }
     }
+    if (fields.containerConfig !== undefined) {
+      const config = object(fields.containerConfig);
+      if (
+        Object.keys(config).some(
+          (key) => !['timeout', 'additionalMounts'].includes(key),
+        )
+      )
+        throw new SyntaxError(
+          'Unknown legacy container configuration; preserve its source.',
+        );
+      group.containerConfig = {};
+      if (config.timeout !== undefined) {
+        if (
+          typeof config.timeout !== 'number' ||
+          !Number.isFinite(config.timeout) ||
+          config.timeout <= 0
+        )
+          throw new SyntaxError('Legacy container timeout is invalid.');
+        group.containerConfig.timeout = config.timeout;
+      }
+      if (config.additionalMounts !== undefined) {
+        if (!Array.isArray(config.additionalMounts))
+          throw new SyntaxError('Legacy additional mounts must be an array.');
+        group.containerConfig.additionalMounts = config.additionalMounts.map(
+          (value: unknown): AdditionalMount => {
+            const record = object(value);
+            if (
+              Object.keys(record).some(
+                (key) =>
+                  !['hostPath', 'containerPath', 'readonly'].includes(key),
+              )
+            )
+              throw new SyntaxError(
+                'Unknown legacy mount fields; preserve its source.',
+              );
+            const mount: AdditionalMount = { hostPath: text(record.hostPath) };
+            if (record.containerPath !== undefined)
+              mount.containerPath = text(record.containerPath);
+            if (record.readonly !== undefined) {
+              if (typeof record.readonly !== 'boolean')
+                throw new SyntaxError('Legacy mount readonly must be Boolean.');
+              mount.readonly = record.readonly;
+            }
+            return mount;
+          },
+        );
+      }
+    }
+    return group;
+  };
+  // Each unversioned legacy file is imported completely in one SQLite
+  // transaction. Its original bytes are archived only after that commit.
+  const migrateFile = (
+    filename: string,
+    importRows: (data: Record<string, unknown>) => void,
+  ) => {
+    const filePath = path.join(DATA_DIR, filename),
+      archived = `${filePath}.migrated`;
+    let raw: string;
+    try {
+      raw = fs.readFileSync(filePath, 'utf-8');
+    } catch (error) {
+      if (!hasErrno(error, 'ENOENT')) throw error;
+      return;
+    }
+    try {
+      fs.lstatSync(archived);
+      throw new Error(
+        'Legacy migration archive already exists; preserve both files and inspect before retrying.',
+      );
+    } catch (error) {
+      if (!hasErrno(error, 'ENOENT')) throw error;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      throw new SyntaxError(
+        `Legacy ${filename} JSON is invalid; preserve it and repair its schema before restarting.`,
+        { cause: error },
+      );
+    }
+    const data = object(parsed);
+    db.transaction(() => importRows(data))();
+    fs.renameSync(filePath, archived);
   };
 
-  // Migrate router_state.json
-  const routerState = migrateFile('router_state.json') as {
-    last_timestamp?: string;
-    last_agent_timestamp?: Record<string, string>;
-  } | null;
-  if (routerState) {
-    if (routerState.last_timestamp) {
-      setRouterState('last_timestamp', routerState.last_timestamp);
-    }
-    if (routerState.last_agent_timestamp) {
-      setRouterState(
-        'last_agent_timestamp',
-        JSON.stringify(routerState.last_agent_timestamp),
+  migrateFile('router_state.json', (state) => {
+    if (
+      Object.keys(state).some(
+        (key) => !['last_timestamp', 'last_agent_timestamp'].includes(key),
+      )
+    )
+      throw new SyntaxError(
+        'Unknown legacy router state fields; preserve the source until its owner supports them.',
       );
+    if (state.last_timestamp !== undefined) {
+      if (typeof state.last_timestamp !== 'string')
+        throw new SyntaxError('Legacy router timestamp must be a string.');
+      setRouterState('last_timestamp', state.last_timestamp);
     }
-  }
-
-  // Migrate sessions.json
-  const sessions = migrateFile('sessions.json') as Record<
-    string,
-    string
-  > | null;
-  if (sessions) {
-    for (const [folder, sessionId] of Object.entries(sessions)) {
-      setSession(folder, sessionId);
+    if (state.last_agent_timestamp !== undefined) {
+      const cursors = object(state.last_agent_timestamp);
+      if (Object.values(cursors).some((value) => typeof value !== 'string'))
+        throw new SyntaxError('Legacy router cursors must be strings.');
+      setRouterState('last_agent_timestamp', JSON.stringify(cursors));
     }
-  }
-
-  // Migrate registered_groups.json
-  const groups = migrateFile('registered_groups.json') as Record<
-    string,
-    RegisteredGroup
-  > | null;
-  if (groups) {
-    for (const [jid, group] of Object.entries(groups)) {
+  });
+  migrateFile('sessions.json', (sessions) => {
+    for (const [folder, session] of Object.entries(sessions)) {
+      if (
+        !isValidGroupFolder(folder) ||
+        typeof session !== 'string' ||
+        !session
+      )
+        throw new SyntaxError(
+          'Legacy session state is invalid; preserve and repair its source.',
+        );
+      setSession(folder, session);
+    }
+  });
+  migrateFile('registered_groups.json', (groups) => {
+    for (const [jid, value] of Object.entries(groups)) {
+      const group = groupRecord(value);
       try {
         setRegisteredGroup(jid, group);
-      } catch (err) {
-        if (!(err instanceof InvalidGroupFolderError)) throw err;
+      } catch (error) {
+        if (!(error instanceof InvalidGroupFolderError)) throw error;
         logger.warn(
-          { jid, folder: group.folder, err },
+          { jid, folder: group.folder, error },
           'Skipping migrated registered group with invalid folder',
         );
       }
     }
-  }
+  });
 }

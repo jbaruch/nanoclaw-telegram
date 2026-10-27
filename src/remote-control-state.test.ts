@@ -52,6 +52,29 @@ describe('atomic Remote Control owner migration', () => {
     ).toBe(false);
   });
 
+  it.each([
+    '{broken',
+    JSON.stringify({ pid: 'invalid' }),
+    JSON.stringify({ schema_version: 1, pid: 'invalid' }),
+  ])(
+    'retains malformed gate bytes and refuses a subsequent launch for %s',
+    async (raw) => {
+      const state = path.join(fixture.directory, 'remote-control.json');
+      fs.writeFileSync(state, raw);
+      expect(owner.restoreRemoteControl).toThrow(
+        'occupied-session state is malformed',
+      );
+      await expect(
+        owner.startRemoteControl('fixed', 'tg:123', fixture.directory),
+      ).rejects.toThrow('occupied-session state is malformed');
+      expect(fs.readFileSync(state, 'utf8')).toBe(raw);
+      expect(fs.readdirSync(fixture.directory)).toEqual([
+        'remote-control.json',
+      ]);
+      expect(process.kill).not.toHaveBeenCalled();
+    },
+  );
+
   it('preserves legacy bytes on failed replacement and can retry the migration', () => {
     const state = path.join(fixture.directory, 'remote-control.json');
     const original = JSON.stringify(legacy);

@@ -20,10 +20,12 @@ vi.mock('./group-queue.js', () => ({
   GroupQueue: class {
     notifyIdle = vi.fn();
     closeStdin = vi.fn();
+    sendMessage = vi.fn(() => true);
   },
 }));
 vi.mock('./db.js', () => ({
   getMessagesSince: vi.fn(),
+  getNewMessages: vi.fn(),
   getLastBotMessageTimestamp: vi.fn(() => ''),
   setRouterState: vi.fn(),
   getAllTasks: () => [],
@@ -32,13 +34,14 @@ vi.mock('./db.js', () => ({
 }));
 import {
   processGroupMessages,
+  startMessageLoop,
   _setRegisteredGroups,
   sendWithRetry,
   sendIpcMessage,
   sendIpcReaction,
   sendScheduledMessage,
 } from './index.js';
-import { getMessagesSince, setRouterState } from './db.js';
+import { getMessagesSince, getNewMessages, setRouterState } from './db.js';
 import { findChannel } from './router.js';
 import { runContainerAgent } from './container-runner.js';
 
@@ -400,4 +403,26 @@ it('does not contain a mixed operational and implementation aggregate as a routi
   await expect(processGroupMessages(jid)).rejects.toBe(mixed);
   expect(storedCursor(jid)).toBe(previous);
   expect(channel.setTyping).toHaveBeenLastCalledWith(jid, false);
+});
+
+it('propagates an unexpected typing defect from the actual piped-message consumer', async () => {
+  const jid = 'tg:piped-typing-defect';
+  _setRegisteredGroups({
+    [jid]: {
+      name: 'fixed',
+      folder: 'fixed',
+      isMain: true,
+      trigger: '@Andy',
+      added_at: previous,
+    },
+  });
+  vi.mocked(getNewMessages).mockReturnValue({
+    messages: [input(jid, current)],
+    newTimestamp: current,
+  });
+  vi.mocked(getMessagesSince).mockReturnValue([input(jid, current)]);
+  const defect = new TypeError('fixed piped typing defect');
+  vi.mocked(channel.setTyping!).mockRejectedValueOnce(defect);
+  await expect(startMessageLoop()).rejects.toBe(defect);
+  expect(channel.setTyping).toHaveBeenCalledExactlyOnceWith(jid, true);
 });

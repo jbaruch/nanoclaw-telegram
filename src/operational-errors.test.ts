@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
+import Database from 'better-sqlite3';
 import { HttpError } from 'grammy';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -13,6 +14,7 @@ import {
   isCronInputError,
   isNetworkError,
   isOperationalRunError,
+  isRecoverableSqliteError,
   IpcRouteUnavailableError,
   ContainerExitError,
 } from './operational-errors.js';
@@ -60,6 +62,38 @@ describe('expected operational errors', () => {
     const cycle = new AggregateError([]);
     cycle.errors.push(cycle);
     expect(isOperationalRunError(cycle)).toBe(false);
+  });
+
+  it('propagates actual invalid SQL/schema errors while recognizing only enumerated contention codes', () => {
+    const database = new Database(':memory:');
+    try {
+      const error = caught(() =>
+        database.prepare('SELECT missing_column FROM missing_table'),
+      );
+      expect(error).toMatchObject({ code: 'SQLITE_ERROR' });
+      expect(isRecoverableSqliteError(error)).toBe(false);
+      expect(isOperationalRunError(error)).toBe(false);
+      for (const code of ['SQLITE_BUSY', 'SQLITE_LOCKED', 'SQLITE_IOERR_READ'])
+        expect(
+          isRecoverableSqliteError(
+            new Database.SqliteError('fixed storage condition', code),
+          ),
+        ).toBe(true);
+      for (const code of [
+        'SQLITE_ERROR',
+        'SQLITE_SCHEMA',
+        'SQLITE_MISUSE',
+        'SQLITE_CONSTRAINT_UNIQUE',
+        'SQLITE_UNKNOWN',
+      ])
+        expect(
+          isRecoverableSqliteError(
+            new Database.SqliteError('fixed nonrecoverable condition', code),
+          ),
+        ).toBe(false);
+    } finally {
+      database.close();
+    }
   });
 
   it('recognizes a real failed child without classifying programming errors as command failures', () => {

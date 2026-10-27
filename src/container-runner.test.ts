@@ -1,5 +1,8 @@
 import fs from 'fs';
-import { ContainerExitError } from './operational-errors.js';
+import {
+  ContainerExitError,
+  ContainerOutputProtocolError,
+} from './operational-errors.js';
 import { createDraftStream } from './draft-stream.js';
 import { logger } from './logger.js';
 import { stopContainer } from './container-runtime.js';
@@ -247,6 +250,97 @@ describe('container-runner timeout behavior', () => {
       });
     },
   );
+
+  it.each(['markerless', 'unfinished'] as const)(
+    'bounds %s parser output and retires only its own container',
+    async (kind) => {
+      vi.mocked(stopContainer).mockClear();
+      const pending = runContainerAgent(
+        testGroup,
+        testInput,
+        () => {},
+        vi.fn(async () => {}),
+      );
+      const rejected = expect(pending).rejects.toBeInstanceOf(
+        ContainerOutputProtocolError,
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      fakeProc.stdout.push(
+        (kind === 'unfinished' ? OUTPUT_START_MARKER : '') +
+          'x'.repeat(10485761),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      await rejected;
+      expect(stopContainer).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining('nanoclaw-test-group-'),
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('does not treat a session-only marker as terminal timeout success', async () => {
+    const pending = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      newSessionId: 'fixed-session',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(1830000);
+    fakeProc.emit('close', 137);
+    await expect(pending).resolves.toMatchObject({
+      status: 'error',
+      error: expect.stringContaining('without a completed terminal response'),
+    });
+  });
+
+  it('preserves settled visible output across a later session update during idle cleanup', async () => {
+    const pending = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    emitOutputMarker(fakeProc, { status: 'success', result: 'fixed response' });
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      newSessionId: 'fixed-session',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(1830000);
+    fakeProc.emit('close', 137);
+    await expect(pending).resolves.toMatchObject({ status: 'success' });
+  });
+
+  it('does not treat preview-only activity as terminal timeout success', async () => {
+    const pending = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      streamText: 'fixed preview',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(1830000);
+    fakeProc.emit('close', 137);
+    await expect(pending).resolves.toMatchObject({
+      status: 'error',
+      error: expect.stringContaining('without a completed terminal response'),
+    });
+  });
 
   it('waits for a pending output callback after nonzero native close and retains both failures', async () => {
     vi.mocked(stopContainer).mockClear();

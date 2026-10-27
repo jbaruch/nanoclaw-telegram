@@ -231,12 +231,13 @@ export class GroupQueue {
     state.pendingMessages = false;
     this.activeCount++;
 
-    logger.debug(
-      { groupJid, reason, activeCount: this.activeCount },
-      'Starting container for group',
-    );
-
+    let handled = false;
     try {
+      logger.debug(
+        { groupJid, reason, activeCount: this.activeCount },
+        'Starting container for group',
+      );
+
       if (this.processMessagesFn) {
         const success = await this.processMessagesFn(groupJid);
         if (success) {
@@ -245,11 +246,14 @@ export class GroupQueue {
           this.scheduleRetry(groupJid, state);
         }
       }
+      handled = true;
     } catch (err) {
       if (!isOperationalRunError(err)) throw err;
       logger.error({ groupJid, err }, 'Error processing messages for group');
       this.scheduleRetry(groupJid, state);
+      handled = true;
     } finally {
+      if (!handled) this.shuttingDown = true;
       state.active = false;
       state.process = null;
       state.containerName = null;
@@ -267,17 +271,21 @@ export class GroupQueue {
     state.runningTaskId = task.id;
     this.activeCount++;
 
-    logger.debug(
-      { groupJid, taskId: task.id, activeCount: this.activeCount },
-      'Running queued task',
-    );
-
+    let handled = false;
     try {
+      logger.debug(
+        { groupJid, taskId: task.id, activeCount: this.activeCount },
+        'Running queued task',
+      );
+
       await task.fn();
+      handled = true;
     } catch (err) {
       if (!isOperationalRunError(err)) throw err;
       logger.error({ groupJid, taskId: task.id, err }, 'Error running task');
+      handled = true;
     } finally {
+      if (!handled) this.shuttingDown = true;
       state.active = false;
       state.isTaskContainer = false;
       state.runningTaskId = null;

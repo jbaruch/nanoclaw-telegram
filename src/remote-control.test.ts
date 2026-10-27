@@ -536,27 +536,31 @@ describe('remote-control', () => {
     });
 
     it.each(['null', '[]', '{"pid":"123"}'])(
-      'clears malformed persisted session %s without process operations',
+      'preserves and refuses malformed persisted session %s without process operations',
       (raw) => {
         readFileSyncSpy.mockReturnValue(raw);
         const kill = vi.spyOn(process, 'kill');
-        restoreRemoteControl();
+        expect(restoreRemoteControl).toThrow(
+          'occupied-session state is malformed',
+        );
         expect(getActiveSession()).toBeNull();
         expect(kill).not.toHaveBeenCalled();
-        expect(unlinkSyncSpy).toHaveBeenCalledWith(STATE_FILE);
+        expect(unlinkSyncSpy).not.toHaveBeenCalled();
       },
     );
 
-    it('clears state on corrupted JSON', () => {
+    it('preserves and refuses corrupted occupied-session JSON', () => {
       readFileSyncSpy.mockImplementation((p: string) => {
         if (p.endsWith('remote-control.json')) return 'not json{{{';
         return '';
       });
 
-      restoreRemoteControl();
+      expect(restoreRemoteControl).toThrow(
+        'occupied-session state is malformed',
+      );
 
       expect(getActiveSession()).toBeNull();
-      expect(unlinkSyncSpy).toHaveBeenCalled();
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
     });
 
     // ** This is the key integration test: restore → stop must work **

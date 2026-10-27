@@ -1,4 +1,5 @@
 import fs from 'fs';
+import Database from 'better-sqlite3';
 import { ChildProcess } from 'child_process';
 import { IpcRouteUnavailableError } from './operational-errors.js';
 import { GroupQueue } from './group-queue.js';
@@ -158,6 +159,46 @@ describe('task lifecycle recovery', () => {
       await vi.advanceTimersByTimeAsync(1000);
       expect(enqueue).toHaveBeenCalledTimes(1);
       expect(log).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('propagates a SQLite SQL/schema defect through the scheduler lifecycle', async () => {
+    const defect = new Database.SqliteError(
+      'fixed missing column',
+      'SQLITE_ERROR',
+    );
+    vi.spyOn(database, 'getDueTasks').mockImplementationOnce(() => {
+      throw defect;
+    });
+    await expect(startSchedulerLoop(dependencies(vi.fn()))).rejects.toBe(
+      defect,
+    );
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it.each(['0', '1000junk', '1.5'])(
+    'pauses a malformed stored interval %s without effects or repeated run logs',
+    async (value) => {
+      task('interval');
+      database.updateTask('fixed-task', { schedule_value: value });
+      let execute!: () => Promise<void>;
+      const enqueue = vi.fn(
+        (_jid: string, _id: string, fn: () => Promise<void>) => {
+          execute = fn;
+        },
+      );
+      const log = vi.spyOn(database, 'logTaskRun');
+      startSchedulerLoop(dependencies(enqueue));
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(execute()).resolves.toBeUndefined();
+      expect(database.getTaskById('fixed-task')).toMatchObject({
+        status: 'paused',
+        schedule_value: value,
+      });
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(runContainerAgent).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(enqueue).toHaveBeenCalledTimes(1);
     },
   );
 
