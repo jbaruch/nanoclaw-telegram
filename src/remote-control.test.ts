@@ -137,6 +137,7 @@ describe('remote-control', () => {
     });
     closeSyncSpy = vi.spyOn(fs, 'closeSync').mockImplementation(() => {});
     vi.spyOn(fs, 'fsyncSync').mockImplementation(() => {});
+    vi.spyOn(fs, 'fchmodSync').mockImplementation(() => {});
     const identity = {
       dev: 1,
       ino: 2,

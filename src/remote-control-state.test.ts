@@ -381,3 +381,42 @@ it('does not conceal an unexpected state reader defect during host startup', () 
   });
   expect(owner.restoreRemoteControlAtStartup).toThrow(defect);
 });
+
+it('prepares only a verified legacy same-writer DATA_DIR before native launch and preserves payload bytes', async () => {
+  await syntheticCli(
+    "console.log('https://claude.ai/code?bridge=env_synthetic');setInterval(()=>{},60000);",
+  );
+  fs.chmodSync(fixture.directory, 0o775);
+  const retained = path.join(fixture.directory, 'retained-owner-data');
+  fs.writeFileSync(retained, 'unchanged private data', { mode: 0o600 });
+  try {
+    await expect(
+      owner.startRemoteControl('fixed', 'tg:123', fixture.directory),
+    ).resolves.toMatchObject({ ok: true });
+    expect(fs.statSync(fixture.directory).mode & 0o777).toBe(0o755);
+    expect(fs.readFileSync(retained, 'utf8')).toBe('unchanged private data');
+  } finally {
+    await owner.stopRemoteControl();
+  }
+}, 15000);
+
+it('refuses an aliased DATA_DIR without changing foreign metadata or launching a process', async () => {
+  const owned = fixture.directory,
+    foreign = owned + '-foreign';
+  fs.mkdirSync(foreign, { mode: 0o775 });
+  fs.chmodSync(foreign, 0o775);
+  fs.rmdirSync(owned);
+  fs.symlinkSync(foreign, owned);
+  try {
+    await expect(
+      owner.startRemoteControl('fixed', 'tg:123', owned),
+    ).rejects.toThrow('storage is not owned');
+    expect(fs.statSync(foreign).mode & 0o777).toBe(0o775);
+    expect(fs.readdirSync(foreign)).toEqual([]);
+    expect(process.kill).not.toHaveBeenCalled();
+  } finally {
+    fs.unlinkSync(owned);
+    fs.mkdirSync(owned);
+    fs.rmdirSync(foreign);
+  }
+});

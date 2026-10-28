@@ -49,17 +49,51 @@ type StopResult = { ok: true } | { ok: false; error: string };
 let stopping: Promise<StopResult> | undefined;
 
 function reserveStart(): () => void {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o755 });
   const directory = fs.lstatSync(DATA_DIR);
   if (
     !directory.isDirectory() ||
     directory.isSymbolicLink() ||
-    directory.uid !== process.geteuid!() ||
-    (directory.mode & 0o022) !== 0
+    directory.uid !== process.geteuid!()
   )
     throw new Error(
       'Remote Control storage is not owned and private for the runtime writer; preserve it for repair.',
     );
+  // Decrease only structural write bits on the actual runtime writer's data
+  // directory. Never follow an alias or change payload/foreign ownership.
+  if ((directory.mode & 0o022) !== 0) {
+    const parent = fs.openSync(
+      DATA_DIR,
+      fs.constants.O_RDONLY |
+        fs.constants.O_NOFOLLOW |
+        fs.constants.O_DIRECTORY,
+    );
+    using _parentLease = { [Symbol.dispose]: () => fs.closeSync(parent) };
+    const held = fs.fstatSync(parent);
+    if (
+      !held.isDirectory() ||
+      held.uid !== directory.uid ||
+      held.dev !== directory.dev ||
+      held.ino !== directory.ino
+    )
+      throw new Error(
+        'Remote Control storage changed before preparation; preserve it for host-owner repair.',
+      );
+    fs.fchmodSync(parent, held.mode & 0o7777 & ~0o022);
+    fs.fsyncSync(parent);
+    const bound = fs.lstatSync(DATA_DIR);
+    if (
+      !bound.isDirectory() ||
+      bound.isSymbolicLink() ||
+      bound.uid !== held.uid ||
+      bound.dev !== held.dev ||
+      bound.ino !== held.ino ||
+      (bound.mode & 0o022) !== 0
+    )
+      throw new Error(
+        'Remote Control storage changed during preparation; preserve it for host-owner repair.',
+      );
+  }
   const syncParent = () => {
     const parent = fs.openSync(
       DATA_DIR,
