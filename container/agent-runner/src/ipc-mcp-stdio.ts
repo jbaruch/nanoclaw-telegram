@@ -22,11 +22,16 @@ const isMain = process.env.NANOCLAW_IS_MAIN === '1';
 
 function writeIpcFile(dir: string, data: object): string {
   fs.mkdirSync(IPC_DIR, { recursive: true, mode: 0o755 });
+  const root = fs.openSync(
+    IPC_DIR,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_DIRECTORY,
+  );
+  using _rootLease = { [Symbol.dispose]: () => fs.closeSync(root) };
+  // The native agent runs in Linux. Rename through held directory capabilities,
+  // so a concurrent host capture cannot redirect the durability acknowledgment.
+  const source = `/proc/self/fd/${root}`;
   const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
-  const filepath = path.join(dir, filename);
-  // The host atomically captures channel directories. Keep the unpublished
-  // temporary inode in the stable group mount, outside that handoff.
-  const tempPath = path.join(IPC_DIR, `.${filename}.tmp`);
+  const tempPath = `${source}/.${filename}.tmp`;
   const fd = fs.openSync(
     tempPath,
     fs.constants.O_WRONLY |
@@ -35,22 +40,35 @@ function writeIpcFile(dir: string, data: object): string {
       fs.constants.O_NOFOLLOW,
     0o600,
   );
+  using _fileLease = { [Symbol.dispose]: () => fs.closeSync(fd) };
+  fs.writeFileSync(fd, JSON.stringify(data, null, 2));
+  fs.fsyncSync(fd);
   const identity = fs.fstatSync(fd);
-  try {
-    fs.writeFileSync(fd, JSON.stringify(data, null, 2));
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
   for (let attempt = 0; attempt < 3; attempt++) {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+    let published = false;
     try {
-      fs.renameSync(tempPath, filepath);
+      (() => {
+        fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+        const destination = fs.openSync(
+          dir,
+          fs.constants.O_RDONLY |
+            fs.constants.O_NOFOLLOW |
+            fs.constants.O_DIRECTORY,
+        );
+        using _destinationLease = {
+          [Symbol.dispose]: () => fs.closeSync(destination),
+        };
+        fs.renameSync(tempPath, `/proc/self/fd/${destination}/${filename}`);
+        published = true;
+        fs.fsyncSync(destination);
+        fs.fsyncSync(root);
+      })();
       return filename;
     } catch (error) {
-      // ENOENT can mean the channel was captured between mkdir and rename.
-      // Reuse the SAME still-unpublished inode; never retry a successful rename.
+      // Retry only a known pre-publication missing directory, never an uncertain
+      // rename/flush/cleanup outcome after the request has entered host custody.
       if (
+        published ||
         !(error instanceof Error) ||
         !('code' in error) ||
         error.code !== 'ENOENT' ||

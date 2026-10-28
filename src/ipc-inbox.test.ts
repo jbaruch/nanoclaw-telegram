@@ -361,3 +361,72 @@ it('closes work-hint handles while retaining both an unexpected read defect and 
     }),
   );
 });
+
+it('keeps the source channel intact when the new batch parent cannot be durably linked', () => {
+  const directory = source(),
+    original = body();
+  fs.writeFileSync(path.join(directory, 'fixed.json'), original);
+  const inbox = createIpcInbox(base),
+    root = path.join(base, '.claimed-v1');
+  const descriptors = new Map<number, string>(),
+    open = fs.openSync.bind(fs),
+    sync = fs.fsyncSync.bind(fs);
+  vi.spyOn(fs, 'openSync').mockImplementation((file, flags, mode) => {
+    const fd = open(file, flags, mode);
+    descriptors.set(fd, String(file));
+    return fd;
+  });
+  const failure = Object.assign(
+    new Error('fixed batch parent durability failure'),
+    { code: 'EIO' },
+  );
+  const fault = vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
+    if (descriptors.get(fd) === root) throw failure;
+    sync(fd);
+  });
+  expect(() => inbox.capture('main', 'messages')).toThrow(failure);
+  expect(fs.readFileSync(path.join(directory, 'fixed.json'), 'utf8')).toBe(
+    original,
+  );
+  fault.mockRestore();
+  inbox.capture('main', 'messages');
+  const resumed = inbox.pending();
+  expect(resumed.held).toBe(0);
+  expect(resumed.claims).toHaveLength(1);
+  expect(resumed.claims[0].read()).toBe(original);
+});
+
+it('keeps the captured source intact until its request-slot parent is durable', () => {
+  const directory = source(),
+    original = body();
+  fs.writeFileSync(path.join(directory, 'fixed.json'), original);
+  const inbox = createIpcInbox(base);
+  inbox.capture('main', 'messages');
+  const root = path.join(base, '.claimed-v1'),
+    batch = path.join(root, fs.readdirSync(root)[0]),
+    requests = path.join(batch, 'requests');
+  const descriptors = new Map<number, string>(),
+    open = fs.openSync.bind(fs),
+    sync = fs.fsyncSync.bind(fs);
+  vi.spyOn(fs, 'openSync').mockImplementation((file, flags, mode) => {
+    const fd = open(file, flags, mode);
+    descriptors.set(fd, String(file));
+    return fd;
+  });
+  const fault = vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
+    if (descriptors.get(fd) === requests)
+      throw Object.assign(new Error('fixed slot parent durability failure'), {
+        code: 'EIO',
+      });
+    sync(fd);
+  });
+  expect(inbox.pending()).toEqual({ claims: [], held: 1 });
+  expect(fs.readFileSync(path.join(batch, 'inbox', 'fixed.json'), 'utf8')).toBe(
+    original,
+  );
+  fault.mockRestore();
+  const resumed = inbox.pending();
+  expect(resumed.held).toBe(0);
+  expect(resumed.claims).toHaveLength(1);
+  expect(resumed.claims[0].read()).toBe(original);
+});

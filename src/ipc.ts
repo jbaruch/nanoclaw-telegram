@@ -164,6 +164,15 @@ function quarantineIpcFile(
 ): void {
   try {
     fs.mkdirSync(errorDir, { recursive: true });
+    const parent = fs.openSync(
+      path.dirname(errorDir),
+      fs.constants.O_RDONLY |
+        fs.constants.O_DIRECTORY |
+        fs.constants.O_NOFOLLOW,
+    );
+    using _parentLease = { [Symbol.dispose]: () => fs.closeSync(parent) };
+    fs.fsyncSync(parent);
+
     // link() reserves the destination without overwriting earlier evidence.
     for (let sequence = 0; sequence < 1000; sequence++) {
       const destination = path.join(

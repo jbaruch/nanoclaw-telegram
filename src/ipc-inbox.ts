@@ -275,6 +275,7 @@ export function createIpcInbox(base: string): IpcInbox {
       );
       fs.mkdirSync(path.join(batch, 'requests'), { mode: 0o700 });
       syncDirectory(batch);
+      syncDirectory(root);
       // rename does not follow the final source entry, including an ABA symlink.
       fs.renameSync(source, path.join(batch, 'inbox'));
       syncDirectory(group);
@@ -340,6 +341,7 @@ export function createIpcInbox(base: string): IpcInbox {
                 path.join(slot, 'owner.json'),
                 JSON.stringify({ schema_version: 1, file }),
               );
+              syncDirectory(requests);
               fs.renameSync(
                 path.join(inbox, file),
                 path.join(slot, 'captured'),

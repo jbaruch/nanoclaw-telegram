@@ -376,3 +376,62 @@ describe('IPC file quarantine', () => {
     }
   });
 });
+
+it('retains the sole claim when the first quarantine directory parent cannot be made durable', () => {
+  const temporary = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'telegram-quarantine-parent-'),
+  );
+  const base = path.join(temporary, 'data', 'ipc'),
+    messages = path.join(base, 'main', 'messages');
+  fs.mkdirSync(messages, { recursive: true, mode: 0o755 });
+  const original = JSON.stringify({ type: 'unsupported_request' });
+  fs.writeFileSync(path.join(messages, 'fixed.json'), original);
+  const source = fileURLToPath(new URL('./ipc.ts', import.meta.url));
+  const script = `import fs from 'node:fs';import path from 'node:path';import {startIpcWatcher} from ${JSON.stringify(source)};
+    const base=path.join(process.cwd(),'data','ipc'),errors=path.join(base,'errors');
+    const descriptors=new Map(),open=fs.openSync.bind(fs),mkdir=fs.mkdirSync.bind(fs),sync=fs.fsyncSync.bind(fs);let created=false;
+    const refusal=Object.assign(new Error('fixed quarantine parent refusal'),{code:'EIO'});
+    fs.openSync=(file,flags,mode)=>{const fd=open(file,flags,mode);descriptors.set(fd,String(file));return fd;};
+    fs.mkdirSync=(file,options)=>{const result=mkdir(file,options);if(String(file)===errors)created=true;return result;};
+    fs.fsyncSync=fd=>{if(created&&descriptors.get(fd)===base)throw refusal;return sync(fd);};
+    startIpcWatcher({sendMessage:async()=>{throw new Error('No delivery is authorized');},registeredGroups:()=>({'tg:123':{name:'fixed',folder:'main',isMain:true,trigger:'@Andy',added_at:'2024-01-01T00:00:00Z'}}),registerGroup:()=>{},syncGroups:async()=>{},getAvailableGroups:()=>[],writeGroupsSnapshot:()=>{},onTasksChanged:()=>{}}).then(()=>{throw new Error('Watcher must remain live or refuse');},error=>{
+      const root=path.join(base,'.claimed-v1');let retained=[];
+      for(const batch of fs.readdirSync(root))for(const slot of fs.readdirSync(path.join(root,batch,'requests'))){const file=path.join(root,batch,'requests',slot,'pending');if(fs.existsSync(file))retained.push(fs.readFileSync(file,'utf8'));}
+      const result={refused:error instanceof AggregateError&&error.errors.includes(refusal),retained,quarantine_entries:fs.readdirSync(errors)};
+      process.stdout.write('FIXED_RESULT:'+JSON.stringify(result)+'\\n',()=>process.exit(0));
+    });`;
+  try {
+    const child = spawnSync(
+      process.execPath,
+      [
+        '--import',
+        fileURLToPath(import.meta.resolve('tsx/esm')),
+        '--input-type',
+        'module',
+        '-e',
+        script,
+      ],
+      {
+        cwd: temporary,
+        env: { PATH: process.env.PATH ?? '', HOME: temporary, TZ: 'UTC' },
+        encoding: 'utf8',
+        timeout: 5000,
+        killSignal: 'SIGKILL',
+        maxBuffer: 262144,
+      },
+    );
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+    const result = child.stdout
+      .split('\n')
+      .find((line) => line.startsWith('FIXED_RESULT:'));
+    expect(result).toBeDefined();
+    expect(JSON.parse(result!.slice('FIXED_RESULT:'.length))).toEqual({
+      refused: true,
+      retained: [original],
+      quarantine_entries: [],
+    });
+  } finally {
+    fs.rmSync(temporary, { recursive: true });
+  }
+});
