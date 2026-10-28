@@ -23,7 +23,7 @@
   "dependencies": {
     "@onecli-sh/sdk": "^0.2.0",
     "better-sqlite3": "13.0.3",
-    "cron-parser": "5.5.0",
+    "cron-parser": "5.10.2",
     "grammy": "^1.46.0",
     "openai": "7.37.0"
   },
