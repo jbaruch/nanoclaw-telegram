@@ -162,3 +162,28 @@ it('holds an over-budget channel without parsing, evicting or dispatching its re
     batch = path.join(root, fs.readdirSync(root)[0]);
   expect(fs.readdirSync(path.join(batch, 'inbox'))).toHaveLength(1025);
 });
+
+it('preserves owner evidence if another scan begins dispatch during empty-slot cleanup', () => {
+  const directory = source();
+  fs.writeFileSync(path.join(directory, 'fixed.json'), body());
+  const owner = createIpcInbox(base);
+  owner.capture('main', 'messages');
+  const claim = owner.pending().claims[0],
+    pending = claim.filePath,
+    slot = path.dirname(pending);
+  const ownerFile = path.join(slot, 'owner.json'),
+    before = fs.readFileSync(ownerFile, 'utf8');
+  const stat = fs.lstatSync.bind(fs);
+  let raced = false;
+  vi.spyOn(fs, 'lstatSync').mockImplementation((file, options) => {
+    if (String(file) === pending && !raced) {
+      raced = true;
+      fs.renameSync(pending, path.join(slot, 'in_flight'));
+    }
+    return stat(file, options);
+  });
+  expect(owner.pending()).toEqual({ claims: [], held: 1 });
+  expect(raced).toBe(true);
+  expect(fs.readFileSync(ownerFile, 'utf8')).toBe(before);
+  expect(fs.readFileSync(path.join(slot, 'in_flight'), 'utf8')).toBe(body());
+});

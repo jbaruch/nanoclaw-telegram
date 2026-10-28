@@ -281,6 +281,10 @@ export function createIpcInbox(base: string): IpcInbox {
               syncDirectory(slot);
             }
             if (!exists(pending)) {
+              if (exists(inflight))
+                throw new IpcInboxHold(
+                  'IPC dispatch began during this scan; preserve its owner metadata.',
+                );
               fs.unlinkSync(path.join(slot, 'owner.json'));
               fs.rmdirSync(slot);
               continue;
