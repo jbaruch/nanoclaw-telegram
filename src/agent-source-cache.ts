@@ -208,9 +208,18 @@ export function syncAgentRunnerSource(source: string, cache: string): void {
   using _cache = { [Symbol.dispose]: () => fs.closeSync(cacheFD) };
   assertBound(parent, parentFD);
   assertBound(cache, cacheFD);
+  let hasIndex = true;
+  try {
+    fs.lstatSync(path.join(cache, 'index.ts'));
+  } catch (error) {
+    if (!hasErrno(error, 'ENOENT')) throw error;
+    hasIndex = false;
+  }
+  // Customized links resolve in the container namespace. Observe only the
+  // directory entry, never its target in the host filesystem.
   if (
     present &&
-    fs.existsSync(path.join(cache, 'index.ts')) &&
+    hasIndex &&
     previous?.ready &&
     previous.digest === canonical.digest
   )

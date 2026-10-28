@@ -251,3 +251,25 @@ it('uses explicit readable canonical and private marker modes under restrictive 
     process.umask(prior);
   }
 });
+
+it.each([false, true])(
+  'preserves a same-base customized entry link independently of host target presence=%s',
+  (present) => {
+    syncAgentRunnerSource(source, cache);
+    const foreign = path.join(
+      fixture.directory,
+      'container-only-custom-target.ts',
+    );
+    if (present) fs.writeFileSync(foreign, 'retained target');
+    const index = path.join(cache, 'index.ts');
+    fs.unlinkSync(index);
+    fs.symlinkSync(foreign, index);
+    const markerBefore = fs.readFileSync(marker, 'utf8');
+    syncAgentRunnerSource(source, cache);
+    expect(fs.lstatSync(index).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(index)).toBe(foreign);
+    expect(fs.readFileSync(marker, 'utf8')).toBe(markerBefore);
+    if (present)
+      expect(fs.readFileSync(foreign, 'utf8')).toBe('retained target');
+  },
+);
