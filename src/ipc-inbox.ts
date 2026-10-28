@@ -77,31 +77,64 @@ function ownedDirectory(directory: string, uid: number, prepare = false): void {
     );
 }
 function channelHasRequests(directory: string): boolean {
-  if (process.platform !== 'linux') return true;
-  const fd = fs.openSync(directory, nofollow | fs.constants.O_DIRECTORY);
+  let fd: number;
   try {
-    // Only a work hint. Inspection follows our held FD, never a caller's alias;
-    // actual capture and immutable leaf validation remain mandatory afterward.
-    const dir = fs.opendirSync('/proc/self/fd/' + fd);
-    try {
-      let count = 0;
-      for (let entry = dir.readSync(); entry; entry = dir.readSync()) {
-        if (++count > 1024)
-          throw new IpcInboxHold(
-            'IPC channel entry bound exceeded; preserve the channel.',
-          );
-        if (entry.name.endsWith('.json')) return true;
-      }
-      return false;
-    } finally {
-      dir.closeSync();
+    fd = fs.openSync(directory, nofollow | fs.constants.O_DIRECTORY);
+  } catch (error) {
+    if (!isFileSystemError(error)) throw error;
+    return true;
+  }
+  // Explicit resource disposal preserves a primary defect together with any
+  // close failure, rather than losing either error in a finally throw.
+  using _fdLease = { [Symbol.dispose]: () => fs.closeSync(fd) };
+  let held: fs.Stats;
+  try {
+    held = fs.fstatSync(fd);
+    const before = fs.lstatSync(directory);
+    if (
+      !before.isDirectory() ||
+      before.isSymbolicLink() ||
+      before.dev !== held.dev ||
+      before.ino !== held.ino
+    )
+      return true;
+  } catch (error) {
+    if (!isFileSystemError(error)) throw error;
+    return true;
+  }
+  // Non-authoritative boolean work hint only. Linux inspects our held FD.
+  // Other platforms inspect the path: an ABA may expose directory-entry
+  // metadata internally, never file contents, names in output, or authority.
+  // Every effect still requires atomic capture and private leaf validation.
+  let dir: fs.Dir;
+  try {
+    dir = fs.opendirSync(
+      process.platform === 'linux' ? '/proc/self/fd/' + fd : directory,
+    );
+  } catch (error) {
+    if (!isFileSystemError(error)) throw error;
+    return true;
+  }
+  using _dirLease = { [Symbol.dispose]: () => dir.closeSync() };
+  try {
+    let count = 0;
+    for (let entry = dir.readSync(); entry; entry = dir.readSync()) {
+      if (++count > 1024 || entry.name.endsWith('.json')) return true;
     }
-  } finally {
-    fs.closeSync(fd);
+    const after = fs.lstatSync(directory);
+    return (
+      !after.isDirectory() ||
+      after.isSymbolicLink() ||
+      after.dev !== held.dev ||
+      after.ino !== held.ino
+    );
+  } catch (error) {
+    if (!isFileSystemError(error)) throw error;
+    return true;
   }
 }
 function regularBytes(file: string, privateFile = false, uid?: number): Buffer {
-  const fd = fs.openSync(file, nofollow);
+  const fd = fs.openSync(file, nofollow | fs.constants.O_NONBLOCK);
   try {
     const stat = fs.fstatSync(fd);
     if (

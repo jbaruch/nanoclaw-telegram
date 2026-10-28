@@ -267,11 +267,97 @@ it('never repairs a foreign-owner or aliased structural directory', () => {
   expect(fs.readdirSync(channel)).toEqual([]);
 });
 
-it('avoids idle claim journal writes with the native Linux held-directory hint', () => {
+it('avoids idle claim journal writes with the bounded native work hint', () => {
   source();
   const inbox = createIpcInbox(base);
   const sync = vi.spyOn(fs, 'fsyncSync');
   inbox.capture('main', 'messages');
-  if (process.platform === 'linux') expect(sync).not.toHaveBeenCalled();
+  expect(sync).not.toHaveBeenCalled();
   expect(inbox.pending()).toEqual({ claims: [], held: 0 });
+});
+
+it('refuses a real claimed FIFO without blocking independent regular requests or deleting evidence', () => {
+  const owner = fileURLToPath(new URL('./ipc-inbox.ts', import.meta.url));
+  const script = `import fs from 'node:fs';import path from 'node:path';import {execFileSync} from 'node:child_process';import {createIpcInbox} from ${JSON.stringify(owner)};
+    const base=process.cwd();
+    for(const group of ['blocked','healthy'])fs.mkdirSync(path.join(base,group,'messages'),{recursive:true,mode:0o755});
+    execFileSync('mkfifo',[path.join(base,'blocked','messages','fixed.json')]);
+    fs.writeFileSync(path.join(base,'healthy','messages','fixed.json'),'fixed regular request');
+    const inbox=createIpcInbox(base);inbox.capture('blocked','messages');inbox.capture('healthy','messages');
+    const result=inbox.pending();
+    const root=path.join(base,'.claimed-v1');let retained=false;
+    for(const batch of fs.readdirSync(root)){const dir=path.join(root,batch);if(JSON.parse(fs.readFileSync(path.join(dir,'owner.json'),'utf8')).source_group!=='blocked')continue;
+      for(const slot of fs.readdirSync(path.join(dir,'requests')))retained=fs.lstatSync(path.join(dir,'requests',slot,'captured')).isFIFO();}
+    process.stdout.write(JSON.stringify({held:result.held,claims:result.claims.map(c=>({group:c.sourceGroup,body:c.read()})),fifo_retained:retained}));`;
+  const child = spawnSync(
+    process.execPath,
+    [
+      '--import',
+      fileURLToPath(import.meta.resolve('tsx/esm')),
+      '--input-type',
+      'module',
+      '-e',
+      script,
+    ],
+    {
+      cwd: base,
+      env: { PATH: process.env.PATH ?? '', HOME: base, TZ: 'UTC' },
+      encoding: 'utf8',
+      timeout: 5000,
+      killSignal: 'SIGKILL',
+      maxBuffer: 262144,
+    },
+  );
+  expect(child.error).toBeUndefined();
+  expect(child.status, child.stderr).toBe(0);
+  expect(JSON.parse(child.stdout)).toEqual({
+    held: 1,
+    claims: [{ group: 'healthy', body: 'fixed regular request' }],
+    fifo_retained: true,
+  });
+});
+
+it('falls back to secure capture when the directory work hint has a native read failure', () => {
+  const directory = source();
+  fs.writeFileSync(path.join(directory, 'fixed.json'), body());
+  const inbox = createIpcInbox(base),
+    open = fs.opendirSync.bind(fs);
+  vi.spyOn(fs, 'opendirSync').mockImplementation((file, options) => {
+    if (file === directory || String(file).startsWith('/proc/self/fd/'))
+      throw Object.assign(new Error('fixed hint failure'), { code: 'EIO' });
+    return open(file, options);
+  });
+  inbox.capture('main', 'messages');
+  const result = inbox.pending();
+  expect(result.held).toBe(0);
+  expect(result.claims[0].read()).toBe(body());
+});
+
+it('closes work-hint handles while retaining both an unexpected read defect and close failure', () => {
+  const directory = source();
+  const inbox = createIpcInbox(base);
+  const readFailure = new TypeError('fixed hint read defect'),
+    closeFailure = new TypeError('fixed hint close defect');
+  const open = fs.opendirSync.bind(fs);
+  vi.spyOn(fs, 'opendirSync').mockImplementation((file, options) => {
+    const dir = open(file, options);
+    if (file === directory || String(file).startsWith('/proc/self/fd/')) {
+      vi.spyOn(dir, 'readSync').mockImplementation(() => {
+        throw readFailure;
+      });
+      const close = dir.closeSync.bind(dir);
+      vi.spyOn(dir, 'closeSync').mockImplementation(() => {
+        close();
+        throw closeFailure;
+      });
+    }
+    return dir;
+  });
+  expect(() => inbox.capture('main', 'messages')).toThrowError(
+    expect.objectContaining({
+      name: 'SuppressedError',
+      error: closeFailure,
+      suppressed: readFailure,
+    }),
+  );
 });

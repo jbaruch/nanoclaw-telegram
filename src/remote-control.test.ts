@@ -505,7 +505,7 @@ describe('remote-control', () => {
       kill.mockImplementation(() => {
         throw denied;
       });
-      expect(stopRemoteControl).toThrow(denied);
+      await expect(stopRemoteControl()).rejects.toBe(denied);
       expect(getActiveSession()?.pid).toBe(12345);
       expect(unlinkSyncSpy).not.toHaveBeenCalled();
     });
@@ -534,33 +534,48 @@ describe('remote-control', () => {
 
       await startRemoteControl('user1', 'tg:123', '/project');
 
-      const result = stopRemoteControl();
+      const result = await stopRemoteControl();
       expect(result).toEqual({ ok: true });
       expect(killSpy).toHaveBeenCalledWith(-55555, 'SIGTERM');
       expect(unlinkSyncSpy).toHaveBeenCalledWith(STATE_FILE);
       expect(getActiveSession()).toBeNull();
     });
 
-    it('does not clear a live stopping session or spawn again after signal delivery', async () => {
+    it('waits for actual absence and serializes stop/start while a native child is retiring', async () => {
+      vi.useFakeTimers();
       spawnMock.mockReturnValue(createMockProcess(55555));
       stdoutFileContent = 'https://claude.ai/code?bridge=env_stopping';
-      vi.spyOn(process, 'kill').mockReturnValue(true);
+      let absent = false;
+      vi.spyOn(process, 'kill').mockImplementation((_pid, signal) => {
+        if (signal === 0 && absent)
+          throw Object.assign(new Error('fixed absent'), { code: 'ESRCH' });
+        return true;
+      });
       await startRemoteControl('owner', 'tg:123', '/project');
       unlinkSyncSpy.mockClear();
-      expect(stopRemoteControl()).toMatchObject({
-        ok: false,
-        error: expect.stringContaining('stopping'),
-      });
+      const first = stopRemoteControl();
+      const second = stopRemoteControl();
+      expect(second).toBe(first);
+      await vi.advanceTimersByTimeAsync(0);
       expect(getActiveSession()?.pid).toBe(55555);
       expect(unlinkSyncSpy).not.toHaveBeenCalledWith(STATE_FILE);
       await expect(
         startRemoteControl('owner', 'tg:123', '/project'),
-      ).resolves.toMatchObject({ ok: true, url: stdoutFileContent });
+      ).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringContaining('stopping'),
+      });
       expect(spawnMock).toHaveBeenCalledTimes(1);
+      absent = true;
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(first).resolves.toEqual({ ok: true });
+      expect(getActiveSession()).toBeNull();
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(STATE_FILE);
+      vi.useRealTimers();
     });
 
-    it('returns error when no session is active', () => {
-      const result = stopRemoteControl();
+    it('returns error when no session is active', async () => {
+      const result = await stopRemoteControl();
       expect(result).toEqual({
         ok: false,
         error: 'No active Remote Control session',
@@ -706,7 +721,7 @@ describe('remote-control', () => {
     });
 
     // ** This is the key integration test: restore → stop must work **
-    it('stopRemoteControl works after restoreRemoteControl', () => {
+    it('stopRemoteControl works after restoreRemoteControl', async () => {
       const session = {
         pid: 77777,
         url: 'https://claude.ai/code?bridge=env_restored',
@@ -723,7 +738,7 @@ describe('remote-control', () => {
       restoreRemoteControl();
       expect(getActiveSession()).not.toBeNull();
 
-      const result = stopRemoteControl();
+      const result = await stopRemoteControl();
       expect(result).toEqual({ ok: true });
       expect(killSpy).toHaveBeenCalledWith(-77777, 'SIGTERM');
       expect(unlinkSyncSpy).toHaveBeenCalled();

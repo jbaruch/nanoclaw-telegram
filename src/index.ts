@@ -849,7 +849,7 @@ async function main(): Promise<void> {
         );
       }
     } else {
-      const result = stopRemoteControl();
+      const result = await stopRemoteControl();
       if (result.ok) {
         await channel.sendMessage(chatJid, 'Remote Control session ended.');
       } else {

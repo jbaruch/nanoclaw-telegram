@@ -34,6 +34,8 @@ const STATE_FILE = path.join(DATA_DIR, 'remote-control.json');
 const START_FILE = path.join(DATA_DIR, 'remote-control-starting.json');
 type StartResult = { ok: true; url: string } | { ok: false; error: string };
 let starting: Promise<StartResult> | undefined;
+type StopResult = { ok: true } | { ok: false; error: string };
+let stopping: Promise<StopResult> | undefined;
 
 function reserveStart(): () => void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -176,6 +178,37 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+async function retireOwnedProcess(pid: number | undefined): Promise<void> {
+  if (!pid)
+    throw new Error(
+      'Remote Control child identity is unavailable; preserve the startup gate.',
+    );
+  const absent = () => !isProcessAlive(-pid) && !isProcessAlive(pid);
+  const signal = (value: 'SIGTERM' | 'SIGKILL') => {
+    try {
+      process.kill(-pid, value);
+    } catch (error) {
+      if (!hasErrno(error, 'ESRCH')) throw error;
+      try {
+        process.kill(pid, value);
+      } catch (fallbackError) {
+        if (!hasErrno(fallbackError, 'ESRCH')) throw fallbackError;
+      }
+    }
+  };
+  for (const value of ['SIGTERM', 'SIGKILL'] as const) {
+    signal(value);
+    for (let check = 0; check < 10; check++) {
+      if (absent()) return;
+      await new Promise<void>((done) => setTimeout(done, 100));
+    }
+  }
+  if (absent()) return;
+  throw new Error(
+    'Remote Control process retirement is unverified; preserve the startup gate before retrying.',
+  );
+}
+
 /**
  * Restore session from disk on startup.
  * If the process is still alive, adopt it. Otherwise, clean up.
@@ -247,6 +280,7 @@ export function getActiveSession(): RemoteControlSession | null {
 /** @internal — exported for testing only */
 export function _resetForTesting(): void {
   activeSession = null;
+  stopping = undefined;
 }
 
 /** @internal — exported for testing only */
@@ -259,6 +293,11 @@ export function startRemoteControl(
   chatJid: string,
   cwd: string,
 ): Promise<StartResult> {
+  if (stopping)
+    return Promise.resolve({
+      ok: false,
+      error: 'Remote Control is stopping; wait for verified native retirement.',
+    });
   if (starting) return starting;
   const work = (async () => {
     // Refuse malformed occupied state before creating another reservation.
@@ -396,53 +435,10 @@ async function startRemoteControlOwned(
         };
         const pid = proc.pid;
         let stopPromise: Promise<void> | undefined;
-        const retireStartedProcess = async () => {
-          if (!pid)
-            throw new Error(
-              'Remote Control child identity is unavailable; preserve the startup gate.',
-            );
-          const alive = (identity: number): boolean => {
-            try {
-              process.kill(identity, 0);
-              return true;
-            } catch (error) {
-              if (hasErrno(error, 'ESRCH')) return false;
-              throw error;
-            }
-          };
-          const absent = () => !alive(-pid) && !alive(pid);
-          const signal = (value: 'SIGTERM' | 'SIGKILL') => {
-            try {
-              process.kill(-pid, value);
-            } catch (error) {
-              if (!hasErrno(error, 'ESRCH')) throw error;
-              try {
-                process.kill(pid, value);
-              } catch (fallbackError) {
-                if (!hasErrno(fallbackError, 'ESRCH')) throw fallbackError;
-              }
-            }
-          };
-          for (const value of ['SIGTERM', 'SIGKILL'] as const) {
-            signal(value);
-            for (let check = 0; check < 10; check++) {
-              if (absent()) {
-                disposition('absent');
-                return;
-              }
-              await new Promise<void>((done) => setTimeout(done, 100));
-            }
-          }
-          if (absent()) {
-            disposition('absent');
-            return;
-          }
-          throw new Error(
-            'Remote Control process retirement is unverified; preserve the startup gate before retrying.',
-          );
-        };
         const stopStartedProcess = () =>
-          (stopPromise ??= Promise.resolve().then(retireStartedProcess));
+          (stopPromise ??= Promise.resolve()
+            .then(() => retireOwnedProcess(pid))
+            .then(() => disposition('absent')));
         const rejectAfterCleanup = (error: unknown) => {
           if (settled) return;
           clearTimeout(timer);
@@ -559,34 +555,30 @@ async function startRemoteControlOwned(
   return operation.value;
 }
 
-export function stopRemoteControl():
-  | {
-      ok: true;
-    }
-  | { ok: false; error: string } {
-  if (!activeSession) {
-    return { ok: false, error: 'No active Remote Control session' };
-  }
-
-  const { pid } = activeSession;
-  try {
-    process.kill(-pid, 'SIGTERM');
-  } catch (err) {
-    if (!hasErrno(err, 'ESRCH')) throw err;
-    try {
-      process.kill(pid, 'SIGTERM');
-    } catch (fallbackError) {
-      if (!hasErrno(fallbackError, 'ESRCH')) throw fallbackError;
-    }
-  }
-  if (isProcessAlive(pid) || isProcessAlive(-pid))
-    return {
+export function stopRemoteControl(): Promise<StopResult> {
+  if (stopping) return stopping;
+  if (!activeSession)
+    return Promise.resolve({
       ok: false,
-      error:
-        'Remote Control is stopping; retain its session until native absence is verified.',
-    };
-  activeSession = null;
-  clearState();
-  logger.info({ pid }, 'Remote Control session stopped');
-  return { ok: true };
+      error: 'No active Remote Control session',
+    });
+  const session = activeSession;
+  const work = Promise.resolve()
+    .then(() => retireOwnedProcess(session.pid))
+    .then(() => {
+      clearState();
+      activeSession = null;
+      logger.info({ pid: session.pid }, 'Remote Control session stopped');
+      return { ok: true } as const;
+    });
+  stopping = work;
+  void work.then(
+    () => {
+      stopping = undefined;
+    },
+    () => {
+      stopping = undefined;
+    },
+  );
+  return work;
 }
