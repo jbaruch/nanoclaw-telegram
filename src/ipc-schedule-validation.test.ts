@@ -58,6 +58,7 @@ it('quarantines an invalid update unchanged, applies a valid once update, and pr
   fs.mkdirSync(messages);
   const before = getTaskById('fixed-task');
   const invalid = {
+    schema_version: 1,
     type: 'update_task',
     taskId: 'fixed-task',
     schedule_value: '1000junk',
@@ -100,6 +101,7 @@ it('quarantines an invalid update unchanged, applies a valid once update, and pr
   fs.writeFileSync(
     path.join(tasks, 'valid.json'),
     JSON.stringify({
+      schema_version: 1,
       type: 'update_task',
       taskId: 'fixed-task',
       schedule_type: 'once',
@@ -123,6 +125,7 @@ it('quarantines an invalid update unchanged, applies a valid once update, and pr
   fs.writeFileSync(
     path.join(tasks, 'prompt-only.json'),
     JSON.stringify({
+      schema_version: 1,
       type: 'update_task',
       taskId: 'fixed-task',
       prompt: 'updated prompt',
@@ -145,7 +148,12 @@ it('quarantines an invalid update unchanged, applies a valid once update, and pr
   vi.mocked(deps.sendMessage).mockRejectedValueOnce(defect);
   fs.writeFileSync(
     path.join(messages, 'sql-defect.json'),
-    JSON.stringify({ type: 'message', chatJid: 'tg:123', text: 'fixed input' }),
+    JSON.stringify({
+      schema_version: 1,
+      type: 'message',
+      chatJid: 'tg:123',
+      text: 'fixed input',
+    }),
   );
   const rejected = expect(lifecycle).rejects.toBe(defect);
   await vi.advanceTimersByTimeAsync(1000);

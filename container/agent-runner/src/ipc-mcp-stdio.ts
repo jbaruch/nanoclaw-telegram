@@ -43,7 +43,7 @@ function writeIpcFile(dir: string, data: object): string {
     0o600,
   );
   using _fileLease = { [Symbol.dispose]: () => fs.closeSync(fd) };
-  fs.writeFileSync(fd, JSON.stringify(data, null, 2));
+  fs.writeFileSync(fd, JSON.stringify({ ...data, schema_version: 1 }, null, 2));
   fs.fsyncSync(fd);
   const identity = fs.fstatSync(fd);
   for (let attempt = 0; attempt < 3; attempt++) {

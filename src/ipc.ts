@@ -54,6 +54,10 @@ function validateIpcRequest(
     throw new SyntaxError('IPC request must be an object');
   }
   const fields = data as Record<string, unknown>;
+  if (fields.schema_version !== 1)
+    throw new SyntaxError(
+      'Unsupported IPC request schema; update the co-shipped writer/reader and inspect preserved evidence before any replay.',
+    );
   if (typeof fields.type !== 'string')
     throw new SyntaxError('IPC type must be a string');
   const requirements: Record<string, readonly string[]> = {
@@ -98,6 +102,9 @@ function validateIpcRequest(
 
   for (const field of [
     'chatJid',
+    'sender',
+    'timestamp',
+    'createdBy',
     'messageId',
     'emoji',
     'text',

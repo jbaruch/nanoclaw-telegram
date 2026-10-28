@@ -35,7 +35,13 @@ afterEach(() => {
   fs.rmSync(directory, { recursive: true, force: true });
 });
 function fixtureHook(
-  sdkFailure: boolean | 'throw' = false,
+  sdkFailure:
+    | boolean
+    | 'throw'
+    | 'drain'
+    | 'poll-failure'
+    | 'wait-failure'
+    | 'settle-poll-failure' = false,
   publicationRace: false | 'capture' | 'retire' = false,
   durabilityFault = false,
 ): string {
@@ -43,7 +49,7 @@ function fixtureHook(
   // Synthetic filesystem transport only. Linux uses actual proc-FD paths;
   // Darwin maps those fixed Linux capabilities to our owned test directory.
   const fsModule = `import fs from 'node:fs';import path from 'node:path';
-    const root=${JSON.stringify(directory)},descriptors=new Map(),events=[];let captured=false,faulted=false;
+    const root=${JSON.stringify(directory)},descriptors=new Map(),events=[];let captured=false,faulted=false,inputFaulted=false,closeFaulted=false;
     const physical=(value)=>{if(typeof value!=='string')return value;
       if(value.startsWith('/workspace/'))return path.join(root,value.slice(1));
       if(value==='/tmp/input.json')return path.join(root,'input.json');
@@ -55,6 +61,8 @@ function fixtureHook(
     process.on('exit',()=>fs.writeFileSync(path.join(root,'ipc-durability.json'),JSON.stringify(events)));
     export default new Proxy(fs,{get(target,key){const value=target[key];if(typeof value!=='function')return value;
       return (...args)=>{
+        if(${JSON.stringify(sdkFailure === 'drain')}&&key==='readFileSync'&&String(args[0]).endsWith('/input/002-held.json')&&!inputFaulted){inputFaulted=true;throw Object.assign(new Error('Fixed later native input read failure'),{code:'EIO'});}
+        if(${JSON.stringify(sdkFailure === 'poll-failure' || sdkFailure === 'wait-failure' || sdkFailure === 'settle-poll-failure')}&&key==='unlinkSync'&&String(args[0]).endsWith('/input/_close')&&fs.existsSync(physical(args[0]))&&!closeFaulted){closeFaulted=true;globalThis.fixedFixtureSDKDone?.();throw Object.assign(new Error('Fixed private native close failure'),{code:'EACCES'});}
         if(key==='renameSync'){
           const destination=physical(args[1]);
           if(${JSON.stringify(publicationRace)}&&!captured&&destination.startsWith(path.join(root,'workspace/ipc/messages')+'/')){
@@ -81,7 +89,7 @@ function fixtureHook(
   const source = `import {registerHooks} from 'node:module';
     const fsModule=${JSON.stringify(fsModule)};
     const childModule=${JSON.stringify(childModule)};
-    const sdk=${JSON.stringify(sdkFailure === 'throw' ? "export async function* query(){throw new TypeError('fixed-private-unexpected-sdk-body');}" : "setInterval(()=>{},60000); export async function* query(){yield {type:'result',subtype:'error_during_execution',is_error:true,errors:['fixed-private-sdk-body']};throw new Error('SDK event after failure must not be consumed');}")};
+    const sdk=${JSON.stringify(sdkFailure === 'settle-poll-failure' ? "import fs from 'fs';export function query(){let step=0;return {[Symbol.asyncIterator](){return this;},next(){if(++step===1)return Promise.resolve({done:false,value:{type:'result',subtype:'success',is_error:false,result:'initial complete'}});fs.writeFileSync('/workspace/ipc/input/_close','close');return new Promise(resolve=>{globalThis.fixedFixtureSDKDone=()=>resolve({done:true});});}};}" : sdkFailure === 'poll-failure' ? "import fs from 'fs';export async function* query(){fs.writeFileSync('/workspace/ipc/input/_close','close');await new Promise(()=>{});}" : sdkFailure === 'wait-failure' ? "import fs from 'fs';export async function* query(){fs.writeFileSync('/workspace/ipc/input/_close','close');yield {type:'result',subtype:'success',is_error:false,result:'initial complete'};}" : sdkFailure === 'drain' ? "import fs from 'fs';export async function* query({prompt}){const first=await prompt[Symbol.asyncIterator]().next();fs.writeFileSync('/workspace/ipc/input/_close','close');yield {type:'result',subtype:'success',is_error:false,result:first.value.message.content};}" : sdkFailure === 'throw' ? "export async function* query(){throw new TypeError('fixed-private-unexpected-sdk-body');}" : "setInterval(()=>{},60000); export async function* query(){yield {type:'result',subtype:'error_during_execution',is_error:true,errors:['fixed-private-sdk-body']};throw new Error('SDK event after failure must not be consumed');}")};
     registerHooks({resolve(specifier,context,next){
       if(specifier==='fs')return {url:'data:text/javascript,'+encodeURIComponent(fsModule),shortCircuit:true};
       if(specifier==='child_process')return {url:'data:text/javascript,'+encodeURIComponent(childModule),shortCircuit:true};
@@ -95,7 +103,13 @@ function fixtureHook(
 function run(
   file: string,
   input: string,
-  sdkFailure: boolean | 'throw' = false,
+  sdkFailure:
+    | boolean
+    | 'throw'
+    | 'drain'
+    | 'poll-failure'
+    | 'wait-failure'
+    | 'settle-poll-failure' = false,
   timezone = 'UTC',
   publicationRace: false | 'capture' | 'retire' = false,
   durabilityFault = false,
@@ -405,8 +419,8 @@ it('does not acknowledge queued or replay publication after a native destination
     names = fs.readdirSync(channel);
   expect(names).toHaveLength(1);
   expect(
-    JSON.parse(fs.readFileSync(path.join(channel, names[0]), 'utf8')).text,
-  ).toBe('fixed once');
+    JSON.parse(fs.readFileSync(path.join(channel, names[0]), 'utf8')),
+  ).toMatchObject({ schema_version: 1, type: 'message', text: 'fixed once' });
   expect(
     JSON.parse(
       fs.readFileSync(path.join(directory, 'ipc-durability.json'), 'utf8'),
@@ -683,3 +697,82 @@ it('snapshot cleanup failure preserves the original failed-replace error too', (
     suppressed: primary,
   });
 });
+
+it('actual agent drain keeps already consumed input when a later native read fails', () => {
+  const input = path.join(directory, 'workspace', 'ipc', 'input');
+  fs.mkdirSync(input, { recursive: true });
+  fs.writeFileSync(
+    path.join(input, '001-first.json'),
+    JSON.stringify({ type: 'message', text: 'first synthetic input' }),
+  );
+  const held = JSON.stringify({
+    type: 'message',
+    text: 'later held synthetic input',
+  });
+  fs.writeFileSync(
+    path.join(input, '003-independent.json'),
+    JSON.stringify({ type: 'message', text: 'independent synthetic input' }),
+  );
+  fs.writeFileSync(path.join(input, '002-held.json'), held);
+  const child = run(
+    'index.ts',
+    JSON.stringify({
+      prompt: 'initial fixed prompt',
+      chatJid: 'tg:fixture',
+      groupFolder: 'main',
+      isMain: true,
+    }),
+    'drain',
+  );
+  expect(child.error).toBeUndefined();
+  expect(child.status, child.stderr).toBe(0);
+  const frames = [
+    ...child.stdout.matchAll(
+      /---NANOCLAW_OUTPUT_START---\s*([\s\S]*?)\s*---NANOCLAW_OUTPUT_END---/g,
+    ),
+  ].map((match) => JSON.parse(match[1]));
+  expect(
+    frames.find((frame) => frame.completion === 'sdk_turn_completed')?.result,
+  ).toBe(
+    'initial fixed prompt\nfirst synthetic input\nindependent synthetic input',
+  );
+  expect(fs.existsSync(path.join(input, '001-first.json'))).toBe(false);
+  expect(fs.readFileSync(path.join(input, '002-held.json'), 'utf8')).toBe(held);
+  expect(child.stderr).toContain('IPC input read failed');
+});
+
+it.each(['poll-failure', 'wait-failure', 'settle-poll-failure'] as const)(
+  'actual %s reaches the awaited framed agent boundary',
+  (failure) => {
+    const child = run(
+      'index.ts',
+      JSON.stringify({
+        prompt: 'fixed',
+        chatJid: 'tg:fixture',
+        groupFolder: 'main',
+        isMain: true,
+      }),
+      failure,
+    );
+    expect(child.error).toBeUndefined();
+    expect(child.status).toBe(1);
+    const frames = [
+      ...child.stdout.matchAll(
+        /---NANOCLAW_OUTPUT_START---\s*([\s\S]*?)\s*---NANOCLAW_OUTPUT_END---/g,
+      ),
+    ].map((match) => JSON.parse(match[1]));
+    expect(frames.at(-1)).toMatchObject({
+      status: 'error',
+      result: null,
+      error: expect.stringContaining('Agent IPC/storage failed'),
+    });
+    expect(child.stdout + child.stderr).not.toContain(
+      'Fixed private native close failure',
+    );
+    expect(
+      fs.existsSync(
+        path.join(directory, 'workspace', 'ipc', 'input', '_close'),
+      ),
+    ).toBe(true);
+  },
+);

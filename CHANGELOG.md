@@ -6,6 +6,10 @@ For detailed release notes, see the [full changelog on the documentation site](h
 
 ### Runtime diagnostics
 
+- Version durable MCP message/task requests independently of custody metadata and quarantine incompatible bytes before effects. Own both agent pollers through awaited promises, abort only the affected native query on input-lifecycle failure, and preserve collected input across expected per-file I/O failures. Pin CI action commits with automated renewal and gate macOS tests on successful diagnostics.
+
+- Retain already-consumed agent input across a later expected filesystem failure, return collected progress to the active turn, and preserve the failed input file for repair/retry.
+
 - Version host-owned task snapshots as schema 1, validate both agent readers, and keep the live database as mutation authority. Refuse incompatible/legacy/malformed snapshots without rewriting them; publish fresh metadata by verified private atomic replacement. Extend existing formatting and lint gates to nested agent sources, and route unexpected agent defects through the genuine outer framed process boundary.
 
 - Prepare Remote Control's existing verified runtime-owned data-directory write bits through a held descriptor before launch; refuse aliases/rebinding and preserve all payload and held session bytes.

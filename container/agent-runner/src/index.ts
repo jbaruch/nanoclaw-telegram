@@ -311,6 +311,7 @@ function shouldClose(): boolean {
  * Returns messages found, or empty array.
  */
 function drainIpcInput(): string[] {
+  const messages: string[] = [];
   try {
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
     const files = fs
@@ -318,7 +319,6 @@ function drainIpcInput(): string[] {
       .filter((f) => f.endsWith('.json'))
       .sort();
 
-    const messages: string[] = [];
     for (const file of files) {
       const filePath = path.join(IPC_INPUT_DIR, file);
       try {
@@ -329,7 +329,12 @@ function drainIpcInput(): string[] {
         }
       } catch (err) {
         if (!(err instanceof SyntaxError) && !isFileSystemError(err)) throw err;
-        if (isFileSystemError(err)) throw err;
+        if (isFileSystemError(err)) {
+          log(
+            'IPC input read failed; retain this file and continue independent input.',
+          );
+          continue;
+        }
         log(
           'Malformed IPC input refused; repair the native publisher before retrying.',
         );
@@ -346,7 +351,7 @@ function drainIpcInput(): string[] {
     log(
       'IPC input read failed; preserve pending files and repair storage before retrying.',
     );
-    return [];
+    return messages;
   }
 }
 
@@ -355,18 +360,22 @@ function drainIpcInput(): string[] {
  * Returns the messages as a single string, or null if _close.
  */
 function waitForIpcMessage(): Promise<string | null> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const poll = () => {
-      if (shouldClose()) {
-        resolve(null);
-        return;
-      }
-      const messages = drainIpcInput();
-      if (messages.length > 0) {
-        resolve(messages.join('\n'));
-        return;
-      }
-      setTimeout(poll, IPC_POLL_MS);
+      void Promise.resolve()
+        .then(() => {
+          if (shouldClose()) {
+            resolve(null);
+            return;
+          }
+          const messages = drainIpcInput();
+          if (messages.length) {
+            resolve(messages.join('\n'));
+            return;
+          }
+          setTimeout(poll, IPC_POLL_MS);
+        })
+        .then(undefined, reject);
     };
     poll();
   });
@@ -394,26 +403,35 @@ async function runQuery(
   const stream = new MessageStream();
   stream.push(prompt);
 
-  // Poll IPC for follow-up messages and _close sentinel during the query
+  // Timer failures belong to this awaited query, never to the process-global
+  // timer dispatcher. Abort only this native query if its input lifecycle fails.
   let ipcPolling = true;
   let closedDuringQuery = false;
+  let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  const abortController = new AbortController();
+  let rejectPolling!: (error: unknown) => void;
+  const pollingFailure = new Promise<never>((_resolve, reject) => {
+    rejectPolling = reject;
+  });
+  let pollWork: Promise<void> = Promise.resolve();
   const pollIpcDuringQuery = () => {
-    if (!ipcPolling) return;
-    if (shouldClose()) {
-      log('Close sentinel detected during query, ending stream');
-      closedDuringQuery = true;
-      stream.end();
-      ipcPolling = false;
-      return;
-    }
-    const messages = drainIpcInput();
-    for (const text of messages) {
-      log(`Piping IPC message into active query (${text.length} chars)`);
-      stream.push(text);
-    }
-    setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
+    pollWork = Promise.resolve().then(() => {
+      if (!ipcPolling) return;
+      if (shouldClose()) {
+        closedDuringQuery = true;
+        stream.end();
+        ipcPolling = false;
+        return;
+      }
+      for (const text of drainIpcInput()) {
+        log(`Piping IPC message into active query (${text.length} chars)`);
+        stream.push(text);
+      }
+      pollTimer = setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
+    });
+    void pollWork.then(undefined, rejectPolling);
   };
-  setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
+  pollTimer = setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
 
   let newSessionId: string | undefined;
   let lastAssistantUuid: string | undefined;
@@ -448,9 +466,10 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
-  for await (const message of query({
+  const nativeQuery = query({
     prompt: stream,
     options: {
+      abortController,
       cwd: '/workspace/group',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
@@ -504,76 +523,94 @@ async function runQuery(
         ],
       },
     },
-  })) {
-    messageCount++;
-    const msgType =
-      message.type === 'system'
-        ? `system/${(message as { subtype?: string }).subtype}`
-        : message.type;
-    log(`[msg #${messageCount}] type=${msgType}`);
+  });
+  const iterator = nativeQuery[Symbol.asyncIterator]();
+  let queryDone = false;
+  try {
+    while (true) {
+      const next = await Promise.race([iterator.next(), pollingFailure]);
+      if (next.done) {
+        // A native completion cannot erase an already-dispatched poll failure.
+        await pollWork;
+        queryDone = true;
+        break;
+      }
+      const message = next.value;
+      messageCount++;
+      const msgType =
+        message.type === 'system'
+          ? `system/${(message as { subtype?: string }).subtype}`
+          : message.type;
+      log(`[msg #${messageCount}] type=${msgType}`);
 
-    if (message.type === 'assistant' && 'uuid' in message) {
-      lastAssistantUuid = (message as { uuid: string }).uuid;
-      // Extract text content from assistant messages for streaming preview
-      const content = (
-        message as {
-          message?: { content?: Array<{ type: string; text?: string }> };
-        }
-      ).message?.content;
-      if (content) {
-        const text = content
-          .filter((c) => c.type === 'text' && c.text)
-          .map((c) => c.text!)
-          .join('');
-        if (text) {
-          streamingTextAccum = text;
-          const now = Date.now();
-          if (now - lastStreamEmit >= STREAM_THROTTLE_MS) {
-            writeOutput({
-              status: 'success',
-              result: null,
-              streamText: streamingTextAccum,
-              newSessionId,
-            });
-            lastStreamEmit = now;
+      if (message.type === 'assistant' && 'uuid' in message) {
+        lastAssistantUuid = (message as { uuid: string }).uuid;
+        // Extract text content from assistant messages for streaming preview
+        const content = (
+          message as {
+            message?: { content?: Array<{ type: string; text?: string }> };
+          }
+        ).message?.content;
+        if (content) {
+          const text = content
+            .filter((c) => c.type === 'text' && c.text)
+            .map((c) => c.text!)
+            .join('');
+          if (text) {
+            streamingTextAccum = text;
+            const now = Date.now();
+            if (now - lastStreamEmit >= STREAM_THROTTLE_MS) {
+              writeOutput({
+                status: 'success',
+                result: null,
+                streamText: streamingTextAccum,
+                newSessionId,
+              });
+              lastStreamEmit = now;
+            }
           }
         }
       }
-    }
 
-    if (message.type === 'system' && message.subtype === 'init') {
-      newSessionId = message.session_id;
-      log(`Session initialized: ${newSessionId}`);
-    }
+      if (message.type === 'system' && message.subtype === 'init') {
+        newSessionId = message.session_id;
+        log(`Session initialized: ${newSessionId}`);
+      }
 
-    if (
-      message.type === 'system' &&
-      (message as { subtype?: string }).subtype === 'task_notification'
-    ) {
-      const tn = message as {
-        task_id: string;
-        status: string;
-        summary: string;
-      };
-      log(`Task notification: status=${tn.status}`);
-    }
-
-    if (message.type === 'result') {
-      resultCount++;
-      log(`Result #${resultCount}: subtype=${message.subtype}`);
-      const output = sdkResultOutput(message, newSessionId);
-      writeOutput(output);
-      if (output.status === 'error') {
-        ipcPolling = false;
-        stream.end();
-        return {
-          newSessionId,
-          lastAssistantUuid,
-          closedDuringQuery,
-          failed: true,
+      if (
+        message.type === 'system' &&
+        (message as { subtype?: string }).subtype === 'task_notification'
+      ) {
+        const tn = message as {
+          task_id: string;
+          status: string;
+          summary: string;
         };
+        log(`Task notification: status=${tn.status}`);
+      }
+
+      if (message.type === 'result') {
+        resultCount++;
+        log(`Result #${resultCount}: subtype=${message.subtype}`);
+        const output = sdkResultOutput(message, newSessionId);
+        writeOutput(output);
+        if (output.status === 'error') {
+          ipcPolling = false;
+          stream.end();
+          return {
+            newSessionId,
+            lastAssistantUuid,
+            closedDuringQuery,
+            failed: true,
+          };
+        }
       }
     }
+  } finally {
+    ipcPolling = false;
+    clearTimeout(pollTimer);
+    stream.end();
+    if (!queryDone) abortController.abort();
   }
 
   ipcPolling = false;
@@ -803,8 +840,9 @@ main().catch((error: unknown) => {
     status: 'error',
     result: null,
     newSessionId: errorSessionId,
-    error:
-      'Agent execution failed; inspect the native SDK configuration before retrying.',
+    error: isFileSystemError(error)
+      ? 'Agent IPC/storage failed; preserve pending input and repair filesystem access before retrying.'
+      : 'Agent execution failed; inspect the native SDK configuration before retrying.',
   });
   process.exit(1);
 });

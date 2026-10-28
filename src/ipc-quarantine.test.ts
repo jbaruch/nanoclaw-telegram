@@ -36,20 +36,27 @@ describe('IPC file quarantine', () => {
     fs.mkdirSync(tasks, { recursive: true });
     fs.mkdirSync(messages);
     const incompleteMessage = JSON.stringify({
+      schema_version: 1,
       type: 'message',
       chatJid: 'tg:123',
     });
     fs.writeFileSync(path.join(messages, 'incomplete.json'), incompleteMessage);
     const invalidUtf8 = Buffer.concat([
-      Buffer.from('{"type":"message","chatJid":"tg:123","text":"'),
+      Buffer.from(
+        '{"schema_version":1,"type":"message","chatJid":"tg:123","text":"',
+      ),
       Buffer.from([0xff]),
       Buffer.from('"}'),
     ]);
     fs.writeFileSync(path.join(messages, 'invalid-utf8.json'), invalidUtf8);
 
     const invalid = {
-      'incomplete.json': { type: 'unsupported_same_name_task' },
+      'incomplete.json': {
+        schema_version: 1,
+        type: 'unsupported_same_name_task',
+      },
       'folder.json': {
+        schema_version: 1,
         type: 'register_group',
         jid: 'tg:123',
         name: 'fixed',
@@ -57,19 +64,22 @@ describe('IPC file quarantine', () => {
         trigger: '@Andy',
       },
       'cron.json': {
+        schema_version: 1,
         type: 'schedule_task',
         targetJid: 'tg:123',
         prompt: 'fixed',
         schedule_type: 'cron',
         schedule_value: { invalid: true },
       },
-      'unknown.json': { type: 'unsupported_request' },
+      'unknown.json': { schema_version: 1, type: 'unsupported_request' },
       'incomplete-task.json': {
+        schema_version: 1,
         type: 'schedule_task',
         prompt: 'fixed',
         schedule_type: 'cron',
       },
       'mount.json': {
+        schema_version: 1,
         type: 'register_group',
         jid: 'tg:123',
         name: 'fixed',
@@ -80,6 +90,32 @@ describe('IPC file quarantine', () => {
     };
     for (const [name, value] of Object.entries(invalid))
       fs.writeFileSync(path.join(tasks, name), JSON.stringify(value));
+    const malformedSender = JSON.stringify({
+      schema_version: 1,
+      type: 'message',
+      chatJid: 'tg:123',
+      text: 'must not send',
+      sender: { invalid: true },
+    });
+    fs.writeFileSync(
+      path.join(messages, 'invalid-sender.json'),
+      malformedSender,
+    );
+    const incompatibleRequests = new Map<string, string>();
+    for (const [name, version] of [
+      ['legacy', undefined],
+      ['future', 2],
+      ['invalid', '1'],
+    ] as const) {
+      const raw = JSON.stringify({
+        ...(version === undefined ? {} : { schema_version: version }),
+        type: 'message',
+        chatJid: 'tg:123',
+        text: 'must remain held',
+      });
+      incompatibleRequests.set(name, raw);
+      fs.writeFileSync(path.join(messages, `${name}-version.json`), raw);
+    }
     const deps: IpcDeps = {
       sendMessage: vi.fn(async () => {}),
       sendReaction: vi.fn(async () => {}),
@@ -124,6 +160,19 @@ describe('IPC file quarantine', () => {
           },
         ]).map((mount) => mount.containerPath),
       ).toContain('/workspace/project/ipc/errors');
+      expect(
+        fs.readFileSync(
+          path.join(quarantine, 'main-messages-0-invalid-sender.json'),
+          'utf8',
+        ),
+      ).toBe(malformedSender);
+      for (const [name, raw] of incompatibleRequests)
+        expect(
+          fs.readFileSync(
+            path.join(quarantine, `main-messages-0-${name}-version.json`),
+            'utf8',
+          ),
+        ).toBe(raw);
       expect(deps.registerGroup).not.toHaveBeenCalled();
       expect(deps.sendMessage).not.toHaveBeenCalled();
       expect(
@@ -159,7 +208,10 @@ describe('IPC file quarantine', () => {
           ),
         ).toEqual(value);
       }
-      const laterBody = JSON.stringify({ type: 'unsupported_later_message' });
+      const laterBody = JSON.stringify({
+        schema_version: 1,
+        type: 'unsupported_later_message',
+      });
       fs.writeFileSync(path.join(messages, 'incomplete.json'), laterBody);
       await vi.advanceTimersByTimeAsync(1000);
       expect(
@@ -188,6 +240,7 @@ describe('IPC file quarantine', () => {
       fs.writeFileSync(
         path.join(messages, 'valid.json'),
         JSON.stringify({
+          schema_version: 1,
           type: 'message',
           chatJid: 'tg:123',
           text: 'fixed later input',
@@ -205,6 +258,7 @@ describe('IPC file quarantine', () => {
       );
       vi.mocked(deps.sendReaction!).mockRejectedValueOnce(reactionFailure);
       const reaction = {
+        schema_version: 1,
         type: 'react_to_message',
         chatJid: 'tg:123',
         messageId: '17',
@@ -242,6 +296,7 @@ describe('IPC file quarantine', () => {
       );
       vi.mocked(deps.sendMessage).mockRejectedValueOnce(unavailable);
       const unknownRoute = {
+        schema_version: 1,
         type: 'message',
         chatJid: 'unknown:fixed',
         text: 'fixed route payload',
@@ -268,6 +323,7 @@ describe('IPC file quarantine', () => {
       fs.writeFileSync(
         path.join(messages, 'route-recovered.json'),
         JSON.stringify({
+          schema_version: 1,
           type: 'message',
           chatJid: 'tg:123',
           text: 'fixed later routed payload',
@@ -288,6 +344,7 @@ describe('IPC file quarantine', () => {
       fs.writeFileSync(
         path.join(messages, 'delayed-defect.json'),
         JSON.stringify({
+          schema_version: 1,
           type: 'message',
           chatJid: 'tg:123',
           text: 'fixed failing input',
@@ -310,6 +367,7 @@ describe('IPC file quarantine', () => {
       fs.writeFileSync(
         path.join(messages, 'after-defect.json'),
         JSON.stringify({
+          schema_version: 1,
           type: 'message',
           chatJid: 'tg:123',
           text: 'fixed healthy input',
@@ -335,6 +393,7 @@ describe('IPC file quarantine', () => {
     const messages = path.join(temporary, 'data', 'ipc', 'main', 'messages');
     fs.mkdirSync(messages, { recursive: true });
     const body = JSON.stringify({
+      schema_version: 1,
       type: 'message',
       chatJid: 'tg:123',
       text: 'fixed input',
@@ -343,6 +402,7 @@ describe('IPC file quarantine', () => {
     fs.writeFileSync(
       path.join(messages, 'z-later.json'),
       JSON.stringify({
+        schema_version: 1,
         type: 'message',
         chatJid: 'tg:123',
         text: 'fixed later input',
@@ -398,7 +458,10 @@ it('retains the sole claim when the first quarantine directory parent cannot be 
   const base = path.join(temporary, 'data', 'ipc'),
     messages = path.join(base, 'main', 'messages');
   fs.mkdirSync(messages, { recursive: true, mode: 0o755 });
-  const original = JSON.stringify({ type: 'unsupported_request' });
+  const original = JSON.stringify({
+    schema_version: 1,
+    type: 'unsupported_request',
+  });
   fs.writeFileSync(path.join(messages, 'fixed.json'), original);
   const source = fileURLToPath(new URL('./ipc.ts', import.meta.url));
   const script = `import fs from 'node:fs';import path from 'node:path';import {startIpcWatcher} from ${JSON.stringify(source)};
