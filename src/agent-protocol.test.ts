@@ -2,12 +2,14 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { spawnSync } from 'child_process';
+import { ChildProcess, spawnSync } from 'child_process';
+import { GroupQueue } from './group-queue.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const context = vi.hoisted(() => ({ timezone: 'UTC', data: '' }));
 vi.mock('@onecli-sh/sdk', () => ({ OneCLI: class {} }));
 vi.mock('./config.js', () => ({
   ONECLI_URL: 'http://fixture.invalid',
+  MAX_CONCURRENT_CONTAINERS: 2,
   get DATA_DIR() {
     return context.data;
   },
@@ -87,6 +89,7 @@ function fixtureHook(
       };}});`;
   const childModule = `import * as native from 'node:child_process';export * from 'node:child_process';export function execFile(file,args,options,callback){return native.execFile(file,args.map(value=>value==='/tmp/task-script.sh'?${JSON.stringify(path.join(directory, 'task-script.sh'))}:value),options,callback);}`;
   const source = `import {registerHooks} from 'node:module';
+    if(${JSON.stringify(sdkFailure === 'throw')}){const write=process.stdout.write.bind(process.stdout);process.stdout.write=(...args)=>{setTimeout(()=>write(...args),50);return true;};}
     const fsModule=${JSON.stringify(fsModule)};
     const childModule=${JSON.stringify(childModule)};
     const sdk=${JSON.stringify(sdkFailure === 'settle-poll-failure' ? "import fs from 'fs';export function query(){let step=0;return {[Symbol.asyncIterator](){return this;},next(){if(++step===1)return Promise.resolve({done:false,value:{type:'result',subtype:'success',is_error:false,result:'initial complete'}});fs.writeFileSync('/workspace/ipc/input/_close','close');return new Promise(resolve=>{globalThis.fixedFixtureSDKDone=()=>resolve({done:true});});}};}" : sdkFailure === 'poll-failure' ? "import fs from 'fs';export async function* query(){fs.writeFileSync('/workspace/ipc/input/_close','close');await new Promise(()=>{});}" : sdkFailure === 'wait-failure' ? "import fs from 'fs';export async function* query(){fs.writeFileSync('/workspace/ipc/input/_close','close');yield {type:'result',subtype:'success',is_error:false,result:'initial complete'};}" : sdkFailure === 'drain' ? "import fs from 'fs';export async function* query({prompt}){const first=await prompt[Symbol.asyncIterator]().next();fs.writeFileSync('/workspace/ipc/input/_close','close');yield {type:'result',subtype:'success',is_error:false,result:first.value.message.content};}" : sdkFailure === 'throw' ? "export async function* query(){throw new TypeError('fixed-private-unexpected-sdk-body');}" : "setInterval(()=>{},60000); export async function* query(){yield {type:'result',subtype:'error_during_execution',is_error:true,errors:['fixed-private-sdk-body']};throw new Error('SDK event after failure must not be consumed');}")};
@@ -563,7 +566,16 @@ it('routes an actual unexpected SDK producer defect through the sole outer frame
   );
 });
 
-it.each(['null', '[]', '{"wakeAgent":"false"}', '{broken'])(
+it.each([
+  'null',
+  '[]',
+  '{"wakeAgent":"false"}',
+  '{broken',
+  '{"wakeAgent":true,"data":null}',
+  '{"wakeAgent":true,"data":[]}',
+  '{"wakeAgent":true,"data":7}',
+  '{"wakeAgent":true,"data":"private"}',
+])(
   'actual scheduled precheck refuses malformed output %s without querying the SDK',
   (output) => {
     const script = 'printf "%s\\n" ' + "'" + output + "'";
@@ -703,15 +715,24 @@ it('actual agent drain keeps already consumed input when a later native read fai
   fs.mkdirSync(input, { recursive: true });
   fs.writeFileSync(
     path.join(input, '001-first.json'),
-    JSON.stringify({ type: 'message', text: 'first synthetic input' }),
+    JSON.stringify({
+      schema_version: 1,
+      type: 'message',
+      text: 'first synthetic input',
+    }),
   );
   const held = JSON.stringify({
+    schema_version: 1,
     type: 'message',
     text: 'later held synthetic input',
   });
   fs.writeFileSync(
     path.join(input, '003-independent.json'),
-    JSON.stringify({ type: 'message', text: 'independent synthetic input' }),
+    JSON.stringify({
+      schema_version: 1,
+      type: 'message',
+      text: 'independent synthetic input',
+    }),
   );
   fs.writeFileSync(path.join(input, '002-held.json'), held);
   const child = run(
@@ -774,5 +795,104 @@ it.each(['poll-failure', 'wait-failure', 'settle-poll-failure'] as const)(
         path.join(directory, 'workspace', 'ipc', 'input', '_close'),
       ),
     ).toBe(true);
+  },
+);
+
+it('actual host follow-up writer and agent reader share schema1 while incompatible input stays unchanged', async () => {
+  const input = path.join(directory, 'workspace', 'ipc', 'input');
+  const hostInput = path.join(context.data, 'ipc', 'main', 'input');
+  fs.mkdirSync(input, { recursive: true });
+  const incompatible = [
+    { type: 'message', text: 'legacy private input' },
+    { schema_version: 2, type: 'message', text: 'future private input' },
+    { schema_version: 1, type: 'message', text: 12 },
+  ];
+  incompatible.forEach((record, index) =>
+    fs.writeFileSync(
+      path.join(input, `held-${index}.json`),
+      JSON.stringify(record),
+    ),
+  );
+  const queue = new GroupQueue();
+  let finish!: () => void;
+  queue.setProcessMessagesFn(async () => {
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    return true;
+  });
+  queue.enqueueMessageCheck('tg:fixture');
+  queue.registerProcess(
+    'tg:fixture',
+    new ChildProcess(),
+    'private-fixture',
+    'main',
+  );
+  try {
+    expect(queue.sendMessage('tg:fixture', 'host follow-up input')).toBe(true);
+    const files = fs.readdirSync(hostInput);
+    expect(files).toHaveLength(1);
+    expect(
+      JSON.parse(fs.readFileSync(path.join(hostInput, files[0]), 'utf8')),
+    ).toEqual({
+      schema_version: 1,
+      type: 'message',
+      text: 'host follow-up input',
+    });
+    // Synthetic group-bind transport; preserve the actual host-produced bytes.
+    fs.renameSync(path.join(hostInput, files[0]), path.join(input, files[0]));
+    const child = run(
+      'index.ts',
+      JSON.stringify({
+        prompt: 'initial',
+        chatJid: 'tg:fixture',
+        groupFolder: 'main',
+        isMain: true,
+      }),
+      'drain',
+    );
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+    const frames = [
+      ...child.stdout.matchAll(
+        /---NANOCLAW_OUTPUT_START---\s*([\s\S]*?)\s*---NANOCLAW_OUTPUT_END---/g,
+      ),
+    ].map((match) => JSON.parse(match[1]));
+    expect(
+      frames.find((frame) => frame.completion === 'sdk_turn_completed')?.result,
+    ).toBe('initial\nhost follow-up input');
+    incompatible.forEach((record, index) =>
+      expect(
+        fs.readFileSync(path.join(input, `held-${index}.json`), 'utf8'),
+      ).toBe(JSON.stringify(record)),
+    );
+    expect(fs.existsSync(path.join(input, files[0]))).toBe(false);
+  } finally {
+    finish();
+    await Promise.resolve();
+  }
+});
+
+it.each(['{"wakeAgent":true}', '{"wakeAgent":true,"data":{}}'])(
+  'actual precheck accepts object activation data or defaults omitted data: %s',
+  (output) => {
+    const child = run(
+      'index.ts',
+      JSON.stringify({
+        prompt: 'fixed',
+        chatJid: 'tg:fixture',
+        groupFolder: 'main',
+        isMain: true,
+        isScheduledTask: true,
+        script: 'printf "%s\\n" ' + "'" + output + "'",
+      }),
+      'drain',
+    );
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+    expect(child.stdout).toContain('sdk_turn_completed');
+    expect(child.stdout).not.toContain(
+      'Task script did not return a valid precheck result',
+    );
   },
 );

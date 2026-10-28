@@ -190,7 +190,10 @@ export class GroupQueue {
       const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
       const filepath = path.join(inputDir, filename);
       const tempPath = `${filepath}.tmp`;
-      fs.writeFileSync(tempPath, JSON.stringify({ type: 'message', text }));
+      fs.writeFileSync(
+        tempPath,
+        JSON.stringify({ schema_version: 1, type: 'message', text }),
+      );
       fs.renameSync(tempPath, filepath);
       return true;
     } catch (err) {

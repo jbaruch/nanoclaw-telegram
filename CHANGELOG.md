@@ -6,6 +6,10 @@ For detailed release notes, see the [full changelog on the documentation site](h
 
 ### Runtime diagnostics
 
+- Version retained host follow-up input, preserve incompatible input before SDK admission, require object activation data from scheduled prechecks, flush outer failure diagnostics before native exit, and document the Remote Control starting gate lifecycle.
+
+- Quarantine only native task-create primary-key conflicts from untrusted request IDs, preserve retained task definitions, and continue independent IPC work while leaving other SQLite defects visible to the host owner.
+
 - Version durable MCP message/task requests independently of custody metadata and quarantine incompatible bytes before effects. Own both agent pollers through awaited promises, abort only the affected native query on input-lifecycle failure, and preserve collected input across expected per-file I/O failures. Pin CI action commits with automated renewal and gate macOS tests on successful diagnostics.
 
 - Retain already-consumed agent input across a later expected filesystem failure, return collected progress to the active turn, and preserve the failed input file for repair/retry.

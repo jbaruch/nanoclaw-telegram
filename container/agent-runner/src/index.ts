@@ -5,7 +5,7 @@
  * Input protocol:
  *   Stdin: Full ContainerInput JSON (read until EOF, like before)
  *   IPC:   Follow-up messages written as JSON files to /workspace/ipc/input/
- *          Files: {type:"message", text:"..."}.json — polled and consumed
+ *          Files: {schema_version:1, type:"message", text:"..."}.json — polled and consumed
  *          Sentinel: /workspace/ipc/input/_close — signals session end
  *
  * Stdout protocol:
@@ -323,10 +323,25 @@ function drainIpcInput(): string[] {
       const filePath = path.join(IPC_INPUT_DIR, file);
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-        fs.unlinkSync(filePath);
-        if (data.type === 'message' && data.text) {
-          messages.push(data.text);
+        if (
+          !data ||
+          typeof data !== 'object' ||
+          Array.isArray(data) ||
+          data.schema_version !== 1 ||
+          data.type !== 'message' ||
+          typeof data.text !== 'string' ||
+          !data.text ||
+          Object.keys(data).some(
+            (key) => !['schema_version', 'type', 'text'].includes(key),
+          )
+        ) {
+          log(
+            'Unsupported IPC input retained; repair the co-shipped host writer and agent reader before retrying.',
+          );
+          continue;
         }
+        fs.unlinkSync(filePath);
+        messages.push(data.text);
       } catch (err) {
         if (!(err instanceof SyntaxError) && !isFileSystemError(err)) throw err;
         if (isFileSystemError(err)) {
@@ -622,7 +637,7 @@ async function runQuery(
 
 interface ScriptResult {
   wakeAgent: boolean;
-  data?: unknown;
+  data: Record<string, unknown>;
 }
 
 const SCRIPT_TIMEOUT_MS = 30_000;
@@ -648,10 +663,14 @@ function parseScriptOutput(line: string): ScriptResult | null {
     log('Script output is missing its wakeAgent boolean.');
     return null;
   }
-  return {
-    wakeAgent: result.wakeAgent,
-    ...('data' in result ? { data: result.data } : {}),
-  };
+  const data = 'data' in result ? result.data : {};
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    log(
+      'Script activation data must be an object; repair the precheck output before retrying.',
+    );
+    return null;
+  }
+  return { wakeAgent: result.wakeAgent, data: data as Record<string, unknown> };
 }
 
 async function runScript(script: string): Promise<ScriptResult | null> {
@@ -844,5 +863,9 @@ main().catch((error: unknown) => {
       ? 'Agent IPC/storage failed; preserve pending input and repair filesystem access before retrying.'
       : 'Agent execution failed; inspect the native SDK configuration before retrying.',
   });
-  process.exit(1);
+  process.stdout.write('', (flushError) => {
+    if (flushError)
+      log('Agent diagnostic flush failed; inspect the host output pipe.');
+    process.exit(1);
+  });
 });

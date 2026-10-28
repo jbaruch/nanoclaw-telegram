@@ -6,6 +6,7 @@ import {
   IpcRouteUnavailableError,
 } from './operational-errors.js';
 import fs from 'fs';
+import Database from 'better-sqlite3';
 import path from 'path';
 
 import {
@@ -457,19 +458,34 @@ export async function processTaskIpc(
           data.context_mode === 'group' || data.context_mode === 'isolated'
             ? data.context_mode
             : 'isolated';
-        createTask({
-          id: taskId,
-          group_folder: targetFolder,
-          chat_jid: targetJid,
-          prompt: data.prompt,
-          script: data.script || null,
-          schedule_type: scheduleType,
-          schedule_value: data.schedule_value,
-          context_mode: contextMode,
-          next_run: nextRun,
-          status: 'active',
-          created_at: new Date().toISOString(),
-        });
+        try {
+          createTask({
+            id: taskId,
+            group_folder: targetFolder,
+            chat_jid: targetJid,
+            prompt: data.prompt,
+            script: data.script || null,
+            schedule_type: scheduleType,
+            schedule_value: data.schedule_value,
+            context_mode: contextMode,
+            next_run: nextRun,
+            status: 'active',
+            created_at: new Date().toISOString(),
+          });
+        } catch (error) {
+          // This one plain INSERT atomically refuses an agent-supplied ID
+          // collision. Other constraint/schema failures remain native defects.
+          if (
+            !(error instanceof Database.SqliteError) ||
+            error.code !== 'SQLITE_CONSTRAINT_PRIMARYKEY'
+          )
+            throw error;
+          throw new SyntaxError(
+            'Task request ID conflicts with retained state; inspect the native task list before retrying.',
+            { cause: error },
+          );
+        }
+
         logger.info(
           { taskId, sourceGroup, targetFolder, contextMode },
           'Task created via IPC',

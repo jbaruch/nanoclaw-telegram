@@ -24,6 +24,18 @@ import { logger } from './logger.js';
  * unchanged; adopting today's PID would invent a migration. Unsupported/newer,
  * malformed or unverifiable records never authorize adoption or signaling.
  * Real-Claude nonce preservation on Darwin is a separate native acceptance gate.
+ *
+ * remote-control-starting.json is a separate gate-store artifact, also solely
+ * owned by this module. Its schema1 writer reserveStart uses exclusive nofollow
+ * creation, mode0600, and fsyncs file/parent before launch. Exact fields are
+ * schema_version:1, state:'starting', owner_pid (native host PID), attempt_id
+ * (random UUID); these are reservation metadata, never restored PID authority.
+ * Any occupied gate (legacy, newer, malformed or uncertain) refuses acquisition
+ * unchanged. There is no migration, timeout eviction or automatic restart reset.
+ * The same-process release closure verifies original inode, regular/single-link
+ * type and exact bytes before unlink+parent fsync. It releases only after no
+ * child was launched, a session was durably tracked, or native absence proved;
+ * unknown retirement preserves the gate. Cleanup failures propagate to owner.
  */
 class UnsupportedRemoteControlStateError extends Error {}
 

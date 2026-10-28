@@ -33,7 +33,7 @@ afterEach(() => {
   if (fixture.directory)
     fs.rmSync(fixture.directory, { recursive: true, force: true });
 });
-it('quarantines an invalid update unchanged, applies a valid once update, and propagates a SQL defect', async () => {
+it('quarantines untrusted duplicate/update errors, proceeds with later requests, and propagates native SQL defects', async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2024-01-01T00:00:00Z'));
   fixture.directory = fs.mkdtempSync(
@@ -52,6 +52,42 @@ it('quarantines an invalid update unchanged, applies a valid once update, and pr
     status: 'active',
     created_at: '2024-01-01T00:00:00Z',
   });
+  createTask({
+    id: 'owned-other-task',
+    group_folder: 'other',
+    chat_jid: 'tg:other',
+    prompt: 'retained owner task',
+    schedule_type: 'interval',
+    schedule_value: '60000',
+    next_run: '2024-01-01T00:01:00.000Z',
+    context_mode: 'isolated',
+    status: 'active',
+    created_at: '2024-01-01T00:00:00Z',
+  });
+  const retainedOther = getTaskById('owned-other-task');
+  const otherTasks = path.join(fixture.directory, 'ipc', 'other', 'tasks');
+  fs.mkdirSync(otherTasks, { recursive: true });
+  const duplicate = {
+    schema_version: 1,
+    type: 'schedule_task',
+    taskId: 'owned-other-task',
+    targetJid: 'tg:other',
+    prompt: 'must not replace',
+    schedule_type: 'interval',
+    schedule_value: '60000',
+  };
+  fs.writeFileSync(
+    path.join(otherTasks, 'a-duplicate.json'),
+    JSON.stringify(duplicate),
+  );
+  fs.writeFileSync(
+    path.join(otherTasks, 'b-valid.json'),
+    JSON.stringify({
+      ...duplicate,
+      taskId: 'fresh-other-task',
+      prompt: 'later valid owner task',
+    }),
+  );
   const tasks = path.join(fixture.directory, 'ipc', 'main', 'tasks'),
     messages = path.join(fixture.directory, 'ipc', 'main', 'messages');
   fs.mkdirSync(tasks, { recursive: true });
@@ -68,6 +104,12 @@ it('quarantines an invalid update unchanged, applies a valid once update, and pr
   const deps: IpcDeps = {
     sendMessage: vi.fn(async () => {}),
     registeredGroups: () => ({
+      'tg:other': {
+        name: 'other',
+        folder: 'other',
+        trigger: '@Andy',
+        added_at: '2024-01-01T00:00:00Z',
+      },
       'tg:123': {
         name: 'fixed',
         folder: 'main',
@@ -83,7 +125,30 @@ it('quarantines an invalid update unchanged, applies a valid once update, and pr
     onTasksChanged: vi.fn(),
   };
   const lifecycle = startIpcWatcher(deps);
+  const failed = vi.fn();
+  void lifecycle.then(undefined, failed);
   await vi.advanceTimersByTimeAsync(0);
+  expect(failed).not.toHaveBeenCalled();
+  expect(getTaskById('owned-other-task')).toEqual(retainedOther);
+  expect(getTaskById('fresh-other-task')).toMatchObject({
+    group_folder: 'other',
+    prompt: 'later valid owner task',
+    status: 'active',
+  });
+  expect(
+    JSON.parse(
+      fs.readFileSync(
+        path.join(
+          fixture.directory,
+          'ipc',
+          'errors',
+          'other-tasks-0-a-duplicate.json',
+        ),
+        'utf8',
+      ),
+    ),
+  ).toEqual(duplicate);
+  expect(vi.getTimerCount()).toBe(1);
   expect(getTaskById('fixed-task')).toEqual(before);
   expect(
     JSON.parse(
@@ -115,7 +180,7 @@ it('quarantines an invalid update unchanged, applies a valid once update, and pr
     next_run: '2024-02-03T04:05:06.000Z',
     prompt: 'fixed',
   });
-  expect(deps.onTasksChanged).toHaveBeenCalledTimes(1);
+  expect(deps.onTasksChanged).toHaveBeenCalledTimes(2);
   expect(fs.existsSync(path.join(tasks, 'valid.json'))).toBe(false);
   // Existing owner-written legacy schedule is not reparsed by an unrelated edit.
   updateTask('fixed-task', {
@@ -139,7 +204,7 @@ it('quarantines an invalid update unchanged, applies a valid once update, and pr
     schedule_value: '2024-02-03T04:05',
     next_run: '2024-02-03T04:05:06.000Z',
   });
-  expect(deps.onTasksChanged).toHaveBeenCalledTimes(2);
+  expect(deps.onTasksChanged).toHaveBeenCalledTimes(3);
 
   const defect = new Database.SqliteError(
     'fixed missing column',
