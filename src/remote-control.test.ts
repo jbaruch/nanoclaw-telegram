@@ -312,6 +312,30 @@ describe('remote-control', () => {
       vi.useRealTimers();
     });
 
+    it('preserves an asynchronous child defect while retirement is already in progress', async () => {
+      vi.useFakeTimers();
+      const proc = createMockProcess(44444);
+      spawnMock.mockReturnValue(proc);
+      const defect = new TypeError('fixed child defect during retirement');
+      let absent = false;
+      vi.spyOn(process, 'kill').mockImplementation((_pid, signal) => {
+        if (signal === 'SIGTERM') {
+          absent = true;
+          proc.stdin.emit('error', defect);
+        }
+        if (signal === 0 && absent)
+          throw Object.assign(new Error('fixed absent'), { code: 'ESRCH' });
+        return true;
+      });
+      const pending = startRemoteControl('owner', 'tg:123', '/project');
+      const rejected = expect(pending).rejects.toBe(defect);
+      await vi.advanceTimersByTimeAsync(30_200);
+      await rejected;
+      expect(startingBytes).toBe('');
+      expect(vi.getTimerCount()).toBe(0);
+      vi.useRealTimers();
+    });
+
     it('retains the exclusive gate when successful signals do not prove native retirement', async () => {
       vi.useFakeTimers();
       spawnMock.mockReturnValue(createMockProcess(44444));

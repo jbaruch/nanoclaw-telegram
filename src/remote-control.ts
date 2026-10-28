@@ -328,6 +328,7 @@ async function startRemoteControlOwned(
     const finish = (
       result: { ok: true; url: string } | { ok: false; error: string },
     ) => {
+      if (settled) return;
       settled = true;
       clearTimeout(timer);
       resolve(result);
