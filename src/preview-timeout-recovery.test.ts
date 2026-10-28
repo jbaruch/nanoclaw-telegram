@@ -156,6 +156,7 @@ it.each([
   'sdk-is-error',
   'markerless-clean',
   'unfinished-clean',
+  'invalid-utf8-clean',
   'session-clean',
   'markerless-overflow',
   'unfinished-overflow',
@@ -257,9 +258,17 @@ it.each([
         newSessionId: 'fixed-session',
       });
       fixture.proc.stdout.push(
-        failure === 'markerless-clean'
-          ? 'fixed diagnostic only'
-          : '---NANOCLAW_OUTPUT_START---\n' +
+        failure === 'invalid-utf8-clean'
+          ? Buffer.concat([
+              Buffer.from(
+                '---NANOCLAW_OUTPUT_START---\n{"status":"success","result":"',
+              ),
+              Buffer.from([0xff]),
+              Buffer.from('"}\n---NANOCLAW_OUTPUT_END---\n'),
+            ])
+          : failure === 'markerless-clean'
+            ? 'fixed diagnostic only'
+            : '---NANOCLAW_OUTPUT_START---\n' +
               session +
               (failure === 'session-clean'
                 ? '\n---NANOCLAW_OUTPUT_END---\n'

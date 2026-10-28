@@ -1,5 +1,6 @@
 import {
   isCommandError,
+  hasErrno,
   ContainerExitError,
   ContainerOutputProtocolError,
 } from './operational-errors.js';
@@ -55,6 +56,24 @@ function frameStart(buffer: Buffer | string): number {
     offset = buffer.indexOf(OUTPUT_START_LINE, offset + 1);
   }
   return offset;
+}
+
+function decodeOutput(bytes: Buffer): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+      bytes,
+    );
+  } catch (error) {
+    if (
+      !(error instanceof TypeError) ||
+      !hasErrno(error, 'ERR_ENCODING_INVALID_ENCODED_DATA')
+    )
+      throw error;
+    throw new SyntaxError(
+      'Agent output is not valid UTF-8; retain undelivered input.',
+      { cause: error },
+    );
+  }
 }
 
 export interface ContainerInput {
@@ -400,6 +419,7 @@ export async function runContainerAgent(
     // Retain raw frame bytes until both markers arrive, so UTF-8 characters
     // split across native stdout chunks are decoded exactly once.
     let parseBuffer = Buffer.alloc(0);
+    let legacyBytes = Buffer.alloc(0);
     let newSessionId: string | undefined;
     let outputProtocolError = false;
     const hasInvalidFrame = () =>
@@ -483,9 +503,16 @@ export async function runContainerAgent(
           }
         }
 
+        const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
+        if (!onOutput) {
+          if (legacyBytes.length + bytes.length > CONTAINER_MAX_OUTPUT_SIZE)
+            throw new ContainerOutputProtocolError(
+              'Agent output exceeded the bounded legacy parser; retain undelivered input.',
+            );
+          legacyBytes = Buffer.concat([legacyBytes, bytes]);
+        }
         // Stream-parse for output markers
         if (onOutput) {
-          const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
           if (parseBuffer.length + bytes.length > CONTAINER_MAX_OUTPUT_SIZE) {
             parseBuffer = Buffer.alloc(0);
             throw new ContainerOutputProtocolError(
@@ -501,14 +528,16 @@ export async function runContainerAgent(
             );
             if (endIdx === -1) break; // Incomplete pair, wait for more data
 
-            const jsonStr = parseBuffer
-              .slice(startIdx + OUTPUT_START_LINE.length, endIdx)
-              .toString('utf8')
-              .trim();
+            const jsonBytes = parseBuffer.slice(
+              startIdx + OUTPUT_START_LINE.length,
+              endIdx,
+            );
             parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_LINE.length);
 
             try {
-              const parsed = parseContainerOutput(jsonStr);
+              const parsed = parseContainerOutput(
+                decodeOutput(jsonBytes).trim(),
+              );
               if (
                 parsed.completion === 'script_precheck_completed' &&
                 (!input.script || !input.isScheduledTask)
@@ -759,21 +788,23 @@ export async function runContainerAgent(
 
         // Legacy mode: parse the last output marker pair from accumulated stdout
         try {
+          // Decode original bounded bytes, never the lossy diagnostic text.
+          const legacyText = decodeOutput(legacyBytes);
           // Extract JSON between sentinel markers for robust parsing
-          const startIdx = frameStart(stdout);
-          const endIdx = stdout.indexOf(
+          const startIdx = frameStart(legacyText);
+          const endIdx = legacyText.indexOf(
             OUTPUT_END_LINE,
             startIdx + OUTPUT_START_LINE.length,
           );
 
           let jsonLine: string;
           if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-            jsonLine = stdout
+            jsonLine = legacyText
               .slice(startIdx + OUTPUT_START_LINE.length, endIdx)
               .trim();
           } else {
             // Fallback: last non-empty line (backwards compatibility)
-            const lines = stdout.trim().split('\n');
+            const lines = legacyText.trim().split('\n');
             jsonLine = lines[lines.length - 1];
           }
 

@@ -276,6 +276,34 @@ describe('container-runner timeout behavior', () => {
     },
   );
 
+  it.each([true, false])(
+    'refuses invalid native UTF-8 without any admitted result (streaming=%s)',
+    async (streaming) => {
+      const onOutput = vi.fn(async () => {});
+      const pending = runContainerAgent(
+        testGroup,
+        testInput,
+        () => {},
+        streaming ? onOutput : undefined,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      fakeProc.stdout.push(
+        Buffer.concat([
+          Buffer.from(`${OUTPUT_START_MARKER}\n{"status":"success","result":"`),
+          Buffer.from([0xff]),
+          Buffer.from(`"}\n${OUTPUT_END_MARKER}\n`),
+        ]),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      fakeProc.emit('close', 0);
+      await expect(pending).resolves.toMatchObject({
+        status: 'error',
+        result: null,
+      });
+      expect(onOutput).not.toHaveBeenCalled();
+    },
+  );
+
   it('accepts silent completed scheduled prechecks while refusing markerless scripts', async () => {
     const input = {
       ...testInput,
