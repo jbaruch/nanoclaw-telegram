@@ -25,3 +25,6 @@ Known invalid captured JSON leaves and non-request filenames share a pre-dispatc
 
 
 An `update_task` producer call must include at least one prompt, script or schedule field before it can publish schema 1; the host retains the same requirement. Omission is distinct from an explicit empty script, which remains a supported script-removal update. Neither queued update nor source validation proves a native effect or delivery.
+
+
+The non-authoritative channel work hint treats any observed entry as work, including a lone non-JSON file, directory, alias or FIFO. It reads only directory-entry metadata, closes its handles and still requires native identity checks plus private per-entry custody before any parse/effect. Empty channels remain an idle no-write path. Co-shipped agent source refresh is owned by `src/agent-source-cache.ts` and documented in `docs/AGENT-SOURCE-CACHE.md`; mtimes cannot authorize an old protocol producer.

@@ -6,6 +6,8 @@ For detailed release notes, see the [full changelog on the documentation site](h
 
 ### Runtime diagnostics
 
+- Refresh the customizable per-group runner from every canonical source byte through a host-only versioned digest marker, preserving custom-only extras and same-base edits while retaining interrupted refresh debt. Treat any lone channel entry as work so non-request evidence reaches private custody.
+
 - Capture observed IPC entries individually so late JSON published through a retained old channel directory stays pending for the next scan, while only observed non-request leaves enter durable quarantine. Refuse no-op task updates before publication, preserving explicit empty-script removal.
 
 - Quarantine known invalid or access-refused captured JSON entries before dispatch without following aliases or deleting unknown contents. Preserve storage/rename/fsync uncertainty and all pending/in-flight conflicts as holds, while valid same-batch and other-source IPC can progress.

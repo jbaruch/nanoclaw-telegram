@@ -134,10 +134,7 @@ function channelHasRequests(directory: string): boolean {
   }
   using _dirLease = { [Symbol.dispose]: () => dir.closeSync() };
   try {
-    let count = 0;
-    for (let entry = dir.readSync(); entry; entry = dir.readSync()) {
-      if (++count > 1024 || entry.name.endsWith('.json')) return true;
-    }
+    if (dir.readSync()) return true;
     const after = fs.lstatSync(directory);
     return (
       !after.isDirectory() ||

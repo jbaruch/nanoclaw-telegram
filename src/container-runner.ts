@@ -12,6 +12,7 @@ import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
 import { StringDecoder } from 'string_decoder';
 import { protectIpcClaimMounts } from './ipc-mounts.js';
+import { syncAgentRunnerSource } from './agent-source-cache.js';
 import path from 'path';
 
 import {
@@ -246,16 +247,7 @@ function buildVolumeMounts(
     'agent-runner-src',
   );
   if (fs.existsSync(agentRunnerSrc)) {
-    const srcIndex = path.join(agentRunnerSrc, 'index.ts');
-    const cachedIndex = path.join(groupAgentRunnerDir, 'index.ts');
-    const needsCopy =
-      !fs.existsSync(groupAgentRunnerDir) ||
-      !fs.existsSync(cachedIndex) ||
-      (fs.existsSync(srcIndex) &&
-        fs.statSync(srcIndex).mtimeMs > fs.statSync(cachedIndex).mtimeMs);
-    if (needsCopy) {
-      fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
-    }
+    syncAgentRunnerSource(agentRunnerSrc, groupAgentRunnerDir);
   }
   mounts.push({
     hostPath: groupAgentRunnerDir,

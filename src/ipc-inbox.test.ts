@@ -1,7 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { spawnSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createIpcInbox } from './ipc-inbox.js';
@@ -913,5 +913,41 @@ it.each([1, 2])(
       record,
     );
     expect(fs.existsSync(path.join(evidence, 'inbox'))).toBe(false);
+  },
+);
+
+it.each(['file', 'directory', 'symlink', 'fifo'] as const)(
+  'treats a lone non-request %s as work and preserves it in private custody',
+  (kind) => {
+    const directory = source(),
+      leaf = path.join(directory, 'stray.bin'),
+      foreign = path.join(base, 'foreign-target');
+    fs.writeFileSync(foreign, 'retained foreign');
+    if (kind === 'directory') fs.mkdirSync(leaf);
+    else if (kind === 'symlink') fs.symlinkSync(foreign, leaf);
+    else if (kind === 'fifo') execFileSync('mkfifo', [leaf]);
+    else fs.writeFileSync(leaf, 'retained stray');
+    const inbox = createIpcInbox(base);
+    inbox.capture('main', 'messages');
+    expect(fs.readdirSync(path.join(base, '.claimed-v1'))).toHaveLength(1);
+    expect(inbox.pending()).toEqual({ claims: [], held: 0 });
+    expect(fs.readdirSync(path.join(base, '.claimed-v1'))).toEqual([]);
+    const evidence = path.join(
+      base,
+      'errors',
+      fs.readdirSync(path.join(base, 'errors'))[0],
+    );
+    expect(
+      JSON.parse(fs.readFileSync(path.join(evidence, 'owner.json'), 'utf8')),
+    ).toMatchObject({ schema_version: 1, file: 'stray.bin' });
+    const retained = fs.lstatSync(path.join(evidence, 'captured'));
+    expect(retained.isSymbolicLink()).toBe(kind === 'symlink');
+    expect(retained.isFIFO()).toBe(kind === 'fifo');
+    expect(retained.isDirectory()).toBe(kind === 'directory');
+    expect(fs.readFileSync(foreign, 'utf8')).toBe('retained foreign');
+    if (kind === 'file')
+      expect(fs.readFileSync(path.join(evidence, 'captured'), 'utf8')).toBe(
+        'retained stray',
+      );
   },
 );
