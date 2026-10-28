@@ -1,6 +1,8 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { spawnSync } from 'child_process';
+import { fileURLToPath } from 'url';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createIpcInbox } from './ipc-inbox.js';
 let base: string;
@@ -186,4 +188,51 @@ it('preserves owner evidence if another scan begins dispatch during empty-slot c
   expect(raced).toBe(true);
   expect(fs.readFileSync(ownerFile, 'utf8')).toBe(before);
   expect(fs.readFileSync(path.join(slot, 'in_flight'), 'utf8')).toBe(body());
+});
+
+it('actual host snapshot creation remains admissible under a permissive inherited umask', () => {
+  const runner = fileURLToPath(
+    new URL('./container-runner.ts', import.meta.url),
+  );
+  const owner = fileURLToPath(new URL('./ipc-inbox.ts', import.meta.url));
+  const script = `import fs from 'node:fs';import path from 'node:path';import {writeTasksSnapshot} from ${JSON.stringify(runner)};import {createIpcInbox} from ${JSON.stringify(owner)};
+    process.umask(0o002);writeTasksSnapshot('main',true,[]);
+    const base=path.join(process.cwd(),'data','ipc');const group=path.join(base,'main');
+    for(const p of [base,group]){if((fs.lstatSync(p).mode&0o777)!==0o755)throw new Error('Unsafe native-created mode');}
+    const inbox=createIpcInbox(base);inbox.capture('main','messages');
+    if(inbox.pending().held!==0)throw new Error('Native writer refused');process.stdout.write('ADMITTED');`;
+  const child = spawnSync(
+    process.execPath,
+    [
+      '--import',
+      fileURLToPath(import.meta.resolve('tsx/esm')),
+      '--input-type',
+      'module',
+      '-e',
+      script,
+    ],
+    {
+      cwd: base,
+      env: { PATH: process.env.PATH ?? '', HOME: base, TZ: 'UTC' },
+      encoding: 'utf8',
+      timeout: 10000,
+      maxBuffer: 262144,
+    },
+  );
+  expect(child.error).toBeUndefined();
+  expect(child.status, child.stderr).toBe(0);
+  expect(child.stdout).toContain('ADMITTED');
+});
+
+it('holds invalid UTF-8 private metadata without widening or removing its gate', () => {
+  const directory = source();
+  fs.writeFileSync(path.join(directory, 'fixed.json'), body());
+  const inbox = createIpcInbox(base);
+  inbox.capture('main', 'messages');
+  const root = path.join(base, '.claimed-v1');
+  const metadata = path.join(root, fs.readdirSync(root)[0], 'owner.json');
+  const original = Buffer.from([123, 34, 255, 34, 58, 49, 125]);
+  fs.writeFileSync(metadata, original);
+  expect(createIpcInbox(base).pending()).toEqual({ claims: [], held: 1 });
+  expect(fs.readFileSync(metadata)).toEqual(original);
 });

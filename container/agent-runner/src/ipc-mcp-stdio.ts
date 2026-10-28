@@ -21,17 +21,56 @@ const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
 
 function writeIpcFile(dir: string, data: object): string {
-  fs.mkdirSync(dir, { recursive: true });
-
+  fs.mkdirSync(IPC_DIR, { recursive: true, mode: 0o755 });
   const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
   const filepath = path.join(dir, filename);
-
-  // Atomic write: temp file then rename
-  const tempPath = `${filepath}.tmp`;
-  fs.writeFileSync(tempPath, JSON.stringify(data, null, 2));
-  fs.renameSync(tempPath, filepath);
-
-  return filename;
+  // The host atomically captures channel directories. Keep the unpublished
+  // temporary inode in the stable group mount, outside that handoff.
+  const tempPath = path.join(IPC_DIR, `.${filename}.tmp`);
+  const fd = fs.openSync(
+    tempPath,
+    fs.constants.O_WRONLY |
+      fs.constants.O_CREAT |
+      fs.constants.O_EXCL |
+      fs.constants.O_NOFOLLOW,
+    0o600,
+  );
+  const identity = fs.fstatSync(fd);
+  try {
+    fs.writeFileSync(fd, JSON.stringify(data, null, 2));
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+    try {
+      fs.renameSync(tempPath, filepath);
+      return filename;
+    } catch (error) {
+      // ENOENT can mean the channel was captured between mkdir and rename.
+      // Reuse the SAME still-unpublished inode; never retry a successful rename.
+      if (
+        !(error instanceof Error) ||
+        !('code' in error) ||
+        error.code !== 'ENOENT' ||
+        attempt === 2
+      )
+        throw error;
+      const stat = fs.lstatSync(tempPath);
+      if (
+        !stat.isFile() ||
+        stat.isSymbolicLink() ||
+        stat.nlink !== 1 ||
+        stat.dev !== identity.dev ||
+        stat.ino !== identity.ino
+      )
+        throw new Error(
+          'IPC unpublished request identity changed; preserve its evidence.',
+        );
+    }
+  }
+  throw new Error('IPC publication did not complete.');
 }
 
 const server = new McpServer({

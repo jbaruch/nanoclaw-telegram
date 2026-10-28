@@ -6,6 +6,8 @@ For detailed release notes, see the [full changelog on the documentation site](h
 
 ### Runtime diagnostics
 
+- Keep marker text inside agent results intact, refuse invalid UTF-8 IPC bytes without delivery, and preserve atomic message publication while the host captures channel directories. Create IPC parents with explicit safe modes under permissive umasks. Retire startup process groups before releasing Remote Control retry gates; keep the gate when absence is unverified. CI installs the existing locked agent protocol dependencies before running actual subprocess tests.
+
 - Keep native delivery refusals visible through Telegram sends and draft finalization; mark delivery only after native acknowledgment. Route agent callback failures through owned cleanup and the caller Promise, and surface delayed background-loop failures through the main process owner.
 - Validate container output markers, keep IPC and scheduler polls scheduled after failures, and finish failed-task logs/schedule advancement before propagating unexpected errors.
 - Preserve undelivered message cursors and cleanup on unexpected errors; quarantine malformed IPC before processing and quarantine unexpected per-file failures before propagation. Version the runtime-owned database migration and remote-control state, migrate accepted legacy records, refuse newer versions, and route delayed remote-control polling failures through the caller Promise with owned-process cleanup.

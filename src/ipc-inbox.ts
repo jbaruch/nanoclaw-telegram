@@ -94,14 +94,29 @@ function exclusiveWrite(file: string, bytes: string | Buffer): void {
   }
   syncDirectory(path.dirname(file));
 }
+function decodeUtf8(bytes: Buffer): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+      bytes,
+    );
+  } catch (error) {
+    if (
+      !(error instanceof TypeError) ||
+      !hasErrno(error, 'ERR_ENCODING_INVALID_ENCODED_DATA')
+    )
+      throw error;
+    throw new SyntaxError(
+      'IPC bytes are not valid UTF-8; preserve the original request.',
+      { cause: error },
+    );
+  }
+}
 function metadata(
   file: string,
   keys: string[],
   uid: number,
 ): Record<string, unknown> {
-  const raw: unknown = JSON.parse(
-    regularBytes(file, true, uid).toString('utf8'),
-  );
+  const raw: unknown = JSON.parse(decodeUtf8(regularBytes(file, true, uid)));
   if (!raw || typeof raw !== 'object' || Array.isArray(raw))
     throw new IpcInboxHold('IPC owner metadata is invalid.');
   const record = raw as Record<string, unknown>;
@@ -298,7 +313,7 @@ export function createIpcInbox(base: string): IpcInbox {
               get filePath() {
                 return current;
               },
-              read: () => regularBytes(current, true, uid).toString('utf8'),
+              read: () => decodeUtf8(regularBytes(current, true, uid)),
               dispatch() {
                 fs.renameSync(pending, inflight);
                 syncDirectory(slot);

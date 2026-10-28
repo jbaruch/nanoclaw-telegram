@@ -333,41 +333,72 @@ async function startRemoteControlOwned(
       resolve(result);
     };
     const pid = proc.pid;
-    let stopAttempted = false;
-    const stopStartedProcess = () => {
-      stopAttempted = true;
-      if (!pid) return;
-      try {
-        process.kill(-pid, 'SIGTERM');
-      } catch (error) {
-        if (!hasErrno(error, 'ESRCH')) throw error;
+    let stopPromise: Promise<void> | undefined;
+    const retireStartedProcess = async () => {
+      if (!pid)
+        throw new Error(
+          'Remote Control child identity is unavailable; preserve the startup gate.',
+        );
+      const alive = (identity: number): boolean => {
         try {
-          process.kill(pid, 'SIGTERM');
-        } catch (fallbackError) {
-          if (!hasErrno(fallbackError, 'ESRCH')) throw fallbackError;
+          process.kill(identity, 0);
+          return true;
+        } catch (error) {
+          if (hasErrno(error, 'ESRCH')) return false;
+          throw error;
+        }
+      };
+      const absent = () => !alive(-pid) && !alive(pid);
+      const signal = (value: 'SIGTERM' | 'SIGKILL') => {
+        try {
+          process.kill(-pid, value);
+        } catch (error) {
+          if (!hasErrno(error, 'ESRCH')) throw error;
+          try {
+            process.kill(pid, value);
+          } catch (fallbackError) {
+            if (!hasErrno(fallbackError, 'ESRCH')) throw fallbackError;
+          }
+        }
+      };
+      for (const value of ['SIGTERM', 'SIGKILL'] as const) {
+        signal(value);
+        for (let check = 0; check < 10; check++) {
+          if (absent()) {
+            disposition('absent');
+            return;
+          }
+          await new Promise<void>((done) => setTimeout(done, 100));
         }
       }
+      if (absent()) {
+        disposition('absent');
+        return;
+      }
+      throw new Error(
+        'Remote Control process retirement is unverified; preserve the startup gate before retrying.',
+      );
     };
+    const stopStartedProcess = () =>
+      (stopPromise ??= Promise.resolve().then(retireStartedProcess));
     const rejectAfterCleanup = (error: unknown) => {
       if (settled) return;
       clearTimeout(timer);
       settled = true;
       if (activeSession?.pid === pid) activeSession = null;
-      if (stopAttempted) {
-        reject(error);
-        return;
-      }
       Promise.resolve()
         .then(stopStartedProcess)
         .then(
           () => reject(error),
           (cleanupError: unknown) =>
             reject(
-              new AggregateError(
-                [error, cleanupError],
-                'Remote Control polling and owned-process cleanup failed; inspect the started process before retrying.',
-                { cause: error },
-              ),
+              cleanupError === error
+                ? error
+                : new AggregateError(
+                    [error, cleanupError],
+                    'Remote Control polling and owned-process cleanup failed; inspect the started process before retrying.',
+                    { cause: error },
+                  ),
             ),
         );
     };
@@ -384,7 +415,7 @@ async function startRemoteControlOwned(
       if (!pid) return; // A failed launch emits error asynchronously.
       // Check if process died
       if (!isProcessAlive(pid)) {
-        disposition('absent');
+        await stopStartedProcess();
         finish({ ok: false, error: 'Process exited before producing URL' });
         return;
       }
@@ -418,7 +449,7 @@ async function startRemoteControlOwned(
 
       // Timeout check
       if (Date.now() - startTime >= URL_TIMEOUT_MS) {
-        stopStartedProcess();
+        await stopStartedProcess();
         finish({
           ok: false,
           error: 'Timed out waiting for Remote Control URL',

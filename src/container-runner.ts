@@ -40,6 +40,22 @@ const onecli = new OneCLI({ url: ONECLI_URL });
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+// JSON string newlines are escaped, so complete sentinel lines cannot occur
+// inside a valid encoded result. Literal marker text remains ordinary content.
+const OUTPUT_START_LINE = `${OUTPUT_START_MARKER}\n`;
+const OUTPUT_END_LINE = `\n${OUTPUT_END_MARKER}\n`;
+function frameStart(buffer: Buffer | string): number {
+  let offset = buffer.indexOf(OUTPUT_START_LINE);
+  while (
+    offset > 0 &&
+    (typeof buffer === 'string'
+      ? buffer[offset - 1] !== '\n'
+      : buffer[offset - 1] !== 10)
+  ) {
+    offset = buffer.indexOf(OUTPUT_START_LINE, offset + 1);
+  }
+  return offset;
+}
 
 export interface ContainerInput {
   prompt: string;
@@ -177,9 +193,18 @@ function buildVolumeMounts(
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
   const groupIpcDir = resolveGroupIpcPath(group.folder);
-  fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
-  fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
-  fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+  fs.mkdirSync(path.join(groupIpcDir, 'messages'), {
+    recursive: true,
+    mode: 0o755,
+  });
+  fs.mkdirSync(path.join(groupIpcDir, 'tasks'), {
+    recursive: true,
+    mode: 0o755,
+  });
+  fs.mkdirSync(path.join(groupIpcDir, 'input'), {
+    recursive: true,
+    mode: 0o755,
+  });
   mounts.push({
     hostPath: groupIpcDir,
     containerPath: '/workspace/ipc',
@@ -469,15 +494,18 @@ export async function runContainerAgent(
           }
           parseBuffer = Buffer.concat([parseBuffer, bytes]);
           let startIdx: number;
-          while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
-            const endIdx = parseBuffer.indexOf(OUTPUT_END_MARKER, startIdx);
+          while ((startIdx = frameStart(parseBuffer)) !== -1) {
+            const endIdx = parseBuffer.indexOf(
+              OUTPUT_END_LINE,
+              startIdx + OUTPUT_START_LINE.length,
+            );
             if (endIdx === -1) break; // Incomplete pair, wait for more data
 
             const jsonStr = parseBuffer
-              .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
+              .slice(startIdx + OUTPUT_START_LINE.length, endIdx)
               .toString('utf8')
               .trim();
-            parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_MARKER.length);
+            parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_LINE.length);
 
             try {
               const parsed = parseContainerOutput(jsonStr);
@@ -732,13 +760,16 @@ export async function runContainerAgent(
         // Legacy mode: parse the last output marker pair from accumulated stdout
         try {
           // Extract JSON between sentinel markers for robust parsing
-          const startIdx = stdout.indexOf(OUTPUT_START_MARKER);
-          const endIdx = stdout.indexOf(OUTPUT_END_MARKER);
+          const startIdx = frameStart(stdout);
+          const endIdx = stdout.indexOf(
+            OUTPUT_END_LINE,
+            startIdx + OUTPUT_START_LINE.length,
+          );
 
           let jsonLine: string;
           if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
             jsonLine = stdout
-              .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
+              .slice(startIdx + OUTPUT_START_LINE.length, endIdx)
               .trim();
           } else {
             // Fallback: last non-empty line (backwards compatibility)
@@ -834,7 +865,7 @@ export function writeTasksSnapshot(
 ): void {
   // Write filtered tasks to the group's IPC directory
   const groupIpcDir = resolveGroupIpcPath(groupFolder);
-  fs.mkdirSync(groupIpcDir, { recursive: true });
+  fs.mkdirSync(groupIpcDir, { recursive: true, mode: 0o755 });
 
   // Main sees all tasks, others only see their own
   const filteredTasks = isMain
@@ -864,7 +895,7 @@ export function writeGroupsSnapshot(
   _registeredJids: Set<string>,
 ): void {
   const groupIpcDir = resolveGroupIpcPath(groupFolder);
-  fs.mkdirSync(groupIpcDir, { recursive: true });
+  fs.mkdirSync(groupIpcDir, { recursive: true, mode: 0o755 });
 
   // Main sees all groups; others see nothing (they can't activate groups)
   const visibleGroups = isMain ? groups : [];

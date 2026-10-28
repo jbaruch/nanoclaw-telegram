@@ -224,7 +224,7 @@ export function startIpcWatcher(deps: IpcDeps): Promise<void> {
   ipcWatcherRunning = true;
 
   const ipcBaseDir = path.join(DATA_DIR, 'ipc');
-  fs.mkdirSync(ipcBaseDir, { recursive: true });
+  fs.mkdirSync(ipcBaseDir, { recursive: true, mode: 0o755 });
 
   let rejectLifecycle!: (error: unknown) => void;
   ipcLifecycle = new Promise<void>((_resolve, reject) => {

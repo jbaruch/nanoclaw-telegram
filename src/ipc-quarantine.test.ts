@@ -39,6 +39,13 @@ describe('IPC file quarantine', () => {
       chatJid: 'tg:123',
     });
     fs.writeFileSync(path.join(messages, 'incomplete.json'), incompleteMessage);
+    const invalidUtf8 = Buffer.concat([
+      Buffer.from('{"type":"message","chatJid":"tg:123","text":"'),
+      Buffer.from([0xff]),
+      Buffer.from('"}'),
+    ]);
+    fs.writeFileSync(path.join(messages, 'invalid-utf8.json'), invalidUtf8);
+
     const invalid = {
       'incomplete.json': { type: 'unsupported_same_name_task' },
       'folder.json': {
@@ -105,6 +112,18 @@ describe('IPC file quarantine', () => {
       await vi.advanceTimersByTimeAsync(1000);
       expect(vi.getTimerCount()).toBe(1);
       expect(deps.registerGroup).not.toHaveBeenCalled();
+      expect(deps.sendMessage).not.toHaveBeenCalled();
+      expect(
+        fs.readFileSync(
+          path.join(
+            temporary,
+            'ipc',
+            'errors',
+            'main-messages-0-invalid-utf8.json',
+          ),
+        ),
+      ).toEqual(invalidUtf8);
+
       expect(
         fs.readFileSync(
           path.join(

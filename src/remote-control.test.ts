@@ -33,6 +33,19 @@ function createMockProcess(pid = 12345) {
   });
 }
 
+function mockOwnedRetirement() {
+  const retired = new Set<number>();
+  return vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+    if (signal === 0 && retired.has(Math.abs(pid)))
+      throw Object.assign(new Error('fixed absent owned process'), {
+        code: 'ESRCH',
+      });
+    if (signal === 'SIGTERM' || signal === 'SIGKILL')
+      retired.add(Math.abs(pid));
+    return true;
+  });
+}
+
 describe('remote-control', () => {
   const STATE_FILE = _getStateFilePath();
   let readFileSyncSpy: ReturnType<typeof vi.spyOn>;
@@ -66,8 +79,22 @@ describe('remote-control', () => {
       .mockImplementation((file, bytes) => {
         if (typeof file === 'number') startingBytes = String(bytes);
       });
-    unlinkSyncSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation(() => {});
-    openSyncSpy = vi.spyOn(fs, 'openSync').mockReturnValue(42);
+    unlinkSyncSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation((file) => {
+      if (String(file).endsWith('remote-control-starting.json'))
+        startingBytes = '';
+    });
+    openSyncSpy = vi.spyOn(fs, 'openSync').mockImplementation((file, flags) => {
+      if (
+        String(file).endsWith('remote-control-starting.json') &&
+        typeof flags === 'number' &&
+        flags & fs.constants.O_EXCL &&
+        startingBytes
+      )
+        throw Object.assign(new Error('fixed occupied gate'), {
+          code: 'EEXIST',
+        });
+      return 42;
+    });
     closeSyncSpy = vi.spyOn(fs, 'closeSync').mockImplementation(() => {});
     vi.spyOn(fs, 'fsyncSync').mockImplementation(() => {});
     const identity = {
@@ -107,7 +134,7 @@ describe('remote-control', () => {
     it('shares one pending launch across concurrent callers before URL discovery', async () => {
       vi.useFakeTimers();
       spawnMock.mockReturnValue(createMockProcess(12345));
-      vi.spyOn(process, 'kill').mockReturnValue(true);
+      mockOwnedRetirement();
       const first = startRemoteControl('owner', 'tg:123', '/project');
       const second = startRemoteControl('owner', 'tg:123', '/project');
       expect(second).toBe(first);
@@ -133,7 +160,7 @@ describe('remote-control', () => {
       // Simulate URL appearing in stdout file on first poll
       stdoutFileContent =
         'Session URL: https://claude.ai/code?bridge=env_abc123\n';
-      vi.spyOn(process, 'kill').mockImplementation(() => true);
+      mockOwnedRetirement();
 
       const result = await startRemoteControl('user1', 'tg:123', '/project');
 
@@ -153,7 +180,7 @@ describe('remote-control', () => {
       const proc = createMockProcess();
       spawnMock.mockReturnValue(proc);
       stdoutFileContent = 'https://claude.ai/code?bridge=env_test\n';
-      vi.spyOn(process, 'kill').mockImplementation(() => true);
+      mockOwnedRetirement();
 
       await startRemoteControl('user1', 'tg:123', '/project');
 
@@ -169,7 +196,7 @@ describe('remote-control', () => {
       const proc = createMockProcess();
       spawnMock.mockReturnValue(proc);
       stdoutFileContent = 'https://claude.ai/code?bridge=env_test\n';
-      vi.spyOn(process, 'kill').mockImplementation(() => true);
+      mockOwnedRetirement();
 
       await startRemoteControl('user1', 'tg:123', '/project');
 
@@ -182,7 +209,7 @@ describe('remote-control', () => {
       const proc = createMockProcess(99999);
       spawnMock.mockReturnValue(proc);
       stdoutFileContent = 'https://claude.ai/code?bridge=env_save\n';
-      vi.spyOn(process, 'kill').mockImplementation(() => true);
+      mockOwnedRetirement();
 
       await startRemoteControl('user1', 'tg:123', '/project');
 
@@ -197,7 +224,7 @@ describe('remote-control', () => {
       const proc = createMockProcess();
       spawnMock.mockReturnValue(proc);
       stdoutFileContent = 'https://claude.ai/code?bridge=env_existing\n';
-      vi.spyOn(process, 'kill').mockImplementation(() => true);
+      mockOwnedRetirement();
 
       await startRemoteControl('user1', 'tg:123', '/project');
 
@@ -216,7 +243,7 @@ describe('remote-control', () => {
       spawnMock.mockReturnValueOnce(proc1).mockReturnValueOnce(proc2);
 
       // First start: process alive, URL found
-      const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+      const killSpy = mockOwnedRetirement();
       stdoutFileContent = 'https://claude.ai/code?bridge=env_first\n';
       await startRemoteControl('user1', 'tg:123', '/project');
 
@@ -260,7 +287,7 @@ describe('remote-control', () => {
       const proc = createMockProcess(44444);
       spawnMock.mockReturnValue(proc);
       stdoutFileContent = 'no url here';
-      vi.spyOn(process, 'kill').mockImplementation(() => true);
+      mockOwnedRetirement();
 
       const promise = startRemoteControl('user1', 'tg:123', '/project');
 
@@ -275,17 +302,45 @@ describe('remote-control', () => {
         error: 'Timed out waiting for Remote Control URL',
       });
 
+      expect(startingBytes).toBe('');
+      stdoutFileContent = 'https://claude.ai/code?bridge=env_retry';
+      spawnMock.mockReturnValue(createMockProcess(55555));
+      await expect(
+        startRemoteControl('user1', 'tg:123', '/project'),
+      ).resolves.toEqual({ ok: true, url: stdoutFileContent });
+      expect(spawnMock).toHaveBeenCalledTimes(2);
+      vi.useRealTimers();
+    });
+
+    it('retains the exclusive gate when successful signals do not prove native retirement', async () => {
+      vi.useFakeTimers();
+      spawnMock.mockReturnValue(createMockProcess(44444));
+      vi.spyOn(process, 'kill').mockReturnValue(true);
+      const pending = startRemoteControl('owner', 'tg:123', '/project');
+      const rejected = expect(pending).rejects.toThrow(
+        'retirement is unverified',
+      );
+      await vi.advanceTimersByTimeAsync(32_200);
+      await rejected;
+      expect(startingBytes).not.toBe('');
+      await expect(
+        startRemoteControl('owner', 'tg:123', '/project'),
+      ).rejects.toThrow();
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
       vi.useRealTimers();
     });
 
     it('rejects a delayed poll defect and terminates only its started process', async () => {
       vi.useFakeTimers();
       spawnMock.mockReturnValue(createMockProcess(12345));
-      const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+      const kill = mockOwnedRetirement();
       const pending = startRemoteControl('user1', 'tg:123', '/project');
       await vi.advanceTimersByTimeAsync(0);
       const defect = new TypeError('fixed delayed reader defect');
-      readFileSyncSpy.mockImplementation(() => {
+      readFileSyncSpy.mockImplementation((file: fs.PathOrFileDescriptor) => {
+        if (String(file).endsWith('remote-control-starting.json'))
+          return startingBytes;
         throw defect;
       });
       const rejected = expect(pending).rejects.toBe(defect);
@@ -310,7 +365,9 @@ describe('remote-control', () => {
       const pending = startRemoteControl('user1', 'tg:123', '/project');
       await vi.advanceTimersByTimeAsync(0);
       const defect = new TypeError('fixed delayed reader defect');
-      readFileSyncSpy.mockImplementation(() => {
+      readFileSyncSpy.mockImplementation((file: fs.PathOrFileDescriptor) => {
+        if (String(file).endsWith('remote-control-starting.json'))
+          return startingBytes;
         throw defect;
       });
       const rejected = expect(pending).rejects.toMatchObject({
@@ -361,7 +418,7 @@ describe('remote-control', () => {
         vi.useFakeTimers();
         const proc = createMockProcess();
         spawnMock.mockReturnValue(proc);
-        const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+        const kill = mockOwnedRetirement();
         const defect = new TypeError('fixed asynchronous child defect');
         const pending = startRemoteControl('user1', 'tg:123', '/project');
         const rejected = expect(pending).rejects.toBe(defect);
@@ -370,7 +427,7 @@ describe('remote-control', () => {
         await vi.advanceTimersByTimeAsync(0);
         await rejected;
         expect(kill).toHaveBeenCalledWith(-12345, 'SIGTERM');
-        expect(closeSyncSpy).toHaveBeenCalledTimes(4);
+        expect(startingBytes).toBe('');
         expect(vi.getTimerCount()).toBe(0);
         vi.useRealTimers();
       },
@@ -380,7 +437,7 @@ describe('remote-control', () => {
       const proc = createMockProcess();
       spawnMock.mockReturnValue(proc);
       stdoutFileContent = 'https://claude.ai/code?bridge=env_fixed';
-      const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+      const kill = mockOwnedRetirement();
       await expect(
         startRemoteControl('user1', 'tg:123', '/project'),
       ).resolves.toMatchObject({ ok: true });
@@ -414,7 +471,7 @@ describe('remote-control', () => {
     it('does not interpret denied process inspection as a dead session', async () => {
       spawnMock.mockReturnValue(createMockProcess());
       stdoutFileContent = 'https://claude.ai/code?bridge=env_fixed\n';
-      const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+      const kill = mockOwnedRetirement();
       await startRemoteControl('user1', 'tg:123', '/project');
       const denied = Object.assign(new Error('fixed denied'), {
         code: 'EPERM',
@@ -448,7 +505,7 @@ describe('remote-control', () => {
       const proc = createMockProcess(55555);
       spawnMock.mockReturnValue(proc);
       stdoutFileContent = 'https://claude.ai/code?bridge=env_stop\n';
-      const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+      const killSpy = mockOwnedRetirement();
 
       await startRemoteControl('user1', 'tg:123', '/project');
 
@@ -480,7 +537,7 @@ describe('remote-control', () => {
         startedAt: '2024-01-01T00:00:00Z',
       };
       readFileSyncSpy.mockReturnValue(JSON.stringify(session));
-      vi.spyOn(process, 'kill').mockReturnValue(true);
+      mockOwnedRetirement();
       restoreRemoteControl();
       expect(writeFileSyncSpy).toHaveBeenCalledWith(
         '/tmp/nanoclaw-rc-test/.remote-control-fixed/state.json',
@@ -501,7 +558,7 @@ describe('remote-control', () => {
       readFileSyncSpy.mockReturnValue(
         JSON.stringify({ schema_version: 1, ...session }),
       );
-      vi.spyOn(process, 'kill').mockReturnValue(true);
+      mockOwnedRetirement();
       restoreRemoteControl();
       expect(writeFileSyncSpy).not.toHaveBeenCalled();
       expect(getActiveSession()).toEqual(session);
@@ -539,7 +596,7 @@ describe('remote-control', () => {
         if (p.endsWith('remote-control.json')) return JSON.stringify(session);
         return '';
       });
-      vi.spyOn(process, 'kill').mockImplementation(() => true);
+      mockOwnedRetirement();
 
       restoreRemoteControl();
 
@@ -618,7 +675,7 @@ describe('remote-control', () => {
         if (p.endsWith('remote-control.json')) return JSON.stringify(session);
         return '';
       });
-      const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+      const killSpy = mockOwnedRetirement();
 
       restoreRemoteControl();
       expect(getActiveSession()).not.toBeNull();
@@ -642,7 +699,7 @@ describe('remote-control', () => {
         if (p.endsWith('remote-control.json')) return JSON.stringify(session);
         return '';
       });
-      vi.spyOn(process, 'kill').mockImplementation(() => true);
+      mockOwnedRetirement();
 
       restoreRemoteControl();
 

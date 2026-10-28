@@ -250,6 +250,32 @@ describe('container-runner timeout behavior', () => {
     });
   });
 
+  it.each([true, false])(
+    'preserves literal sentinel content in %s streaming mode',
+    async (streaming) => {
+      const onOutput = vi.fn(async () => {});
+      const text = `before ${OUTPUT_START_MARKER}\n${OUTPUT_END_MARKER} after`;
+      const expected = { status: 'success', result: text };
+      const pending = runContainerAgent(
+        testGroup,
+        testInput,
+        () => {},
+        streaming ? onOutput : undefined,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const frame = Buffer.from(
+        `${OUTPUT_START_MARKER}\n${JSON.stringify(expected)}\n${OUTPUT_END_MARKER}\n`,
+      );
+      for (const byte of frame) fakeProc.stdout.push(Buffer.from([byte]));
+      await vi.advanceTimersByTimeAsync(0);
+      fakeProc.emit('close', 0);
+      await expect(pending).resolves.toMatchObject(
+        streaming ? { status: 'success' } : expected,
+      );
+      if (streaming) expect(onOutput).toHaveBeenCalledExactlyOnceWith(expected);
+    },
+  );
+
   it('accepts silent completed scheduled prechecks while refusing markerless scripts', async () => {
     const input = {
       ...testInput,
