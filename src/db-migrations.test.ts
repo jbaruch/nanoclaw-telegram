@@ -15,7 +15,13 @@ vi.mock('./config.js', () => ({
   },
   GROUPS_DIR: '/synthetic/groups',
 }));
-import { _closeDatabase, initDatabase } from './db.js';
+import { logger } from './logger.js';
+import {
+  _closeDatabase,
+  initDatabase,
+  getAllRegisteredGroups,
+  getAllSessions,
+} from './db.js';
 
 let directory: string;
 let opened = false;
@@ -394,3 +400,65 @@ describe('durable schema migration', () => {
     );
   });
 });
+
+it.each(['errors', 'ERRORS', 'Errors'])(
+  'holds an already registered quarantine group %s without changing its row or blocking other groups',
+  (folder) => {
+    initialize();
+    const check = disk();
+    try {
+      check
+        .prepare(
+          'INSERT INTO registered_groups(jid,name,folder,trigger_pattern,added_at) VALUES(?,?,?,?,?)',
+        )
+        .run('tg:held', 'held', folder, '@Andy', '2024-01-01T00:00:00Z');
+      check
+        .prepare(
+          'INSERT INTO registered_groups(jid,name,folder,trigger_pattern,added_at) VALUES(?,?,?,?,?)',
+        )
+        .run('tg:good', 'good', 'main', '@Andy', '2024-01-01T00:00:00Z');
+      const before = check
+        .prepare('SELECT * FROM registered_groups WHERE jid=?')
+        .get('tg:held');
+      const warn = vi.spyOn(logger, 'warn');
+      const groups = getAllRegisteredGroups();
+      expect(groups['tg:held']).toBeUndefined();
+      expect(groups['tg:good'].folder).toBe('main');
+      expect(
+        check
+          .prepare('SELECT * FROM registered_groups WHERE jid=?')
+          .get('tg:held'),
+      ).toEqual(before);
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ jid: 'tg:held', folder }),
+        expect.stringContaining('Holding registered group'),
+      );
+    } finally {
+      check.close();
+    }
+  },
+);
+
+it('retains original legacy quarantine-session bytes while loading unrelated sessions', () => {
+  const file = path.join(paths.data, 'sessions.json'),
+    bytes = JSON.stringify({
+      errors: 'old-private-session',
+      main: 'known-main-session',
+    });
+  fs.writeFileSync(file, bytes);
+  expect(initialize).not.toThrow();
+  expect(getAllSessions()).toEqual({ main: 'known-main-session' });
+  expect(fs.readFileSync(file + '.migrated', 'utf8')).toBe(bytes);
+});
+
+it.each([null, { unknown: true }])(
+  'does not silently accept malformed held legacy session values %j',
+  (value) => {
+    const file = path.join(paths.data, 'sessions.json'),
+      bytes = JSON.stringify({ errors: value, main: 'valid' });
+    fs.writeFileSync(file, bytes);
+    expect(initialize).toThrow('Legacy session state is invalid');
+    expect(fs.readFileSync(file, 'utf8')).toBe(bytes);
+    expect(fs.existsSync(file + '.migrated')).toBe(false);
+  },
+);

@@ -710,7 +710,7 @@ export function getRegisteredGroup(
   if (!isValidGroupFolder(row.folder)) {
     logger.warn(
       { jid: row.jid, folder: row.folder },
-      'Skipping registered group with invalid folder',
+      'Holding registered group with invalid or reserved folder; preserve its row and register a safe folder before use',
     );
     return undefined;
   }
@@ -766,7 +766,7 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     if (!isValidGroupFolder(row.folder)) {
       logger.warn(
         { jid: row.jid, folder: row.folder },
-        'Skipping registered group with invalid folder',
+        'Holding registered group with invalid or reserved folder; preserve its row and register a safe folder before use',
       );
       continue;
     }
@@ -946,11 +946,17 @@ function migrateJsonState(): void {
   });
   migrateFile('sessions.json', (sessions) => {
     for (const [folder, session] of Object.entries(sessions)) {
-      if (
-        !isValidGroupFolder(folder) ||
-        typeof session !== 'string' ||
-        !session
-      )
+      if (typeof session !== 'string' || !session)
+        throw new SyntaxError(
+          'Legacy session state is invalid; preserve and repair its source.',
+        );
+      if (folder.toLowerCase() === 'errors') {
+        logger.warn(
+          'Holding legacy quarantine-namespace session; preserve the archived original and reconcile its group folder before use.',
+        );
+        continue;
+      }
+      if (!isValidGroupFolder(folder))
         throw new SyntaxError(
           'Legacy session state is invalid; preserve and repair its source.',
         );

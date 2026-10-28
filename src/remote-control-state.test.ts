@@ -353,3 +353,31 @@ it('retires the genuine newly owned child if native-bound state replacement fail
     fs.existsSync(path.join(fixture.directory, 'remote-control-starting.json')),
   ).toBe(false);
 }, 15000);
+
+it.each([
+  JSON.stringify(legacy),
+  JSON.stringify({ schema_version: 1, ...legacy }),
+  JSON.stringify({ schema_version: 99, ...legacy }),
+  '{broken',
+])(
+  'returns from expected startup hold while retaining the exact record and refusing later starts %s',
+  async (bytes) => {
+    const state = path.join(fixture.directory, 'remote-control.json');
+    fs.writeFileSync(state, bytes, { mode: 0o600 });
+    expect(() => owner.restoreRemoteControlAtStartup()).not.toThrow();
+    expect(fs.readFileSync(state, 'utf8')).toBe(bytes);
+    expect(owner.getActiveSession()).toBeNull();
+    await expect(
+      owner.startRemoteControl('fixed', 'tg:123', fixture.directory),
+    ).rejects.toThrow();
+    expect(process.kill).not.toHaveBeenCalled();
+  },
+);
+
+it('does not conceal an unexpected state reader defect during host startup', () => {
+  const defect = new TypeError('fixed unexpected reader defect');
+  vi.spyOn(fs, 'openSync').mockImplementationOnce(() => {
+    throw defect;
+  });
+  expect(owner.restoreRemoteControlAtStartup).toThrow(defect);
+});

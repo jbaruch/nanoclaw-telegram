@@ -5,7 +5,7 @@ import {
   RemoteControlIdentityError,
   type RemoteControlIdentity,
 } from './remote-control-identity.js';
-import { hasErrno } from './operational-errors.js';
+import { hasErrno, isFileSystemError } from './operational-errors.js';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -405,6 +405,28 @@ export function restoreRemoteControl(): void {
     );
   } else clearState();
 }
+/** Host startup owns optional Remote Control refusal; the unchanged record still
+ * gates every later start. Expected holds must not disable unrelated channels,
+ * scheduler or IPC. Unexpected implementation defects still reject startup.
+ */
+export function restoreRemoteControlAtStartup(): void {
+  try {
+    restoreRemoteControl();
+  } catch (error) {
+    if (
+      !(error instanceof UnsupportedRemoteControlStateError) &&
+      !(error instanceof RemoteControlOutputError) &&
+      !(error instanceof RemoteControlIdentityError) &&
+      !isFileSystemError(error)
+    )
+      throw error;
+    activeSession = null;
+    logger.error(
+      'Remote Control remains held; preserve its owner state and reconcile the native instance before retrying. Other host services will continue.',
+    );
+  }
+}
+
 export function getActiveSession(): RemoteControlSession | null {
   return activeSession && sessionIsLive(activeSession) ? activeSession : null;
 }

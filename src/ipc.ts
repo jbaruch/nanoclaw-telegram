@@ -253,8 +253,7 @@ export function startIpcWatcher(deps: IpcDeps): Promise<void> {
         if (group.isMain) folderIsMain.set(group.folder, true);
       }
       for (const sourceGroup of fs.readdirSync(ipcBaseDir)) {
-        if (!isValidGroupFolder(sourceGroup) || sourceGroup === 'errors')
-          continue;
+        if (!isValidGroupFolder(sourceGroup)) continue;
         const stat = fs.lstatSync(path.join(ipcBaseDir, sourceGroup));
         if (!stat.isDirectory() || stat.isSymbolicLink()) {
           logger.error('IPC group alias refused; original entry retained.');

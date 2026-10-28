@@ -23,6 +23,22 @@ export function protectIpcClaimMounts(mounts: readonly Mount[]): Mount[] {
   fs.mkdirSync(base, { recursive: true });
   createIpcInbox(base);
   const reserved = path.join(base, '.claimed-v1');
+  const quarantine = path.join(base, 'errors');
+  try {
+    fs.mkdirSync(quarantine, { mode: 0o700 });
+  } catch (error) {
+    if (!hasErrno(error, 'EEXIST')) throw error;
+  }
+  const evidence = fs.lstatSync(quarantine);
+  if (
+    !evidence.isDirectory() ||
+    evidence.isSymbolicLink() ||
+    evidence.uid !== process.geteuid!() ||
+    (evidence.mode & 0o022) !== 0
+  )
+    throw new Error(
+      'IPC quarantine root is unsafe; preserve evidence and hold agent launch for host-owner repair.',
+    );
   const canonicalBase = fs.realpathSync(base);
   const canonicalReserved = fs.realpathSync(reserved);
   if (canonicalReserved !== path.join(canonicalBase, '.claimed-v1'))
@@ -66,38 +82,61 @@ export function protectIpcClaimMounts(mounts: readonly Mount[]): Mount[] {
     hostPath: fs.realpathSync(mount.hostPath),
   }));
   const masks: Mount[] = [];
+  function verifyQuarantine() {
+    const stat = fs.lstatSync(quarantine);
+    if (
+      !stat.isDirectory() ||
+      stat.isSymbolicLink() ||
+      stat.uid !== process.geteuid!() ||
+      (stat.mode & 0o022) !== 0 ||
+      stat.dev !== evidence.dev ||
+      stat.ino !== evidence.ino ||
+      fs.realpathSync(quarantine) !== path.join(canonicalBase, 'errors')
+    )
+      throw new Error(
+        'IPC quarantine binding changed; preserve evidence and hold agent launch for host-owner repair.',
+      );
+  }
+  verifyQuarantine();
+  const reservedRoots = [canonicalReserved, path.join(canonicalBase, 'errors')];
   for (const mount of canonical) {
     const source = mount.hostPath;
-    if (contains(canonicalReserved, source) || contains(empty, source))
+    if (
+      reservedRoots.some((root) => contains(root, source)) ||
+      contains(empty, source)
+    )
       throw new Error(
         'Direct or descendant IPC evidence/mask mounts are forbidden; remove the extra mount.',
       );
-    if (!contains(source, canonicalReserved)) continue;
-    if (!mount.readonly)
-      throw new Error(
-        'Read-write parent overlaps reserved IPC evidence; remove the extra mount before launching an agent.',
-      );
-    const relative = path
-      .relative(source, canonicalReserved)
-      .split(path.sep)
-      .join('/');
-    const target = path.posix.join(mount.containerPath, relative);
-    if (canonical.some((other) => contains(target, other.containerPath)))
-      throw new Error(
-        'A nested mount pierces an IPC evidence mask; remove the partial mount layout.',
-      );
-    if (
-      masks.some(
-        (other) =>
-          contains(other.containerPath, target) ||
-          contains(target, other.containerPath),
+    for (const reservedRoot of reservedRoots) {
+      if (!contains(source, reservedRoot)) continue;
+      if (!mount.readonly)
+        throw new Error(
+          'Read-write parent overlaps reserved IPC evidence; remove the extra mount before launching an agent.',
+        );
+      const relative = path
+        .relative(source, reservedRoot)
+        .split(path.sep)
+        .join('/');
+      const target = path.posix.join(mount.containerPath, relative);
+      if (canonical.some((other) => contains(target, other.containerPath)))
+        throw new Error(
+          'A nested mount pierces an IPC evidence mask; remove the partial mount layout.',
+        );
+      if (
+        masks.some(
+          (other) =>
+            contains(other.containerPath, target) ||
+            contains(target, other.containerPath),
+        )
       )
-    )
-      throw new Error(
-        'IPC evidence masks overlap; remove the ambiguous mount layout.',
-      );
-    masks.push({ hostPath: empty, containerPath: target, readonly: true });
+        throw new Error(
+          'IPC evidence masks overlap; remove the ambiguous mount layout.',
+        );
+      masks.push({ hostPath: empty, containerPath: target, readonly: true });
+    }
   }
   verifyEmpty();
+  verifyQuarantine();
   return [...canonical, ...masks];
 }

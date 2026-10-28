@@ -62,7 +62,7 @@ import {
 import { startIpcWatcher, IpcRouteUnavailableError } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
-  restoreRemoteControl,
+  restoreRemoteControlAtStartup,
   startRemoteControl,
   stopRemoteControl,
 } from './remote-control.js';
@@ -812,7 +812,7 @@ async function main(): Promise<void> {
     ensureOneCLIAgent(jid, group);
   }
 
-  restoreRemoteControl();
+  restoreRemoteControlAtStartup();
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {

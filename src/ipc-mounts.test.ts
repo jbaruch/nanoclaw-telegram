@@ -46,7 +46,7 @@ it('canonicalizes both RO parent views and appends exact empty masks after every
     },
     own,
   ]);
-  expect(mounts).toHaveLength(5);
+  expect(mounts).toHaveLength(7);
   expect(
     mounts
       .slice(0, 3)
@@ -64,7 +64,17 @@ it('canonicalizes both RO parent views and appends exact empty masks after every
     },
     {
       hostPath: fs.realpathSync(empty),
+      containerPath: '/workspace/project/data/ipc/errors',
+      readonly: true,
+    },
+    {
+      hostPath: fs.realpathSync(empty),
       containerPath: '/workspace/extra/alias/data/ipc/.claimed-v1',
+      readonly: true,
+    },
+    {
+      hostPath: fs.realpathSync(empty),
+      containerPath: '/workspace/extra/alias/data/ipc/errors',
       readonly: true,
     },
   ]);
@@ -138,3 +148,24 @@ it.each(['symlink', 'nonempty'] as const)(
       );
   },
 );
+
+it('refuses a direct quarantine root/leaf view while preserving real evidence bytes', () => {
+  protectIpcClaimMounts([]);
+  const quarantine = path.join(data, 'ipc', 'errors'),
+    leaf = path.join(quarantine, 'retained.json');
+  fs.writeFileSync(leaf, 'retained evidence', { mode: 0o600 });
+  for (const source of [quarantine, leaf])
+    expect(() =>
+      protectIpcClaimMounts([
+        {
+          hostPath: source,
+          containerPath: '/workspace/extra/alias',
+          readonly: true,
+        },
+      ]),
+    ).toThrow('Direct or descendant');
+  expect(fs.readFileSync(leaf, 'utf8')).toBe('retained evidence');
+  expect(
+    protectIpcClaimMounts([parent()]).map((mount) => mount.containerPath),
+  ).toContain('/workspace/project/data/ipc/errors');
+});
