@@ -411,6 +411,10 @@ export async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let signalIdleCloseFailure!: (failure: { error: unknown }) => void;
+  const idleCloseFailure = new Promise<{ error: unknown }>((resolve) => {
+    signalIdleCloseFailure = resolve;
+  });
 
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
@@ -419,7 +423,9 @@ export async function processGroupMessages(chatJid: string): Promise<boolean> {
         { group: group.name },
         'Idle timeout, closing container stdin',
       );
-      queue.closeStdin(chatJid);
+      void Promise.resolve()
+        .then(() => queue.closeStdin(chatJid))
+        .then(undefined, (error) => signalIdleCloseFailure({ error }));
     }, IDLE_TIMEOUT);
   };
 
@@ -503,7 +509,9 @@ export async function processGroupMessages(chatJid: string): Promise<boolean> {
             hadError = true;
           }
         },
-        draftStream?.failure,
+        draftStream
+          ? Promise.race([draftStream.failure, idleCloseFailure])
+          : idleCloseFailure,
       );
     })(),
   ]);

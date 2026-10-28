@@ -6,6 +6,9 @@ For detailed release notes, see the [full changelog on the documentation site](h
 
 ### Runtime diagnostics
 
+- Preserve original IPC filename order through private custody and restart. Propagate failed close controls to the actual runner/scheduler cleanup owner. Keep prompt-only edits to legacy schedules independent of schedule validation, and clear positively retired preview identity before fallback delivery.
+- Bind Remote Control state schema 2 to native process identity, bound and fatally decode capability output, and preserve unproved legacy state unchanged. Linux uses native boot/start/executable/command observations; Darwin requires its source-generated nonce in native command metadata. Real Claude nonce preservation remains a separate native acceptance requirement.
+
 - Flush both IPC publication directories before acknowledging a queued request, keep captured batch/request parent names durable before source removal, and retain the sole claim when first-quarantine parent durability fails.
 
 - Preserve explicit existing database main/bot flags during legacy migration. Run stored legacy one-shots at their already captured UTC instant without rewriting schedule history; keep new schedule input strict. Notify idle queues only after terminal output. Durably record Remote Control sessions, remove private transient child output after capture, and retain stopping sessions until native process absence is verified. Prepare only verified runtime-owned legacy IPC parent modes and avoid idle claim-journal churn through a bounded non-authoritative directory hint.
@@ -14,7 +17,7 @@ For detailed release notes, see the [full changelog on the documentation site](h
 
 - Keep native delivery refusals visible through Telegram sends and draft finalization; mark delivery only after native acknowledgment. Route agent callback failures through owned cleanup and the caller Promise, and surface delayed background-loop failures through the main process owner.
 - Validate container output markers, keep IPC and scheduler polls scheduled after failures, and finish failed-task logs/schedule advancement before propagating unexpected errors.
-- Preserve undelivered message cursors and cleanup on unexpected errors; quarantine malformed IPC before processing and quarantine unexpected per-file failures before propagation. Version the runtime-owned database migration and remote-control state, migrate accepted legacy records, refuse newer versions, and route delayed remote-control polling failures through the caller Promise with owned-process cleanup.
+- Preserve undelivered message cursors and cleanup on unexpected errors; quarantine malformed IPC before processing and quarantine unexpected per-file failures before propagation. Version the runtime-owned database migration and remote-control state, migrate accepted database records and hold unproved legacy process identities, refuse newer versions, and route delayed remote-control polling failures through the caller Promise with owned-process cleanup.
 - Type Telegram handlers and test doubles with the installed SDK contracts. Handle expected filesystem, database, command and provider failures explicitly; let unexpected implementation errors propagate. Keep legacy schema migration transactional and retryable after a failed backfill, and report only successfully stopped orphan containers.
 
 ### Runtime compatibility

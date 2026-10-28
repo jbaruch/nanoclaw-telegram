@@ -24,7 +24,7 @@ function entries(directory: string, limit = 1024): string[] {
         );
       names.push(entry.name);
     }
-    return names;
+    return names.sort();
   } finally {
     dir.closeSync();
   }
@@ -437,6 +437,14 @@ export function createIpcInbox(base: string): IpcInbox {
           held++;
         }
       }
+      // Opaque slot names are storage identities, never delivery order. Retain
+      // the old channel's lexical filename ordering across snapshot/reload.
+      claims.sort((a, b) =>
+        Buffer.compare(
+          Buffer.from([a.sourceGroup, a.channel, a.file].join('\0')),
+          Buffer.from([b.sourceGroup, b.channel, b.file].join('\0')),
+        ),
+      );
       return { claims, held };
     },
   };

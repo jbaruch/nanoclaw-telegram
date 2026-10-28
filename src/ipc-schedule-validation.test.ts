@@ -24,6 +24,7 @@ import {
   _closeDatabase,
   createTask,
   getTaskById,
+  updateTask,
 } from './db.js';
 afterEach(() => {
   vi.clearAllTimers();
@@ -114,6 +115,29 @@ it('quarantines an invalid update unchanged, applies a valid once update, and pr
   });
   expect(deps.onTasksChanged).toHaveBeenCalledTimes(1);
   expect(fs.existsSync(path.join(tasks, 'valid.json'))).toBe(false);
+  // Existing owner-written legacy schedule is not reparsed by an unrelated edit.
+  updateTask('fixed-task', {
+    schedule_value: '2024-02-03T04:05',
+    next_run: '2024-02-03T04:05:06.000Z',
+  });
+  fs.writeFileSync(
+    path.join(tasks, 'prompt-only.json'),
+    JSON.stringify({
+      type: 'update_task',
+      taskId: 'fixed-task',
+      prompt: 'updated prompt',
+      script: 'printf fixed',
+    }),
+  );
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(getTaskById('fixed-task')).toMatchObject({
+    prompt: 'updated prompt',
+    script: 'printf fixed',
+    schedule_value: '2024-02-03T04:05',
+    next_run: '2024-02-03T04:05:06.000Z',
+  });
+  expect(deps.onTasksChanged).toHaveBeenCalledTimes(2);
+
   const defect = new Database.SqliteError(
     'fixed missing column',
     'SQLITE_ERROR',

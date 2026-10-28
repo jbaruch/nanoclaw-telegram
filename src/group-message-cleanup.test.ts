@@ -408,11 +408,13 @@ it('classifies a missing native IPC route without consuming a valid later send',
   );
 });
 
-it('passes the actual preview failure signal into the native run owner', async () => {
+it('combines the actual preview failure with the owned idle-close signal', async () => {
+  const error = new TypeError('fixed preview owner failure');
+  draft.failure = Promise.resolve({ error });
   await seed('tg:preview-owner');
-  expect(vi.mocked(runContainerAgent).mock.calls.at(-1)?.[4]).toBe(
-    draft.failure,
-  );
+  await expect(
+    vi.mocked(runContainerAgent).mock.calls.at(-1)?.[4],
+  ).resolves.toEqual({ error });
 });
 
 it('does not deduplicate an unacknowledged failure, and only suppresses after a successful retry', async () => {
@@ -595,4 +597,47 @@ it('does not preempt a producing query for a pending task on preview or session-
   );
   await expect(processGroupMessages(jid)).resolves.toBe(true);
   idleFixture.pendingTask = false;
+});
+
+it('retries undelivered final output when its oversized preview was already positively deleted', async () => {
+  const jid = 'tg:retired-preview-fallback';
+  await seed(jid);
+  const { createDraftStream } =
+    await vi.importActual<typeof import('./draft-stream.js')>(
+      './draft-stream.js',
+    );
+  const remove = vi
+    .fn()
+    .mockResolvedValueOnce(undefined)
+    .mockRejectedValueOnce(
+      new HttpError('must not delete twice', new Error('fixed')),
+    );
+  draft = createDraftStream({
+    sendMessage: async () => 91,
+    editMessage: async () => {},
+    deleteMessage: remove,
+  });
+  channel.createDraftStream = () => draft;
+  const failure = new HttpError(
+    'fixed final send refusal',
+    new Error('fixed transport'),
+  );
+  vi.mocked(channel.sendMessage).mockRejectedValue(failure);
+  vi.mocked(runContainerAgent).mockImplementationOnce(
+    async (_group, _input, _process, onOutput) => {
+      await onOutput!({
+        status: 'success',
+        result: null,
+        streamText: 'fixed acknowledged preview longer than thirty characters',
+      });
+      await onOutput!({ status: 'success', result: 'x'.repeat(5000) });
+      return { status: 'success', result: null };
+    },
+  );
+  const pending = processGroupMessages(jid),
+    rejected = expect(pending).resolves.toBe(false);
+  await vi.advanceTimersByTimeAsync(60000);
+  await rejected;
+  expect(remove).toHaveBeenCalledExactlyOnceWith(91);
+  expect(storedCursor(jid)).toBe(previous);
 });

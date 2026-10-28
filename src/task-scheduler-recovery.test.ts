@@ -494,3 +494,46 @@ it.each([
     });
   },
 );
+
+it('observes a real GroupQueue close-file refusal and retires the owned scheduled container', async () => {
+  task('once');
+  const queue = new GroupQueue();
+  const write = fs.writeFileSync.bind(fs),
+    failure = Object.assign(new Error('fixed close permission refusal'), {
+      code: 'EACCES',
+    });
+  vi.spyOn(fs, 'writeFileSync').mockImplementation((file, ...args) => {
+    if (String(file).endsWith('/_close')) throw failure;
+    return write(file, ...args);
+  });
+  let settle!: (output: { status: 'success'; result: null }) => void;
+  vi.mocked(runContainerAgent).mockImplementationOnce(
+    async (_group, _input, onProcess, onOutput) => {
+      onProcess(new ChildProcess(), 'owned-native-close-refusal');
+      await onOutput!({ status: 'success', result: 'fixed result' });
+      return new Promise((resolve) => {
+        settle = resolve;
+      });
+    },
+  );
+  const deps = dependencies(queue.enqueueTask.bind(queue));
+  deps.queue = queue;
+  deps.onProcess = (_jid, proc, name, folder) =>
+    queue.registerProcess('tg:123', proc, name, folder);
+  startSchedulerLoop(deps);
+  await vi.advanceTimersByTimeAsync(10000);
+  expect(stopContainer).toHaveBeenCalledExactlyOnceWith(
+    'owned-native-close-refusal',
+  );
+  expect(database.getTaskById('fixed-task')).toMatchObject({
+    status: 'completed',
+    next_run: null,
+    last_result: 'Error: fixed close permission refusal',
+  });
+  const later = vi.fn(async () => {});
+  queue.enqueueTask('tg:123', 'later-task', later);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(later).toHaveBeenCalledTimes(1);
+  settle({ status: 'success', result: null });
+  await vi.advanceTimersByTimeAsync(0);
+});

@@ -34,7 +34,7 @@ afterEach(() => {
   fs.rmSync(fixture.directory, { recursive: true });
 });
 
-describe('atomic Remote Control owner migration', () => {
+describe('private Remote Control native identity owner', () => {
   it('preserves an occupied unknown starting gate without opening child log files', async () => {
     const file = path.join(fixture.directory, 'remote-control-starting.json');
     const bytes = JSON.stringify({ schema_version: 99, state: 'starting' });
@@ -128,6 +128,17 @@ describe('atomic Remote Control owner migration', () => {
         fs.writeFileSync(release, 'release');
         expect(await done).toBe(0);
         expect(output).toContain('"ok":true');
+        const saved = path.join(stateDir, 'remote-control.json');
+        expect(JSON.parse(fs.readFileSync(saved, 'utf8'))).toMatchObject({
+          schema_version: 2,
+          identity: {
+            kind:
+              process.platform === 'linux'
+                ? 'linux-birth'
+                : 'darwin-command-nonce',
+          },
+        });
+        expect(fs.statSync(saved).mode & 0o777).toBe(0o600);
         expect(fs.readFileSync(counter, 'utf8')).toBe('started\n');
         expect(fs.existsSync(gate)).toBe(false);
         expect(
@@ -198,11 +209,13 @@ describe('atomic Remote Control owner migration', () => {
       const state = path.join(fixture.directory, 'remote-control.json');
       fs.writeFileSync(state, raw);
       expect(owner.restoreRemoteControl).toThrow(
-        'occupied-session state is malformed',
+        /occupied-session state is malformed|Legacy Remote Control identity is unproved/,
       );
       await expect(
         owner.startRemoteControl('fixed', 'tg:123', fixture.directory),
-      ).rejects.toThrow('occupied-session state is malformed');
+      ).rejects.toThrow(
+        /occupied-session state is malformed|Legacy Remote Control identity is unproved/,
+      );
       expect(fs.readFileSync(state, 'utf8')).toBe(raw);
       expect(fs.readdirSync(fixture.directory)).toEqual([
         'remote-control.json',
@@ -211,33 +224,35 @@ describe('atomic Remote Control owner migration', () => {
     },
   );
 
-  it('preserves legacy bytes on failed replacement and can retry the migration', () => {
-    const state = path.join(fixture.directory, 'remote-control.json');
-    const original = JSON.stringify(legacy);
-    fs.writeFileSync(state, original);
-    const denied = Object.assign(new Error('fixed replacement denied'), {
-      code: 'EACCES',
-    });
-    const rename = vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
-      throw denied;
-    });
-    expect(owner.restoreRemoteControl).toThrow(denied);
-    expect(fs.readFileSync(state, 'utf8')).toBe(original);
-    expect(fs.readdirSync(fixture.directory)).toEqual(['remote-control.json']);
-    expect(owner.getActiveSession()).toBeNull();
-    rename.mockRestore();
-    owner.restoreRemoteControl();
-    expect(JSON.parse(fs.readFileSync(state, 'utf8'))).toEqual({
-      schema_version: 1,
-      ...legacy,
-    });
-    expect(fs.statSync(state).mode & 0o777).toBe(0o600);
-    expect(owner.getActiveSession()).toEqual(legacy);
-  });
+  it.each([undefined, 1])(
+    'holds legacy schema %s unchanged without adopting a current PID or replacing state',
+    (version) => {
+      const state = path.join(fixture.directory, 'remote-control.json');
+      const original = JSON.stringify({
+        ...(version === undefined ? {} : { schema_version: version }),
+        ...legacy,
+      });
+      fs.writeFileSync(state, original, { mode: 0o600 });
+      const rename = vi.spyOn(fs, 'renameSync');
+      const sync = vi.spyOn(fs, 'fsyncSync');
+      for (let attempt = 0; attempt < 2; attempt++)
+        expect(owner.restoreRemoteControl).toThrow(
+          'Legacy Remote Control identity is unproved',
+        );
+      expect(fs.readFileSync(state, 'utf8')).toBe(original);
+      expect(fs.readdirSync(fixture.directory)).toEqual([
+        'remote-control.json',
+      ]);
+      expect(owner.getActiveSession()).toBeNull();
+      expect(rename).not.toHaveBeenCalled();
+      expect(sync).not.toHaveBeenCalled();
+      expect(process.kill).not.toHaveBeenCalled();
+    },
+  );
 
   it('holds unknown-version bytes without process or filesystem mutation', () => {
     const state = path.join(fixture.directory, 'remote-control.json');
-    const raw = JSON.stringify({ schema_version: 2, ...legacy });
+    const raw = JSON.stringify({ schema_version: 99, ...legacy });
     fs.writeFileSync(state, raw);
     expect(owner.restoreRemoteControl).toThrow(
       'Unsupported Remote Control state version',
@@ -248,11 +263,35 @@ describe('atomic Remote Control owner migration', () => {
   });
 });
 
-it('fsyncs a migrated state before replacement and its parent before returning tracked authority', () => {
+it('retains actual invalid UTF-8 owner bytes without adopting, signaling, or clearing authority', () => {
   const state = path.join(fixture.directory, 'remote-control.json');
-  fs.writeFileSync(state, JSON.stringify(legacy), { mode: 0o600 });
-  const opened = new Map<number, string>();
-  const events: string[] = [];
+  const bytes = Buffer.from([
+    0x7b, 0x22, 0x70, 0x69, 0x64, 0x22, 0x3a, 0xff, 0x7d,
+  ]);
+  fs.writeFileSync(state, bytes, { mode: 0o600 });
+  expect(owner.restoreRemoteControl).toThrow('not valid UTF-8');
+  expect(fs.readFileSync(state)).toEqual(bytes);
+  expect(process.kill).not.toHaveBeenCalled();
+});
+
+async function syntheticCli(body: string): Promise<void> {
+  vi.mocked(process.kill).mockRestore();
+  const bin = path.join(fixture.directory, 'bin');
+  fs.mkdirSync(bin);
+  fs.writeFileSync(
+    path.join(bin, 'claude'),
+    `#!${process.execPath}\n${body}\n`,
+    { mode: 0o700 },
+  );
+  vi.stubEnv('PATH', bin);
+}
+
+it('fsyncs fresh native-bound state before replacement and parent before returning tracked authority', async () => {
+  await syntheticCli(
+    "console.log('https://claude.ai/code?bridge=env_synthetic');setInterval(()=>{},60000);",
+  );
+  const opened = new Map<number, string>(),
+    events: string[] = [];
   const open = fs.openSync.bind(fs),
     sync = fs.fsyncSync.bind(fs),
     rename = fs.renameSync.bind(fs);
@@ -263,7 +302,11 @@ it('fsyncs a migrated state before replacement and its parent before returning t
   });
   vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
     events.push(
-      opened.get(fd) === fixture.directory ? 'parent_sync' : 'file_sync',
+      opened.get(fd)?.endsWith('state.json')
+        ? 'state_sync'
+        : opened.get(fd) === fixture.directory
+          ? 'parent_sync'
+          : 'other_sync',
     );
     sync(fd);
   });
@@ -271,10 +314,42 @@ it('fsyncs a migrated state before replacement and its parent before returning t
     events.push('rename');
     rename(from, to);
   });
-  owner.restoreRemoteControl();
-  expect(events).toEqual(['file_sync', 'rename', 'parent_sync']);
-  expect(JSON.parse(fs.readFileSync(state, 'utf8'))).toEqual({
-    schema_version: 1,
-    ...legacy,
+  try {
+    await expect(
+      owner.startRemoteControl('fixed', 'tg:123', fixture.directory),
+    ).resolves.toMatchObject({ ok: true });
+    const at = events.indexOf('rename');
+    expect(events.slice(at - 1, at + 2)).toEqual([
+      'state_sync',
+      'rename',
+      'parent_sync',
+    ]);
+    expect(owner.getActiveSession()?.identity.kind).toBe(
+      process.platform === 'linux' ? 'linux-birth' : 'darwin-command-nonce',
+    );
+  } finally {
+    await owner.stopRemoteControl();
+  }
+}, 15000);
+
+it('retires the genuine newly owned child if native-bound state replacement fails, without tracking or erasing authority', async () => {
+  await syntheticCli(
+    "console.log('https://claude.ai/code?bridge=env_synthetic');setInterval(()=>{},60000);",
+  );
+  const denied = Object.assign(new Error('fixed state replacement denied'), {
+    code: 'EACCES',
   });
-});
+  vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
+    throw denied;
+  });
+  await expect(
+    owner.startRemoteControl('fixed', 'tg:123', fixture.directory),
+  ).rejects.toBe(denied);
+  expect(owner.getActiveSession()).toBeNull();
+  expect(
+    fs.existsSync(path.join(fixture.directory, 'remote-control.json')),
+  ).toBe(false);
+  expect(
+    fs.existsSync(path.join(fixture.directory, 'remote-control-starting.json')),
+  ).toBe(false);
+}, 15000);

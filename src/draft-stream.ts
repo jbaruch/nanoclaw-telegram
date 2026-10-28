@@ -129,6 +129,7 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
         if (messageId) {
           try {
             await opts.deleteMessage(messageId);
+            messageId = undefined;
           } catch (err) {
             throw new TelegramPreviewUncertainError(
               'Acknowledged preview could not be deleted; inspect it before retrying output.',

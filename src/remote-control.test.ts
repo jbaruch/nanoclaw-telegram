@@ -9,10 +9,37 @@ vi.mock('./config.js', () => ({
 
 // Mock child_process
 const spawnMock = vi.fn();
-vi.mock('child_process', () => ({
+vi.mock('child_process', async (original) => ({
+  ...(await original<typeof import('child_process')>()),
   spawn: (...args: unknown[]) => spawnMock(...args),
 }));
+const identityFixture = vi.hoisted(() => ({
+  kind: 'linux-birth' as const,
+  boot_id: '00000000-0000-4000-8000-000000000001',
+  start_ticks: '1',
+  executable: '/synthetic/claude',
+  command_sha256: 'a'.repeat(64),
+}));
+vi.mock('./remote-control-identity.js', async (original) => ({
+  ...(await original<typeof import('./remote-control-identity.js')>()),
+  captureRemoteControlIdentity: vi.fn(() => ({ ...identityFixture })),
+  verifyRemoteControlIdentity: vi.fn((pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return 'same';
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !('code' in error) ||
+        error.code !== 'ESRCH'
+      )
+        throw error;
+      return 'absent';
+    }
+  }),
+}));
 
+import { verifyRemoteControlIdentity } from './remote-control-identity.js';
 import {
   startRemoteControl,
   stopRemoteControl,
@@ -27,6 +54,8 @@ import {
 function createMockProcess(pid = 12345) {
   return Object.assign(new EventEmitter(), {
     pid,
+    exitCode: null,
+    signalCode: null,
     unref: vi.fn(),
     kill: vi.fn(),
     stdin: Object.assign(new EventEmitter(), { write: vi.fn(), end: vi.fn() }),
@@ -56,7 +85,9 @@ describe('remote-control', () => {
   let closeSyncSpy: ReturnType<typeof vi.spyOn>;
 
   // Track what readFileSync should return for the stdout file
-  let stdoutFileContent: string;
+  let stdoutFileContent: string | Buffer;
+  let readableFile: string;
+  let readOffset: number;
   let startingBytes: string;
 
   beforeEach(() => {
@@ -64,6 +95,8 @@ describe('remote-control', () => {
     spawnMock.mockReset();
     stdoutFileContent = '';
     startingBytes = '';
+    readableFile = '';
+    readOffset = 0;
 
     // Default fs mocks
     vi.spyOn(fs, 'mkdtempSync').mockReturnValue(
@@ -93,6 +126,13 @@ describe('remote-control', () => {
         throw Object.assign(new Error('fixed occupied gate'), {
           code: 'EEXIST',
         });
+      if (
+        typeof flags === 'number' &&
+        !(flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR))
+      ) {
+        readableFile = String(file);
+        readOffset = 0;
+      }
       return 42;
     });
     closeSyncSpy = vi.spyOn(fs, 'closeSync').mockImplementation(() => {});
@@ -103,6 +143,7 @@ describe('remote-control', () => {
       uid: process.geteuid!(),
       mode: 0o700,
       nlink: 1,
+      size: 0,
       isFile: () => true,
       isDirectory: () => true,
       isSymbolicLink: () => false,
@@ -121,7 +162,46 @@ describe('remote-control', () => {
       }
       return '';
     }) as typeof fs.readFileSync);
+    const read = (
+      _fd: number,
+      target: NodeJS.ArrayBufferView,
+      ...args: unknown[]
+    ): number => {
+      if (!Buffer.isBuffer(target))
+        throw new TypeError('Unexpected fixture buffer');
+      const offset = Number(args[0]),
+        length = Number(args[1]),
+        position = args[2];
+      const value = readFileSyncSpy(readableFile, 'utf8');
+      const bytes = Buffer.isBuffer(value)
+        ? value
+        : Buffer.from(
+            String(value) +
+              (readableFile.endsWith('remote-control.stdout') ? '\n' : ''),
+          );
+      const start = typeof position === 'number' ? position : readOffset;
+      const n = bytes.copy(
+        target,
+        offset,
+        start,
+        Math.min(bytes.length, start + length),
+      );
+      if (position === null) readOffset += n;
+      return n;
+    };
+    vi.spyOn(fs, 'readSync').mockImplementation(read as typeof fs.readSync);
   });
+
+  function mockState(raw: string) {
+    readFileSyncSpy.mockImplementation((file: fs.PathOrFileDescriptor) => {
+      if (String(file).endsWith('remote-control.json')) return raw;
+      if (String(file).endsWith('remote-control-starting.json'))
+        return startingBytes;
+      if (String(file).endsWith('remote-control.stdout'))
+        return stdoutFileContent;
+      return '';
+    });
+  }
 
   afterEach(() => {
     _resetForTesting();
@@ -170,7 +250,11 @@ describe('remote-control', () => {
       });
       expect(spawnMock).toHaveBeenCalledWith(
         'claude',
-        ['remote-control', '--name', 'NanoClaw Remote'],
+        [
+          'remote-control',
+          '--name',
+          expect.stringMatching(/^NanoClaw Remote [a-f0-9-]{36}$/),
+        ],
         expect.objectContaining({ cwd: '/project', detached: true }),
       );
       expect(proc.unref).toHaveBeenCalled();
@@ -235,6 +319,24 @@ describe('remote-control', () => {
         ok: true,
         url: 'https://claude.ai/code?bridge=env_existing',
       });
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not return or signal a recalled PID after native instance identity changes', async () => {
+      spawnMock.mockReturnValue(createMockProcess());
+      stdoutFileContent = 'https://claude.ai/code?bridge=env_fixed\n';
+      const kill = mockOwnedRetirement();
+      await startRemoteControl('fixed', 'tg:123', '/project');
+      kill.mockClear();
+      vi.mocked(verifyRemoteControlIdentity).mockReturnValueOnce('changed');
+      await expect(
+        startRemoteControl('fixed', 'tg:123', '/project'),
+      ).rejects.toThrow('unproved or changed');
+      vi.mocked(verifyRemoteControlIdentity).mockReturnValueOnce('changed');
+      await expect(stopRemoteControl()).rejects.toThrow(
+        'Recalled process identity is unproved',
+      );
+      expect(kill.mock.calls.filter(([, signal]) => signal !== 0)).toEqual([]);
       expect(spawnMock).toHaveBeenCalledTimes(1);
     });
 
@@ -476,7 +578,7 @@ describe('remote-control', () => {
       );
       await Promise.resolve();
       expect(getActiveSession()).toBe(session);
-      expect(kill).not.toHaveBeenCalled();
+      expect(kill.mock.calls.filter(([, signal]) => signal !== 0)).toEqual([]);
       expect(writeFileSyncSpy).toHaveBeenCalledTimes(writes);
       expect(unlinkSyncSpy).not.toHaveBeenCalled();
     });
@@ -489,7 +591,7 @@ describe('remote-control', () => {
       await expect(
         startRemoteControl('user1', 'tg:123', '/project'),
       ).rejects.toBe(defect);
-      expect(closeSyncSpy).toHaveBeenCalledTimes(4);
+      expect(closeSyncSpy).toHaveBeenCalledTimes(6);
       expect(getActiveSession()).toBeNull();
     });
 
@@ -506,8 +608,64 @@ describe('remote-control', () => {
         throw denied;
       });
       await expect(stopRemoteControl()).rejects.toBe(denied);
+      expect(() => getActiveSession()).toThrow(denied);
+      kill.mockImplementation(() => true);
       expect(getActiveSession()?.pid).toBe(12345);
       expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      Buffer.concat([
+        Buffer.from('https://claude.ai/code?bridge=env_'),
+        Buffer.from([0xff]),
+        Buffer.from('\n'),
+      ]),
+      Buffer.alloc(65537, 0x61),
+      Buffer.from('https://claude.ai/codeevil?bridge=env_fixed\n'),
+    ])(
+      'retires its owned child rather than tracking malformed or over-budget stdout',
+      async (bytes) => {
+        spawnMock.mockReturnValue(createMockProcess());
+        const kill = mockOwnedRetirement();
+        stdoutFileContent = bytes;
+        await expect(
+          startRemoteControl('fixed', 'tg:123', '/project'),
+        ).resolves.toMatchObject({ ok: false });
+        expect(
+          kill.mock.calls.filter(([, signal]) => signal === 'SIGTERM'),
+        ).toEqual([[-12345, 'SIGTERM']]);
+        expect(getActiveSession()).toBeNull();
+        expect(
+          writeFileSyncSpy.mock.calls.some(
+            ([file]: unknown[]) =>
+              typeof file === 'string' && file.endsWith('state.json'),
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it('waits for a complete native URL line instead of tracking a partial URL snapshot', async () => {
+      vi.useFakeTimers();
+      try {
+        spawnMock.mockReturnValue(createMockProcess());
+        mockOwnedRetirement();
+        stdoutFileContent = Buffer.from(
+          'https://claude.ai/code?bridge=env_part',
+        );
+        const result = startRemoteControl('fixed', 'tg:123', '/project');
+        await vi.advanceTimersByTimeAsync(200);
+        expect(getActiveSession()).toBeNull();
+        stdoutFileContent = Buffer.from(
+          'https://claude.ai/code?bridge=env_partial_complete\n',
+        );
+        await vi.advanceTimersByTimeAsync(200);
+        await expect(result).resolves.toEqual({
+          ok: true,
+          url: 'https://claude.ai/code?bridge=env_partial_complete',
+        });
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('returns error if spawn throws', async () => {
@@ -586,7 +744,7 @@ describe('remote-control', () => {
   // --- restoreRemoteControl ---
 
   describe('restoreRemoteControl', () => {
-    it('rewrites a verified legacy session to schema 1 through its owner', () => {
+    it('retains a legacy session as unproved without adopting or signaling its PID', () => {
       const session = {
         pid: 77777,
         url: 'https://claude.ai/code?bridge=env_fixed',
@@ -594,15 +752,13 @@ describe('remote-control', () => {
         startedInChat: 'tg:123',
         startedAt: '2024-01-01T00:00:00Z',
       };
-      readFileSyncSpy.mockReturnValue(JSON.stringify(session));
+      mockState(JSON.stringify(session));
       mockOwnedRetirement();
-      restoreRemoteControl();
-      expect(writeFileSyncSpy).toHaveBeenCalledWith(
-        '/tmp/nanoclaw-rc-test/.remote-control-fixed/state.json',
-        JSON.stringify({ schema_version: 1, ...session }),
-        { mode: 0o600, flag: 'wx' },
+      expect(restoreRemoteControl).toThrow(
+        'Legacy Remote Control identity is unproved',
       );
-      expect(getActiveSession()).toEqual(session);
+      expect(writeFileSyncSpy).not.toHaveBeenCalled();
+      expect(getActiveSession()).toBeNull();
     });
 
     it('reads a current session without rewriting it', () => {
@@ -614,24 +770,31 @@ describe('remote-control', () => {
         startedAt: '2024-01-01T00:00:00Z',
       };
       readFileSyncSpy.mockReturnValue(
-        JSON.stringify({ schema_version: 1, ...session }),
+        JSON.stringify({
+          schema_version: 2,
+          identity: { ...identityFixture },
+          ...session,
+        }),
       );
       mockOwnedRetirement();
       restoreRemoteControl();
       expect(writeFileSyncSpy).not.toHaveBeenCalled();
-      expect(getActiveSession()).toEqual(session);
+      expect(getActiveSession()).toEqual({
+        ...session,
+        identity: { ...identityFixture },
+      });
     });
 
     it('preserves and refuses an unsupported state version without process effects', () => {
       const raw = JSON.stringify({
-        schema_version: 2,
+        schema_version: 99,
         pid: 77777,
         url: 'https://claude.ai/code?bridge=env_fixed',
         startedBy: 'user1',
         startedInChat: 'tg:123',
         startedAt: '2024-01-01T00:00:00Z',
       });
-      readFileSyncSpy.mockReturnValue(raw);
+      mockState(raw);
       const kill = vi.spyOn(process, 'kill');
       expect(restoreRemoteControl).toThrow(
         'Unsupported Remote Control state version',
@@ -644,6 +807,8 @@ describe('remote-control', () => {
 
     it('restores session if state file exists and process is alive', () => {
       const session = {
+        schema_version: 2,
+        identity: { ...identityFixture },
         pid: 77777,
         url: 'https://claude.ai/code?bridge=env_restored',
         startedBy: 'user1',
@@ -666,6 +831,8 @@ describe('remote-control', () => {
 
     it('clears state if process is dead', () => {
       const session = {
+        schema_version: 2,
+        identity: { ...identityFixture },
         pid: 88888,
         url: 'https://claude.ai/code?bridge=env_dead',
         startedBy: 'user1',
@@ -695,10 +862,10 @@ describe('remote-control', () => {
     it.each(['null', '[]', '{"pid":"123"}'])(
       'preserves and refuses malformed persisted session %s without process operations',
       (raw) => {
-        readFileSyncSpy.mockReturnValue(raw);
+        mockState(raw);
         const kill = vi.spyOn(process, 'kill');
         expect(restoreRemoteControl).toThrow(
-          'occupied-session state is malformed',
+          /occupied-session state is malformed|Legacy Remote Control identity is unproved/,
         );
         expect(getActiveSession()).toBeNull();
         expect(kill).not.toHaveBeenCalled();
@@ -723,6 +890,8 @@ describe('remote-control', () => {
     // ** This is the key integration test: restore → stop must work **
     it('stopRemoteControl works after restoreRemoteControl', async () => {
       const session = {
+        schema_version: 2,
+        identity: { ...identityFixture },
         pid: 77777,
         url: 'https://claude.ai/code?bridge=env_restored',
         startedBy: 'user1',
@@ -747,6 +916,8 @@ describe('remote-control', () => {
 
     it('startRemoteControl returns restored URL without spawning', () => {
       const session = {
+        schema_version: 2,
+        identity: { ...identityFixture },
         pid: 77777,
         url: 'https://claude.ai/code?bridge=env_restored',
         startedBy: 'user1',

@@ -430,3 +430,29 @@ it('keeps the captured source intact until its request-slot parent is durable', 
   expect(resumed.claims).toHaveLength(1);
   expect(resumed.claims[0].read()).toBe(original);
 });
+
+it('preserves original channel filename order through opaque snapshots and restart', () => {
+  const messages = source();
+  const tasks = path.join(base, 'main', 'tasks');
+  fs.mkdirSync(tasks);
+  for (const channel of [messages, tasks])
+    for (const name of ['003-final.json', '001-first.json', '002-middle.json'])
+      fs.writeFileSync(path.join(channel, name), body(name));
+  const inbox = createIpcInbox(base);
+  inbox.capture('main', 'messages');
+  inbox.capture('main', 'tasks');
+  inbox.pending();
+  const resumed = createIpcInbox(base).pending();
+  expect(resumed.held).toBe(0);
+  expect(
+    resumed.claims.map((c) => [c.channel, c.file, JSON.parse(c.read()).text]),
+  ).toEqual(
+    ['messages', 'tasks'].flatMap((channel) =>
+      ['001-first.json', '002-middle.json', '003-final.json'].map((name) => [
+        channel,
+        name,
+        name,
+      ]),
+    ),
+  );
+});

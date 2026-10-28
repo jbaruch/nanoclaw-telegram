@@ -1,3 +1,10 @@
+import {
+  captureRemoteControlIdentity,
+  verifyRemoteControlIdentity,
+  parseRemoteControlIdentity,
+  RemoteControlIdentityError,
+  type RemoteControlIdentity,
+} from './remote-control-identity.js';
 import { hasErrno } from './operational-errors.js';
 import { spawn } from 'child_process';
 import fs from 'fs';
@@ -7,13 +14,16 @@ import { randomUUID } from 'crypto';
 import { DATA_DIR } from './config.js';
 import { logger } from './logger.js';
 
-/**
- * Sole runtime reader/writer of remote-control.json. Schema 1 contains
- * schema_version plus pid (positive integer), url, startedBy, startedInChat and
- * startedAt (strings). Accepted legacy records omit only schema_version and are
- * rewritten by this owner after live process verification. This occupied-session
- * record gates a second launch: under the gate-store exception, unsupported
- * versions refuse and are preserved instead of reading as an empty session.
+/** Sole owner of remote-control.json. Schema2 adds a native instance identity:
+ * Linux boot/start/executable/command proof, or a Darwin native command nonce.
+ * This occupied-session artifact uses the gate-store exception: unsupported
+ * state refuses another launch instead of reading as an empty session. The
+ * runtime is its sole reader/writer. No older process record is accepted for
+ * migration without its original native instance evidence.
+ * Legacy unversioned/schema1 records have no original birth proof and HOLD
+ * unchanged; adopting today's PID would invent a migration. Unsupported/newer,
+ * malformed or unverifiable records never authorize adoption or signaling.
+ * Real-Claude nonce preservation on Darwin is a separate native acceptance gate.
  */
 class UnsupportedRemoteControlStateError extends Error {}
 
@@ -23,6 +33,7 @@ interface RemoteControlSession {
   startedBy: string;
   startedInChat: string;
   startedAt: string;
+  identity: RemoteControlIdentity;
 }
 
 let activeSession: RemoteControlSession | null = null;
@@ -116,11 +127,12 @@ function saveState(session: RemoteControlSession): void {
   const temporary = fs.mkdtempSync(path.join(DATA_DIR, '.remote-control-'));
   const candidate = path.join(temporary, 'state.json');
   try {
-    fs.writeFileSync(
-      candidate,
-      JSON.stringify({ schema_version: 1, ...session }),
-      { mode: 0o600, flag: 'wx' },
-    );
+    const encoded = JSON.stringify({ schema_version: 2, ...session });
+    if (Buffer.byteLength(encoded) > 16384)
+      throw new UnsupportedRemoteControlStateError(
+        'Remote Control state exceeds its bounded owner budget.',
+      );
+    fs.writeFileSync(candidate, encoded, { mode: 0o600, flag: 'wx' });
     const fd = fs.openSync(
       candidate,
       fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
@@ -178,7 +190,10 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-async function retireOwnedProcess(pid: number | undefined): Promise<void> {
+async function retireOwnedProcess(
+  pid: number | undefined,
+  assertOwned: () => void,
+): Promise<void> {
   if (!pid)
     throw new Error(
       'Remote Control child identity is unavailable; preserve the startup gate.',
@@ -197,6 +212,8 @@ async function retireOwnedProcess(pid: number | undefined): Promise<void> {
     }
   };
   for (const value of ['SIGTERM', 'SIGKILL'] as const) {
+    if (absent()) return;
+    assertOwned();
     signal(value);
     for (let check = 0; check < 10; check++) {
       if (absent()) return;
@@ -209,77 +226,193 @@ async function retireOwnedProcess(pid: number | undefined): Promise<void> {
   );
 }
 
-/**
- * Restore session from disk on startup.
- * If the process is still alive, adopt it. Otherwise, clean up.
- */
-export function restoreRemoteControl(): void {
-  let data: string;
-  try {
-    data = fs.readFileSync(STATE_FILE, 'utf-8');
-  } catch (err) {
-    if (!hasErrno(err, 'ENOENT')) throw err;
-    return;
+class RemoteControlOutputError extends Error {}
+function boundedBytes(
+  file: string,
+  maximum: number,
+): { bytes: Buffer; privateFile: boolean } {
+  const fd = fs.openSync(
+    file,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+  );
+  using _lease = { [Symbol.dispose]: () => fs.closeSync(fd) };
+  const stat = fs.fstatSync(fd);
+  if (
+    !stat.isFile() ||
+    stat.nlink !== 1 ||
+    stat.uid !== process.geteuid!() ||
+    stat.size > maximum
+  )
+    throw new RemoteControlOutputError(
+      'Remote Control data is not bounded owned regular data; preserve it for inspection.',
+    );
+  const bytes = Buffer.alloc(maximum + 1);
+  let count = 0;
+  while (count < bytes.length) {
+    const n = fs.readSync(fd, bytes, count, bytes.length - count, null);
+    if (!n) break;
+    count += n;
   }
-
+  if (count > maximum)
+    throw new RemoteControlOutputError(
+      'Remote Control data exceeded its byte bound.',
+    );
+  return {
+    bytes: bytes.subarray(0, count),
+    privateFile: (stat.mode & 0o077) === 0,
+  };
+}
+function decoded(bytes: Buffer, stream = false): string {
   try {
-    const parsed: unknown = JSON.parse(data);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new SyntaxError('Remote Control state must be an object');
-    }
-    const candidate = parsed as Record<string, unknown>;
-    const legacy = !Object.hasOwn(candidate, 'schema_version');
-    if (!legacy && candidate.schema_version !== 1)
-      throw new UnsupportedRemoteControlStateError(
-        'Unsupported Remote Control state version; update NanoClaw before restoring or starting another session.',
-      );
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+      bytes,
+      { stream },
+    );
+  } catch (error) {
     if (
-      typeof candidate.pid !== 'number' ||
-      !Number.isSafeInteger(candidate.pid) ||
-      candidate.pid <= 0 ||
-      typeof candidate.url !== 'string' ||
-      typeof candidate.startedBy !== 'string' ||
-      typeof candidate.startedInChat !== 'string' ||
-      typeof candidate.startedAt !== 'string'
-    ) {
-      throw new SyntaxError('Remote Control state has invalid session fields');
-    }
-    const session: RemoteControlSession = {
-      pid: candidate.pid,
-      url: candidate.url,
-      startedBy: candidate.startedBy,
-      startedInChat: candidate.startedInChat,
-      startedAt: candidate.startedAt,
-    };
-    if (
-      session.pid &&
-      (isProcessAlive(session.pid) || isProcessAlive(-session.pid))
-    ) {
-      if (legacy) saveState(session);
-      activeSession = session;
-      logger.info(
-        { pid: session.pid },
-        'Restored Remote Control session from previous run',
-      );
-    } else {
-      clearState();
-    }
-  } catch (err) {
-    if (!(err instanceof SyntaxError)) throw err;
-    throw new Error(
-      'Remote Control occupied-session state is malformed; preserve it and inspect the owned process before repairing the record or starting another session.',
-      { cause: err },
+      !(error instanceof TypeError) ||
+      !hasErrno(error, 'ERR_ENCODING_INVALID_ENCODED_DATA')
+    )
+      throw error;
+    throw new RemoteControlOutputError(
+      'Remote Control output is not valid UTF-8.',
+      { cause: error },
     );
   }
 }
-
+function parsedUrl(value: string): URL | undefined {
+  try {
+    return new URL(value);
+  } catch (error) {
+    if (!(error instanceof TypeError)) throw error;
+    return undefined;
+  }
+}
+function validUrl(value: string): string {
+  const result = parsedUrl(value);
+  if (!result)
+    throw new RemoteControlOutputError(
+      'Remote Control output contains an invalid URL.',
+    );
+  const parsed = result;
+  if (
+    value.length > 4096 ||
+    Array.from(value).some(
+      (character) =>
+        character.charCodeAt(0) <= 32 || character.charCodeAt(0) === 127,
+    ) ||
+    parsed.protocol !== 'https:' ||
+    parsed.hostname !== 'claude.ai' ||
+    parsed.username ||
+    parsed.password ||
+    parsed.port ||
+    !/^\/code(?:\/|$)/.test(parsed.pathname)
+  )
+    throw new RemoteControlOutputError(
+      'Remote Control output contains an invalid URL.',
+    );
+  return value;
+}
+function stateJson(raw: string): { ok: true; value: unknown } | { ok: false } {
+  try {
+    return { ok: true, value: JSON.parse(raw) as unknown };
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    return { ok: false };
+  }
+}
+function sessionIsLive(session: RemoteControlSession): boolean {
+  const status = verifyRemoteControlIdentity(session.pid, session.identity);
+  if (status === 'same') return true;
+  if (status === 'absent' && !isProcessAlive(-session.pid)) return false;
+  throw new UnsupportedRemoteControlStateError(
+    'Remote Control native identity is unproved or changed; retain its state without adopting or signaling the PID.',
+  );
+}
+export function restoreRemoteControl(): void {
+  let raw: string;
+  let privateFile: boolean;
+  try {
+    const snapshot = boundedBytes(STATE_FILE, 16384);
+    raw = decoded(snapshot.bytes);
+    privateFile = snapshot.privateFile;
+  } catch (error) {
+    if (hasErrno(error, 'ENOENT')) return;
+    throw error;
+  }
+  const parsed = stateJson(raw);
+  if (
+    !parsed.ok ||
+    !parsed.value ||
+    typeof parsed.value !== 'object' ||
+    Array.isArray(parsed.value)
+  )
+    throw new UnsupportedRemoteControlStateError(
+      'Remote Control occupied-session state is malformed; preserve it for owner inspection.',
+    );
+  const row = parsed.value as Record<string, unknown>;
+  if (row.schema_version === undefined || row.schema_version === 1)
+    throw new UnsupportedRemoteControlStateError(
+      'Legacy Remote Control identity is unproved; preserve the original state for host-owner reconciliation without adopting or signaling its PID.',
+    );
+  if (row.schema_version !== 2)
+    throw new UnsupportedRemoteControlStateError(
+      'Unsupported Remote Control state version; update the owner before restoring or starting another session.',
+    );
+  if (!privateFile)
+    throw new UnsupportedRemoteControlStateError(
+      'Remote Control instance state is not private; preserve it for owner inspection.',
+    );
+  if (
+    Object.keys(row).sort().join() !==
+      [
+        'schema_version',
+        'pid',
+        'url',
+        'startedBy',
+        'startedInChat',
+        'startedAt',
+        'identity',
+      ]
+        .sort()
+        .join() ||
+    typeof row.pid !== 'number' ||
+    !Number.isSafeInteger(row.pid) ||
+    row.pid <= 0 ||
+    row.pid > 2147483647 ||
+    typeof row.url !== 'string' ||
+    typeof row.startedBy !== 'string' ||
+    typeof row.startedInChat !== 'string' ||
+    typeof row.startedAt !== 'string' ||
+    !Number.isFinite(new Date(row.startedAt).getTime())
+  )
+    throw new UnsupportedRemoteControlStateError(
+      'Remote Control occupied-session state is malformed; preserve it for owner inspection.',
+    );
+  const session: RemoteControlSession = {
+    pid: row.pid,
+    url: validUrl(row.url),
+    startedBy: row.startedBy,
+    startedInChat: row.startedInChat,
+    startedAt: row.startedAt,
+    identity: parseRemoteControlIdentity(row.identity),
+  };
+  if (sessionIsLive(session)) {
+    activeSession = session;
+    logger.info(
+      { pid: session.pid },
+      'Restored verified Remote Control instance',
+    );
+  } else clearState();
+}
 export function getActiveSession(): RemoteControlSession | null {
-  return activeSession;
+  return activeSession && sessionIsLive(activeSession) ? activeSession : null;
 }
 
 /** @internal — exported for testing only */
 export function _resetForTesting(): void {
   activeSession = null;
+  starting = undefined;
   stopping = undefined;
 }
 
@@ -302,10 +435,7 @@ export function startRemoteControl(
   const work = (async () => {
     // Refuse malformed occupied state before creating another reservation.
     if (!activeSession) restoreRemoteControl();
-    if (
-      activeSession &&
-      (isProcessAlive(activeSession.pid) || isProcessAlive(-activeSession.pid))
-    )
+    if (activeSession && sessionIsLive(activeSession))
       return { ok: true as const, url: activeSession.url };
     const release = reserveStart();
     let disposition: 'no_child' | 'tracked' | 'absent' | 'unknown' = 'no_child';
@@ -353,10 +483,7 @@ async function startRemoteControlOwned(
   if (!activeSession) restoreRemoteControl();
   if (activeSession) {
     // Verify the process is still alive
-    if (
-      isProcessAlive(activeSession.pid) ||
-      isProcessAlive(-activeSession.pid)
-    ) {
+    if (sessionIsLive(activeSession)) {
       return { ok: true, url: activeSession.url };
     }
     // Process died — clean up and start a new one
@@ -397,12 +524,13 @@ async function startRemoteControlOwned(
         throw error;
       }
 
+      const instanceNonce = randomUUID();
       let proc;
       disposition('unknown');
       try {
         proc = spawn(
           'claude',
-          ['remote-control', '--name', 'NanoClaw Remote'],
+          ['remote-control', '--name', `NanoClaw Remote ${instanceNonce}`],
           {
             cwd,
             stdio: ['pipe', stdoutFd, stderrFd],
@@ -437,7 +565,18 @@ async function startRemoteControlOwned(
         let stopPromise: Promise<void> | undefined;
         const stopStartedProcess = () =>
           (stopPromise ??= Promise.resolve()
-            .then(() => retireOwnedProcess(pid))
+            .then(() =>
+              retireOwnedProcess(pid, () => {
+                if (
+                  proc.pid !== pid ||
+                  proc.exitCode !== null ||
+                  proc.signalCode !== null
+                )
+                  throw new RemoteControlIdentityError(
+                    'Original child lifecycle is no longer active; preserve the startup gate.',
+                  );
+              }),
+            )
             .then(() => disposition('absent')));
         const rejectAfterCleanup = (error: unknown) => {
           if (settled) return;
@@ -482,23 +621,44 @@ async function startRemoteControlOwned(
           }
 
           // Check for URL in stdout file
-          let content = '';
+          let content: string;
           try {
-            content = fs.readFileSync(stdoutFile, 'utf-8');
+            const output = boundedBytes(stdoutFile, 65536);
+            if (!output.privateFile)
+              throw new RemoteControlOutputError(
+                'Remote Control output is not private.',
+              );
+            const snapshot = decoded(output.bytes, true);
+            content = snapshot.slice(0, snapshot.lastIndexOf('\n') + 1);
           } catch (err) {
-            if (!hasErrno(err, 'ENOENT')) throw err;
-            // File might not have content yet
+            if (!(err instanceof RemoteControlOutputError)) throw err;
+            await stopStartedProcess();
+            finish({ ok: false, error: err.message });
+            return;
           }
 
           const match = content.match(URL_REGEX);
           if (match) {
-            const session: RemoteControlSession = {
-              pid,
-              url: match[0],
-              startedBy: sender,
-              startedInChat: chatJid,
-              startedAt: new Date().toISOString(),
-            };
+            let session: RemoteControlSession;
+            try {
+              session = {
+                pid,
+                url: validUrl(match[0]),
+                startedBy: sender,
+                startedInChat: chatJid,
+                startedAt: new Date().toISOString(),
+                identity: captureRemoteControlIdentity(pid, instanceNonce),
+              };
+            } catch (error) {
+              if (
+                !(error instanceof RemoteControlOutputError) &&
+                !(error instanceof RemoteControlIdentityError)
+              )
+                throw error;
+              await stopStartedProcess();
+              finish({ ok: false, error: error.message });
+              return;
+            }
             activeSession = session;
             saveState(session);
             disposition('tracked');
@@ -564,7 +724,16 @@ export function stopRemoteControl(): Promise<StopResult> {
     });
   const session = activeSession;
   const work = Promise.resolve()
-    .then(() => retireOwnedProcess(session.pid))
+    .then(() =>
+      retireOwnedProcess(session.pid, () => {
+        if (
+          verifyRemoteControlIdentity(session.pid, session.identity) !== 'same'
+        )
+          throw new RemoteControlIdentityError(
+            'Recalled process identity is unproved; retain state without signaling.',
+          );
+      }),
+    )
     .then(() => {
       clearState();
       activeSession = null;

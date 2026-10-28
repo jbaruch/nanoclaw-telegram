@@ -118,6 +118,9 @@ export class GroupQueue {
       return;
     }
     if (state.pendingTasks.some((t) => t.id === taskId)) {
+      // A previous preemption write may have failed. Retry the control signal,
+      // never enqueue or execute a second copy of the pending task.
+      if (state.active && state.idleWaiting) this.closeStdin(groupJid);
       logger.debug({ groupJid, taskId }, 'Task already queued, skipping');
       return;
     }
@@ -217,6 +220,7 @@ export class GroupQueue {
         { groupJid, err },
         'Could not write close sentinel; inspect group IPC permissions',
       );
+      throw err;
     }
   }
 

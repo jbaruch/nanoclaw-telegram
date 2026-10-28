@@ -373,9 +373,19 @@ export function startSchedulerLoop(deps: SchedulerDependencies): Promise<void> {
           continue;
         }
 
-        deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
-          runTask(currentTask, deps),
-        );
+        try {
+          deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
+            runTask(currentTask, deps),
+          );
+        } catch (error) {
+          if (!isFileSystemError(error)) throw error;
+          // The queue retains the single pending task and retries preemption on
+          // the next poll; unrelated due groups can still make progress.
+          logger.error(
+            { taskId: currentTask.id, error },
+            'Task preemption signal failed; retrying control on the next poll',
+          );
+        }
       }
     } catch (err) {
       if (!isFileSystemError(err) && !isRecoverableSqliteError(err)) throw err;

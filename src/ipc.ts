@@ -554,17 +554,16 @@ export async function processTaskIpc(
         if (data.schedule_value !== undefined)
           updates.schedule_value = data.schedule_value;
 
-        // Validate the complete prospective schedule before any persisted mutation.
-        const prospective = { ...task, ...updates };
-        const schedule = parseTaskSchedule(
-          prospective.schedule_type,
-          prospective.schedule_value,
-        );
         if (
           data.schedule_type !== undefined ||
           data.schedule_value !== undefined
-        )
-          updates.next_run = schedule.nextRun;
+        ) {
+          const prospective = { ...task, ...updates };
+          updates.next_run = parseTaskSchedule(
+            prospective.schedule_type,
+            prospective.schedule_value,
+          ).nextRun;
+        }
 
         updateTask(data.taskId, updates);
         logger.info(
