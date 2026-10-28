@@ -38,6 +38,7 @@ import { RegisteredGroup, ScheduledTask } from './types.js';
  * Co-authored-by: @community-pr-601
  */
 export function computeNextRun(task: ScheduledTask): string | null {
+  if (task.schedule_type === 'once') return null;
   const now = Date.now();
   const schedule = parseTaskSchedule(
     task.schedule_type,
@@ -95,12 +96,27 @@ async function runTask(
   const [execution] = await Promise.allSettled([
     (async () => {
       try {
-        parseTaskSchedule(task.schedule_type, task.schedule_value);
         if (
           !task.next_run ||
           !Number.isFinite(new Date(task.next_run).getTime())
         )
           throw new SyntaxError('Stored task next_run is invalid.');
+        if (task.schedule_type === 'once') {
+          if (
+            typeof task.schedule_value !== 'string' ||
+            !task.schedule_value.trim() ||
+            !Number.isFinite(new Date(task.schedule_value).getTime()) ||
+            new Date(task.next_run).toISOString() !== task.next_run
+          )
+            throw new SyntaxError(
+              'Stored once task authority is invalid; preserve its captured UTC instant for repair.',
+            );
+          // Legacy creation already captured an absolute instant (including old
+          // minute precision and DST normalization). Use it only in memory;
+          // never rewrite historical schedule text or guess the wall time again.
+          task = { ...task, schedule_value: task.next_run };
+        }
+        parseTaskSchedule(task.schedule_type, task.schedule_value);
       } catch (failure) {
         if (!(failure instanceof SyntaxError)) throw failure;
         updateTask(task.id, { status: 'paused' });

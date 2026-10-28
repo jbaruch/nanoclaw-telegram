@@ -133,26 +133,33 @@ function migrateToVersion1(database: Database.Database): void {
   }
 
   // Add is_bot_message column if it doesn't exist (migration for existing DBs)
-  if (!hasColumn('messages', 'is_bot_message')) {
+  const addedBotMessage = !hasColumn('messages', 'is_bot_message');
+  if (addedBotMessage) {
     database.exec(
       `ALTER TABLE messages ADD COLUMN is_bot_message INTEGER DEFAULT 0`,
     );
   }
-  // Version0 may contain committed columns but interrupted backfills.
+  // Existing explicit flags are authority; an unversioned database is not
+  // evidence that a default false value was an interrupted backfill.
   database
-    .prepare(`UPDATE messages SET is_bot_message = 1 WHERE content LIKE ?`)
-    .run(`${ASSISTANT_NAME}:%`);
+    .prepare(
+      `UPDATE messages SET is_bot_message = CASE WHEN content LIKE ? THEN 1 ELSE 0 END WHERE ? OR is_bot_message IS NULL`,
+    )
+    .run(`${ASSISTANT_NAME}:%`, addedBotMessage ? 1 : 0);
 
   // Add is_main column if it doesn't exist (migration for existing DBs)
-  if (!hasColumn('registered_groups', 'is_main')) {
+  const addedMain = !hasColumn('registered_groups', 'is_main');
+  if (addedMain) {
     database.exec(
       `ALTER TABLE registered_groups ADD COLUMN is_main INTEGER DEFAULT 0`,
     );
   }
   // Backfill: 'main' or channel-prefixed main folders like 'telegram_main'
-  database.exec(
-    `UPDATE registered_groups SET is_main = 1 WHERE folder = 'main' OR folder LIKE '%\\_main' ESCAPE '\\'`,
-  );
+  database
+    .prepare(
+      `UPDATE registered_groups SET is_main = CASE WHEN folder = 'main' OR folder LIKE '%\\_main' ESCAPE '\\' THEN 1 ELSE 0 END WHERE ? OR is_main IS NULL`,
+    )
+    .run(addedMain ? 1 : 0);
 
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
   if (!hasColumn('chats', 'channel'))

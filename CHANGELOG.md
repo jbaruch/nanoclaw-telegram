@@ -6,6 +6,8 @@ For detailed release notes, see the [full changelog on the documentation site](h
 
 ### Runtime diagnostics
 
+- Preserve explicit existing database main/bot flags during legacy migration. Run stored legacy one-shots at their already captured UTC instant without rewriting schedule history; keep new schedule input strict. Notify idle queues only after terminal output. Durably record Remote Control sessions, remove private transient child output after capture, and retain stopping sessions until native process absence is verified. Prepare only verified runtime-owned legacy IPC parent modes and avoid idle claim-journal churn on Linux through a held-directory hint.
+
 - Keep marker text inside agent results intact, refuse invalid UTF-8 IPC bytes without delivery, and preserve atomic message publication while the host captures channel directories. Create IPC parents with explicit safe modes under permissive umasks. Retire startup process groups before releasing Remote Control retry gates; keep the gate when absence is unverified. CI installs the existing locked agent protocol dependencies before running actual subprocess tests.
 
 - Keep native delivery refusals visible through Telegram sends and draft finalization; mark delivery only after native acknowledgment. Route agent callback failures through owned cleanup and the caller Promise, and surface delayed background-loop failures through the main process owner.

@@ -429,3 +429,68 @@ describe('task lifecycle recovery', () => {
     expect(deps.queue.closeStdin).not.toHaveBeenCalled();
   });
 });
+
+it.each([
+  ['2024-01-01T00:00', '2024-01-01T00:00:00.000Z'],
+  ['2023-11-05T01:30', '2023-11-05T06:30:00.000Z'],
+  ['2023-03-12T02:30:00', '2023-03-12T08:30:00.000Z'],
+])(
+  'executes a legacy once schedule %s at its captured instant without rewriting history',
+  async (original, captured) => {
+    task('once');
+    database.updateTask('fixed-task', {
+      schedule_value: original,
+      next_run: captured,
+    });
+    vi.mocked(runContainerAgent).mockResolvedValue({
+      status: 'success',
+      result: null,
+      completion: 'sdk_turn_completed',
+    });
+    let execute!: () => Promise<void>;
+    startSchedulerLoop(
+      dependencies((_jid, _id, run) => {
+        execute = run;
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(execute).toBeDefined();
+    await execute();
+    expect(runContainerAgent).toHaveBeenCalledTimes(1);
+    expect(database.getTaskById('fixed-task')).toMatchObject({
+      schedule_value: original,
+      status: 'completed',
+      next_run: null,
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(runContainerAgent).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each([
+  ['not-a-date', '2024-01-01T00:00:00.000Z'],
+  ['2024-01-01T00:00', '2024-01-01T00:00:00'],
+])(
+  'holds a stored one-shot without valid captured authority (%s, %s)',
+  async (original, captured) => {
+    task('once');
+    database.updateTask('fixed-task', {
+      schedule_value: original,
+      next_run: captured,
+    });
+    let execute!: () => Promise<void>;
+    startSchedulerLoop(
+      dependencies((_jid, _id, run) => {
+        execute = run;
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    await execute();
+    expect(runContainerAgent).not.toHaveBeenCalled();
+    expect(database.getTaskById('fixed-task')).toMatchObject({
+      schedule_value: original,
+      status: 'paused',
+      next_run: captured,
+    });
+  },
+);

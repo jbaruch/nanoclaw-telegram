@@ -31,8 +31,6 @@ const URL_REGEX = /https:\/\/claude\.ai\/code\S+/;
 const URL_TIMEOUT_MS = 30_000;
 const URL_POLL_MS = 200;
 const STATE_FILE = path.join(DATA_DIR, 'remote-control.json');
-const STDOUT_FILE = path.join(DATA_DIR, 'remote-control.stdout');
-const STDERR_FILE = path.join(DATA_DIR, 'remote-control.stderr');
 const START_FILE = path.join(DATA_DIR, 'remote-control-starting.json');
 type StartResult = { ok: true; url: string } | { ok: false; error: string };
 let starting: Promise<StartResult> | undefined;
@@ -121,7 +119,17 @@ function saveState(session: RemoteControlSession): void {
       JSON.stringify({ schema_version: 1, ...session }),
       { mode: 0o600, flag: 'wx' },
     );
+    const fd = fs.openSync(
+      candidate,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+    );
+    try {
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
     fs.renameSync(candidate, STATE_FILE);
+    syncStateDirectory();
   } catch (error) {
     try {
       fs.rmSync(temporary, { recursive: true });
@@ -137,9 +145,22 @@ function saveState(session: RemoteControlSession): void {
   fs.rmSync(temporary, { recursive: true });
 }
 
+function syncStateDirectory(): void {
+  const fd = fs.openSync(
+    DATA_DIR,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_DIRECTORY,
+  );
+  try {
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function clearState(): void {
   try {
     fs.unlinkSync(STATE_FILE);
+    syncStateDirectory();
   } catch (err) {
     if (!hasErrno(err, 'ENOENT')) throw err;
   }
@@ -197,7 +218,10 @@ export function restoreRemoteControl(): void {
       startedInChat: candidate.startedInChat,
       startedAt: candidate.startedAt,
     };
-    if (session.pid && isProcessAlive(session.pid)) {
+    if (
+      session.pid &&
+      (isProcessAlive(session.pid) || isProcessAlive(-session.pid))
+    ) {
       if (legacy) saveState(session);
       activeSession = session;
       logger.info(
@@ -239,7 +263,10 @@ export function startRemoteControl(
   const work = (async () => {
     // Refuse malformed occupied state before creating another reservation.
     if (!activeSession) restoreRemoteControl();
-    if (activeSession && isProcessAlive(activeSession.pid))
+    if (
+      activeSession &&
+      (isProcessAlive(activeSession.pid) || isProcessAlive(-activeSession.pid))
+    )
       return { ok: true as const, url: activeSession.url };
     const release = reserveStart();
     let disposition: 'no_child' | 'tracked' | 'absent' | 'unknown' = 'no_child';
@@ -287,7 +314,10 @@ async function startRemoteControlOwned(
   if (!activeSession) restoreRemoteControl();
   if (activeSession) {
     // Verify the process is still alive
-    if (isProcessAlive(activeSession.pid)) {
+    if (
+      isProcessAlive(activeSession.pid) ||
+      isProcessAlive(-activeSession.pid)
+    ) {
       return { ok: true, url: activeSession.url };
     }
     // Process died — clean up and start a new one
@@ -298,182 +328,235 @@ async function startRemoteControlOwned(
   // Redirect stdout/stderr to files so the process has no pipes to the parent.
   // This prevents SIGPIPE when NanoClaw restarts.
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  const stdoutFd = fs.openSync(STDOUT_FILE, 'w');
-  const stderrFd = fs.openSync(STDERR_FILE, 'w');
-
-  let proc;
-  disposition('unknown');
-  try {
-    proc = spawn('claude', ['remote-control', '--name', 'NanoClaw Remote'], {
-      cwd,
-      stdio: ['pipe', stdoutFd, stderrFd],
-      detached: true,
-    });
-  } catch (err) {
-    fs.closeSync(stdoutFd);
-    fs.closeSync(stderrFd);
-    if (!hasErrno(err, 'ENOENT') && !hasErrno(err, 'EACCES')) throw err;
-    disposition('no_child');
-    return { ok: false, error: `Failed to start: ${err.message}` };
-  }
-
-  // Close parent descriptors before observing the child's asynchronous launch.
-  fs.closeSync(stdoutFd);
-  fs.closeSync(stderrFd);
-
-  return new Promise((resolve, reject) => {
-    const startTime = Date.now();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let settled = false;
-    const finish = (
-      result: { ok: true; url: string } | { ok: false; error: string },
-    ) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
-    };
-    const pid = proc.pid;
-    let stopPromise: Promise<void> | undefined;
-    const retireStartedProcess = async () => {
-      if (!pid)
-        throw new Error(
-          'Remote Control child identity is unavailable; preserve the startup gate.',
+  const outputDirectory = fs.mkdtempSync(
+    path.join(DATA_DIR, '.remote-control-output-'),
+  );
+  const stdoutFile = path.join(outputDirectory, 'remote-control.stdout');
+  const stderrFile = path.join(outputDirectory, 'remote-control.stderr');
+  const [operation] = await Promise.allSettled([
+    (async (): Promise<StartResult> => {
+      const stdoutFd = fs.openSync(
+        stdoutFile,
+        fs.constants.O_WRONLY |
+          fs.constants.O_CREAT |
+          fs.constants.O_EXCL |
+          fs.constants.O_NOFOLLOW,
+        0o600,
+      );
+      let stderrFd: number;
+      try {
+        stderrFd = fs.openSync(
+          stderrFile,
+          fs.constants.O_WRONLY |
+            fs.constants.O_CREAT |
+            fs.constants.O_EXCL |
+            fs.constants.O_NOFOLLOW,
+          0o600,
         );
-      const alive = (identity: number): boolean => {
-        try {
-          process.kill(identity, 0);
-          return true;
-        } catch (error) {
-          if (hasErrno(error, 'ESRCH')) return false;
-          throw error;
-        }
-      };
-      const absent = () => !alive(-pid) && !alive(pid);
-      const signal = (value: 'SIGTERM' | 'SIGKILL') => {
-        try {
-          process.kill(-pid, value);
-        } catch (error) {
-          if (!hasErrno(error, 'ESRCH')) throw error;
-          try {
-            process.kill(pid, value);
-          } catch (fallbackError) {
-            if (!hasErrno(fallbackError, 'ESRCH')) throw fallbackError;
+      } catch (error) {
+        fs.closeSync(stdoutFd);
+        throw error;
+      }
+
+      let proc;
+      disposition('unknown');
+      try {
+        proc = spawn(
+          'claude',
+          ['remote-control', '--name', 'NanoClaw Remote'],
+          {
+            cwd,
+            stdio: ['pipe', stdoutFd, stderrFd],
+            detached: true,
+          },
+        );
+      } catch (err) {
+        fs.closeSync(stdoutFd);
+        fs.closeSync(stderrFd);
+        if (!hasErrno(err, 'ENOENT') && !hasErrno(err, 'EACCES')) throw err;
+        disposition('no_child');
+        return { ok: false, error: `Failed to start: ${err.message}` };
+      }
+
+      // Close parent descriptors before observing the child's asynchronous launch.
+      fs.closeSync(stdoutFd);
+      fs.closeSync(stderrFd);
+
+      return new Promise((resolve, reject) => {
+        const startTime = Date.now();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let settled = false;
+        const finish = (
+          result: { ok: true; url: string } | { ok: false; error: string },
+        ) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(result);
+        };
+        const pid = proc.pid;
+        let stopPromise: Promise<void> | undefined;
+        const retireStartedProcess = async () => {
+          if (!pid)
+            throw new Error(
+              'Remote Control child identity is unavailable; preserve the startup gate.',
+            );
+          const alive = (identity: number): boolean => {
+            try {
+              process.kill(identity, 0);
+              return true;
+            } catch (error) {
+              if (hasErrno(error, 'ESRCH')) return false;
+              throw error;
+            }
+          };
+          const absent = () => !alive(-pid) && !alive(pid);
+          const signal = (value: 'SIGTERM' | 'SIGKILL') => {
+            try {
+              process.kill(-pid, value);
+            } catch (error) {
+              if (!hasErrno(error, 'ESRCH')) throw error;
+              try {
+                process.kill(pid, value);
+              } catch (fallbackError) {
+                if (!hasErrno(fallbackError, 'ESRCH')) throw fallbackError;
+              }
+            }
+          };
+          for (const value of ['SIGTERM', 'SIGKILL'] as const) {
+            signal(value);
+            for (let check = 0; check < 10; check++) {
+              if (absent()) {
+                disposition('absent');
+                return;
+              }
+              await new Promise<void>((done) => setTimeout(done, 100));
+            }
           }
-        }
-      };
-      for (const value of ['SIGTERM', 'SIGKILL'] as const) {
-        signal(value);
-        for (let check = 0; check < 10; check++) {
           if (absent()) {
             disposition('absent');
             return;
           }
-          await new Promise<void>((done) => setTimeout(done, 100));
-        }
-      }
-      if (absent()) {
-        disposition('absent');
-        return;
-      }
-      throw new Error(
-        'Remote Control process retirement is unverified; preserve the startup gate before retrying.',
-      );
-    };
-    const stopStartedProcess = () =>
-      (stopPromise ??= Promise.resolve().then(retireStartedProcess));
-    const rejectAfterCleanup = (error: unknown) => {
-      if (settled) return;
-      clearTimeout(timer);
-      settled = true;
-      if (activeSession?.pid === pid) activeSession = null;
-      Promise.resolve()
-        .then(stopStartedProcess)
-        .then(
-          () => reject(error),
-          (cleanupError: unknown) =>
-            reject(
-              cleanupError === error
-                ? error
-                : new AggregateError(
-                    [error, cleanupError],
-                    'Remote Control polling and owned-process cleanup failed; inspect the started process before retrying.',
-                    { cause: error },
-                  ),
-            ),
-        );
-    };
-    proc.on('error', (error: Error) => {
-      if (settled) return;
-      if (!pid && (hasErrno(error, 'ENOENT') || hasErrno(error, 'EACCES'))) {
-        disposition('no_child');
-        finish({ ok: false, error: `Failed to start: ${error.message}` });
-      } else rejectAfterCleanup(error);
-    });
-    proc.stdin?.on('error', rejectAfterCleanup);
-    const poll = async () => {
-      if (settled) return;
-      if (!pid) return; // A failed launch emits error asynchronously.
-      // Check if process died
-      if (!isProcessAlive(pid)) {
-        await stopStartedProcess();
-        finish({ ok: false, error: 'Process exited before producing URL' });
-        return;
-      }
-
-      // Check for URL in stdout file
-      let content = '';
-      try {
-        content = fs.readFileSync(STDOUT_FILE, 'utf-8');
-      } catch (err) {
-        if (!hasErrno(err, 'ENOENT')) throw err;
-        // File might not have content yet
-      }
-
-      const match = content.match(URL_REGEX);
-      if (match) {
-        const session: RemoteControlSession = {
-          pid,
-          url: match[0],
-          startedBy: sender,
-          startedInChat: chatJid,
-          startedAt: new Date().toISOString(),
+          throw new Error(
+            'Remote Control process retirement is unverified; preserve the startup gate before retrying.',
+          );
         };
-        activeSession = session;
-        saveState(session);
-        disposition('tracked');
-
-        logger.info({ pid, sender, chatJid }, 'Remote Control session started');
-        finish({ ok: true, url: match[0] });
-        return;
-      }
-
-      // Timeout check
-      if (Date.now() - startTime >= URL_TIMEOUT_MS) {
-        await stopStartedProcess();
-        finish({
-          ok: false,
-          error: 'Timed out waiting for Remote Control URL',
+        const stopStartedProcess = () =>
+          (stopPromise ??= Promise.resolve().then(retireStartedProcess));
+        const rejectAfterCleanup = (error: unknown) => {
+          if (settled) return;
+          clearTimeout(timer);
+          settled = true;
+          if (activeSession?.pid === pid) activeSession = null;
+          Promise.resolve()
+            .then(stopStartedProcess)
+            .then(
+              () => reject(error),
+              (cleanupError: unknown) =>
+                reject(
+                  cleanupError === error
+                    ? error
+                    : new AggregateError(
+                        [error, cleanupError],
+                        'Remote Control polling and owned-process cleanup failed; inspect the started process before retrying.',
+                        { cause: error },
+                      ),
+                ),
+            );
+        };
+        proc.on('error', (error: Error) => {
+          if (settled) return;
+          if (
+            !pid &&
+            (hasErrno(error, 'ENOENT') || hasErrno(error, 'EACCES'))
+          ) {
+            disposition('no_child');
+            finish({ ok: false, error: `Failed to start: ${error.message}` });
+          } else rejectAfterCleanup(error);
         });
-        return;
-      }
+        proc.stdin?.on('error', rejectAfterCleanup);
+        const poll = async () => {
+          if (settled) return;
+          if (!pid) return; // A failed launch emits error asynchronously.
+          // Check if process died
+          if (!isProcessAlive(pid)) {
+            await stopStartedProcess();
+            finish({ ok: false, error: 'Process exited before producing URL' });
+            return;
+          }
 
-      timer = setTimeout(() => {
-        void poll().then(undefined, rejectAfterCleanup);
-      }, URL_POLL_MS);
-    };
+          // Check for URL in stdout file
+          let content = '';
+          try {
+            content = fs.readFileSync(stdoutFile, 'utf-8');
+          } catch (err) {
+            if (!hasErrno(err, 'ENOENT')) throw err;
+            // File might not have content yet
+          }
 
-    void Promise.resolve()
-      .then(() => {
-        // Error listeners exist before stdin/unref can emit a launch failure.
-        if (!pid) return;
-        proc.stdin?.write('y\n');
-        proc.stdin?.end();
-        proc.unref();
-        return poll();
-      })
-      .then(undefined, rejectAfterCleanup);
-  });
+          const match = content.match(URL_REGEX);
+          if (match) {
+            const session: RemoteControlSession = {
+              pid,
+              url: match[0],
+              startedBy: sender,
+              startedInChat: chatJid,
+              startedAt: new Date().toISOString(),
+            };
+            activeSession = session;
+            saveState(session);
+            disposition('tracked');
+
+            logger.info(
+              { pid, sender, chatJid },
+              'Remote Control session started',
+            );
+            finish({ ok: true, url: match[0] });
+            return;
+          }
+
+          // Timeout check
+          if (Date.now() - startTime >= URL_TIMEOUT_MS) {
+            await stopStartedProcess();
+            finish({
+              ok: false,
+              error: 'Timed out waiting for Remote Control URL',
+            });
+            return;
+          }
+
+          timer = setTimeout(() => {
+            void poll().then(undefined, rejectAfterCleanup);
+          }, URL_POLL_MS);
+        };
+
+        void Promise.resolve()
+          .then(() => {
+            // Error listeners exist before stdin/unref can emit a launch failure.
+            if (!pid) return;
+            proc.stdin?.write('y\n');
+            proc.stdin?.end();
+            proc.unref();
+            return poll();
+          })
+          .then(undefined, rejectAfterCleanup);
+      });
+    })(),
+  ]);
+  const [cleanup] = await Promise.allSettled([
+    Promise.resolve().then(() =>
+      fs.rmSync(outputDirectory, { recursive: true }),
+    ),
+  ]);
+  if (operation.status === 'rejected' && cleanup.status === 'rejected')
+    throw new AggregateError(
+      [operation.reason, cleanup.reason],
+      'Remote Control launch and private output cleanup failed.',
+      { cause: operation.reason },
+    );
+  if (operation.status === 'rejected') throw operation.reason;
+  if (cleanup.status === 'rejected') throw cleanup.reason;
+  return operation.value;
 }
 
 export function stopRemoteControl():
@@ -487,11 +570,21 @@ export function stopRemoteControl():
 
   const { pid } = activeSession;
   try {
-    process.kill(pid, 'SIGTERM');
+    process.kill(-pid, 'SIGTERM');
   } catch (err) {
     if (!hasErrno(err, 'ESRCH')) throw err;
-    // already dead
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch (fallbackError) {
+      if (!hasErrno(fallbackError, 'ESRCH')) throw fallbackError;
+    }
   }
+  if (isProcessAlive(pid) || isProcessAlive(-pid))
+    return {
+      ok: false,
+      error:
+        'Remote Control is stopping; retain its session until native absence is verified.',
+    };
   activeSession = null;
   clearState();
   logger.info({ pid }, 'Remote Control session stopped');

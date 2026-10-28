@@ -16,9 +16,17 @@ vi.mock('./router.js', async (original) => ({
   ...(await original<typeof import('./router.js')>()),
   findChannel: vi.fn(),
 }));
+const idleFixture = vi.hoisted(() => ({
+  pendingTask: false,
+  closed: false,
+  notifyIdle: vi.fn(),
+}));
 vi.mock('./group-queue.js', () => ({
   GroupQueue: class {
-    notifyIdle = vi.fn();
+    notifyIdle = (jid: string) => {
+      idleFixture.notifyIdle(jid);
+      if (idleFixture.pendingTask) idleFixture.closed = true;
+    };
     closeStdin = vi.fn();
     sendMessage = vi.fn(() => true);
   },
@@ -553,4 +561,38 @@ it('propagates an unexpected typing defect from the actual piped-message consume
   expect(writes.some(([, value]) => JSON.parse(value)[jid] === current)).toBe(
     false,
   );
+});
+
+it('does not preempt a producing query for a pending task on preview or session-only updates', async () => {
+  const jid = 'tg:pending-task-terminal';
+  await seed(jid);
+  idleFixture.pendingTask = true;
+  idleFixture.closed = false;
+  idleFixture.notifyIdle.mockClear();
+  vi.mocked(runContainerAgent).mockImplementationOnce(
+    async (_group, _input, _process, onOutput) => {
+      await onOutput!({
+        status: 'success',
+        result: null,
+        streamText: 'fixed preview',
+      });
+      await onOutput!({
+        status: 'success',
+        result: null,
+        newSessionId: 'fixed-session',
+      });
+      expect(idleFixture.closed).toBe(false);
+      expect(idleFixture.notifyIdle).not.toHaveBeenCalled();
+      await onOutput!({
+        status: 'success',
+        result: null,
+        completion: 'sdk_turn_completed',
+      });
+      expect(idleFixture.closed).toBe(true);
+      expect(idleFixture.notifyIdle).toHaveBeenCalledExactlyOnceWith(jid);
+      return { status: 'success', result: null };
+    },
+  );
+  await expect(processGroupMessages(jid)).resolves.toBe(true);
+  idleFixture.pendingTask = false;
 });

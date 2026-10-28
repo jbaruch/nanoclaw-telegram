@@ -37,17 +37,68 @@ function syncDirectory(directory: string): void {
     fs.closeSync(fd);
   }
 }
-function ownedDirectory(directory: string, uid: number): void {
+function ownedDirectory(directory: string, uid: number, prepare = false): void {
   const stat = fs.lstatSync(directory);
-  if (
-    !stat.isDirectory() ||
-    stat.isSymbolicLink() ||
-    stat.uid !== uid ||
-    (stat.mode & 0o022) !== 0
-  )
+  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== uid)
     throw new IpcInboxHold(
       'IPC parent identity is unsafe; preserve requests and repair the runtime-owned directory.',
     );
+  if ((stat.mode & 0o022) !== 0 && prepare) {
+    const fd = fs.openSync(directory, nofollow | fs.constants.O_DIRECTORY);
+    try {
+      const held = fs.fstatSync(fd);
+      if (
+        !held.isDirectory() ||
+        held.uid !== uid ||
+        held.dev !== stat.dev ||
+        held.ino !== stat.ino
+      )
+        throw new IpcInboxHold(
+          'IPC parent changed before structural preparation.',
+        );
+      fs.fchmodSync(fd, held.mode & 0o7777 & ~0o022);
+      fs.fsyncSync(fd);
+      const bound = fs.lstatSync(directory);
+      if (
+        bound.isSymbolicLink() ||
+        bound.dev !== held.dev ||
+        bound.ino !== held.ino
+      )
+        throw new IpcInboxHold(
+          'IPC parent binding changed during structural preparation.',
+        );
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+  if ((fs.lstatSync(directory).mode & 0o022) !== 0)
+    throw new IpcInboxHold(
+      'IPC parent permissions are unsafe; preserve requests and repair the runtime-owned directory.',
+    );
+}
+function channelHasRequests(directory: string): boolean {
+  if (process.platform !== 'linux') return true;
+  const fd = fs.openSync(directory, nofollow | fs.constants.O_DIRECTORY);
+  try {
+    // Only a work hint. Inspection follows our held FD, never a caller's alias;
+    // actual capture and immutable leaf validation remain mandatory afterward.
+    const dir = fs.opendirSync('/proc/self/fd/' + fd);
+    try {
+      let count = 0;
+      for (let entry = dir.readSync(); entry; entry = dir.readSync()) {
+        if (++count > 1024)
+          throw new IpcInboxHold(
+            'IPC channel entry bound exceeded; preserve the channel.',
+          );
+        if (entry.name.endsWith('.json')) return true;
+      }
+      return false;
+    } finally {
+      dir.closeSync();
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 function regularBytes(file: string, privateFile = false, uid?: number): Buffer {
   const fd = fs.openSync(file, nofollow);
@@ -155,7 +206,7 @@ export interface IpcInbox {
 export function createIpcInbox(base: string): IpcInbox {
   // Native process identity, never an environment/caller-provided UID.
   const uid = process.geteuid!();
-  ownedDirectory(base, uid);
+  ownedDirectory(base, uid, true);
   const root = path.join(base, PRIVATE_ROOT);
   if (!exists(root)) {
     fs.mkdirSync(root, { mode: 0o700 });
@@ -172,10 +223,10 @@ export function createIpcInbox(base: string): IpcInbox {
       if (!isValidGroupFolder(sourceGroup))
         throw new IpcInboxHold('Invalid IPC source identity.');
       const group = path.join(base, sourceGroup);
-      ownedDirectory(base, uid);
-      ownedDirectory(group, uid);
+      ownedDirectory(base, uid, true);
+      ownedDirectory(group, uid, true);
       const source = path.join(group, channel);
-      if (!exists(source)) return;
+      if (!exists(source) || !channelHasRequests(source)) return;
       if (batches().length >= MAX_BATCHES)
         throw new IpcInboxHold(
           'IPC claim capacity exhausted; no requests were moved.',

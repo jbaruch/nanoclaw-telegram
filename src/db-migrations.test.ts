@@ -45,16 +45,17 @@ function columns(database: Database.Database, table: string): string[] {
 }
 
 describe('durable schema migration', () => {
-  it('repairs version0 committed columns whose historical backfills never ran', () => {
+  it('preserves explicit version0 authority and infers only genuinely missing flags', () => {
     initialize();
     _closeDatabase();
     opened = false;
     const old = disk();
     old.exec(`
       INSERT INTO chats(jid,name) VALUES ('tg:123','preserved'),('123@g.us','group');
-      INSERT INTO messages(id,chat_jid,content) VALUES ('fixed','tg:123','Andy: saved response');
+      INSERT INTO messages(id,chat_jid,content,is_bot_message) VALUES ('fixed','tg:123','Andy: human text',0),('unknown','tg:123','Andy: saved response',NULL),('explicit-bot','tg:123','Other retained content',1);
       INSERT INTO registered_groups(jid,name,folder,trigger_pattern,added_at)
-        VALUES ('tg:123','main','telegram_main','@Andy','2024-01-01T00:00:00Z');
+        VALUES ('tg:123','main','team_main','@Andy','2024-01-01T00:00:00Z');
+      INSERT INTO registered_groups(jid,name,folder,trigger_pattern,added_at,is_main) VALUES ('tg:null','unknown','telegram_main','@Andy','2024-01-01T00:00:00Z',NULL),('tg:main','explicit','other','@Andy','2024-01-01T00:00:00Z',1);
     `);
     old.pragma('user_version = 0');
     old.close();
@@ -66,11 +67,23 @@ describe('durable schema migration', () => {
     try {
       expect(check.pragma('user_version', { simple: true })).toBe(1);
       expect(
-        check.prepare('SELECT is_main FROM registered_groups').get(),
-      ).toEqual({ is_main: 1 });
+        check
+          .prepare('SELECT jid,is_main FROM registered_groups ORDER BY jid')
+          .all(),
+      ).toEqual([
+        { jid: 'tg:123', is_main: 0 },
+        { jid: 'tg:main', is_main: 1 },
+        { jid: 'tg:null', is_main: 1 },
+      ]);
       expect(
-        check.prepare('SELECT content,is_bot_message FROM messages').get(),
-      ).toEqual({ content: 'Andy: saved response', is_bot_message: 1 });
+        check
+          .prepare('SELECT id,is_bot_message FROM messages ORDER BY id')
+          .all(),
+      ).toEqual([
+        { id: 'explicit-bot', is_bot_message: 1 },
+        { id: 'fixed', is_bot_message: 0 },
+        { id: 'unknown', is_bot_message: 1 },
+      ]);
       expect(
         check
           .prepare('SELECT jid,channel,is_group FROM chats ORDER BY jid')

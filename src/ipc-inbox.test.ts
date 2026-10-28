@@ -236,3 +236,42 @@ it('holds invalid UTF-8 private metadata without widening or removing its gate',
   expect(createIpcInbox(base).pending()).toEqual({ claims: [], held: 1 });
   expect(fs.readFileSync(metadata)).toEqual(original);
 });
+
+it('tightens only verified runtime-owned structural parents from the legacy permissive layout', () => {
+  const channel = source();
+  fs.chmodSync(base, 0o775);
+  fs.chmodSync(path.dirname(channel), 0o775);
+  fs.chmodSync(channel, 0o775);
+  fs.writeFileSync(path.join(channel, 'fixed.json'), body());
+  const inbox = createIpcInbox(base);
+  inbox.capture('main', 'messages');
+  expect(fs.statSync(base).mode & 0o777).toBe(0o755);
+  expect(fs.statSync(path.dirname(channel)).mode & 0o777).toBe(0o755);
+  const result = inbox.pending();
+  expect(result.held).toBe(0);
+  expect(result.claims[0].read()).toBe(body());
+});
+
+it('never repairs a foreign-owner or aliased structural directory', () => {
+  const channel = source();
+  fs.chmodSync(base, 0o775);
+  const lstat = fs.lstatSync.bind(fs);
+  vi.spyOn(fs, 'lstatSync').mockImplementation((file, options) => {
+    const stat = lstat(file, options as never);
+    return file === base
+      ? Object.assign(stat, { uid: process.geteuid!() + 1 })
+      : stat;
+  });
+  expect(() => createIpcInbox(base)).toThrow('parent identity');
+  expect(fs.statSync(base).mode & 0o777).toBe(0o775);
+  expect(fs.readdirSync(channel)).toEqual([]);
+});
+
+it('avoids idle claim journal writes with the native Linux held-directory hint', () => {
+  source();
+  const inbox = createIpcInbox(base);
+  const sync = vi.spyOn(fs, 'fsyncSync');
+  inbox.capture('main', 'messages');
+  if (process.platform === 'linux') expect(sync).not.toHaveBeenCalled();
+  expect(inbox.pending()).toEqual({ claims: [], held: 0 });
+});

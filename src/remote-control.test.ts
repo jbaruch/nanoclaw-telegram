@@ -201,8 +201,9 @@ describe('remote-control', () => {
       await startRemoteControl('user1', 'tg:123', '/project');
 
       // Two child log descriptors, the reservation and two parent fsyncs.
-      expect(openSyncSpy).toHaveBeenCalledTimes(5);
-      expect(closeSyncSpy).toHaveBeenCalledTimes(5);
+      expect(closeSyncSpy.mock.calls.length).toBe(
+        openSyncSpy.mock.calls.length,
+      );
     });
 
     it('saves state to disk after capturing URL', async () => {
@@ -249,7 +250,7 @@ describe('remote-control', () => {
 
       // Old process (11111) is dead, new process (22222) is alive
       killSpy.mockImplementation((pid: number, sig?: string | number) => {
-        if (pid === 11111 && (sig === 0 || sig === undefined)) {
+        if (Math.abs(pid) === 11111 && (sig === 0 || sig === undefined)) {
           throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
         }
         return true;
@@ -535,9 +536,27 @@ describe('remote-control', () => {
 
       const result = stopRemoteControl();
       expect(result).toEqual({ ok: true });
-      expect(killSpy).toHaveBeenCalledWith(55555, 'SIGTERM');
+      expect(killSpy).toHaveBeenCalledWith(-55555, 'SIGTERM');
       expect(unlinkSyncSpy).toHaveBeenCalledWith(STATE_FILE);
       expect(getActiveSession()).toBeNull();
+    });
+
+    it('does not clear a live stopping session or spawn again after signal delivery', async () => {
+      spawnMock.mockReturnValue(createMockProcess(55555));
+      stdoutFileContent = 'https://claude.ai/code?bridge=env_stopping';
+      vi.spyOn(process, 'kill').mockReturnValue(true);
+      await startRemoteControl('owner', 'tg:123', '/project');
+      unlinkSyncSpy.mockClear();
+      expect(stopRemoteControl()).toMatchObject({
+        ok: false,
+        error: expect.stringContaining('stopping'),
+      });
+      expect(getActiveSession()?.pid).toBe(55555);
+      expect(unlinkSyncSpy).not.toHaveBeenCalledWith(STATE_FILE);
+      await expect(
+        startRemoteControl('owner', 'tg:123', '/project'),
+      ).resolves.toMatchObject({ ok: true, url: stdoutFileContent });
+      expect(spawnMock).toHaveBeenCalledTimes(1);
     });
 
     it('returns error when no session is active', () => {
@@ -706,7 +725,7 @@ describe('remote-control', () => {
 
       const result = stopRemoteControl();
       expect(result).toEqual({ ok: true });
-      expect(killSpy).toHaveBeenCalledWith(77777, 'SIGTERM');
+      expect(killSpy).toHaveBeenCalledWith(-77777, 'SIGTERM');
       expect(unlinkSyncSpy).toHaveBeenCalled();
       expect(getActiveSession()).toBeNull();
     });
