@@ -12,6 +12,7 @@ export class IpcInboxHold extends Error {}
 type Channel = 'messages' | 'tasks';
 const PRIVATE_ROOT = '.claimed-v1';
 const MAX_BATCHES = 1024;
+const MAX_SOURCE_BATCHES = 64;
 const MAX_BYTES = 1024 * 1024;
 const nofollow = fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW;
 function entries(directory: string, limit = 1024): string[] {
@@ -160,9 +161,16 @@ function regularBytes(file: string, privateFile = false, uid?: number): Buffer {
       throw new IpcInboxHold(
         'IPC request is not a bounded single-link regular file; preserve the claimed batch.',
       );
-    const buffer = Buffer.alloc(MAX_BYTES + 1);
+    // Small native owner records do not need a full payload-sized allocation.
+    // Grow for concurrent file growth, preserving the same one-MiB admission.
+    let buffer = Buffer.alloc(stat.size + 1);
     let count = 0;
-    while (count < buffer.length) {
+    while (count < MAX_BYTES + 1) {
+      if (count === buffer.length) {
+        const grown = Buffer.alloc(Math.min(MAX_BYTES + 1, buffer.length * 2));
+        buffer.copy(grown);
+        buffer = grown;
+      }
       const n = fs.readSync(fd, buffer, count, buffer.length - count, null);
       if (!n) break;
       count += n;
@@ -264,6 +272,58 @@ export function createIpcInbox(base: string): IpcInbox {
     throw new IpcInboxHold('IPC claim root must be private.');
   function batches(): string[] {
     return entries(root, MAX_BATCHES);
+  }
+  function batchIdentity(batch: string): {
+    sourceGroup: string;
+    channel: Channel;
+  } {
+    ownedDirectory(batch, uid);
+    const owner = metadata(
+      path.join(batch, 'owner.json'),
+      ['schema_version', 'source_group', 'channel'],
+      uid,
+    );
+    if (
+      typeof owner.source_group !== 'string' ||
+      !isValidGroupFolder(owner.source_group) ||
+      (owner.channel !== 'messages' && owner.channel !== 'tasks')
+    )
+      throw new IpcInboxHold('IPC batch identity is invalid.');
+    return { sourceGroup: owner.source_group, channel: owner.channel };
+  }
+  function assertCaptureCapacity(sourceGroup: string): void {
+    const current = batches();
+    if (current.length >= MAX_BATCHES)
+      throw new IpcInboxHold(
+        'IPC claim capacity exhausted; no requests were moved.',
+      );
+    let attributed = 0,
+      unresolved = 0;
+    for (const name of current) {
+      try {
+        if (batchIdentity(path.join(root, name)).sourceGroup === sourceGroup)
+          attributed++;
+      } catch (error) {
+        if (
+          !(error instanceof IpcInboxHold) &&
+          !(error instanceof SyntaxError) &&
+          !isFileSystemError(error)
+        )
+          throw error;
+        // Private unknown owner state still consumes GLOBAL capacity and stays
+        // held. Never invent a source identity or clear it to admit a request.
+        unresolved++;
+      }
+    }
+    if (unresolved)
+      logger.warn(
+        { unresolved },
+        'IPC batch identity remains held; inspect private owner metadata before reconciliation.',
+      );
+    if (attributed >= MAX_SOURCE_BATCHES)
+      throw new IpcInboxHold(
+        'IPC source claim capacity exhausted; preserve this source and reconcile its held batches. No requests were moved.',
+      );
   }
   // Verify existing whole-inbox quarantine evidence only. Never create or
   // resume a whole-directory move: an old publisher can still add valid JSON.
@@ -426,10 +486,7 @@ export function createIpcInbox(base: string): IpcInbox {
       ownedDirectory(group, uid, true);
       const source = path.join(group, channel);
       if (!exists(source) || !channelHasRequests(source)) return;
-      if (batches().length >= MAX_BATCHES)
-        throw new IpcInboxHold(
-          'IPC claim capacity exhausted; no requests were moved.',
-        );
+      assertCaptureCapacity(sourceGroup);
       const batch = fs.mkdtempSync(path.join(root, 'batch-'));
       exclusiveWrite(
         path.join(batch, 'owner.json'),
@@ -462,20 +519,7 @@ export function createIpcInbox(base: string): IpcInbox {
             throw new IpcInboxHold(
               'IPC scan capacity reached; preserve later batches.',
             );
-          ownedDirectory(batch, uid);
-          const owner = metadata(
-            path.join(batch, 'owner.json'),
-            ['schema_version', 'source_group', 'channel'],
-            uid,
-          );
-          if (
-            typeof owner.source_group !== 'string' ||
-            !isValidGroupFolder(owner.source_group) ||
-            (owner.channel !== 'messages' && owner.channel !== 'tasks')
-          )
-            throw new IpcInboxHold('IPC batch identity is invalid.');
-          const sourceGroup = owner.source_group,
-            channel = owner.channel;
+          const { sourceGroup, channel } = batchIdentity(batch);
           const requests = path.join(batch, 'requests');
           ownedDirectory(requests, uid);
           const slots = entries(requests);

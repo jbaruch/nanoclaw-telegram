@@ -113,9 +113,17 @@ it('actual mount construction refreshes a newer legacy cache and a non-index-onl
   fs.writeFileSync(path.join(cache, 'index.ts'), 'legacy customized index');
   fs.writeFileSync(path.join(cache, 'ipc-mcp-stdio.ts'), 'old producer');
   fs.utimesSync(
+    path.join(source, 'index.ts'),
+    new Date('2000-01-01T00:00:00.000Z'),
+    new Date('2000-01-01T00:00:00.000Z'),
+  );
+  fs.utimesSync(
     path.join(cache, 'index.ts'),
-    new Date('2099-01-01'),
-    new Date('2099-01-01'),
+    new Date('2001-01-01T00:00:00.000Z'),
+    new Date('2001-01-01T00:00:00.000Z'),
+  );
+  expect(fs.statSync(path.join(cache, 'index.ts')).mtimeMs).toBeGreaterThan(
+    fs.statSync(path.join(source, 'index.ts')).mtimeMs,
   );
   await runSyntheticContainer();
   expect(fs.readFileSync(path.join(cache, 'ipc-mcp-stdio.ts'), 'utf8')).toBe(
@@ -129,8 +137,11 @@ it('actual mount construction refreshes a newer legacy cache and a non-index-onl
   fs.writeFileSync(path.join(source, 'ipc-mcp-stdio.ts'), 'corrected producer');
   fs.utimesSync(
     path.join(cache, 'index.ts'),
-    new Date('2099-01-01'),
-    new Date('2099-01-01'),
+    new Date('2001-01-01T00:00:00.000Z'),
+    new Date('2001-01-01T00:00:00.000Z'),
+  );
+  expect(fs.statSync(path.join(cache, 'index.ts')).mtimeMs).toBeGreaterThan(
+    fs.statSync(path.join(source, 'index.ts')).mtimeMs,
   );
   await runSyntheticContainer();
   expect(fs.readFileSync(path.join(cache, 'ipc-mcp-stdio.ts'), 'utf8')).toBe(

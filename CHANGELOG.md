@@ -6,6 +6,8 @@ For detailed release notes, see the [full changelog on the documentation site](h
 
 ### Runtime diagnostics
 
+- Bound live IPC batches per validated source before capture, retaining the global bound and all unknown/in-flight evidence so one source cannot consume the shared budget. Preserve queued source bytes, lexical ordering and the existing payload bound while other sources progress.
+
 - Refresh the customizable per-group runner from every canonical source byte through a host-only versioned digest marker, preserving custom-only extras and same-base edits while retaining interrupted refresh debt. Treat any lone channel entry as work so non-request evidence reaches private custody.
 
 - Capture observed IPC entries individually so late JSON published through a retained old channel directory stays pending for the next scan, while only observed non-request leaves enter durable quarantine. Refuse no-op task updates before publication, preserving explicit empty-script removal.

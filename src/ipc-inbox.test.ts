@@ -951,3 +951,119 @@ it.each(['file', 'directory', 'symlink', 'fifo'] as const)(
       );
   },
 );
+
+it('limits one source to64 live batches without moving its next request or starving another source after restart', () => {
+  const directory = source('blocked'),
+    stored = JSON.stringify({
+      schema_version: 1,
+      type: 'message',
+      chatJid: 'tg:blocked',
+      text: 'retained blocked input',
+    });
+  for (let index = 0; index < 1025; index++)
+    fs.writeFileSync(path.join(directory, `oversize-${index}.json`), stored);
+  const inbox = createIpcInbox(base);
+  inbox.capture('blocked', 'messages');
+  expect(inbox.pending()).toEqual({ claims: [], held: 1 });
+  let firstInFlight: string | undefined;
+  for (let batch = 1; batch < 64; batch++) {
+    fs.writeFileSync(path.join(directory, 'request.json'), stored);
+    inbox.capture('blocked', 'messages');
+    const scan = inbox.pending();
+    expect(scan.held).toBe(batch);
+    expect(scan.claims).toHaveLength(1);
+    expect(scan.claims[0].read()).toBe(stored);
+    scan.claims[0].dispatch();
+    firstInFlight ??= scan.claims[0].filePath;
+  }
+  const queued = path.join(directory, 'next.json');
+  fs.writeFileSync(queued, stored);
+  expect(() => inbox.capture('blocked', 'messages')).toThrow(
+    'source claim capacity',
+  );
+  expect(fs.readFileSync(queued, 'utf8')).toBe(stored);
+  const restarted = createIpcInbox(base);
+  expect(() => restarted.capture('blocked', 'messages')).toThrow(
+    'source claim capacity',
+  );
+  expect(fs.readFileSync(queued, 'utf8')).toBe(stored);
+  expect(fs.readFileSync(firstInFlight!, 'utf8')).toBe(stored);
+  const tasks = path.join(base, 'blocked', 'tasks');
+  fs.mkdirSync(tasks);
+  fs.writeFileSync(path.join(tasks, 'next.json'), stored);
+  expect(() => restarted.capture('blocked', 'tasks')).toThrow(
+    'source claim capacity',
+  );
+  expect(fs.readFileSync(path.join(tasks, 'next.json'), 'utf8')).toBe(stored);
+  const healthy = source('healthy');
+  fs.writeFileSync(path.join(healthy, 'request.json'), body('healthy'));
+  restarted.capture('healthy', 'messages');
+  const scan = restarted.pending();
+  expect(scan.held).toBe(64);
+  expect(scan.claims).toHaveLength(1);
+  expect(scan.claims[0].sourceGroup).toBe('healthy');
+  expect(scan.claims[0].read()).toBe(body('healthy'));
+  scan.claims[0].dispatch();
+  scan.claims[0].complete();
+  expect(createIpcInbox(base).pending()).toEqual({ claims: [], held: 64 });
+  expect(fs.readdirSync(path.join(base, '.claimed-v1'))).toHaveLength(64);
+  expect(fs.readFileSync(queued, 'utf8')).toBe(stored);
+}, 30000);
+
+it('preserves complete captured bytes when a retained descriptor grows the file after the size observation', () => {
+  const directory = source(),
+    file = path.join(directory, 'request.json'),
+    prefix = 'captured prefix',
+    tail = 'x'.repeat(65536);
+  fs.writeFileSync(file, prefix);
+  const guest = fs.openSync(file, 'r+');
+  try {
+    const ino = fs.fstatSync(guest).ino,
+      inbox = createIpcInbox(base);
+    inbox.capture('main', 'messages');
+    const nativeRead = fs.readSync.bind(fs);
+    let grown = false;
+    const read = (...args: Parameters<typeof fs.readSync>): number => {
+      if (!grown && fs.fstatSync(args[0]).ino === ino) {
+        grown = true;
+        fs.writeSync(guest, Buffer.from(tail), 0, tail.length, prefix.length);
+      }
+      return Reflect.apply(nativeRead, fs, args) as number;
+    };
+    vi.spyOn(fs, 'readSync').mockImplementation(read as typeof fs.readSync);
+    const scan = inbox.pending();
+    expect(grown).toBe(true);
+    expect(scan.held).toBe(0);
+    expect(scan.claims).toHaveLength(1);
+    expect(scan.claims[0].read()).toBe(prefix + tail);
+  } finally {
+    fs.closeSync(guest);
+  }
+});
+
+it.each([1024 * 1024, 1024 * 1024 + 1])(
+  'retains the existing captured payload byte bound at %s',
+  (size) => {
+    const directory = source(),
+      body = 'x'.repeat(size);
+    fs.writeFileSync(path.join(directory, 'request.json'), body);
+    const inbox = createIpcInbox(base);
+    inbox.capture('main', 'messages');
+    const scan = inbox.pending();
+    expect(scan.held).toBe(0);
+    if (size === 1024 * 1024) {
+      expect(scan.claims).toHaveLength(1);
+      expect(scan.claims[0].read()).toBe(body);
+    } else {
+      expect(scan.claims).toEqual([]);
+      const evidence = path.join(
+        base,
+        'errors',
+        fs.readdirSync(path.join(base, 'errors'))[0],
+      );
+      expect(fs.readFileSync(path.join(evidence, 'captured'), 'utf8')).toBe(
+        body,
+      );
+    }
+  },
+);
