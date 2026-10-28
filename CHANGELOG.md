@@ -6,6 +6,8 @@ For detailed release notes, see the [full changelog on the documentation site](h
 
 ### Runtime diagnostics
 
+- Create private quarantine directories explicitly under permissive umasks and prepare only verified same-writer legacy structural write bits without changing evidence. Run configured root lint before CI tests, renew the existing nested npm lock weekly, and cover native Remote Control identity/lifecycle on macOS as well as Linux.
+
 - Reserve the host quarantine `errors` namespace case-insensitively and mask its evidence from agent parent views. Preserve refused registrations and existing quarantine bytes. Keep expected Remote Control state holds local to that optional feature during startup; unrelated channels, IPC and scheduling continue without adopting or signaling an unproved process.
 
 - Preserve original IPC filename order through private custody and restart. Propagate failed close controls to the actual runner/scheduler cleanup owner. Keep prompt-only edits to legacy schedules independent of schedule validation, and clear positively retired preview identity before fallback delivery.

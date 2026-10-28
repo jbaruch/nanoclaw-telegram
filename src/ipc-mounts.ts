@@ -2,7 +2,7 @@
 import fs from 'fs';
 import path from 'path';
 import { DATA_DIR } from './config.js';
-import { createIpcInbox } from './ipc-inbox.js';
+import { createIpcInbox, prepareIpcQuarantineRoot } from './ipc-inbox.js';
 import { hasErrno } from './operational-errors.js';
 interface Mount {
   hostPath: string;
@@ -23,12 +23,7 @@ export function protectIpcClaimMounts(mounts: readonly Mount[]): Mount[] {
   fs.mkdirSync(base, { recursive: true });
   createIpcInbox(base);
   const reserved = path.join(base, '.claimed-v1');
-  const quarantine = path.join(base, 'errors');
-  try {
-    fs.mkdirSync(quarantine, { mode: 0o700 });
-  } catch (error) {
-    if (!hasErrno(error, 'EEXIST')) throw error;
-  }
+  const quarantine = prepareIpcQuarantineRoot(base);
   const evidence = fs.lstatSync(quarantine);
   if (
     !evidence.isDirectory() ||

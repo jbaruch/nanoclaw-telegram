@@ -169,3 +169,30 @@ it('refuses a direct quarantine root/leaf view while preserving real evidence by
     protectIpcClaimMounts([parent()]).map((mount) => mount.containerPath),
   ).toContain('/workspace/project/data/ipc/errors');
 });
+
+it('prepares a legacy same-writer group-writable quarantine without changing evidence', () => {
+  const quarantine = path.join(data, 'ipc', 'errors');
+  fs.mkdirSync(quarantine);
+  fs.chmodSync(quarantine, 0o775);
+  const file = path.join(quarantine, 'held.json');
+  fs.writeFileSync(file, 'unchanged evidence', { mode: 0o600 });
+  const mounts = protectIpcClaimMounts([parent()]);
+  expect(fs.statSync(quarantine).mode & 0o777).toBe(0o755);
+  expect(fs.readFileSync(file, 'utf8')).toBe('unchanged evidence');
+  expect(mounts.map((m) => m.containerPath)).toContain(
+    '/workspace/project/data/ipc/errors',
+  );
+});
+
+it('refuses an aliased legacy quarantine without changing foreign permissions or bytes', () => {
+  const foreign = path.join(fixture.root, 'foreign');
+  fs.mkdirSync(foreign);
+  fs.chmodSync(foreign, 0o775);
+  fs.writeFileSync(path.join(foreign, 'held'), 'unchanged');
+  fs.symlinkSync(foreign, path.join(data, 'ipc', 'errors'));
+  expect(() => protectIpcClaimMounts([parent()])).toThrow(
+    'IPC parent identity is unsafe',
+  );
+  expect(fs.statSync(foreign).mode & 0o777).toBe(0o775);
+  expect(fs.readFileSync(path.join(foreign, 'held'), 'utf8')).toBe('unchanged');
+});

@@ -37,5 +37,27 @@ jobs:
       - name: Bootstrap test typecheck
         run: npx tsc --noEmit -p tsconfig.setup.json
 
+      - name: Root lint
+        run: npm run lint
+
       - name: Tests
         run: npx vitest run
+
+  remote-control-macos:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Format and lint before native tests
+        run: |
+          npm run format:check
+          npm run lint
+      - name: Native Remote Control identity and lifecycle
+        # Real local OS children and a private synthetic CLI; no Claude/provider calls.
+        run: npx vitest run src/remote-control-identity.test.ts src/remote-control-state.test.ts src/remote-control.test.ts

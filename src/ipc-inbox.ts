@@ -76,6 +76,22 @@ function ownedDirectory(directory: string, uid: number, prepare = false): void {
       'IPC parent permissions are unsafe; preserve requests and repair the runtime-owned directory.',
     );
 }
+/** Fixed host-owned quarantine namespace. Existing runtime-owned structural
+ * directories only lose write bits; payload evidence is never altered.
+ */
+export function prepareIpcQuarantineRoot(base: string): string {
+  const uid = process.geteuid!();
+  ownedDirectory(base, uid, true);
+  const root = path.join(base, 'errors');
+  try {
+    fs.mkdirSync(root, { mode: 0o700 });
+  } catch (error) {
+    if (!hasErrno(error, 'EEXIST')) throw error;
+  }
+  ownedDirectory(root, uid, true);
+  return root;
+}
+
 function channelHasRequests(directory: string): boolean {
   let fd: number;
   try {

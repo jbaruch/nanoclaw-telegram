@@ -8,7 +8,11 @@ import {
 import fs from 'fs';
 import path from 'path';
 
-import { createIpcInbox, IpcInboxHold } from './ipc-inbox.js';
+import {
+  createIpcInbox,
+  IpcInboxHold,
+  prepareIpcQuarantineRoot,
+} from './ipc-inbox.js';
 
 import { parseTaskSchedule } from './task-schedule.js';
 
@@ -163,7 +167,7 @@ function quarantineIpcFile(
   error: unknown,
 ): void {
   try {
-    fs.mkdirSync(errorDir, { recursive: true });
+    prepareIpcQuarantineRoot(path.dirname(errorDir));
     const parent = fs.openSync(
       path.dirname(errorDir),
       fs.constants.O_RDONLY |

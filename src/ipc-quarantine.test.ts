@@ -14,6 +14,7 @@ vi.mock('./config.js', () => ({
   IPC_POLL_INTERVAL: 1000,
   TIMEZONE: 'UTC',
 }));
+import { protectIpcClaimMounts } from './ipc-mounts.js';
 import {
   startIpcWatcher,
   IpcRouteUnavailableError,
@@ -97,6 +98,7 @@ describe('IPC file quarantine', () => {
       writeGroupsSnapshot: vi.fn(),
       onTasksChanged: vi.fn(),
     };
+    const priorUmask = process.umask(0o002);
     try {
       const scan = vi.spyOn(fs, 'readdirSync').mockImplementationOnce(() => {
         throw Object.assign(new Error('fixed missing directory'), {
@@ -111,6 +113,17 @@ describe('IPC file quarantine', () => {
       scan.mockRestore();
       await vi.advanceTimersByTimeAsync(1000);
       expect(vi.getTimerCount()).toBe(1);
+      const quarantine = path.join(temporary, 'ipc', 'errors');
+      expect(fs.statSync(quarantine).mode & 0o777).toBe(0o700);
+      expect(
+        protectIpcClaimMounts([
+          {
+            hostPath: temporary,
+            containerPath: '/workspace/project',
+            readonly: true,
+          },
+        ]).map((mount) => mount.containerPath),
+      ).toContain('/workspace/project/ipc/errors');
       expect(deps.registerGroup).not.toHaveBeenCalled();
       expect(deps.sendMessage).not.toHaveBeenCalled();
       expect(
@@ -309,6 +322,7 @@ describe('IPC file quarantine', () => {
       );
       expect(vi.getTimerCount()).toBe(1);
     } finally {
+      process.umask(priorUmask);
       vi.clearAllTimers();
       fs.rmSync(temporary, { recursive: true });
     }
