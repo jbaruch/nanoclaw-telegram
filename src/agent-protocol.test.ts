@@ -896,3 +896,115 @@ it.each(['{"wakeAgent":true}', '{"wakeAgent":true,"data":{}}'])(
     );
   },
 );
+
+it('actual malformed agent input flushes its complete frame before native exit', () => {
+  const child = run('index.ts', '{broken', 'throw');
+  expect(child.error).toBeUndefined();
+  expect(child.status).toBe(1);
+  const frames = [
+    ...child.stdout.matchAll(
+      /---NANOCLAW_OUTPUT_START---\s*([\s\S]*?)\s*---NANOCLAW_OUTPUT_END---/g,
+    ),
+  ].map((match) => JSON.parse(match[1]));
+  expect(frames).toEqual([
+    {
+      status: 'error',
+      result: null,
+      error:
+        'Failed to parse agent input; provide a valid container input record.',
+    },
+  ]);
+});
+
+it('actual host outer boundary flushes delayed stderr before exit without starting native services', () => {
+  const hook = path.join(directory, 'host-hook.mjs');
+  fs.writeFileSync(
+    hook,
+    `import {registerHooks} from 'node:module';
+    const write=process.stderr.write.bind(process.stderr);process.stderr.write=(...args)=>{setTimeout(()=>write(...args),50);return true;};
+    registerHooks({resolve(specifier,context,next){
+      if(context.parentURL?.endsWith('/src/index.ts') && specifier==='./container-runtime.js')return {url:'data:text/javascript,'+encodeURIComponent('export function ensureContainerRuntimeRunning(){throw new Error("fixed synthetic startup refusal");}export function cleanupOrphans(){throw new Error("must not execute cleanup");}'),shortCircuit:true};
+      return next(specifier,context);
+    }});`,
+  );
+  const child = spawnSync(
+    process.execPath,
+    [
+      '--import',
+      fileURLToPath(import.meta.resolve('tsx/esm')),
+      '--import',
+      hook,
+      fileURLToPath(new URL('./index.ts', import.meta.url)),
+    ],
+    {
+      cwd: directory,
+      env: { PATH: process.env.PATH ?? '', HOME: directory },
+      encoding: 'utf8',
+      timeout: 5000,
+      maxBuffer: 262144,
+    },
+  );
+  expect(child.error).toBeUndefined();
+  expect(child.status).toBe(1);
+  expect(child.stderr).toContain(
+    'NanoClaw runtime failed; inspect the error before restarting',
+  );
+  expect(child.stderr).toContain('fixed synthetic startup refusal');
+  expect(fs.readdirSync(directory)).toEqual(['host-hook.mjs']);
+});
+
+it('actual MCP producer refuses empty required strings before any durable publication', () => {
+  const requests = [
+    {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'synthetic', version: '1' },
+      },
+    },
+    { jsonrpc: '2.0', method: 'notifications/initialized' },
+    ...[
+      ['send_message', { text: '' }],
+      ['react_to_message', { emoji: '' }],
+      [
+        'schedule_task',
+        { prompt: '', schedule_type: 'interval', schedule_value: '5000' },
+      ],
+      ['pause_task', { task_id: '' }],
+      ['resume_task', { task_id: '' }],
+      ['cancel_task', { task_id: '' }],
+      ['update_task', { task_id: '', prompt: 'fixed' }],
+      ...['jid', 'name', 'folder', 'trigger'].map((field) => [
+        'register_group',
+        {
+          jid: 'tg:fixed',
+          name: 'fixed',
+          folder: 'telegram_fixed',
+          trigger: '@Andy',
+          [field]: '',
+        },
+      ]),
+    ].map(([name, args], index) => ({
+      jsonrpc: '2.0',
+      id: index + 2,
+      method: 'tools/call',
+      params: { name, arguments: args },
+    })),
+  ];
+  const child = run(
+    'ipc-mcp-stdio.ts',
+    requests.map((row) => JSON.stringify(row)).join('\n') + '\n',
+  );
+  expect(child.error).toBeUndefined();
+  expect(child.status, child.stderr).toBe(0);
+  const replies = child.stdout
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  for (let id = 2; id < 13; id++)
+    expect(replies.find((row) => row.id === id)?.result?.isError).toBe(true);
+  expect(fs.existsSync(path.join(directory, 'workspace', 'ipc'))).toBe(false);
+});

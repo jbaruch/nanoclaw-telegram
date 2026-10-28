@@ -6,6 +6,10 @@ For detailed release notes, see the [full changelog on the documentation site](h
 
 ### Runtime diagnostics
 
+- Flush agent input-refusal and host outer diagnostics before forced exit, align MCP required nonempty strings with the host schema, and describe scheduled activation data as an optional object. Reject empty host follow-up text before publication.
+
+- Retain captured non-request directory entries in durable private quarantine without following or deleting their contents, so ordinary completed IPC batches release capacity; failed quarantine durability remains held across restart.
+
 - Version retained host follow-up input, preserve incompatible input before SDK admission, require object activation data from scheduled prechecks, flush outer failure diagnostics before native exit, and document the Remote Control starting gate lifecycle.
 
 - Quarantine only native task-create primary-key conflicts from untrusted request IDs, preserve retained task definitions, and continue independent IPC work while leaving other SQLite defects visible to the host owner.

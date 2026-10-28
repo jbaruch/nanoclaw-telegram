@@ -734,6 +734,9 @@ async function main(): Promise<void> {
       error:
         'Failed to parse agent input; provide a valid container input record.',
     });
+    await new Promise<void>((resolve, reject) => {
+      process.stdout.write('', (error) => (error ? reject(error) : resolve()));
+    });
     process.exit(1);
   }
 

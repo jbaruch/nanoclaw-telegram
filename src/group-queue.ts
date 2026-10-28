@@ -179,6 +179,10 @@ export class GroupQueue {
    * Returns true if the message was written, false if no active container.
    */
   sendMessage(groupJid: string, text: string): boolean {
+    if (typeof text !== 'string' || text.length === 0)
+      throw new SyntaxError(
+        'Host follow-up text must be a nonempty string before publication.',
+      );
     const state = this.getGroup(groupJid);
     if (!state.active || !state.groupFolder || state.isTaskContainer)
       return false;

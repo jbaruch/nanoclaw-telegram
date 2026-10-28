@@ -456,3 +456,167 @@ it('preserves original channel filename order through opaque snapshots and resta
     ),
   );
 });
+
+it('quarantines non-request trees and aliases without leaking batch capacity across restart', () => {
+  const foreign = path.join(base, 'foreign-evidence');
+  fs.writeFileSync(foreign, 'untouched foreign bytes');
+  for (let cycle = 0; cycle < 3; cycle++) {
+    const directory = source();
+    fs.writeFileSync(path.join(directory, 'request.json'), body(String(cycle)));
+    fs.writeFileSync(path.join(directory, 'stray.bin'), 'retained stray bytes');
+    fs.mkdirSync(path.join(directory, 'stray-directory'));
+    fs.writeFileSync(
+      path.join(directory, 'stray-directory', 'child'),
+      'retained child bytes',
+    );
+    fs.symlinkSync(foreign, path.join(directory, 'stray-alias'));
+    const inbox = createIpcInbox(base);
+    inbox.capture('main', 'messages');
+    const scan = inbox.pending();
+    expect(scan.held).toBe(0);
+    expect(scan.claims).toHaveLength(1);
+    expect(scan.claims[0].read()).toBe(body(String(cycle)));
+    scan.claims[0].dispatch();
+    scan.claims[0].complete();
+    expect(createIpcInbox(base).pending()).toEqual({ claims: [], held: 0 });
+    expect(fs.readdirSync(path.join(base, '.claimed-v1'))).toEqual([]);
+  }
+  const quarantines = fs.readdirSync(path.join(base, 'errors'));
+  expect(quarantines).toHaveLength(3);
+  for (const name of quarantines) {
+    const evidence = path.join(base, 'errors', name);
+    expect(
+      JSON.parse(fs.readFileSync(path.join(evidence, 'owner.json'), 'utf8')),
+    ).toEqual({
+      schema_version: 1,
+      source_group: 'main',
+      channel: 'messages',
+      batch_id: name.slice('unrecognized-'.length),
+    });
+    expect(
+      fs.readFileSync(path.join(evidence, 'inbox', 'stray.bin'), 'utf8'),
+    ).toBe('retained stray bytes');
+    expect(
+      fs.readFileSync(
+        path.join(evidence, 'inbox', 'stray-directory', 'child'),
+        'utf8',
+      ),
+    ).toBe('retained child bytes');
+    expect(
+      fs
+        .lstatSync(path.join(evidence, 'inbox', 'stray-alias'))
+        .isSymbolicLink(),
+    ).toBe(true);
+    expect(fs.readlinkSync(path.join(evidence, 'inbox', 'stray-alias'))).toBe(
+      foreign,
+    );
+  }
+  expect(fs.readFileSync(foreign, 'utf8')).toBe('untouched foreign bytes');
+  const independent = source('other');
+  fs.writeFileSync(
+    path.join(independent, 'independent.json'),
+    body('independent'),
+  );
+  const restarted = createIpcInbox(base);
+  restarted.capture('other', 'messages');
+  expect(restarted.pending().claims[0].read()).toBe(body('independent'));
+});
+
+it('holds after uncertain quarantine durability and resumes only after exact evidence is flushed', () => {
+  const directory = source();
+  fs.writeFileSync(path.join(directory, 'request.json'), body());
+  fs.writeFileSync(path.join(directory, 'stray.bin'), 'retained stray bytes');
+  const inbox = createIpcInbox(base);
+  inbox.capture('main', 'messages');
+  const descriptors = new Map<number, string>(),
+    open = fs.openSync.bind(fs),
+    sync = fs.fsyncSync.bind(fs),
+    rename = fs.renameSync.bind(fs);
+  let moved = false;
+  vi.spyOn(fs, 'openSync').mockImplementation((file, flags, mode) => {
+    const fd = open(file, flags, mode);
+    descriptors.set(fd, String(file));
+    return fd;
+  });
+  vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+    rename(from, to);
+    if (
+      String(to).includes('/errors/unrecognized-') &&
+      String(to).endsWith('/inbox')
+    )
+      moved = true;
+  });
+  const fault = vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
+    if (moved && descriptors.get(fd)?.includes('/errors/unrecognized-'))
+      throw Object.assign(new Error('fixed quarantine durability failure'), {
+        code: 'EIO',
+      });
+    sync(fd);
+  });
+  expect(inbox.pending()).toEqual({ claims: [], held: 1 });
+  expect(moved).toBe(true);
+  const quarantine = path.join(
+    base,
+    'errors',
+    fs.readdirSync(path.join(base, 'errors'))[0],
+  );
+  expect(
+    fs.readFileSync(path.join(quarantine, 'inbox', 'stray.bin'), 'utf8'),
+  ).toBe('retained stray bytes');
+  expect(createIpcInbox(base).pending()).toEqual({ claims: [], held: 1 });
+  fault.mockRestore();
+  const resumed = createIpcInbox(base).pending();
+  expect(resumed.held).toBe(0);
+  expect(resumed.claims).toHaveLength(1);
+  expect(resumed.claims[0].read()).toBe(body());
+  resumed.claims[0].dispatch();
+  resumed.claims[0].complete();
+  expect(createIpcInbox(base).pending()).toEqual({ claims: [], held: 0 });
+  expect(fs.readdirSync(path.join(base, '.claimed-v1'))).toEqual([]);
+  expect(
+    fs.readFileSync(path.join(quarantine, 'inbox', 'stray.bin'), 'utf8'),
+  ).toBe('retained stray bytes');
+});
+
+it.each(['schema_version', 'source_group'] as const)(
+  'preserves incompatible quarantine %s and does not dispatch its linked batch',
+  (field) => {
+    const directory = source();
+    fs.writeFileSync(path.join(directory, 'request.json'), body());
+    fs.writeFileSync(path.join(directory, 'stray.bin'), 'retained stray bytes');
+    const inbox = createIpcInbox(base);
+    inbox.capture('main', 'messages');
+    const nativeRename = fs.renameSync.bind(fs);
+    const fault = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (
+        String(to).includes('/errors/unrecognized-') &&
+        String(to).endsWith('/inbox')
+      )
+        throw Object.assign(new Error('fixed pre-move native failure'), {
+          code: 'EIO',
+        });
+      nativeRename(from, to);
+    });
+    expect(inbox.pending()).toEqual({ claims: [], held: 1 });
+    fault.mockRestore();
+    const quarantine = path.join(
+      base,
+      'errors',
+      fs.readdirSync(path.join(base, 'errors'))[0],
+    );
+    const metadata = path.join(quarantine, 'owner.json');
+    const original = JSON.parse(fs.readFileSync(metadata, 'utf8'));
+    const unsupported = JSON.stringify({
+      ...original,
+      [field]: field === 'schema_version' ? 2 : 'other',
+    });
+    fs.writeFileSync(metadata, unsupported);
+    expect(createIpcInbox(base).pending()).toEqual({ claims: [], held: 1 });
+    expect(fs.readFileSync(metadata, 'utf8')).toBe(unsupported);
+    const batch = path.join(base, '.claimed-v1', original.batch_id);
+    expect(
+      fs.readFileSync(path.join(batch, 'inbox', 'stray.bin'), 'utf8'),
+    ).toBe('retained stray bytes');
+    expect(fs.existsSync(path.join(quarantine, 'inbox'))).toBe(false);
+  },
+);

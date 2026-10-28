@@ -995,6 +995,12 @@ if (isDirectRun) {
       { err },
       'NanoClaw runtime failed; inspect the error before restarting',
     );
-    process.exit(1);
+    process.stderr.write('', (flushError) => {
+      if (flushError)
+        logger.error(
+          'NanoClaw diagnostic flush failed; inspect the service output pipe.',
+        );
+      process.exit(1);
+    });
   });
 }

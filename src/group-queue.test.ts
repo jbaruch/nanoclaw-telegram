@@ -586,3 +586,13 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10);
   });
 });
+
+it('refuses empty host follow-up input before any file publication', async () => {
+  const fs = await import('fs');
+  vi.mocked(fs.default.writeFileSync).mockClear();
+  vi.mocked(fs.default.renameSync).mockClear();
+  const queue = new GroupQueue();
+  expect(() => queue.sendMessage('tg:fixture', '')).toThrow(SyntaxError);
+  expect(fs.default.writeFileSync).not.toHaveBeenCalled();
+  expect(fs.default.renameSync).not.toHaveBeenCalled();
+});

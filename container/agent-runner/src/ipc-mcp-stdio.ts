@@ -103,7 +103,7 @@ server.tool(
   'send_message',
   "Queue a message for host delivery to the user or group while you're still running. This tool confirms queuing, not channel delivery. Use this for progress updates or to queue multiple messages.",
   {
-    text: z.string().describe('The message text to send'),
+    text: z.string().min(1).describe('The message text to send'),
     sender: z
       .string()
       .optional()
@@ -139,6 +139,7 @@ server.tool(
       ),
     emoji: z
       .string()
+      .min(1)
       .describe('The emoji to react with (e.g., "👍", "🔥", "✅", "❤️")'),
   },
   async (args) => {
@@ -183,6 +184,7 @@ SCHEDULE VALUE FORMAT (timestamps without a suffix use LOCAL timezone):
   {
     prompt: z
       .string()
+      .min(1)
       .describe(
         'What the agent should do when the task runs. For isolated mode, include all necessary context here.',
       ),
@@ -193,6 +195,7 @@ SCHEDULE VALUE FORMAT (timestamps without a suffix use LOCAL timezone):
       ),
     schedule_value: z
       .string()
+      .min(1)
       .describe(
         'cron: "*/5 * * * *" | interval: milliseconds like "300000" | once: local timestamp like "2026-02-01T15:30:00" (optional Z or numeric timezone offset)',
       ),
@@ -212,7 +215,7 @@ SCHEDULE VALUE FORMAT (timestamps without a suffix use LOCAL timezone):
       .string()
       .optional()
       .describe(
-        'Optional bash script to run before waking the agent. Script must output JSON on the last line of stdout: { "wakeAgent": boolean, "data"?: any }. If wakeAgent is false, the agent is not called. Test your script with bash -c "..." before scheduling.',
+        'Optional bash script to run before waking the agent. Script must output JSON on the last line of stdout: { "wakeAgent": boolean, "data"?: object }. data must be a non-null, non-array object; omission defaults to {}. If wakeAgent is false, the agent is not called. Test your script with bash -c "..." before scheduling.',
       ),
   },
   async (args) => {
@@ -325,7 +328,7 @@ server.tool(
 server.tool(
   'pause_task',
   'Pause a scheduled task. It will not run until resumed.',
-  { task_id: z.string().describe('The task ID to pause') },
+  { task_id: z.string().min(1).describe('The task ID to pause') },
   async (args) => {
     const data = {
       type: 'pause_task',
@@ -351,7 +354,7 @@ server.tool(
 server.tool(
   'resume_task',
   'Resume a paused task.',
-  { task_id: z.string().describe('The task ID to resume') },
+  { task_id: z.string().min(1).describe('The task ID to resume') },
   async (args) => {
     const data = {
       type: 'resume_task',
@@ -377,7 +380,7 @@ server.tool(
 server.tool(
   'cancel_task',
   'Cancel and delete a scheduled task.',
-  { task_id: z.string().describe('The task ID to cancel') },
+  { task_id: z.string().min(1).describe('The task ID to cancel') },
   async (args) => {
     const data = {
       type: 'cancel_task',
@@ -404,7 +407,7 @@ server.tool(
   'update_task',
   'Update an existing scheduled task. Only provided fields are changed; omitted fields stay the same.',
   {
-    task_id: z.string().describe('The task ID to update'),
+    task_id: z.string().min(1).describe('The task ID to update'),
     prompt: z.string().optional().describe('New prompt for the task'),
     schedule_type: z
       .enum(['cron', 'interval', 'once'])
@@ -527,16 +530,18 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   {
     jid: z
       .string()
+      .min(1)
       .describe(
         'The chat JID (e.g., "120363336345536173@g.us", "tg:-1001234567890", "dc:1234567890123456")',
       ),
-    name: z.string().describe('Display name for the group'),
+    name: z.string().min(1).describe('Display name for the group'),
     folder: z
       .string()
+      .min(1)
       .describe(
         'Channel-prefixed folder name (e.g., "whatsapp_family-chat", "telegram_dev-team")',
       ),
-    trigger: z.string().describe('Trigger word (e.g., "@Andy")'),
+    trigger: z.string().min(1).describe('Trigger word (e.g., "@Andy")'),
   },
   async (args) => {
     if (!isMain) {
