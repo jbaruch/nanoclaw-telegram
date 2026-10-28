@@ -4,12 +4,21 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawnSync } from 'child_process';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-const context = vi.hoisted(() => ({ timezone: 'UTC' }));
+const context = vi.hoisted(() => ({ timezone: 'UTC', data: '' }));
+vi.mock('@onecli-sh/sdk', () => ({ OneCLI: class {} }));
 vi.mock('./config.js', () => ({
+  ONECLI_URL: 'http://fixture.invalid',
+  get DATA_DIR() {
+    return context.data;
+  },
+  get GROUPS_DIR() {
+    return path.join(context.data, 'groups');
+  },
   get TIMEZONE() {
     return context.timezone;
   },
 }));
+import { writeTasksSnapshot } from './container-runner.js';
 import { parseTaskSchedule } from './task-schedule.js';
 let directory: string;
 beforeEach(() => {
@@ -18,13 +27,15 @@ beforeEach(() => {
   directory = fs.mkdtempSync(
     path.join(os.tmpdir(), 'telegram-agent-protocol-'),
   );
+  context.data = path.join(directory, 'host-data');
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
   fs.rmSync(directory, { recursive: true, force: true });
 });
 function fixtureHook(
-  sdkFailure = false,
+  sdkFailure: boolean | 'throw' = false,
   publicationRace: false | 'capture' | 'retire' = false,
   durabilityFault = false,
 ): string {
@@ -36,6 +47,7 @@ function fixtureHook(
     const physical=(value)=>{if(typeof value!=='string')return value;
       if(value.startsWith('/workspace/'))return path.join(root,value.slice(1));
       if(value==='/tmp/input.json')return path.join(root,'input.json');
+      if(value==='/tmp/task-script.sh')return path.join(root,'task-script.sh');
       const match=/^\\/proc\\/self\\/fd\\/([0-9]+)(?:\\/(.*))?$/.exec(value);
       if(match){const held=descriptors.get(Number(match[1]));if(!held)throw new Error('Unknown synthetic directory capability');return path.join(held.path,match[2]??'');}
       return value;};
@@ -65,12 +77,15 @@ function fixtureHook(
         if(key==='closeSync')descriptors.delete(args[0]);
         return result;
       };}});`;
+  const childModule = `import * as native from 'node:child_process';export * from 'node:child_process';export function execFile(file,args,options,callback){return native.execFile(file,args.map(value=>value==='/tmp/task-script.sh'?${JSON.stringify(path.join(directory, 'task-script.sh'))}:value),options,callback);}`;
   const source = `import {registerHooks} from 'node:module';
     const fsModule=${JSON.stringify(fsModule)};
-    const sdk=${JSON.stringify("setInterval(()=>{},60000); export async function* query(){yield {type:'result',subtype:'error_during_execution',is_error:true,errors:['fixed-private-sdk-body']};throw new Error('SDK event after failure must not be consumed');}")};
+    const childModule=${JSON.stringify(childModule)};
+    const sdk=${JSON.stringify(sdkFailure === 'throw' ? "export async function* query(){throw new TypeError('fixed-private-unexpected-sdk-body');}" : "setInterval(()=>{},60000); export async function* query(){yield {type:'result',subtype:'error_during_execution',is_error:true,errors:['fixed-private-sdk-body']};throw new Error('SDK event after failure must not be consumed');}")};
     registerHooks({resolve(specifier,context,next){
       if(specifier==='fs')return {url:'data:text/javascript,'+encodeURIComponent(fsModule),shortCircuit:true};
-      if(${sdkFailure}&&specifier==='@anthropic-ai/claude-agent-sdk')return {url:'data:text/javascript,'+encodeURIComponent(sdk),shortCircuit:true};
+      if(specifier==='child_process')return {url:'data:text/javascript,'+encodeURIComponent(childModule),shortCircuit:true};
+      if(${Boolean(sdkFailure)}&&specifier==='@anthropic-ai/claude-agent-sdk')return {url:'data:text/javascript,'+encodeURIComponent(sdk),shortCircuit:true};
       return next(specifier,context);
     }});`;
   fs.writeFileSync(hook, source);
@@ -80,7 +95,7 @@ function fixtureHook(
 function run(
   file: string,
   input: string,
-  sdkFailure = false,
+  sdkFailure: boolean | 'throw' = false,
   timezone = 'UTC',
   publicationRace: false | 'capture' | 'retire' = false,
   durabilityFault = false,
@@ -162,9 +177,21 @@ it.each([
     fs.mkdirSync(path.join(directory, 'workspace', 'ipc'), { recursive: true });
     fs.writeFileSync(
       path.join(directory, 'workspace', 'ipc', 'current_tasks.json'),
-      JSON.stringify([
-        { id: 'fixed-task', schedule_type: type, schedule_value: value },
-      ]),
+      JSON.stringify({
+        schema_version: 1,
+        tasks: [
+          {
+            id: 'fixed-task',
+            groupFolder: 'main',
+            prompt: 'fixed',
+            script: null,
+            status: 'active',
+            next_run: null,
+            schedule_type: type,
+            schedule_value: value,
+          },
+        ],
+      }),
     );
     const requests = [
       {
@@ -385,4 +412,274 @@ it('does not acknowledge queued or replay publication after a native destination
       fs.readFileSync(path.join(directory, 'ipc-durability.json'), 'utf8'),
     ),
   ).toEqual(['inode_sync', 'rename', 'destination_sync']);
+});
+
+function snapshotCalls(): string {
+  return (
+    [
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2024-11-05',
+          capabilities: {},
+          clientInfo: { name: 'synthetic', version: '1' },
+        },
+      },
+      { jsonrpc: '2.0', method: 'notifications/initialized' },
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'list_tasks', arguments: {} },
+      },
+      {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: {
+          name: 'update_task',
+          arguments: { task_id: 'fixed-task', schedule_value: '60000' },
+        },
+      },
+    ]
+      .map((value) => JSON.stringify(value))
+      .join('\n') + '\n'
+  );
+}
+const snapshotRow = {
+  id: 'fixed-task',
+  groupFolder: 'main',
+  prompt: 'fixed prompt',
+  script: null,
+  schedule_type: 'interval',
+  schedule_value: '5000',
+  status: 'active',
+  next_run: null,
+};
+
+it('the actual host snapshot writer feeds the actual MCP list and partial-update reader', () => {
+  writeTasksSnapshot('main', true, [snapshotRow]);
+  const nativeFile = path.join(
+    context.data,
+    'ipc',
+    'main',
+    'current_tasks.json',
+  );
+  const bytes = fs.readFileSync(nativeFile);
+  expect(JSON.parse(bytes.toString())).toEqual({
+    schema_version: 1,
+    tasks: [snapshotRow],
+  });
+  const mounted = path.join(
+    directory,
+    'workspace',
+    'ipc',
+    'current_tasks.json',
+  );
+  fs.mkdirSync(path.dirname(mounted), { recursive: true });
+  fs.writeFileSync(mounted, bytes);
+  const child = run('ipc-mcp-stdio.ts', snapshotCalls());
+  expect(child.error).toBeUndefined();
+  expect(child.status, child.stderr).toBe(0);
+  const replies = child.stdout
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  for (const id of [2, 3])
+    expect(
+      replies.find((reply) => reply.id === id).result.isError ?? false,
+    ).toBe(false);
+  const requests = path.join(directory, 'workspace', 'ipc', 'tasks');
+  expect(fs.readdirSync(requests)).toHaveLength(1);
+  expect(fs.readFileSync(mounted)).toEqual(bytes);
+});
+
+it.each([
+  [snapshotRow],
+  { schema_version: 2, tasks: [snapshotRow] },
+  { schema_version: 1, tasks: [snapshotRow], extra: true },
+  { schema_version: 1, tasks: [snapshotRow, snapshotRow] },
+  { schema_version: 1, tasks: [{ ...snapshotRow, script: 123 }] },
+  { schema_version: 1, tasks: [{ id: 'fixed-task' }] },
+  { schema_version: 1, tasks: null },
+])(
+  'actual MCP refuses incompatible snapshot %j without IPC publication or mutation',
+  (snapshot) => {
+    const file = path.join(directory, 'workspace', 'ipc', 'current_tasks.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const bytes = JSON.stringify(snapshot);
+    fs.writeFileSync(file, bytes);
+    const child = run('ipc-mcp-stdio.ts', snapshotCalls());
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+    const replies = child.stdout
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    for (const id of [2, 3])
+      expect(replies.find((reply) => reply.id === id).result.isError).toBe(
+        true,
+      );
+    expect(
+      fs.existsSync(path.join(directory, 'workspace', 'ipc', 'tasks')),
+    ).toBe(false);
+    expect(fs.readFileSync(file, 'utf8')).toBe(bytes);
+  },
+);
+
+it('routes an actual unexpected SDK producer defect through the sole outer framed process boundary', () => {
+  const child = run(
+    'index.ts',
+    JSON.stringify({
+      prompt: 'fixed',
+      chatJid: 'tg:fixture',
+      groupFolder: 'main',
+      isMain: true,
+    }),
+    'throw',
+  );
+  expect(child.error).toBeUndefined();
+  expect(child.status).toBe(1);
+  expect(child.stdout).toContain('---NANOCLAW_OUTPUT_START---');
+  expect(child.stdout).toContain('Agent execution failed');
+  expect(child.stdout + child.stderr).not.toContain(
+    'fixed-private-unexpected-sdk-body',
+  );
+});
+
+it.each(['null', '[]', '{"wakeAgent":"false"}', '{broken'])(
+  'actual scheduled precheck refuses malformed output %s without querying the SDK',
+  (output) => {
+    const script = 'printf "%s\\n" ' + "'" + output + "'";
+    const child = run(
+      'index.ts',
+      JSON.stringify({
+        prompt: 'fixed',
+        chatJid: 'tg:fixture',
+        groupFolder: 'main',
+        isMain: true,
+        isScheduledTask: true,
+        script,
+      }),
+      'throw',
+    );
+    expect(child.error).toBeUndefined();
+    expect(child.status).toBe(0); // Logical precheck failure is an error frame, not an invented native exit.
+    expect(child.stdout).toContain(
+      'Task script did not return a valid precheck result',
+    );
+    expect(child.stdout + child.stderr).not.toContain('fixed-private-sdk-body');
+  },
+);
+
+it('host snapshot replacement never writes through an agent-controlled leaf symlink', () => {
+  const group = path.join(context.data, 'ipc', 'main');
+  fs.mkdirSync(group, { recursive: true });
+  const outside = path.join(directory, 'retained-owner-file');
+  fs.writeFileSync(outside, 'unchanged owner bytes');
+  fs.symlinkSync(outside, path.join(group, 'current_tasks.json'));
+  writeTasksSnapshot('main', false, [
+    snapshotRow,
+    { ...snapshotRow, id: 'other-task', groupFolder: 'other' },
+  ]);
+  expect(fs.readFileSync(outside, 'utf8')).toBe('unchanged owner bytes');
+  expect(
+    fs.lstatSync(path.join(group, 'current_tasks.json')).isSymbolicLink(),
+  ).toBe(false);
+  expect(
+    JSON.parse(fs.readFileSync(path.join(group, 'current_tasks.json'), 'utf8')),
+  ).toEqual({ schema_version: 1, tasks: [snapshotRow] });
+  expect(
+    fs
+      .readdirSync(path.dirname(group))
+      .filter((name) => name.startsWith('.tasks-snapshot-')),
+  ).toEqual([]);
+});
+
+it('host snapshot writer refuses a group alias without changing foreign bytes', () => {
+  const base = path.join(context.data, 'ipc');
+  fs.mkdirSync(base, { recursive: true });
+  const foreign = path.join(directory, 'foreign');
+  fs.mkdirSync(foreign);
+  fs.writeFileSync(path.join(foreign, 'retained'), 'unchanged');
+  fs.symlinkSync(foreign, path.join(base, 'main'));
+  expect(() => writeTasksSnapshot('main', true, [snapshotRow])).toThrow(
+    'Task snapshot parent is unsafe',
+  );
+  expect(fs.readdirSync(foreign)).toEqual(['retained']);
+  expect(fs.readFileSync(path.join(foreign, 'retained'), 'utf8')).toBe(
+    'unchanged',
+  );
+});
+
+it('failed snapshot replacement preserves the prior artifact and reports cleanup defects', () => {
+  writeTasksSnapshot('main', true, [snapshotRow]);
+  const file = path.join(context.data, 'ipc', 'main', 'current_tasks.json'),
+    before = fs.readFileSync(file);
+  const error = Object.assign(new Error('fixed snapshot replace failure'), {
+    code: 'EIO',
+  });
+  const rename = vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
+    throw error;
+  });
+  expect(() =>
+    writeTasksSnapshot('main', true, [{ ...snapshotRow, prompt: 'new' }]),
+  ).toThrow(error);
+  expect(fs.readFileSync(file)).toEqual(before);
+  rename.mockRestore();
+  const cleanup = Object.assign(new Error('fixed snapshot cleanup failure'), {
+    code: 'EACCES',
+  });
+  const remove = vi.spyOn(fs, 'rmSync').mockImplementationOnce(() => {
+    throw cleanup;
+  });
+  expect(() => writeTasksSnapshot('main', true, [snapshotRow])).toThrow(
+    cleanup,
+  );
+  remove.mockRestore();
+});
+
+it('a prior open snapshot descriptor cannot mutate its atomically published successor', () => {
+  writeTasksSnapshot('main', true, [snapshotRow]);
+  const file = path.join(context.data, 'ipc', 'main', 'current_tasks.json');
+  const fd = fs.openSync(file, 'r+');
+  using _lease = { [Symbol.dispose]: () => fs.closeSync(fd) };
+  writeTasksSnapshot('main', true, [
+    { ...snapshotRow, prompt: 'fresh revision' },
+  ]);
+  fs.writeSync(fd, Buffer.from('invalid old bytes'), 0, 17, 0);
+  expect(JSON.parse(fs.readFileSync(file, 'utf8')).tasks[0].prompt).toBe(
+    'fresh revision',
+  );
+});
+
+it('snapshot cleanup failure preserves the original failed-replace error too', () => {
+  writeTasksSnapshot('main', true, [snapshotRow]);
+  const primary = Object.assign(new Error('fixed snapshot replace failure'), {
+      code: 'EIO',
+    }),
+    cleanup = Object.assign(new Error('fixed snapshot cleanup failure'), {
+      code: 'EACCES',
+    });
+  vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
+    throw primary;
+  });
+  vi.spyOn(fs, 'rmSync').mockImplementationOnce(() => {
+    throw cleanup;
+  });
+  let failure: Error | undefined;
+  try {
+    writeTasksSnapshot('main', true, [snapshotRow]);
+  } catch (error) {
+    if (!(error instanceof Error) || error.name !== 'SuppressedError')
+      throw error;
+    failure = error;
+  }
+  expect(failure).toMatchObject({
+    name: 'SuppressedError',
+    error: cleanup,
+    suppressed: primary,
+  });
 });

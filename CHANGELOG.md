@@ -6,6 +6,8 @@ For detailed release notes, see the [full changelog on the documentation site](h
 
 ### Runtime diagnostics
 
+- Version host-owned task snapshots as schema 1, validate both agent readers, and keep the live database as mutation authority. Refuse incompatible/legacy/malformed snapshots without rewriting them; publish fresh metadata by verified private atomic replacement. Extend existing formatting and lint gates to nested agent sources, and route unexpected agent defects through the genuine outer framed process boundary.
+
 - Prepare Remote Control's existing verified runtime-owned data-directory write bits through a held descriptor before launch; refuse aliases/rebinding and preserve all payload and held session bytes.
 
 - Create private quarantine directories explicitly under permissive umasks and prepare only verified same-writer legacy structural write bits without changing evidence. Run configured root lint before CI tests, renew the existing nested npm lock weekly, and cover native Remote Control identity/lifecycle on macOS as well as Linux.

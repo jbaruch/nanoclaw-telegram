@@ -894,17 +894,115 @@ export function writeTasksSnapshot(
     next_run: string | null;
   }>,
 ): void {
-  // Write filtered tasks to the group's IPC directory
   const groupIpcDir = resolveGroupIpcPath(groupFolder);
-  fs.mkdirSync(groupIpcDir, { recursive: true, mode: 0o755 });
-
-  // Main sees all tasks, others only see their own
+  const base = path.dirname(groupIpcDir);
+  fs.mkdirSync(base, { recursive: true, mode: 0o755 });
+  function leaseDirectory(directory: string) {
+    const before = fs.lstatSync(directory);
+    if (
+      !before.isDirectory() ||
+      before.isSymbolicLink() ||
+      before.uid !== process.geteuid!()
+    )
+      throw new Error(
+        'Task snapshot parent is unsafe; preserve state and repair the runtime-owned directory.',
+      );
+    const fd = fs.openSync(
+      directory,
+      fs.constants.O_RDONLY |
+        fs.constants.O_NOFOLLOW |
+        fs.constants.O_DIRECTORY,
+    );
+    let transferred = false;
+    using _rollback = {
+      [Symbol.dispose]: () => {
+        if (!transferred) fs.closeSync(fd);
+      },
+    };
+    const held = fs.fstatSync(fd);
+    if (
+      !held.isDirectory() ||
+      held.uid !== before.uid ||
+      held.dev !== before.dev ||
+      held.ino !== before.ino
+    )
+      throw new Error(
+        'Task snapshot parent changed before preparation; preserve state for repair.',
+      );
+    if (held.mode & 0o022) {
+      fs.fchmodSync(fd, held.mode & 0o7777 & ~0o022);
+      fs.fsyncSync(fd);
+    }
+    const assertBound = () => {
+      const current = fs.lstatSync(directory);
+      if (
+        !current.isDirectory() ||
+        current.isSymbolicLink() ||
+        current.uid !== held.uid ||
+        current.dev !== held.dev ||
+        current.ino !== held.ino ||
+        (current.mode & 0o022) !== 0
+      )
+        throw new Error(
+          'Task snapshot parent binding changed; preserve state and retry only after owner repair.',
+        );
+    };
+    assertBound();
+    transferred = true;
+    return { fd, assertBound, [Symbol.dispose]: () => fs.closeSync(fd) };
+  }
+  using parent = leaseDirectory(base);
+  try {
+    fs.mkdirSync(groupIpcDir, { mode: 0o755 });
+  } catch (error) {
+    if (!hasErrno(error, 'EEXIST')) throw error;
+  }
+  using group = leaseDirectory(groupIpcDir);
   const filteredTasks = isMain
     ? tasks
-    : tasks.filter((t) => t.groupFolder === groupFolder);
-
-  const tasksFile = path.join(groupIpcDir, 'current_tasks.json');
-  fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
+    : tasks.filter((task) => task.groupFolder === groupFolder);
+  const snapshot = {
+    schema_version: 1,
+    tasks: filteredTasks.map((task) => ({
+      id: task.id,
+      groupFolder: task.groupFolder,
+      prompt: task.prompt,
+      script: task.script ?? null,
+      schedule_type: task.schedule_type,
+      schedule_value: task.schedule_value,
+      status: task.status,
+      next_run: task.next_run,
+    })),
+  };
+  // Stage outside every agent's writable group bind, then replace the leaf:
+  // an agent-controlled current_tasks symlink can never redirect a host write.
+  parent.assertBound();
+  const temporary = fs.mkdtempSync(path.join(base, '.tasks-snapshot-'));
+  using _staging = {
+    [Symbol.dispose]: () => fs.rmSync(temporary, { recursive: true }),
+  };
+  const candidate = path.join(temporary, 'snapshot.json');
+  const fd = fs.openSync(
+    candidate,
+    fs.constants.O_WRONLY |
+      fs.constants.O_CREAT |
+      fs.constants.O_EXCL |
+      fs.constants.O_NOFOLLOW,
+    0o644,
+  );
+  using _file = { [Symbol.dispose]: () => fs.closeSync(fd) };
+  fs.writeFileSync(fd, JSON.stringify(snapshot, null, 2));
+  fs.fsyncSync(fd);
+  parent.assertBound();
+  group.assertBound();
+  const destination =
+    process.platform === 'linux'
+      ? `/proc/self/fd/${group.fd}/current_tasks.json`
+      : path.join(groupIpcDir, 'current_tasks.json');
+  fs.renameSync(candidate, destination);
+  fs.fsyncSync(group.fd);
+  parent.assertBound();
+  group.assertBound();
 }
 
 export interface AvailableGroup {
