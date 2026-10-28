@@ -1,3 +1,12 @@
+import type { DraftStream } from './draft-stream.js';
+import {
+  isFileSystemError,
+  isRecoverableSqliteError,
+  isTelegramError,
+  isOperationalRunError,
+  TelegramPartialDeliveryError,
+  TelegramPreviewUncertainError,
+} from './operational-errors.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -46,11 +55,14 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { resolveGroupFolderPath } from './group-folder.js';
-import { startIpcWatcher } from './ipc.js';
+import {
+  InvalidGroupFolderError,
+  resolveGroupFolderPath,
+} from './group-folder.js';
+import { startIpcWatcher, IpcRouteUnavailableError } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
-  restoreRemoteControl,
+  restoreRemoteControlAtStartup,
   startRemoteControl,
   stopRemoteControl,
 } from './remote-control.js';
@@ -80,7 +92,7 @@ const queue = new GroupQueue();
 const SEND_RETRY_ATTEMPTS = 3;
 const SEND_RETRY_BASE_DELAY_MS = 2000;
 
-async function sendWithRetry(
+export async function sendWithRetry(
   ch: Channel,
   jid: string,
   text: string,
@@ -92,8 +104,20 @@ async function sendWithRetry(
       return;
     } catch (err: unknown) {
       const isLast = attempt === SEND_RETRY_ATTEMPTS - 1;
-      const code = (err as any)?.error?.code || (err as any)?.code || '';
-      const httpCode = (err as any)?.error_code ?? 0;
+      const details = err !== null && typeof err === 'object' ? err : {};
+      const nested =
+        'error' in details &&
+        details.error !== null &&
+        typeof details.error === 'object'
+          ? details.error
+          : {};
+      const code =
+        ('code' in nested ? nested.code : undefined) ||
+        ('code' in details ? details.code : '');
+      const httpCode =
+        'error_code' in details && typeof details.error_code === 'number'
+          ? details.error_code
+          : 0;
       const isTransient =
         /ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|EPIPE/i.test(
           String(code),
@@ -111,9 +135,20 @@ async function sendWithRetry(
   }
 }
 
+/** The IPC watcher owns expected route failures and quarantines their request. */
+export async function sendIpcMessage(jid: string, text: string): Promise<void> {
+  const channel = findChannel(channels, jid);
+  if (!channel)
+    throw new IpcRouteUnavailableError(
+      'No active channel owns the IPC destination; verify the destination and channel connection before resubmitting.',
+    );
+  await sendDeduplicated(channel, jid, text);
+}
+
 // --- Outbound dedup guard ---
 const DEDUP_WINDOW_MS = 10_000;
 const recentSends = new Map<string, number>();
+const pendingSends = new Map<string, Promise<void>>();
 
 function isDuplicateSend(jid: string, text: string): boolean {
   const key = `${jid}::${text}`;
@@ -125,8 +160,64 @@ function isDuplicateSend(jid: string, text: string): boolean {
   }
 
   if (recentSends.has(key)) return true;
-  recentSends.set(key, now);
   return false;
+}
+
+async function sendDeduplicated(
+  channel: Channel,
+  jid: string,
+  text: string,
+): Promise<void> {
+  if (isDuplicateSend(jid, text)) return;
+  const key = `${jid}::${text}`;
+  const existing = pendingSends.get(key);
+  if (existing) return existing;
+  const attempt = sendWithRetry(channel, jid, text);
+  pendingSends.set(key, attempt);
+  try {
+    await attempt;
+    recentSends.set(key, Date.now());
+  } finally {
+    pendingSends.delete(key);
+  }
+}
+
+export async function sendScheduledMessage(
+  jid: string,
+  rawText: string,
+): Promise<void> {
+  const channel = findChannel(channels, jid);
+  if (!channel)
+    throw new IpcRouteUnavailableError(
+      'No active channel owns the scheduled destination; restore its route before the next task run.',
+    );
+  const text = formatOutbound(rawText);
+  if (text) await sendDeduplicated(channel, jid, text);
+}
+
+export async function sendIpcReaction(
+  jid: string,
+  messageId: string | undefined,
+  emoji: string,
+): Promise<void> {
+  const channel = findChannel(channels, jid);
+  if (!channel)
+    throw new IpcRouteUnavailableError(
+      'No active channel owns the reaction destination; verify its route before resubmitting.',
+    );
+  if (messageId) {
+    if (!channel.sendReaction)
+      throw new IpcRouteUnavailableError(
+        'The destination channel does not support reactions to a native message.',
+      );
+    await channel.sendReaction(jid, messageId, emoji);
+  } else {
+    if (!channel.reactToLatestMessage)
+      throw new IpcRouteUnavailableError(
+        'The destination channel cannot select a native reaction target.',
+      );
+    await channel.reactToLatestMessage(jid, emoji);
+  }
 }
 
 const onecli = new OneCLI({ url: ONECLI_URL });
@@ -155,7 +246,8 @@ function loadState(): void {
   const agentTs = getRouterState('last_agent_timestamp');
   try {
     lastAgentTimestamp = agentTs ? JSON.parse(agentTs) : {};
-  } catch {
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
@@ -198,6 +290,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   try {
     groupDir = resolveGroupFolderPath(group.folder);
   } catch (err) {
+    if (!(err instanceof InvalidGroupFolderError)) throw err;
     logger.warn(
       { jid, folder: group.folder, err },
       'Rejecting group registration with invalid folder',
@@ -269,7 +362,7 @@ export function _setRegisteredGroups(
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
  */
-async function processGroupMessages(chatJid: string): Promise<boolean> {
+export async function processGroupMessages(chatJid: string): Promise<boolean> {
   const group = registeredGroups[chatJid];
   if (!group) return true;
 
@@ -318,6 +411,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let signalIdleCloseFailure!: (failure: { error: unknown }) => void;
+  const idleCloseFailure = new Promise<{ error: unknown }>((resolve) => {
+    signalIdleCloseFailure = resolve;
+  });
 
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
@@ -326,81 +423,141 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         { group: group.name },
         'Idle timeout, closing container stdin',
       );
-      queue.closeStdin(chatJid);
+      void Promise.resolve()
+        .then(() => queue.closeStdin(chatJid))
+        .then(undefined, (error) => signalIdleCloseFailure({ error }));
     }, IDLE_TIMEOUT);
   };
 
-  await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
 
   // Progressive streaming: show live preview on edit-capable channels
-  const draftStream = channel.createDraftStream?.(chatJid);
-
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Streaming preview — update draft with accumulated text
-    if (result.streamText && draftStream) {
-      const text = result.streamText
-        .replace(/<internal>[\s\S]*?<\/internal>/g, '')
-        .trim();
-      if (text) draftStream.update(text);
+  let draftStream: DraftStream | undefined;
+  const restoreUndeliveredCursor = () => {
+    if (!outputSentToUser) {
+      lastAgentTimestamp[chatJid] = previousCursor;
+      saveState();
     }
+  };
 
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      if (text) {
-        if (draftStream) {
-          const ok = await draftStream.finish(text);
-          if (!ok) {
-            // Text exceeded maxLength — fall back to regular send
-            try {
-              await sendWithRetry(channel, chatJid, text);
-            } catch (err) {
-              logger.error(
-                { group: group.name, err },
-                'Failed to send agent output after retries',
-              );
-            }
+  const [execution] = await Promise.allSettled([
+    (async () => {
+      await channel.setTyping?.(chatJid, true);
+      draftStream = channel.createDraftStream?.(chatJid);
+      return runAgent(
+        group,
+        prompt,
+        chatJid,
+        async (result) => {
+          // Streaming preview — update draft with accumulated text
+          if (result.streamText && draftStream) {
+            const text = result.streamText
+              .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+              .trim();
+            if (text) await draftStream.update(text);
           }
-        } else {
-          try {
-            await sendWithRetry(channel, chatJid, text);
-          } catch (err) {
-            logger.error(
-              { group: group.name, err },
-              'Failed to send agent output after retries',
+
+          // Streaming output callback — called for each agent result
+          if (result.result) {
+            const raw =
+              typeof result.result === 'string'
+                ? result.result
+                : JSON.stringify(result.result);
+            // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+            const text = raw
+              .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+              .trim();
+            logger.info(
+              { group: group.name },
+              `Agent output: ${raw.length} chars`,
             );
+            if (text) {
+              try {
+                if (draftStream) {
+                  const ok = await draftStream.finish(text);
+                  if (!ok) {
+                    // Text exceeded maxLength — fall back to regular send
+                    await sendWithRetry(channel, chatJid, text);
+                  }
+                } else {
+                  await sendWithRetry(channel, chatJid, text);
+                }
+                outputSentToUser = true;
+              } catch (error) {
+                if (
+                  error instanceof TelegramPartialDeliveryError ||
+                  error instanceof TelegramPreviewUncertainError
+                )
+                  outputSentToUser = true;
+                throw error;
+              }
+            }
+            // Only reset idle timer on actual results, not session-update markers (result: null)
+            resetIdleTimer();
           }
-        }
-        outputSentToUser = true;
-      }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
+          if (
+            result.status === 'success' &&
+            (result.completion !== undefined ||
+              (result.result !== null && result.result.trim() !== ''))
+          ) {
+            queue.notifyIdle(chatJid);
+          }
 
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  });
-
-  await channel.setTyping?.(chatJid, false);
+          if (result.status === 'error') {
+            hadError = true;
+          }
+        },
+        draftStream
+          ? Promise.race([draftStream.failure, idleCloseFailure])
+          : idleCloseFailure,
+      );
+    })(),
+  ]);
+  // Both cleanup actions run even when execution or another cleanup fails.
   if (idleTimer) clearTimeout(idleTimer);
-
-  // Clean up draft stream if agent produced no output
-  if (!outputSentToUser && draftStream) {
-    await draftStream.cancel();
+  const cleanup = await Promise.allSettled([
+    Promise.resolve().then(() => channel.setTyping?.(chatJid, false)),
+    Promise.resolve().then(() =>
+      !outputSentToUser ? draftStream?.cancel() : undefined,
+    ),
+  ]);
+  const cleanupErrors = cleanup.flatMap((result) =>
+    result.status === 'rejected' ? [result.reason as unknown] : [],
+  );
+  const uncertainPreview = cleanupErrors.some(
+    (error) => error instanceof TelegramPreviewUncertainError,
+  );
+  if (uncertainPreview) outputSentToUser = true;
+  if (execution.status === 'rejected' || cleanupErrors.length > 0) {
+    const errors: unknown[] =
+      execution.status === 'rejected'
+        ? [execution.reason as unknown, ...cleanupErrors]
+        : [...cleanupErrors];
+    const rollback = await Promise.allSettled([
+      Promise.resolve().then(restoreUndeliveredCursor),
+    ]);
+    errors.push(
+      ...rollback.flatMap((result) =>
+        result.status === 'rejected' ? [result.reason as unknown] : [],
+      ),
+    );
+    if (uncertainPreview && errors.every(isOperationalRunError)) {
+      logger.error(
+        { group: group.name },
+        'Acknowledged preview retirement is uncertain; preserving cursor without automatic replay. Inspect the preview before retrying.',
+      );
+      return true;
+    }
+    if (execution.status === 'rejected' && errors.length === 1) throw errors[0];
+    throw new AggregateError(
+      errors,
+      'Agent execution or cleanup failed; inspect typing, draft and router state before retrying undelivered input.',
+      { cause: errors[0] },
+    );
   }
+  const output = execution.value;
 
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
@@ -430,6 +587,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  outputFailure?: Promise<{ error: unknown }>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
   const sessionId = sessions[group.folder];
@@ -485,6 +643,7 @@ async function runAgent(
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
+      outputFailure,
     );
 
     if (output.newSessionId) {
@@ -502,12 +661,13 @@ async function runAgent(
 
     return 'success';
   } catch (err) {
+    if (!isOperationalRunError(err)) throw err;
     logger.error({ group: group.name, err }, 'Agent error');
     return 'error';
   }
 }
 
-async function startMessageLoop(): Promise<void> {
+export async function startMessageLoop(): Promise<void> {
   if (messageLoopRunning) {
     logger.debug('Message loop already running, skipping duplicate start');
     return;
@@ -583,6 +743,9 @@ async function startMessageLoop(): Promise<void> {
             allPending.length > 0 ? allPending : groupMessages;
           const formatted = formatMessages(messagesToSend, TIMEZONE);
 
+          // Typing must succeed before handing input to a live container or
+          // committing its cursor; a defect leaves the database input pending.
+          await channel.setTyping?.(chatJid, true);
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
@@ -591,12 +754,6 @@ async function startMessageLoop(): Promise<void> {
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
-            // Show typing indicator while the container processes the piped message
-            channel
-              .setTyping?.(chatJid, true)
-              ?.catch((err) =>
-                logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
-              );
           } else {
             // No active container — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);
@@ -604,6 +761,12 @@ async function startMessageLoop(): Promise<void> {
         }
       }
     } catch (err) {
+      if (
+        !isFileSystemError(err) &&
+        !isTelegramError(err) &&
+        !isRecoverableSqliteError(err)
+      )
+        throw err;
       logger.error({ err }, 'Error in message loop');
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
@@ -649,7 +812,7 @@ async function main(): Promise<void> {
     ensureOneCLIAgent(jid, group);
   }
 
-  restoreRemoteControl();
+  restoreRemoteControlAtStartup();
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
@@ -694,7 +857,7 @@ async function main(): Promise<void> {
         );
       }
     } else {
-      const result = stopRemoteControl();
+      const result = await stopRemoteControl();
       if (result.ok) {
         await channel.sendMessage(chatJid, 'Remote Control session ended.');
       } else {
@@ -765,40 +928,17 @@ async function main(): Promise<void> {
   }
 
   // Start subsystems (independently of connection handler)
-  startSchedulerLoop({
+  const schedulerLifecycle = startSchedulerLoop({
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
-    sendMessage: async (jid, rawText) => {
-      const channel = findChannel(channels, jid);
-      if (!channel) {
-        logger.warn({ jid }, 'No channel owns JID, cannot send message');
-        return;
-      }
-      const text = formatOutbound(rawText);
-      if (text && !isDuplicateSend(jid, text)) {
-        await sendWithRetry(channel, jid, text);
-      }
-    },
+    sendMessage: sendScheduledMessage,
   });
-  startIpcWatcher({
-    sendMessage: (jid, text) => {
-      const channel = findChannel(channels, jid);
-      if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      if (isDuplicateSend(jid, text)) return Promise.resolve();
-      return sendWithRetry(channel, jid, text);
-    },
-    sendReaction: async (jid, messageId, emoji) => {
-      const channel = findChannel(channels, jid);
-      if (!channel) return;
-      if (messageId) {
-        await channel.sendReaction?.(jid, messageId, emoji);
-      } else {
-        await channel.reactToLatestMessage?.(jid, emoji);
-      }
-    },
+  const ipcLifecycle = startIpcWatcher({
+    sendMessage: sendIpcMessage,
+    sendReaction: sendIpcReaction,
     registeredGroups: () => registeredGroups,
     registerGroup,
     syncGroups: async (force: boolean) => {
@@ -830,10 +970,13 @@ async function main(): Promise<void> {
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
-  startMessageLoop().catch((err) => {
-    logger.fatal({ err }, 'Message loop crashed unexpectedly');
-    process.exit(1);
-  });
+  // Background failures reach main's existing outer process boundary.
+  await Promise.race([
+    queue.waitForFailure(),
+    schedulerLifecycle,
+    ipcLifecycle,
+    startMessageLoop(),
+  ]);
 }
 
 // Guard: only run when executed directly, not when imported by tests
@@ -843,8 +986,21 @@ const isDirectRun =
     new URL(`file://${process.argv[1]}`).pathname;
 
 if (isDirectRun) {
+  // outer-boundary-process-contract: the service owner detects failure through
+  // stderr and a nonzero orchestrator exit. This handler logs and exits 1;
+  // propagation alone reaches the legacy rejection reporter, which only logs
+  // and could leave the process alive after a background lifecycle failed.
   main().catch((err) => {
-    logger.error({ err }, 'Failed to start NanoClaw');
-    process.exit(1);
+    logger.error(
+      { err },
+      'NanoClaw runtime failed; inspect the error before restarting',
+    );
+    process.stderr.write('', (flushError) => {
+      if (flushError)
+        logger.error(
+          'NanoClaw diagnostic flush failed; inspect the service output pipe.',
+        );
+      process.exit(1);
+    });
   });
 }

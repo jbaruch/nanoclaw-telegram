@@ -4,6 +4,50 @@ All notable changes to NanoClaw will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
 
+### Runtime diagnostics
+
+- Bound live IPC batches per validated source before capture, retaining the global bound and all unknown/in-flight evidence so one source cannot consume the shared budget. Preserve queued source bytes, lexical ordering and the existing payload bound while other sources progress.
+
+- Refresh the customizable per-group runner from every canonical source byte through a host-only versioned digest marker, preserving custom-only extras and same-base edits while retaining interrupted refresh debt. Treat any lone channel entry as work so non-request evidence reaches private custody.
+
+- Capture observed IPC entries individually so late JSON published through a retained old channel directory stays pending for the next scan, while only observed non-request leaves enter durable quarantine. Refuse no-op task updates before publication, preserving explicit empty-script removal.
+
+- Quarantine known invalid or access-refused captured JSON entries before dispatch without following aliases or deleting unknown contents. Preserve storage/rename/fsync uncertainty and all pending/in-flight conflicts as holds, while valid same-batch and other-source IPC can progress.
+
+- Flush agent input-refusal and host outer diagnostics before forced exit, align MCP required nonempty strings with the host schema, and describe scheduled activation data as an optional object. Reject empty host follow-up text before publication.
+
+- Retain captured non-request directory entries in durable private quarantine without following or deleting their contents, so ordinary completed IPC batches release capacity; failed quarantine durability remains held across restart.
+
+- Version retained host follow-up input, preserve incompatible input before SDK admission, require object activation data from scheduled prechecks, flush outer failure diagnostics before native exit, and document the Remote Control starting gate lifecycle.
+
+- Quarantine only native task-create primary-key conflicts from untrusted request IDs, preserve retained task definitions, and continue independent IPC work while leaving other SQLite defects visible to the host owner.
+
+- Version durable MCP message/task requests independently of custody metadata and quarantine incompatible bytes before effects. Own both agent pollers through awaited promises, abort only the affected native query on input-lifecycle failure, and preserve collected input across expected per-file I/O failures. Pin CI action commits with automated renewal and gate macOS tests on successful diagnostics.
+
+- Retain already-consumed agent input across a later expected filesystem failure, return collected progress to the active turn, and preserve the failed input file for repair/retry.
+
+- Version host-owned task snapshots as schema 1, validate both agent readers, and keep the live database as mutation authority. Refuse incompatible/legacy/malformed snapshots without rewriting them; publish fresh metadata by verified private atomic replacement. Extend existing formatting and lint gates to nested agent sources, and route unexpected agent defects through the genuine outer framed process boundary.
+
+- Prepare Remote Control's existing verified runtime-owned data-directory write bits through a held descriptor before launch; refuse aliases/rebinding and preserve all payload and held session bytes.
+
+- Create private quarantine directories explicitly under permissive umasks and prepare only verified same-writer legacy structural write bits without changing evidence. Run configured root lint before CI tests, renew the existing nested npm lock weekly, and cover native Remote Control identity/lifecycle on macOS as well as Linux.
+
+- Reserve the host quarantine `errors` namespace case-insensitively and mask its evidence from agent parent views. Preserve refused registrations and existing quarantine bytes. Keep expected Remote Control state holds local to that optional feature during startup; unrelated channels, IPC and scheduling continue without adopting or signaling an unproved process.
+
+- Preserve original IPC filename order through private custody and restart. Propagate failed close controls to the actual runner/scheduler cleanup owner. Keep prompt-only edits to legacy schedules independent of schedule validation, and clear positively retired preview identity before fallback delivery.
+- Bind Remote Control state schema 2 to native process identity, bound and fatally decode capability output, and preserve unproved legacy state unchanged. Linux uses native boot/start/executable/command observations; Darwin requires its source-generated nonce in native command metadata. Real Claude nonce preservation remains a separate native acceptance requirement.
+
+- Flush both IPC publication directories before acknowledging a queued request, keep captured batch/request parent names durable before source removal, and retain the sole claim when first-quarantine parent durability fails.
+
+- Preserve explicit existing database main/bot flags during legacy migration. Run stored legacy one-shots at their already captured UTC instant without rewriting schedule history; keep new schedule input strict. Notify idle queues only after terminal output. Durably record Remote Control sessions, remove private transient child output after capture, and retain stopping sessions until native process absence is verified. Prepare only verified runtime-owned legacy IPC parent modes and avoid idle claim-journal churn through a bounded non-authoritative directory hint.
+
+- Keep marker text inside agent results intact, refuse invalid UTF-8 IPC bytes without delivery, and preserve atomic message publication while the host captures channel directories. Create IPC parents with explicit safe modes under permissive umasks. Retire startup process groups before releasing Remote Control retry gates; keep the gate when absence is unverified. CI installs the existing locked agent protocol dependencies before running actual subprocess tests.
+
+- Keep native delivery refusals visible through Telegram sends and draft finalization; mark delivery only after native acknowledgment. Route agent callback failures through owned cleanup and the caller Promise, and surface delayed background-loop failures through the main process owner.
+- Validate container output markers, keep IPC and scheduler polls scheduled after failures, and finish failed-task logs/schedule advancement before propagating unexpected errors.
+- Preserve undelivered message cursors and cleanup on unexpected errors; quarantine malformed IPC before processing and quarantine unexpected per-file failures before propagation. Version the runtime-owned database migration and remote-control state, migrate accepted database records and hold unproved legacy process identities, refuse newer versions, and route delayed remote-control polling failures through the caller Promise with owned-process cleanup.
+- Type Telegram handlers and test doubles with the installed SDK contracts. Handle expected filesystem, database, command and provider failures explicitly; let unexpected implementation errors propagate. Keep legacy schema migration transactional and retryable after a failed backfill, and report only successfully stopped orphan containers.
+
 ### Runtime compatibility
 
 - Require Node.js 24 or newer for the SQLite 13 upgrade. CI and the exact installation release come from `.nvmrc`; the bootstrap rejects older or malformed runtime versions before installing dependencies. `setup/install-node.sh` installs that pinned release through a separately pinned nvm checkout without changing shell profiles, and returns a JSON `bin_dir` for subsequent setup commands. Downloads are validated in a temporary sibling before installation; incomplete managed caches are preserved and replaced, so retrying an interrupted clone needs no manual cleanup. Sourcing it exposes its entrypoint without installing or changing shell state. Bootstrap regressions run with their own formatting, lint and TypeScript gates in CI.

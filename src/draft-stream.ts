@@ -1,8 +1,15 @@
+import {
+  isTelegramError,
+  TelegramDeliveryError,
+  TelegramPreviewUncertainError,
+} from './operational-errors.js';
 import { logger } from './logger.js';
 
 export interface DraftStream {
-  /** Send or edit the preview with accumulated text. Throttled. */
-  update(text: string): void;
+  /** Queue a preview; active throttle windows coalesce updates immediately. */
+  update(text: string): Promise<void>;
+  /** Unexpected timer failures are observed by the owning container run. */
+  failure: Promise<{ error: unknown }>;
   /** Finalize the preview. Returns false if text exceeded maxLength (caller should fall back to sendMessage). */
   finish(text: string): Promise<boolean>;
   /** Delete the preview message (e.g., if agent produced no output). */
@@ -30,35 +37,70 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
   const minInitialChars = opts.minInitialChars ?? 30;
 
   let messageId: number | undefined;
+  let deliveryFailure: Error | undefined;
+  let unexpectedFailure: { error: unknown } | undefined;
   let lastSentText = '';
   let pendingText = '';
   let stopped = false;
   let inFlight: Promise<void> = Promise.resolve();
   let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+  let reportFailure!: (failure: { error: unknown }) => void;
+  const failure = new Promise<{ error: unknown }>((resolve) => {
+    reportFailure = resolve;
+  });
+  const clearThrottle = () => {
+    if (throttleTimer) clearTimeout(throttleTimer);
+    throttleTimer = null;
+  };
 
   async function doSendOrEdit(text: string): Promise<void> {
-    if (text === lastSentText) return;
+    if (text === lastSentText && !deliveryFailure) return;
     try {
       if (!messageId) {
         messageId = await opts.sendMessage(text);
+        if (!Number.isSafeInteger(messageId) || !messageId || messageId <= 0)
+          throw new TelegramDeliveryError(
+            'Draft delivery has no native message ID; inspect Telegram delivery before retrying.',
+          );
       } else {
         await opts.editMessage(messageId, text);
       }
       lastSentText = text;
+      deliveryFailure = undefined;
     } catch (err) {
+      if (!isTelegramError(err)) throw err;
+      deliveryFailure = err;
       logger.debug({ err }, 'Draft stream send/edit failed');
     }
   }
 
+  function throwUnexpectedFailure(): void {
+    if (unexpectedFailure) throw unexpectedFailure.error;
+  }
+
   function flush(): void {
-    if (!pendingText || pendingText === lastSentText) return;
+    if (!pendingText || (pendingText === lastSentText && !deliveryFailure))
+      return;
     const text = pendingText;
-    inFlight = inFlight.then(() => doSendOrEdit(text));
+    inFlight = inFlight
+      .then(() => {
+        if (!unexpectedFailure) return doSendOrEdit(text);
+      })
+      .then(undefined, (error: unknown) => {
+        unexpectedFailure = { error };
+        reportFailure(unexpectedFailure);
+        stopped = true;
+        clearThrottle();
+      });
   }
 
   return {
-    update(text: string): void {
-      if (stopped) return;
+    failure,
+    async update(text: string): Promise<void> {
+      if (stopped) {
+        throwUnexpectedFailure();
+        return;
+      }
       pendingText = text;
 
       // Wait for minimum content before first message
@@ -71,22 +113,28 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
         throttleTimer = null;
         if (!stopped) flush();
       }, throttleMs);
+      await inFlight;
+      throwUnexpectedFailure();
     },
 
     async finish(text: string): Promise<boolean> {
       stopped = true;
-      if (throttleTimer) {
-        clearTimeout(throttleTimer);
-        throttleTimer = null;
-      }
+      clearThrottle();
+
+      await inFlight;
+      throwUnexpectedFailure();
 
       if (text.length > maxLength) {
         // Text too long for a single message — caller should fall back
         if (messageId) {
           try {
             await opts.deleteMessage(messageId);
-          } catch {
-            // ignore — best effort cleanup
+            messageId = undefined;
+          } catch (err) {
+            throw new TelegramPreviewUncertainError(
+              'Acknowledged preview could not be deleted; inspect it before retrying output.',
+              { cause: err },
+            );
           }
         }
         return false;
@@ -95,23 +143,35 @@ export function createDraftStream(opts: DraftStreamOpts): DraftStream {
       pendingText = text;
       flush();
       await inFlight;
+      throwUnexpectedFailure();
+      if (deliveryFailure) throw deliveryFailure;
       return true;
     },
 
     async cancel(): Promise<void> {
       stopped = true;
-      if (throttleTimer) {
-        clearTimeout(throttleTimer);
-        throttleTimer = null;
-      }
+      clearThrottle();
       await inFlight;
-      if (messageId) {
-        try {
+      const [cleanup] = await Promise.allSettled([
+        (async () => {
+          if (!messageId) return;
           await opts.deleteMessage(messageId);
-        } catch {
-          // ignore
-        }
+        })(),
+      ]);
+      if (cleanup.status === 'rejected') {
+        const cause = unexpectedFailure
+          ? new AggregateError(
+              [unexpectedFailure.error, cleanup.reason],
+              'Draft update and preview cleanup failed; inspect the preview before retrying.',
+              { cause: unexpectedFailure.error },
+            )
+          : cleanup.reason;
+        throw new TelegramPreviewUncertainError(
+          'Acknowledged preview deletion is uncertain; preserve input without automatic replay and inspect Telegram.',
+          { cause },
+        );
       }
+      throwUnexpectedFailure();
     },
   };
 }

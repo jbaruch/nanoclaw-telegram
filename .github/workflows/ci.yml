@@ -8,14 +8,20 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           # No scanner tracks .nvmrc: renew monthly within Node 24 LTS,
           # and move to the next supported LTS before Node 24 reaches EOL.
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+
+      - name: Install declared agent protocol dependencies
+        run: npm ci --ignore-scripts --prefix container/agent-runner
+
+      - name: Typecheck and build agent protocol
+        run: npm run build --prefix container/agent-runner
 
       - name: Format check
         run: npm run format:check
@@ -31,5 +37,28 @@ jobs:
       - name: Bootstrap test typecheck
         run: npx tsc --noEmit -p tsconfig.setup.json
 
+      - name: Root lint
+        run: npm run lint
+
       - name: Tests
         run: npx vitest run
+
+  remote-control-macos:
+    needs: ci
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Format and lint before native tests
+        run: |
+          npm run format:check
+          npm run lint
+      - name: Native Remote Control identity and lifecycle
+        # Real local OS children and a private synthetic CLI; no Claude/provider calls.
+        run: npx vitest run src/remote-control-identity.test.ts src/remote-control-state.test.ts src/remote-control.test.ts

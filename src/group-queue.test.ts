@@ -1,5 +1,7 @@
+import { ChildProcess } from 'child_process';
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
+import { HttpError } from 'grammy';
 import { GroupQueue } from './group-queue.js';
 
 // Mock config to control concurrency limit
@@ -33,6 +35,108 @@ describe('GroupQueue', () => {
   afterEach(() => {
     vi.useRealTimers();
   });
+
+  it.each(['messages', 'task'] as const)(
+    'surfaces a queued %s defect to the process owner',
+    async (kind) => {
+      const defect = new TypeError('fixed queued work defect');
+      const rejected = expect(queue.waitForFailure()).rejects.toBe(defect);
+      const work = vi.fn(async () => {
+        throw defect;
+      });
+      if (kind === 'task') queue.enqueueTask('tg:123', 'fixed-task', work);
+      else {
+        queue.setProcessMessagesFn(work);
+        queue.enqueueMessageCheck('tg:123');
+      }
+      await vi.advanceTimersByTimeAsync(0);
+      await rejected;
+      expect(work).toHaveBeenCalledTimes(1);
+      queue.enqueueMessageCheck('tg:456');
+      expect(work).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('retains a completed failure until the real lifecycle owner subscribes', async () => {
+    const defect = new TypeError('fixed early queued defect');
+    queue.setProcessMessagesFn(async () => {
+      throw defect;
+    });
+    queue.enqueueMessageCheck('tg:123');
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(queue.waitForFailure()).rejects.toBe(defect);
+  });
+
+  it('surfaces a task defect from the actual same-group drain path', async () => {
+    let release!: () => void;
+    queue.setProcessMessagesFn(async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return true;
+    });
+    queue.enqueueMessageCheck('tg:123');
+    const defect = new TypeError('fixed drained task defect');
+    queue.enqueueTask('tg:123', 'fixed-task', async () => {
+      throw defect;
+    });
+    const rejected = expect(queue.waitForFailure()).rejects.toBe(defect);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    await rejected;
+  });
+
+  it('keeps all-operational task aggregates contained and permits later queued work', async () => {
+    const failed = vi.fn();
+    void queue.waitForFailure().then(undefined, failed);
+    const transport = new HttpError('fixed transport', new Error('synthetic'));
+    const combined = new AggregateError(
+      [
+        transport,
+        Object.assign(new Error('fixed stop failure'), {
+          status: 7,
+          signal: null,
+        }),
+      ],
+      'fixed operational aggregate',
+      { cause: transport },
+    );
+    queue.enqueueTask('tg:123', 'failed-task', async () => {
+      throw combined;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const later = vi.fn(async () => {});
+    queue.enqueueTask('tg:123', 'later-task', later);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(later).toHaveBeenCalledTimes(1);
+    expect(failed).not.toHaveBeenCalled();
+  });
+
+  it.each(['messages', 'task'] as const)(
+    'does not drain pending messages or tasks after an unexpected %s failure',
+    async (origin) => {
+      const defect = new TypeError('fixed fatal work defect');
+      let reject!: (error: unknown) => void;
+      const blocked = () =>
+        new Promise<never>((_resolve, fail) => {
+          reject = fail;
+        });
+      const messages = vi.fn(async () => true),
+        pendingTask = vi.fn(async () => {});
+      if (origin === 'messages') messages.mockImplementationOnce(blocked);
+      queue.setProcessMessagesFn(messages);
+      if (origin === 'messages') queue.enqueueMessageCheck('tg:123');
+      else queue.enqueueTask('tg:123', 'initial-task', blocked);
+      queue.enqueueMessageCheck('tg:123');
+      queue.enqueueTask('tg:123', 'pending-task', pendingTask);
+      const failed = expect(queue.waitForFailure()).rejects.toBe(defect);
+      reject(defect);
+      await vi.advanceTimersByTimeAsync(0);
+      await failed;
+      expect(pendingTask).not.toHaveBeenCalled();
+      expect(messages).toHaveBeenCalledTimes(origin === 'messages' ? 1 : 0);
+    },
+  );
 
   // --- Single group at a time ---
 
@@ -300,7 +404,7 @@ describe('GroupQueue', () => {
     // Register a process so closeStdin has a groupFolder
     queue.registerProcess(
       'group1@g.us',
-      {} as any,
+      new ChildProcess(),
       'container-1',
       'test-group',
     );
@@ -340,7 +444,7 @@ describe('GroupQueue', () => {
     // Register process and mark idle
     queue.registerProcess(
       'group1@g.us',
-      {} as any,
+      new ChildProcess(),
       'container-1',
       'test-group',
     );
@@ -379,7 +483,7 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10);
     queue.registerProcess(
       'group1@g.us',
-      {} as any,
+      new ChildProcess(),
       'container-1',
       'test-group',
     );
@@ -420,7 +524,7 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10);
     queue.registerProcess(
       'group1@g.us',
-      {} as any,
+      new ChildProcess(),
       'container-1',
       'test-group',
     );
@@ -453,7 +557,7 @@ describe('GroupQueue', () => {
     // Register process and enqueue a task (no idle yet — no preemption)
     queue.registerProcess(
       'group1@g.us',
-      {} as any,
+      new ChildProcess(),
       'container-1',
       'test-group',
     );
@@ -481,4 +585,14 @@ describe('GroupQueue', () => {
     resolveProcess!();
     await vi.advanceTimersByTimeAsync(10);
   });
+});
+
+it('refuses empty host follow-up input before any file publication', async () => {
+  const fs = await import('fs');
+  vi.mocked(fs.default.writeFileSync).mockClear();
+  vi.mocked(fs.default.renameSync).mockClear();
+  const queue = new GroupQueue();
+  expect(() => queue.sendMessage('tg:fixture', '')).toThrow(SyntaxError);
+  expect(fs.default.writeFileSync).not.toHaveBeenCalled();
+  expect(fs.default.renameSync).not.toHaveBeenCalled();
 });

@@ -570,3 +570,20 @@ describe('registered group isMain', () => {
     expect(group.isMain).toBeUndefined();
   });
 });
+
+it.each(['errors', 'ERRORS', 'Errors'])(
+  'refuses registration over host quarantine %s without replacing a valid group',
+  (folder) => {
+    const prior = {
+      name: 'fixed',
+      folder: 'main',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00Z',
+    };
+    setRegisteredGroup('tg:fixed', prior);
+    expect(() => setRegisteredGroup('tg:fixed', { ...prior, folder })).toThrow(
+      'Invalid group folder',
+    );
+    expect(getAllRegisteredGroups()['tg:fixed']).toMatchObject(prior);
+  },
+);

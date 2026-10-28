@@ -120,6 +120,15 @@ describe('cleanupOrphans', () => {
     );
   });
 
+  it('propagates a programming error rather than claiming successful orphan cleanup', () => {
+    const defect = new TypeError('fixed command adapter defect');
+    mockExecSync.mockImplementationOnce(() => {
+      throw defect;
+    });
+    expect(cleanupOrphans).toThrow(defect);
+    expect(logger.info).not.toHaveBeenCalled();
+  });
+
   it('does nothing when no orphans exist', () => {
     mockExecSync.mockReturnValueOnce('');
 
@@ -131,7 +140,10 @@ describe('cleanupOrphans', () => {
 
   it('warns and continues when ps fails', () => {
     mockExecSync.mockImplementationOnce(() => {
-      throw new Error('docker not available');
+      throw Object.assign(new Error('docker not available'), {
+        status: 1,
+        signal: null,
+      });
     });
 
     cleanupOrphans(); // should not throw
@@ -146,7 +158,10 @@ describe('cleanupOrphans', () => {
     mockExecSync.mockReturnValueOnce('nanoclaw-a-1\nnanoclaw-b-2\n');
     // First stop fails
     mockExecSync.mockImplementationOnce(() => {
-      throw new Error('already stopped');
+      throw Object.assign(new Error('already stopped'), {
+        status: 1,
+        signal: null,
+      });
     });
     // Second stop succeeds
     mockExecSync.mockReturnValueOnce('');
@@ -155,7 +170,7 @@ describe('cleanupOrphans', () => {
 
     expect(mockExecSync).toHaveBeenCalledTimes(3);
     expect(logger.info).toHaveBeenCalledWith(
-      { count: 2, names: ['nanoclaw-a-1', 'nanoclaw-b-2'] },
+      { count: 1, names: ['nanoclaw-b-2'] },
       'Stopped orphaned containers',
     );
   });

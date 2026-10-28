@@ -41,3 +41,14 @@ describe('group folder validation', () => {
     expect(() => resolveGroupIpcPath('/tmp')).toThrow();
   });
 });
+
+it.each(['errors', 'ERRORS', 'Errors'])(
+  'reserves host quarantine %s at folder and mount resolution boundaries',
+  (folder) => {
+    expect(isValidGroupFolder(folder)).toBe(false);
+    expect(() => resolveGroupIpcPath(folder)).toThrow('Invalid group folder');
+    expect(() => resolveGroupFolderPath(folder)).toThrow(
+      'Invalid group folder',
+    );
+  },
+);

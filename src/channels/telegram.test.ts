@@ -1,3 +1,6 @@
+import { GrammyError, HttpError } from 'grammy';
+import * as database from '../db.js';
+import type { MessageEntity } from 'grammy/types';
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
 // --- Mocks ---
@@ -26,11 +29,22 @@ vi.mock('../logger.js', () => ({
 
 // --- Grammy mock ---
 
-type Handler = (...args: any[]) => any;
+type Handler = (context: unknown) => unknown;
+interface MockBotState {
+  commandHandlers: Map<string, Handler>;
+  filterHandlers: Map<string, Handler[]>;
+  errorHandler: Handler | null;
+  api: {
+    sendMessage: ReturnType<typeof vi.fn>;
+    sendChatAction: ReturnType<typeof vi.fn>;
+    raw: { setMessageReaction: ReturnType<typeof vi.fn> };
+  };
+}
 
-const botRef = vi.hoisted(() => ({ current: null as any }));
+const botRef = vi.hoisted(() => ({ current: null as MockBotState | null }));
 
-vi.mock('grammy', () => ({
+vi.mock('grammy', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('grammy')>()),
   Bot: class MockBot {
     token: string;
     commandHandlers = new Map<string, Handler>();
@@ -38,8 +52,14 @@ vi.mock('grammy', () => ({
     errorHandler: Handler | null = null;
 
     api = {
-      sendMessage: vi.fn().mockResolvedValue(undefined),
+      getFile: vi
+        .fn()
+        .mockRejectedValue(
+          new HttpError('Synthetic unavailable file', new Error('ECONNRESET')),
+        ),
+      sendMessage: vi.fn().mockResolvedValue({ message_id: 17 }),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
+      raw: { setMessageReaction: vi.fn().mockResolvedValue(true) },
     };
 
     constructor(token: string) {
@@ -61,7 +81,9 @@ vi.mock('grammy', () => ({
       this.errorHandler = handler;
     }
 
-    start(opts: { onStart: (botInfo: any) => void }) {
+    start(opts: {
+      onStart: (botInfo: { username: string; id: number }) => void;
+    }) {
       opts.onStart({ username: 'andy_ai_bot', id: 12345 });
     }
 
@@ -105,7 +127,7 @@ function createTextCtx(overrides: {
   username?: string;
   messageId?: number;
   date?: number;
-  entities?: any[];
+  entities?: MessageEntity[];
 }) {
   const chatId = overrides.chatId ?? 100200300;
   const chatType = overrides.chatType ?? 'group';
@@ -117,8 +139,8 @@ function createTextCtx(overrides: {
     },
     from: {
       id: overrides.fromId ?? 99001,
-      first_name: overrides.firstName ?? 'Alice',
-      username: overrides.username ?? 'alice_user',
+      first_name: (overrides.firstName ?? 'Alice') as string | undefined,
+      username: (overrides.username ?? 'alice_user') as string | undefined,
     },
     message: {
       text: overrides.text,
@@ -139,7 +161,7 @@ function createMediaCtx(overrides: {
   date?: number;
   messageId?: number;
   caption?: string;
-  extra?: Record<string, any>;
+  extra?: Record<string, unknown>;
 }) {
   const chatId = overrides.chatId ?? 100200300;
   return {
@@ -150,7 +172,7 @@ function createMediaCtx(overrides: {
     },
     from: {
       id: overrides.fromId ?? 99001,
-      first_name: overrides.firstName ?? 'Alice',
+      first_name: (overrides.firstName ?? 'Alice') as string | undefined,
       username: 'alice_user',
     },
     message: {
@@ -164,6 +186,7 @@ function createMediaCtx(overrides: {
 }
 
 function currentBot() {
+  if (!botRef.current) throw new Error('Test bot not connected');
   return botRef.current;
 }
 
@@ -344,7 +367,7 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       const ctx = createTextCtx({ text: 'Hi' });
-      ctx.from.first_name = undefined as any;
+      ctx.from.first_name = undefined;
       await triggerTextMessage(ctx);
 
       expect(opts.onMessage).toHaveBeenCalledWith(
@@ -359,8 +382,8 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       const ctx = createTextCtx({ text: 'Hi', fromId: 42 });
-      ctx.from.first_name = undefined as any;
-      ctx.from.username = undefined as any;
+      ctx.from.first_name = undefined;
+      ctx.from.username = undefined;
       await triggerTextMessage(ctx);
 
       expect(opts.onMessage).toHaveBeenCalledWith(
@@ -792,29 +815,117 @@ describe('TelegramChannel', () => {
       expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
     });
 
-    it('handles send failure gracefully', async () => {
+    it('propagates a programming failure without a plain-text retry', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      const defect = new TypeError('fixed channel defect');
+      currentBot().api.sendMessage.mockRejectedValueOnce(defect);
+      await expect(
+        channel.sendMessage('tg:100200300', 'fixed text'),
+      ).rejects.toBe(defect);
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('propagates a failed native send without a plain-text network retry', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
 
-      currentBot().api.sendMessage.mockRejectedValueOnce(
-        new Error('Network error'),
-      );
-
-      // Should not throw
+      const failure = new HttpError('Network error', new Error('ECONNRESET'));
+      currentBot().api.sendMessage.mockRejectedValueOnce(failure);
       await expect(
         channel.sendMessage('tg:100200300', 'Will fail'),
-      ).resolves.toBeUndefined();
+      ).rejects.toBe(failure);
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
     });
 
-    it('does nothing when bot is not initialized', async () => {
-      const opts = createTestOpts();
-      const channel = new TelegramChannel('test-token', opts);
+    it('does not expose a retryable transport error after an acknowledged first chunk', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      const failure = new HttpError(
+        'fixed second-chunk failure',
+        Object.assign(new Error('fixed reset'), { code: 'ECONNRESET' }),
+      );
+      currentBot()
+        .api.sendMessage.mockResolvedValueOnce({ message_id: 17 })
+        .mockRejectedValueOnce(failure);
+      await expect(
+        channel.sendMessage('tg:123', 'x'.repeat(5000)),
+      ).rejects.toMatchObject({
+        name: 'Error',
+        cause: failure,
+        message: expect.stringContaining('acknowledged chunks'),
+      });
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(2);
+    });
 
-      // Don't connect — bot is null
-      await channel.sendMessage('tg:100200300', 'No bot');
+    it('refuses a missing latest native reaction target', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      vi.spyOn(database, 'getLatestMessage').mockReturnValueOnce(null);
+      await expect(
+        channel.reactToLatestMessage('tg:123', '👍'),
+      ).rejects.toThrow('No native message');
+      expect(currentBot().api.raw.setMessageReaction).not.toHaveBeenCalled();
+    });
 
-      // No error, no API call
+    it('propagates native reaction failure and refuses disconnected reactions', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await expect(channel.sendReaction('tg:123', '17', '👍')).rejects.toThrow(
+        'not connected',
+      );
+      await channel.connect();
+      const failure = new HttpError(
+        'fixed reaction failure',
+        new Error('synthetic'),
+      );
+      currentBot().api.raw.setMessageReaction.mockRejectedValueOnce(failure);
+      await expect(channel.sendReaction('tg:123', '17', '👍')).rejects.toBe(
+        failure,
+      );
+    });
+
+    it('does not confirm delivery when the native response lacks a message ID', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      currentBot().api.sendMessage.mockResolvedValueOnce(undefined);
+      await expect(
+        channel.sendMessage('tg:100200300', 'fixed text'),
+      ).rejects.toThrow('no native message acknowledgment');
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('permits plain text only after a native Markdown parse rejection', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      currentBot().api.sendMessage.mockRejectedValueOnce(
+        new GrammyError(
+          'fixed rejection',
+          {
+            ok: false,
+            error_code: 400,
+            description: "Bad Request: can't parse entities",
+          },
+          'sendMessage',
+          {},
+        ),
+      );
+      await expect(
+        channel.sendMessage('tg:100200300', 'fixed text'),
+      ).resolves.toBeUndefined();
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(2);
+      expect(currentBot().api.sendMessage).toHaveBeenLastCalledWith(
+        '100200300',
+        'fixed text',
+        {},
+      );
+    });
+
+    it('refuses delivery when the bot is unavailable', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await expect(
+        channel.sendMessage('tg:100200300', 'No bot'),
+      ).rejects.toThrow('not connected');
     });
   });
 
@@ -889,7 +1000,7 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       currentBot().api.sendChatAction.mockRejectedValueOnce(
-        new Error('Rate limited'),
+        new HttpError('Rate limited', new Error('ETIMEDOUT')),
       );
 
       await expect(

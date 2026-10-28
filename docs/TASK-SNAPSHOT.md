@@ -1,0 +1,11 @@
+# Task snapshot contract
+
+The host runtime `src/container-runner.ts::writeTasksSnapshot` is the sole writer of each group's `data/ipc/<folder>/current_tasks.json`, mounted as `/workspace/ipc/current_tasks.json`. The agent's `task-snapshot.ts` reader serves `list_tasks` and partial schedule updates. These are co-shipped source components.
+
+Schema 1 is an object with exactly `schema_version: 1` and `tasks`, an array. Each row has exactly: `id`, `groupFolder`, `prompt`, `script`, `schedule_type`, `schedule_value`, `status`, and `next_run`. All are strings except `script` and `next_run`, which also accept null. IDs and folders are nonempty; IDs are unique. The host normalizes absent script metadata to null. Schedule/status strings retain database metadata, including legacy values; this snapshot does not certify schedule validity or readiness. Non-main snapshots contain only that group's tasks, and the reader retains the same filter.
+
+The reader accepts only schema 1, bounded regular single-link UTF-8 JSON of at most 4 MiB. Legacy bare arrays, future schemas, malformed/extra/missing fields and duplicate IDs refuse explicitly without mutation or migration. A missing/unreadable snapshot cannot validate a partial update. A complete schedule update does not need recalled fields. Only the host regenerates this derived artifact from the live database; it never imports snapshot contents into that database. During mixed-version rollout, incompatible readers refuse instead of inventing an empty or migrated schedule. Refresh the co-shipped host/agent pair to restore coverage.
+
+The writer verifies native owner/directory bindings, stages privately outside writable agent group mounts, flushes and atomically replaces the snapshot leaf, and reports cleanup failures. A leaf symlink cannot redirect host writes. Unknown parent aliases or changed bindings refuse. Temporary files carry no dispatch/claim authority and are never replayed or migrated.
+
+The live host database and its actual registered source group remain mutation authority. Every update request is rechecked against that database, including schedule grammar and authorization. Snapshot bytes, agent role flags and tool text are never delivery, execution or owner authorization evidence.

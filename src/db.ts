@@ -1,20 +1,45 @@
+import { hasErrno } from './operational-errors.js';
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
 import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
-import { isValidGroupFolder } from './group-folder.js';
+import { InvalidGroupFolderError, isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
   NewMessage,
   RegisteredGroup,
+  AdditionalMount,
   ScheduledTask,
   TaskRunLog,
 } from './types.js';
 
 let db: Database.Database;
 
-function createSchema(database: Database.Database): void {
+/**
+ * Runtime-owned schema of record. SQLite user_version 0 is the accepted legacy
+ * layout; migration 0 -> 1 creates the tables below and completes their ordered
+ * additive columns/backfills. DDL, backfills and version advance commit together.
+ * Version 1 is current; unknown newer versions refuse without mutation.
+ */
+function migrateDatabase(database: Database.Database): void {
+  const version = database.pragma('user_version', { simple: true }) as number;
+  if (version === 1) return;
+  if (version !== 0)
+    throw new Error(
+      'Unsupported database schema version; update NanoClaw before opening this database.',
+    );
+  database.transaction(() => {
+    migrateToVersion1(database);
+    database.pragma('user_version = 1');
+  })();
+}
+
+function migrateToVersion1(database: Database.Database): void {
+  const hasColumn = (table: string, column: string): boolean =>
+    (database.pragma(`table_info(${table})`) as { name: string }[]).some(
+      (row) => row.name === column,
+    );
   database.exec(`
     CREATE TABLE IF NOT EXISTS chats (
       jid TEXT PRIMARY KEY,
@@ -96,67 +121,64 @@ function createSchema(database: Database.Database): void {
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
-  try {
+  if (!hasColumn('scheduled_tasks', 'context_mode')) {
     database.exec(
       `ALTER TABLE scheduled_tasks ADD COLUMN context_mode TEXT DEFAULT 'isolated'`,
     );
-  } catch {
-    /* column already exists */
   }
 
   // Add script column if it doesn't exist (migration for existing DBs)
-  try {
+  if (!hasColumn('scheduled_tasks', 'script')) {
     database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN script TEXT`);
-  } catch {
-    /* column already exists */
   }
 
   // Add is_bot_message column if it doesn't exist (migration for existing DBs)
-  try {
+  const addedBotMessage = !hasColumn('messages', 'is_bot_message');
+  if (addedBotMessage) {
     database.exec(
       `ALTER TABLE messages ADD COLUMN is_bot_message INTEGER DEFAULT 0`,
     );
-    // Backfill: mark existing bot messages that used the content prefix pattern
-    database
-      .prepare(`UPDATE messages SET is_bot_message = 1 WHERE content LIKE ?`)
-      .run(`${ASSISTANT_NAME}:%`);
-  } catch {
-    /* column already exists */
   }
+  // Existing explicit flags are authority; an unversioned database is not
+  // evidence that a default false value was an interrupted backfill.
+  database
+    .prepare(
+      `UPDATE messages SET is_bot_message = CASE WHEN content LIKE ? THEN 1 ELSE 0 END WHERE ? OR is_bot_message IS NULL`,
+    )
+    .run(`${ASSISTANT_NAME}:%`, addedBotMessage ? 1 : 0);
 
   // Add is_main column if it doesn't exist (migration for existing DBs)
-  try {
+  const addedMain = !hasColumn('registered_groups', 'is_main');
+  if (addedMain) {
     database.exec(
       `ALTER TABLE registered_groups ADD COLUMN is_main INTEGER DEFAULT 0`,
     );
-    // Backfill: 'main' or channel-prefixed main folders like 'telegram_main'
-    database.exec(
-      `UPDATE registered_groups SET is_main = 1 WHERE folder = 'main' OR folder LIKE '%\\_main' ESCAPE '\\'`,
-    );
-  } catch {
-    /* column already exists */
   }
+  // Backfill: 'main' or channel-prefixed main folders like 'telegram_main'
+  database
+    .prepare(
+      `UPDATE registered_groups SET is_main = CASE WHEN folder = 'main' OR folder LIKE '%\\_main' ESCAPE '\\' THEN 1 ELSE 0 END WHERE ? OR is_main IS NULL`,
+    )
+    .run(addedMain ? 1 : 0);
 
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
-  try {
+  if (!hasColumn('chats', 'channel'))
     database.exec(`ALTER TABLE chats ADD COLUMN channel TEXT`);
+  if (!hasColumn('chats', 'is_group'))
     database.exec(`ALTER TABLE chats ADD COLUMN is_group INTEGER DEFAULT 0`);
-    // Backfill from JID patterns
-    database.exec(
-      `UPDATE chats SET channel = 'whatsapp', is_group = 1 WHERE jid LIKE '%@g.us'`,
-    );
-    database.exec(
-      `UPDATE chats SET channel = 'whatsapp', is_group = 0 WHERE jid LIKE '%@s.whatsapp.net'`,
-    );
-    database.exec(
-      `UPDATE chats SET channel = 'discord', is_group = 1 WHERE jid LIKE 'dc:%'`,
-    );
-    database.exec(
-      `UPDATE chats SET channel = 'telegram', is_group = 0 WHERE jid LIKE 'tg:%'`,
-    );
-  } catch {
-    /* columns already exist */
-  }
+  // Idempotent backfills run for every accepted version0 layout.
+  database.exec(
+    `UPDATE chats SET channel = 'whatsapp', is_group = 1 WHERE jid LIKE '%@g.us'`,
+  );
+  database.exec(
+    `UPDATE chats SET channel = 'whatsapp', is_group = 0 WHERE jid LIKE '%@s.whatsapp.net' AND channel IS NULL`,
+  );
+  database.exec(
+    `UPDATE chats SET channel = 'discord', is_group = 1 WHERE jid LIKE 'dc:%'`,
+  );
+  database.exec(
+    `UPDATE chats SET channel = 'telegram', is_group = 0 WHERE jid LIKE 'tg:%' AND channel IS NULL`,
+  );
 }
 
 export function initDatabase(): void {
@@ -164,7 +186,7 @@ export function initDatabase(): void {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
   db = new Database(dbPath);
-  createSchema(db);
+  migrateDatabase(db);
 
   // Migrate from JSON files if they exist
   migrateJsonState();
@@ -173,7 +195,7 @@ export function initDatabase(): void {
 /** @internal - for tests only. Creates a fresh in-memory database. */
 export function _initTestDatabase(): void {
   db = new Database(':memory:');
-  createSchema(db);
+  migrateDatabase(db);
 }
 
 /** @internal - for tests only. */
@@ -688,7 +710,7 @@ export function getRegisteredGroup(
   if (!isValidGroupFolder(row.folder)) {
     logger.warn(
       { jid: row.jid, folder: row.folder },
-      'Skipping registered group with invalid folder',
+      'Holding registered group with invalid or reserved folder; preserve its row and register a safe folder before use',
     );
     return undefined;
   }
@@ -709,7 +731,9 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   if (!isValidGroupFolder(group.folder)) {
-    throw new Error(`Invalid group folder "${group.folder}" for JID ${jid}`);
+    throw new InvalidGroupFolderError(
+      `Invalid group folder "${group.folder}" for JID ${jid}`,
+    );
   }
   db.prepare(
     `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)
@@ -742,7 +766,7 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     if (!isValidGroupFolder(row.folder)) {
       logger.warn(
         { jid: row.jid, folder: row.folder },
-        'Skipping registered group with invalid folder',
+        'Holding registered group with invalid or reserved folder; preserve its row and register a safe folder before use',
       );
       continue;
     }
@@ -765,61 +789,192 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
 // --- JSON migration ---
 
 function migrateJsonState(): void {
-  const migrateFile = (filename: string) => {
-    const filePath = path.join(DATA_DIR, filename);
-    if (!fs.existsSync(filePath)) return null;
-    try {
-      const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-      fs.renameSync(filePath, `${filePath}.migrated`);
-      return data;
-    } catch {
-      return null;
-    }
+  const object = (value: unknown): Record<string, unknown> => {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+      throw new SyntaxError(
+        'Legacy state must be a JSON object; preserve and repair its source.',
+      );
+    return value as Record<string, unknown>;
   };
-
-  // Migrate router_state.json
-  const routerState = migrateFile('router_state.json') as {
-    last_timestamp?: string;
-    last_agent_timestamp?: Record<string, string>;
-  } | null;
-  if (routerState) {
-    if (routerState.last_timestamp) {
-      setRouterState('last_timestamp', routerState.last_timestamp);
+  const text = (value: unknown): string => {
+    if (typeof value !== 'string')
+      throw new SyntaxError(
+        'Legacy state requires string fields; preserve and repair its source.',
+      );
+    return value;
+  };
+  const groupRecord = (value: unknown): RegisteredGroup => {
+    const fields = object(value);
+    if (
+      Object.keys(fields).some(
+        (key) =>
+          ![
+            'name',
+            'folder',
+            'trigger',
+            'added_at',
+            'containerConfig',
+            'requiresTrigger',
+            'isMain',
+          ].includes(key),
+      )
+    )
+      throw new SyntaxError(
+        'Unknown legacy group fields; preserve the source until supported.',
+      );
+    const group: RegisteredGroup = {
+      name: text(fields.name),
+      folder: text(fields.folder),
+      trigger: text(fields.trigger),
+      added_at: text(fields.added_at),
+    };
+    for (const key of ['requiresTrigger', 'isMain'] as const) {
+      if (fields[key] !== undefined) {
+        if (typeof fields[key] !== 'boolean')
+          throw new SyntaxError('Legacy group flags must be Boolean.');
+        group[key] = fields[key];
+      }
     }
-    if (routerState.last_agent_timestamp) {
-      setRouterState(
-        'last_agent_timestamp',
-        JSON.stringify(routerState.last_agent_timestamp),
+    if (fields.containerConfig !== undefined) {
+      const config = object(fields.containerConfig);
+      if (
+        Object.keys(config).some(
+          (key) => !['timeout', 'additionalMounts'].includes(key),
+        )
+      )
+        throw new SyntaxError(
+          'Unknown legacy container configuration; preserve its source.',
+        );
+      group.containerConfig = {};
+      if (config.timeout !== undefined) {
+        if (
+          typeof config.timeout !== 'number' ||
+          !Number.isFinite(config.timeout) ||
+          config.timeout <= 0
+        )
+          throw new SyntaxError('Legacy container timeout is invalid.');
+        group.containerConfig.timeout = config.timeout;
+      }
+      if (config.additionalMounts !== undefined) {
+        if (!Array.isArray(config.additionalMounts))
+          throw new SyntaxError('Legacy additional mounts must be an array.');
+        group.containerConfig.additionalMounts = config.additionalMounts.map(
+          (value: unknown): AdditionalMount => {
+            const record = object(value);
+            if (
+              Object.keys(record).some(
+                (key) =>
+                  !['hostPath', 'containerPath', 'readonly'].includes(key),
+              )
+            )
+              throw new SyntaxError(
+                'Unknown legacy mount fields; preserve its source.',
+              );
+            const mount: AdditionalMount = { hostPath: text(record.hostPath) };
+            if (record.containerPath !== undefined)
+              mount.containerPath = text(record.containerPath);
+            if (record.readonly !== undefined) {
+              if (typeof record.readonly !== 'boolean')
+                throw new SyntaxError('Legacy mount readonly must be Boolean.');
+              mount.readonly = record.readonly;
+            }
+            return mount;
+          },
+        );
+      }
+    }
+    return group;
+  };
+  // Each unversioned legacy file is imported completely in one SQLite
+  // transaction. Its original bytes are archived only after that commit.
+  const migrateFile = (
+    filename: string,
+    importRows: (data: Record<string, unknown>) => void,
+  ) => {
+    const filePath = path.join(DATA_DIR, filename),
+      archived = `${filePath}.migrated`;
+    let raw: string;
+    try {
+      raw = fs.readFileSync(filePath, 'utf-8');
+    } catch (error) {
+      if (!hasErrno(error, 'ENOENT')) throw error;
+      return;
+    }
+    try {
+      fs.lstatSync(archived);
+      throw new Error(
+        'Legacy migration archive already exists; preserve both files and inspect before retrying.',
+      );
+    } catch (error) {
+      if (!hasErrno(error, 'ENOENT')) throw error;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      throw new SyntaxError(
+        `Legacy ${filename} JSON is invalid; preserve it and repair its schema before restarting.`,
+        { cause: error },
       );
     }
-  }
+    const data = object(parsed);
+    db.transaction(() => importRows(data))();
+    fs.renameSync(filePath, archived);
+  };
 
-  // Migrate sessions.json
-  const sessions = migrateFile('sessions.json') as Record<
-    string,
-    string
-  > | null;
-  if (sessions) {
-    for (const [folder, sessionId] of Object.entries(sessions)) {
-      setSession(folder, sessionId);
+  migrateFile('router_state.json', (state) => {
+    if (
+      Object.keys(state).some(
+        (key) => !['last_timestamp', 'last_agent_timestamp'].includes(key),
+      )
+    )
+      throw new SyntaxError(
+        'Unknown legacy router state fields; preserve the source until its owner supports them.',
+      );
+    if (state.last_timestamp !== undefined) {
+      if (typeof state.last_timestamp !== 'string')
+        throw new SyntaxError('Legacy router timestamp must be a string.');
+      setRouterState('last_timestamp', state.last_timestamp);
     }
-  }
-
-  // Migrate registered_groups.json
-  const groups = migrateFile('registered_groups.json') as Record<
-    string,
-    RegisteredGroup
-  > | null;
-  if (groups) {
-    for (const [jid, group] of Object.entries(groups)) {
+    if (state.last_agent_timestamp !== undefined) {
+      const cursors = object(state.last_agent_timestamp);
+      if (Object.values(cursors).some((value) => typeof value !== 'string'))
+        throw new SyntaxError('Legacy router cursors must be strings.');
+      setRouterState('last_agent_timestamp', JSON.stringify(cursors));
+    }
+  });
+  migrateFile('sessions.json', (sessions) => {
+    for (const [folder, session] of Object.entries(sessions)) {
+      if (typeof session !== 'string' || !session)
+        throw new SyntaxError(
+          'Legacy session state is invalid; preserve and repair its source.',
+        );
+      if (folder.toLowerCase() === 'errors') {
+        logger.warn(
+          'Holding legacy quarantine-namespace session; preserve the archived original and reconcile its group folder before use.',
+        );
+        continue;
+      }
+      if (!isValidGroupFolder(folder))
+        throw new SyntaxError(
+          'Legacy session state is invalid; preserve and repair its source.',
+        );
+      setSession(folder, session);
+    }
+  });
+  migrateFile('registered_groups.json', (groups) => {
+    for (const [jid, value] of Object.entries(groups)) {
+      const group = groupRecord(value);
       try {
         setRegisteredGroup(jid, group);
-      } catch (err) {
+      } catch (error) {
+        if (!(error instanceof InvalidGroupFolderError)) throw error;
         logger.warn(
-          { jid, folder: group.folder, err },
+          { jid, folder: group.folder, error },
           'Skipping migrated registered group with invalid folder',
         );
       }
     }
-  }
+  });
 }

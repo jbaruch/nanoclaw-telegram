@@ -1,7 +1,16 @@
+import {
+  isFileSystemError,
+  isNetworkError,
+  isTelegramError,
+  TelegramDeliveryError,
+  TelegramPartialDeliveryError,
+  IpcRouteUnavailableError,
+} from '../operational-errors.js';
 import fs from 'fs';
 import https from 'https';
 import path from 'path';
-import { Api, Bot } from 'grammy';
+import { Api, Bot, GrammyError, type Context, type Filter } from 'grammy';
+import type { ReactionTypeEmoji } from 'grammy/types';
 import OpenAI from 'openai';
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
@@ -28,6 +37,21 @@ export interface TelegramChannelOpts {
  * Claude's output naturally matches Telegram's Markdown v1 format:
  *   *bold*, _italic_, `code`, ```code blocks```, [links](url)
  */
+function requireTelegramAcknowledgment(
+  message: { message_id?: number } | undefined,
+): void {
+  if (
+    !message ||
+    !Number.isSafeInteger(message.message_id) ||
+    !message.message_id ||
+    message.message_id <= 0
+  ) {
+    throw new TelegramDeliveryError(
+      'Telegram returned no native message acknowledgment; inspect delivery before retrying.',
+    );
+  }
+}
+
 async function sendTelegramMessage(
   api: { sendMessage: Api['sendMessage'] },
   chatId: string | number,
@@ -38,14 +62,22 @@ async function sendTelegramMessage(
   } = {},
 ): Promise<void> {
   try {
-    await api.sendMessage(chatId, text, {
+    const sent = await api.sendMessage(chatId, text, {
       ...options,
       parse_mode: 'Markdown',
     });
+    requireTelegramAcknowledgment(sent);
   } catch (err) {
-    // Fallback: send as plain text if Markdown parsing fails
+    if (
+      !(err instanceof GrammyError) ||
+      err.error_code !== 400 ||
+      !/can't parse entities|cannot parse entities/i.test(err.description)
+    )
+      throw err;
+    // A native parse rejection permits a plain-text fallback.
     logger.debug({ err }, 'Markdown send failed, falling back to plain text');
-    await api.sendMessage(chatId, text, options);
+    const sent = await api.sendMessage(chatId, text, options);
+    requireTelegramAcknowledgment(sent);
   }
 }
 
@@ -170,19 +202,44 @@ function resolveMessageLinks(content: string): string {
  * Download a file from Telegram's file API.
  * Returns a Buffer with the file contents.
  */
-async function downloadTelegramFile(bot: Bot, fileId: string): Promise<Buffer> {
+export async function downloadTelegramFile(
+  bot: Bot,
+  fileId: string,
+): Promise<Buffer> {
   const file = await bot.api.getFile(fileId);
-  const filePath = file.file_path!;
+  const filePath = file.file_path;
+  if (
+    typeof filePath !== 'string' ||
+    !filePath.trim() ||
+    [...filePath].some(
+      (character) =>
+        character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+    )
+  )
+    throw new TelegramDeliveryError(
+      'Telegram file API returned no usable download path; inspect the provider response before retrying.',
+    );
   const token = bot.token;
   const url = `https://api.telegram.org/file/bot${token}/${filePath}`;
 
   return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
-      const chunks: Buffer[] = [];
-      res.on('data', (chunk: Buffer) => chunks.push(chunk));
-      res.on('end', () => resolve(Buffer.concat(chunks)));
-      res.on('error', reject);
-    });
+    https
+      .get(url, (res) => {
+        res.on('error', reject);
+        if (res.statusCode !== 200) {
+          res.resume();
+          reject(
+            new TelegramDeliveryError(
+              `Telegram file download rejected HTTP ${res.statusCode ?? 'unknown'}; no file bytes accepted.`,
+            ),
+          );
+          return;
+        }
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => resolve(Buffer.concat(chunks)));
+      })
+      .on('error', reject);
   });
 }
 
@@ -209,6 +266,12 @@ async function saveDocument(
     );
     return `/workspace/group/documents/${safeName}`;
   } catch (err) {
+    if (
+      !isFileSystemError(err) &&
+      !isNetworkError(err) &&
+      !isTelegramError(err)
+    )
+      throw err;
     logger.error({ err, fileName }, 'Failed to save Telegram document');
     return null;
   }
@@ -240,6 +303,12 @@ async function savePhoto(
     );
     return `/workspace/group/images/${filename}`;
   } catch (err) {
+    if (
+      !isFileSystemError(err) &&
+      !isNetworkError(err) &&
+      !isTelegramError(err)
+    )
+      throw err;
     logger.error({ err }, 'Failed to save Telegram photo');
     return null;
   }
@@ -266,6 +335,7 @@ async function transcribeVoice(audioBuffer: Buffer): Promise<string | null> {
     });
     return transcription.text;
   } catch (err) {
+    if (!(err instanceof OpenAI.APIError)) throw err;
     logger.error({ err }, 'OpenAI transcription failed');
     return null;
   }
@@ -292,6 +362,7 @@ export async function initBotPool(tokens: string[]): Promise<void> {
         'Pool bot initialized',
       );
     } catch (err) {
+      if (!isTelegramError(err)) throw err;
       logger.error({ err }, 'Failed to initialize pool bot');
     }
   }
@@ -332,6 +403,7 @@ export async function sendPoolMessage(
         'Assigned and renamed pool bot',
       );
     } catch (err) {
+      if (!isTelegramError(err)) throw err;
       logger.warn(
         { sender, err },
         'Failed to rename pool bot (sending anyway)',
@@ -357,7 +429,9 @@ export async function sendPoolMessage(
       'Pool message sent',
     );
   } catch (err) {
+    if (!isTelegramError(err)) throw err;
     logger.error({ chatId, sender, err }, 'Failed to send pool message');
+    throw err;
   }
 }
 
@@ -387,7 +461,7 @@ export class TelegramChannel implements Channel {
       const chatName =
         chatType === 'private'
           ? ctx.from?.first_name || 'Private'
-          : (ctx.chat as any).title || 'Unknown';
+          : ('title' in ctx.chat ? ctx.chat.title : undefined) || 'Unknown';
 
       ctx.reply(
         `Chat ID: \`tg:${chatId}\`\nName: ${chatName}\nType: ${chatType}`,
@@ -426,7 +500,7 @@ export class TelegramChannel implements Channel {
       const chatName =
         ctx.chat.type === 'private'
           ? senderName
-          : (ctx.chat as any).title || chatJid;
+          : ('title' in ctx.chat ? ctx.chat.title : undefined) || chatJid;
 
       // Translate Telegram @bot_username mentions into TRIGGER_PATTERN format.
       // Telegram @mentions (e.g., @andy_ai_bot) won't match TRIGGER_PATTERN
@@ -503,7 +577,10 @@ export class TelegramChannel implements Channel {
     });
 
     // Handle non-text messages with placeholders so the agent knows something was sent
-    const storeNonText = (ctx: any, placeholder: string) => {
+    const storeNonText = (
+      ctx: Filter<Context, 'message'>,
+      placeholder: string,
+    ) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) return;
@@ -621,6 +698,13 @@ export class TelegramChannel implements Channel {
           );
         }
       } catch (err) {
+        if (
+          !isFileSystemError(err) &&
+          !isNetworkError(err) &&
+          !isTelegramError(err) &&
+          !(err instanceof OpenAI.APIError)
+        )
+          throw err;
         logger.error({ err }, 'Failed to process voice message');
         content = '[Voice message - transcription failed]';
       }
@@ -758,10 +842,12 @@ export class TelegramChannel implements Channel {
     replyToMessageId?: string,
   ): Promise<void> {
     if (!this.bot) {
-      logger.warn('Telegram bot not initialized');
-      return;
+      throw new TelegramDeliveryError(
+        'Telegram bot is not connected; reconnect it before retrying delivery.',
+      );
     }
 
+    let acknowledgedChunks = 0;
     try {
       const numericId = jid.replace(/^tg:/, '');
       const options: {
@@ -786,13 +872,21 @@ export class TelegramChannel implements Channel {
           chunks[i],
           chunkOptions,
         );
+        acknowledgedChunks++;
       }
       logger.info(
         { jid, length: text.length, replyToMessageId, chunks: chunks.length },
         'Telegram message sent',
       );
     } catch (err) {
+      if (acknowledgedChunks > 0)
+        throw new TelegramPartialDeliveryError(
+          'Telegram delivery stopped after acknowledged chunks; inspect the partial message before retrying the full output.',
+          { cause: err },
+        );
+      if (!isTelegramError(err)) throw err;
       logger.error({ jid, err }, 'Failed to send Telegram message');
+      throw err;
     }
   }
 
@@ -818,6 +912,7 @@ export class TelegramChannel implements Channel {
       const numericId = jid.replace(/^tg:/, '');
       await this.bot.api.sendChatAction(numericId, 'typing');
     } catch (err) {
+      if (!isTelegramError(err)) throw err;
       logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
     }
   }
@@ -827,29 +922,37 @@ export class TelegramChannel implements Channel {
     messageId: string,
     emoji: string,
   ): Promise<void> {
-    if (!this.bot) return;
+    if (!this.bot)
+      throw new TelegramDeliveryError(
+        'Telegram bot is not connected; reconnect it before retrying the reaction.',
+      );
     const numericId = jid.replace(/^tg:/, '');
     const msgId = parseInt(messageId, 10);
     try {
       await this.bot.api.raw.setMessageReaction({
         chat_id: numericId,
         message_id: msgId,
-        reaction: emoji ? [{ type: 'emoji', emoji: emoji as any }] : [],
+        reaction: emoji
+          ? [{ type: 'emoji', emoji: emoji as ReactionTypeEmoji['emoji'] }]
+          : [],
       });
       logger.info({ jid, messageId, emoji }, 'Telegram reaction sent');
     } catch (err) {
+      if (!isTelegramError(err)) throw err;
       logger.error(
         { jid, messageId, emoji, err },
         'Failed to send Telegram reaction',
       );
+      throw err;
     }
   }
 
   async reactToLatestMessage(jid: string, emoji: string): Promise<void> {
     const latest = getLatestMessage(jid);
     if (!latest) {
-      logger.warn({ jid }, 'No messages found to react to');
-      return;
+      throw new IpcRouteUnavailableError(
+        'No native message is available for the reaction; select an existing message before resubmitting.',
+      );
     }
     await this.sendReaction(jid, latest.id, emoji);
   }

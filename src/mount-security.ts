@@ -1,3 +1,4 @@
+import { isFileSystemError } from './operational-errors.js';
 /**
  * Mount Security Module for NanoClaw
  *
@@ -71,17 +72,46 @@ export function loadMountAllowlist(): MountAllowlist | null {
     const allowlist = JSON.parse(content) as MountAllowlist;
 
     // Validate structure
+    if (
+      !allowlist ||
+      typeof allowlist !== 'object' ||
+      Array.isArray(allowlist)
+    ) {
+      throw new SyntaxError('Mount allowlist must be an object');
+    }
     if (!Array.isArray(allowlist.allowedRoots)) {
-      throw new Error('allowedRoots must be an array');
+      throw new SyntaxError('allowedRoots must be an array');
     }
 
     if (!Array.isArray(allowlist.blockedPatterns)) {
-      throw new Error('blockedPatterns must be an array');
+      throw new SyntaxError('blockedPatterns must be an array');
     }
 
     if (typeof allowlist.nonMainReadOnly !== 'boolean') {
-      throw new Error('nonMainReadOnly must be a boolean');
+      throw new SyntaxError('nonMainReadOnly must be a boolean');
     }
+    for (const root of allowlist.allowedRoots) {
+      if (
+        !root ||
+        typeof root !== 'object' ||
+        Array.isArray(root) ||
+        typeof root.path !== 'string' ||
+        !root.path.trim() ||
+        root.path.includes('\0') ||
+        typeof root.allowReadWrite !== 'boolean' ||
+        (root.description !== undefined && typeof root.description !== 'string')
+      )
+        throw new SyntaxError('Mount allowlist root fields have invalid types');
+    }
+    if (
+      allowlist.blockedPatterns.some(
+        (pattern) =>
+          typeof pattern !== 'string' ||
+          !pattern.trim() ||
+          pattern.includes('\0'),
+      )
+    )
+      throw new SyntaxError('Mount blocked patterns must be nonempty strings');
 
     // Merge with default blocked patterns
     const mergedBlockedPatterns = [
@@ -101,6 +131,7 @@ export function loadMountAllowlist(): MountAllowlist | null {
 
     return cachedAllowlist;
   } catch (err) {
+    if (!(err instanceof SyntaxError) && !isFileSystemError(err)) throw err;
     allowlistLoadError = err instanceof Error ? err.message : String(err);
     logger.error(
       {
@@ -134,7 +165,8 @@ function expandPath(p: string): string {
 function getRealPath(p: string): string | null {
   try {
     return fs.realpathSync(p);
-  } catch {
+  } catch (err) {
+    if (!isFileSystemError(err)) throw err;
     return null;
   }
 }
