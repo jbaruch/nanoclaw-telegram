@@ -268,41 +268,23 @@ export function createIpcInbox(base: string): IpcInbox {
   function batches(): string[] {
     return entries(root, MAX_BATCHES);
   }
-  // A deterministic native-batch identity links retained evidence across a
-  // failed rename/fsync and restart. Never traverse, read or remove its children.
-  function quarantineRemainder(
+  // Verify existing whole-inbox quarantine evidence only. Never create or
+  // resume a whole-directory move: an old publisher can still add valid JSON.
+  function verifyPriorRemainder(
     batch: string,
     inbox: string,
     sourceGroup: string,
     channel: Channel,
   ): void {
-    const batchId = path.basename(batch);
-    const errors = path.join(base, 'errors');
+    const batchId = path.basename(batch),
+      errors = path.join(base, 'errors');
+    if (!exists(errors)) return;
+    ownedDirectory(errors, uid, true);
     const evidence = path.join(errors, 'unrecognized-' + batchId);
-    let existing = false;
-    if (exists(errors)) {
-      ownedDirectory(errors, uid, true);
-      existing = exists(evidence);
-    }
-    if (!existing && (!exists(inbox) || entries(inbox).length === 0)) return;
-    prepareIpcQuarantineRoot(base);
-    syncDirectory(base);
-    if (!existing) {
-      fs.mkdirSync(evidence, { mode: 0o700 });
-      exclusiveWrite(
-        path.join(evidence, 'owner.json'),
-        JSON.stringify({
-          schema_version: 1,
-          source_group: sourceGroup,
-          channel,
-          batch_id: batchId,
-        }),
-      );
-      syncDirectory(errors);
-    }
+    if (!exists(evidence)) return;
     ownedDirectory(evidence, uid);
     if ((fs.lstatSync(evidence).mode & 0o077) !== 0)
-      throw new IpcInboxHold('IPC leftover quarantine must remain private.');
+      throw new IpcInboxHold('Prior IPC quarantine must remain private.');
     const record = metadata(
       path.join(evidence, 'owner.json'),
       ['schema_version', 'source_group', 'channel', 'batch_id'],
@@ -314,29 +296,23 @@ export function createIpcInbox(base: string): IpcInbox {
       record.batch_id !== batchId
     )
       throw new IpcInboxHold(
-        'IPC leftover quarantine identity changed; preserve both locations.',
+        'Prior IPC quarantine identity changed; preserve both locations.',
       );
-    const retained = path.join(evidence, 'inbox');
-    if (exists(inbox)) {
-      if (exists(retained))
-        throw new IpcInboxHold(
-          'IPC leftover quarantine is ambiguous; preserve both locations.',
-        );
-      fs.renameSync(inbox, retained);
-    }
-    const stat = fs.lstatSync(retained);
+    if (exists(inbox))
+      throw new IpcInboxHold(
+        'Prior whole-inbox quarantine is incomplete; preserve both locations for owner reconciliation.',
+      );
+    const retained = fs.lstatSync(path.join(evidence, 'inbox'));
     if (
-      !stat.isDirectory() ||
-      stat.isSymbolicLink() ||
+      !retained.isDirectory() ||
+      retained.isSymbolicLink() ||
       entries(evidence, 2).some(
         (name) => name !== 'owner.json' && name !== 'inbox',
       )
     )
       throw new IpcInboxHold(
-        'IPC leftover quarantine is incomplete; preserve its evidence.',
+        'Prior IPC quarantine is incomplete; preserve its evidence.',
       );
-    // Repeat these barriers even when the original inbox is already absent:
-    // a previous scan may have failed after the atomic move, before durability.
     syncDirectory(evidence);
     syncDirectory(errors);
     syncDirectory(batch);
@@ -518,6 +494,7 @@ export function createIpcInbox(base: string): IpcInbox {
             continue;
           }
           const inbox = path.join(batch, 'inbox');
+          verifyPriorRemainder(batch, inbox, sourceGroup, channel);
           if (exists(inbox)) {
             const stat = fs.lstatSync(inbox);
             if (!stat.isDirectory() || stat.isSymbolicLink())
@@ -526,7 +503,6 @@ export function createIpcInbox(base: string): IpcInbox {
               );
             let requestCount = slots.length;
             for (const file of entries(inbox)) {
-              if (!file.endsWith('.json')) continue;
               if (++requestCount > 1024)
                 throw new IpcInboxHold('IPC batch request bound exceeded.');
               const slot = fs.mkdtempSync(path.join(requests, 'request-'));
@@ -543,7 +519,6 @@ export function createIpcInbox(base: string): IpcInbox {
               syncDirectory(slot);
             }
           }
-          quarantineRemainder(batch, inbox, sourceGroup, channel);
           const batchClaims: IpcClaim[] = [];
           for (const slotName of entries(requests)) {
             const slot = path.join(requests, slotName);
@@ -556,7 +531,7 @@ export function createIpcInbox(base: string): IpcInbox {
             if (
               typeof request.file !== 'string' ||
               path.basename(request.file) !== request.file ||
-              !request.file.endsWith('.json')
+              request.file.length === 0
             )
               throw new IpcInboxHold('IPC leaf identity is invalid.');
             const captured = path.join(slot, 'captured'),
@@ -568,6 +543,7 @@ export function createIpcInbox(base: string): IpcInbox {
               sourceGroup,
               channel,
               request.file,
+              !request.file.endsWith('.json'),
             );
             if (!rejected && exists(captured)) {
               // A new private inode freezes evidence even if a guest retained

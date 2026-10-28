@@ -492,41 +492,37 @@ it('quarantines non-request trees and aliases without leaking batch capacity acr
     expect(fs.readdirSync(path.join(base, '.claimed-v1'))).toEqual([]);
   }
   const quarantines = fs.readdirSync(path.join(base, 'errors'));
-  expect(quarantines).toHaveLength(3);
+  expect(quarantines).toHaveLength(9);
   for (const name of quarantines) {
-    const evidence = path.join(base, 'errors', name);
-    expect(
-      JSON.parse(fs.readFileSync(path.join(evidence, 'owner.json'), 'utf8')),
-    ).toEqual({
+    const evidence = path.join(base, 'errors', name),
+      record = JSON.parse(
+        fs.readFileSync(path.join(evidence, 'owner.json'), 'utf8'),
+      );
+    expect(record).toMatchObject({
       schema_version: 1,
       source_group: 'main',
       channel: 'messages',
-      batch_id: name.slice('unrecognized-'.length),
+      reason: 'invalid_or_unreadable_input',
     });
-    expect(
-      fs.readFileSync(path.join(evidence, 'inbox', 'stray.bin'), 'utf8'),
-    ).toBe('retained stray bytes');
-    expect(
-      fs.readFileSync(
-        path.join(evidence, 'inbox', 'stray-directory', 'child'),
-        'utf8',
-      ),
-    ).toBe('retained child bytes');
-    expect(
-      fs
-        .lstatSync(path.join(evidence, 'inbox', 'stray-alias'))
-        .isSymbolicLink(),
-    ).toBe(true);
-    expect(fs.readlinkSync(path.join(evidence, 'inbox', 'stray-alias'))).toBe(
-      foreign,
-    );
+    if (record.file === 'stray.bin')
+      expect(fs.readFileSync(path.join(evidence, 'captured'), 'utf8')).toBe(
+        'retained stray bytes',
+      );
+    else if (record.file === 'stray-directory')
+      expect(
+        fs.readFileSync(path.join(evidence, 'captured', 'child'), 'utf8'),
+      ).toBe('retained child bytes');
+    else {
+      expect(record.file).toBe('stray-alias');
+      expect(
+        fs.lstatSync(path.join(evidence, 'captured')).isSymbolicLink(),
+      ).toBe(true);
+      expect(fs.readlinkSync(path.join(evidence, 'captured'))).toBe(foreign);
+    }
   }
   expect(fs.readFileSync(foreign, 'utf8')).toBe('untouched foreign bytes');
-  const independent = source('other');
-  fs.writeFileSync(
-    path.join(independent, 'independent.json'),
-    body('independent'),
-  );
+  const other = source('other');
+  fs.writeFileSync(path.join(other, 'independent.json'), body('independent'));
   const restarted = createIpcInbox(base);
   restarted.capture('other', 'messages');
   expect(restarted.pending().claims[0].read()).toBe(body('independent'));
@@ -551,13 +547,13 @@ it('holds after uncertain quarantine durability and resumes only after exact evi
   vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
     rename(from, to);
     if (
-      String(to).includes('/errors/unrecognized-') &&
-      String(to).endsWith('/inbox')
+      String(to).includes('/errors/rejected-') &&
+      String(to).endsWith('/captured')
     )
       moved = true;
   });
   const fault = vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
-    if (moved && descriptors.get(fd)?.includes('/errors/unrecognized-'))
+    if (moved && descriptors.get(fd)?.includes('/errors/rejected-'))
       throw Object.assign(new Error('fixed quarantine durability failure'), {
         code: 'EIO',
       });
@@ -570,9 +566,9 @@ it('holds after uncertain quarantine durability and resumes only after exact evi
     'errors',
     fs.readdirSync(path.join(base, 'errors'))[0],
   );
-  expect(
-    fs.readFileSync(path.join(quarantine, 'inbox', 'stray.bin'), 'utf8'),
-  ).toBe('retained stray bytes');
+  expect(fs.readFileSync(path.join(quarantine, 'captured'), 'utf8')).toBe(
+    'retained stray bytes',
+  );
   expect(createIpcInbox(base).pending()).toEqual({ claims: [], held: 1 });
   fault.mockRestore();
   const resumed = createIpcInbox(base).pending();
@@ -583,9 +579,9 @@ it('holds after uncertain quarantine durability and resumes only after exact evi
   resumed.claims[0].complete();
   expect(createIpcInbox(base).pending()).toEqual({ claims: [], held: 0 });
   expect(fs.readdirSync(path.join(base, '.claimed-v1'))).toEqual([]);
-  expect(
-    fs.readFileSync(path.join(quarantine, 'inbox', 'stray.bin'), 'utf8'),
-  ).toBe('retained stray bytes');
+  expect(fs.readFileSync(path.join(quarantine, 'captured'), 'utf8')).toBe(
+    'retained stray bytes',
+  );
 });
 
 it.each(['schema_version', 'source_group'] as const)(
@@ -599,8 +595,8 @@ it.each(['schema_version', 'source_group'] as const)(
     const nativeRename = fs.renameSync.bind(fs);
     const fault = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
       if (
-        String(to).includes('/errors/unrecognized-') &&
-        String(to).endsWith('/inbox')
+        String(to).includes('/errors/rejected-') &&
+        String(to).endsWith('/captured')
       )
         throw Object.assign(new Error('fixed pre-move native failure'), {
           code: 'EIO',
@@ -625,9 +621,12 @@ it.each(['schema_version', 'source_group'] as const)(
     expect(fs.readFileSync(metadata, 'utf8')).toBe(unsupported);
     const batch = path.join(base, '.claimed-v1', original.batch_id);
     expect(
-      fs.readFileSync(path.join(batch, 'inbox', 'stray.bin'), 'utf8'),
+      fs.readFileSync(
+        path.join(batch, 'requests', original.request_id, 'captured'),
+        'utf8',
+      ),
     ).toBe('retained stray bytes');
-    expect(fs.existsSync(path.join(quarantine, 'inbox'))).toBe(false);
+    expect(fs.existsSync(path.join(quarantine, 'captured'))).toBe(false);
   },
 );
 
@@ -804,5 +803,115 @@ it.each(['schema_version', 'file'] as const)(
         .isDirectory(),
     ).toBe(true);
     expect(fs.existsSync(path.join(evidence, 'captured'))).toBe(false);
+  },
+);
+
+it.each(['slot-capture', 'leaf-quarantine'] as const)(
+  'preserves late valid JSON published through the old directory during %s',
+  (phase) => {
+    const directory = source();
+    fs.writeFileSync(path.join(directory, 'a-first.json'), body('first'));
+    fs.writeFileSync(path.join(directory, 'stray.bin'), 'retained');
+    const oldFD = fs.openSync(
+      directory,
+      fs.constants.O_RDONLY | fs.constants.O_DIRECTORY,
+    );
+    try {
+      const inbox = createIpcInbox(base);
+      inbox.capture('main', 'messages');
+      const batch = path.join(
+        base,
+        '.claimed-v1',
+        fs.readdirSync(path.join(base, '.claimed-v1'))[0],
+      );
+      const oldInbox = path.join(batch, 'inbox');
+      const late = JSON.stringify({
+        schema_version: 1,
+        type: 'message',
+        chatJid: 'tg:123',
+        text: 'late valid input',
+      });
+      const unpublished = path.join(base, 'late-unpublished.tmp');
+      fs.writeFileSync(unpublished, late);
+      const rename = fs.renameSync.bind(fs);
+      let inserted = false;
+      vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+        if (
+          !inserted &&
+          (phase === 'slot-capture'
+            ? String(from) === path.join(oldInbox, 'a-first.json')
+            : (String(from).endsWith('/captured') &&
+                String(to).includes('/errors/rejected-')) ||
+              (String(to).includes('/errors/unrecognized-') &&
+                String(to).endsWith('/inbox')))
+        ) {
+          inserted = true;
+          // Linux uses the real held directory capability; Darwin explicitly maps
+          // that synthetic bind to the same captured inode (verified below).
+          expect(fs.lstatSync(oldInbox).ino).toBe(fs.fstatSync(oldFD).ino);
+          rename(
+            unpublished,
+            process.platform === 'linux'
+              ? `/proc/self/fd/${oldFD}/late.json`
+              : path.join(oldInbox, 'late.json'),
+          );
+          fs.fsyncSync(oldFD);
+        }
+        rename(from, to);
+      });
+      const first = inbox.pending();
+      expect(inserted).toBe(true);
+      expect(first.held).toBe(0);
+      expect(first.claims.map((claim) => claim.read())).toEqual([
+        body('first'),
+      ]);
+      expect(fs.readFileSync(path.join(oldInbox, 'late.json'), 'utf8')).toBe(
+        late,
+      );
+      first.claims[0].dispatch();
+      first.claims[0].complete();
+      const resumed = createIpcInbox(base).pending();
+      expect(resumed.held).toBe(0);
+      expect(resumed.claims).toHaveLength(1);
+      expect(resumed.claims[0].read()).toBe(late);
+      resumed.claims[0].dispatch();
+      resumed.claims[0].complete();
+      expect(createIpcInbox(base).pending()).toEqual({ claims: [], held: 0 });
+      expect(fs.readdirSync(path.join(base, '.claimed-v1'))).toEqual([]);
+    } finally {
+      fs.closeSync(oldFD);
+    }
+  },
+);
+
+it.each([1, 2])(
+  'preserves unresolved prior whole-inbox quarantine schema%s without moving new input',
+  (schema) => {
+    const directory = source();
+    fs.writeFileSync(path.join(directory, 'valid.json'), body());
+    const inbox = createIpcInbox(base);
+    inbox.capture('main', 'messages');
+    const batchId = fs.readdirSync(path.join(base, '.claimed-v1'))[0],
+      batch = path.join(base, '.claimed-v1', batchId),
+      evidence = path.join(base, 'errors', 'unrecognized-' + batchId);
+    fs.mkdirSync(evidence, { recursive: true, mode: 0o700 });
+    const record = JSON.stringify({
+      schema_version: schema,
+      source_group: 'main',
+      channel: 'messages',
+      batch_id: batchId,
+    });
+    fs.writeFileSync(path.join(evidence, 'owner.json'), record, {
+      mode: 0o600,
+    });
+    expect(inbox.pending()).toEqual({ claims: [], held: 1 });
+    expect(
+      fs.readFileSync(path.join(batch, 'inbox', 'valid.json'), 'utf8'),
+    ).toBe(body());
+    expect(fs.readdirSync(path.join(batch, 'requests'))).toEqual([]);
+    expect(fs.readFileSync(path.join(evidence, 'owner.json'), 'utf8')).toBe(
+      record,
+    );
+    expect(fs.existsSync(path.join(evidence, 'inbox'))).toBe(false);
   },
 );

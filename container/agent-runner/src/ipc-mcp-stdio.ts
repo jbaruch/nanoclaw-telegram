@@ -405,7 +405,7 @@ server.tool(
 
 server.tool(
   'update_task',
-  'Update an existing scheduled task. Only provided fields are changed; omitted fields stay the same.',
+  'Update an existing scheduled task. Provide at least one prompt, script or schedule field. Only provided fields are changed; omitted fields stay the same.',
   {
     task_id: z.string().min(1).describe('The task ID to update'),
     prompt: z.string().optional().describe('New prompt for the task'),
@@ -425,6 +425,20 @@ server.tool(
       ),
   },
   async (args) => {
+    if (
+      ![args.prompt, args.script, args.schedule_type, args.schedule_value].some(
+        (value) => value !== undefined,
+      )
+    )
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Task update requires at least one prompt, script or schedule field.',
+          },
+        ],
+        isError: true,
+      };
     if (args.schedule_type !== undefined || args.schedule_value !== undefined) {
       let type = args.schedule_type;
       let value = args.schedule_value;

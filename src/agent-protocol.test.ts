@@ -1008,3 +1008,59 @@ it('actual MCP producer refuses empty required strings before any durable public
     expect(replies.find((row) => row.id === id)?.result?.isError).toBe(true);
   expect(fs.existsSync(path.join(directory, 'workspace', 'ipc'))).toBe(false);
 });
+
+it('actual update tool rejects an omitted change but preserves explicit empty-script removal', () => {
+  const requests = [
+    {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'synthetic', version: '1' },
+      },
+    },
+    { jsonrpc: '2.0', method: 'notifications/initialized' },
+    {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'update_task', arguments: { task_id: 'fixed-task' } },
+    },
+    {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: {
+        name: 'update_task',
+        arguments: { task_id: 'fixed-task', script: '' },
+      },
+    },
+  ];
+  const child = run(
+    'ipc-mcp-stdio.ts',
+    requests.map((row) => JSON.stringify(row)).join('\n') + '\n',
+  );
+  expect(child.error).toBeUndefined();
+  expect(child.status, child.stderr).toBe(0);
+  const replies = child.stdout
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  expect(replies.find((row) => row.id === 2)?.result?.isError).toBe(true);
+  expect(replies.find((row) => row.id === 3)?.result?.isError ?? false).toBe(
+    false,
+  );
+  const tasks = path.join(directory, 'workspace', 'ipc', 'tasks'),
+    files = fs.readdirSync(tasks);
+  expect(files).toHaveLength(1);
+  expect(
+    JSON.parse(fs.readFileSync(path.join(tasks, files[0]), 'utf8')),
+  ).toMatchObject({
+    schema_version: 1,
+    type: 'update_task',
+    taskId: 'fixed-task',
+    script: '',
+  });
+});

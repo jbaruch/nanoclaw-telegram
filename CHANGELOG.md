@@ -6,6 +6,8 @@ For detailed release notes, see the [full changelog on the documentation site](h
 
 ### Runtime diagnostics
 
+- Capture observed IPC entries individually so late JSON published through a retained old channel directory stays pending for the next scan, while only observed non-request leaves enter durable quarantine. Refuse no-op task updates before publication, preserving explicit empty-script removal.
+
 - Quarantine known invalid or access-refused captured JSON entries before dispatch without following aliases or deleting unknown contents. Preserve storage/rename/fsync uncertainty and all pending/in-flight conflicts as holds, while valid same-batch and other-source IPC can progress.
 
 - Flush agent input-refusal and host outer diagnostics before forced exit, align MCP required nonempty strings with the host schema, and describe scheduled activation data as an optional object. Reject empty host follow-up text before publication.
