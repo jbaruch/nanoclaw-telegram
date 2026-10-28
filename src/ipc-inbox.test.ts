@@ -57,7 +57,7 @@ it('refuses group aliases and captures final-channel ABA aliases without touchin
   expect(fs.readFileSync(file, 'utf8')).toBe(body('private'));
 });
 it.each(['symlink', 'hardlink'] as const)(
-  'holds a %s leaf without reading or deleting its foreign target',
+  'quarantines a %s leaf without reading or deleting its foreign target',
   (kind) => {
     const foreign = source('other'),
       file = path.join(foreign, 'private.json');
@@ -68,7 +68,17 @@ it.each(['symlink', 'hardlink'] as const)(
     else fs.linkSync(file, alias);
     const owner = createIpcInbox(base);
     owner.capture('main', 'messages');
-    expect(owner.pending()).toEqual({ claims: [], held: 1 });
+    expect(owner.pending()).toEqual({ claims: [], held: 0 });
+    expect(fs.readdirSync(path.join(base, '.claimed-v1'))).toEqual([]);
+    const evidence = path.join(
+      base,
+      'errors',
+      fs.readdirSync(path.join(base, 'errors'))[0],
+      'captured',
+    );
+    expect(fs.lstatSync(evidence).isSymbolicLink()).toBe(kind === 'symlink');
+    if (kind === 'hardlink')
+      expect(fs.lstatSync(evidence).ino).toBe(fs.lstatSync(file).ino);
     expect(fs.readFileSync(file, 'utf8')).toBe(body('private'));
   },
 );
@@ -276,7 +286,7 @@ it('avoids idle claim journal writes with the bounded native work hint', () => {
   expect(inbox.pending()).toEqual({ claims: [], held: 0 });
 });
 
-it('refuses a real claimed FIFO without blocking independent regular requests or deleting evidence', () => {
+it('quarantines a real claimed FIFO without blocking independent regular requests or deleting evidence', () => {
   const owner = fileURLToPath(new URL('./ipc-inbox.ts', import.meta.url));
   const script = `import fs from 'node:fs';import path from 'node:path';import {execFileSync} from 'node:child_process';import {createIpcInbox} from ${JSON.stringify(owner)};
     const base=process.cwd();
@@ -285,9 +295,9 @@ it('refuses a real claimed FIFO without blocking independent regular requests or
     fs.writeFileSync(path.join(base,'healthy','messages','fixed.json'),'fixed regular request');
     const inbox=createIpcInbox(base);inbox.capture('blocked','messages');inbox.capture('healthy','messages');
     const result=inbox.pending();
-    const root=path.join(base,'.claimed-v1');let retained=false;
-    for(const batch of fs.readdirSync(root)){const dir=path.join(root,batch);if(JSON.parse(fs.readFileSync(path.join(dir,'owner.json'),'utf8')).source_group!=='blocked')continue;
-      for(const slot of fs.readdirSync(path.join(dir,'requests')))retained=fs.lstatSync(path.join(dir,'requests',slot,'captured')).isFIFO();}
+    const root=path.join(base,'errors');let retained=false;
+    for(const name of fs.readdirSync(root)){const dir=path.join(root,name);if(JSON.parse(fs.readFileSync(path.join(dir,'owner.json'),'utf8')).source_group!=='blocked')continue;
+      retained=fs.lstatSync(path.join(dir,'captured')).isFIFO();}
     process.stdout.write(JSON.stringify({held:result.held,claims:result.claims.map(c=>({group:c.sourceGroup,body:c.read()})),fifo_retained:retained}));`;
   const child = spawnSync(
     process.execPath,
@@ -311,7 +321,7 @@ it('refuses a real claimed FIFO without blocking independent regular requests or
   expect(child.error).toBeUndefined();
   expect(child.status, child.stderr).toBe(0);
   expect(JSON.parse(child.stdout)).toEqual({
-    held: 1,
+    held: 0,
     claims: [{ group: 'healthy', body: 'fixed regular request' }],
     fifo_retained: true,
   });
@@ -618,5 +628,181 @@ it.each(['schema_version', 'source_group'] as const)(
       fs.readFileSync(path.join(batch, 'inbox', 'stray.bin'), 'utf8'),
     ).toBe('retained stray bytes');
     expect(fs.existsSync(path.join(quarantine, 'inbox'))).toBe(false);
+  },
+);
+
+it('quarantines a nonregular JSON leaf while same-batch and other-source requests proceed', () => {
+  const own = source(),
+    other = source('other');
+  fs.mkdirSync(path.join(own, 'a-invalid.json'));
+  fs.writeFileSync(path.join(own, 'a-invalid.json', 'child'), 'retained child');
+  fs.writeFileSync(path.join(own, 'b-valid.json'), body('same batch'));
+  fs.writeFileSync(path.join(other, 'valid.json'), body('other source'));
+  const inbox = createIpcInbox(base);
+  inbox.capture('main', 'messages');
+  inbox.capture('other', 'messages');
+  const scan = inbox.pending();
+  expect(scan.held).toBe(0);
+  expect(scan.claims.map((claim) => claim.read())).toEqual([
+    body('same batch'),
+    body('other source'),
+  ]);
+  for (const claim of scan.claims) {
+    claim.dispatch();
+    claim.complete();
+  }
+  expect(createIpcInbox(base).pending()).toEqual({ claims: [], held: 0 });
+  expect(fs.readdirSync(path.join(base, '.claimed-v1'))).toEqual([]);
+  const evidence = path.join(
+    base,
+    'errors',
+    fs.readdirSync(path.join(base, 'errors'))[0],
+  );
+  expect(
+    JSON.parse(fs.readFileSync(path.join(evidence, 'owner.json'), 'utf8')),
+  ).toMatchObject({
+    schema_version: 1,
+    source_group: 'main',
+    channel: 'messages',
+    file: 'a-invalid.json',
+  });
+  expect(
+    fs.readFileSync(path.join(evidence, 'captured', 'child'), 'utf8'),
+  ).toBe('retained child');
+});
+
+it.each(['EACCES', 'EIO'] as const)(
+  'separates captured-leaf access refusal from uncertain storage %s',
+  (code) => {
+    const own = source();
+    fs.writeFileSync(path.join(own, 'a-input.json'), body('retained'));
+    fs.writeFileSync(path.join(own, 'b-valid.json'), body('later'));
+    const inbox = createIpcInbox(base);
+    inbox.capture('main', 'messages');
+    const nativeOpen = fs.openSync.bind(fs);
+    const fault = vi
+      .spyOn(fs, 'openSync')
+      .mockImplementation((file, flags, mode) => {
+        if (String(file).endsWith('/captured'))
+          throw Object.assign(new Error('fixed native read refusal'), { code });
+        return nativeOpen(file, flags, mode);
+      });
+    const scan = inbox.pending();
+    if (code === 'EIO') {
+      expect(scan).toEqual({ claims: [], held: 1 });
+      expect(fs.existsSync(path.join(base, 'errors'))).toBe(false);
+    } else {
+      expect(scan).toEqual({ claims: [], held: 0 });
+      expect(fs.readdirSync(path.join(base, 'errors'))).toHaveLength(2);
+    }
+    fault.mockRestore();
+    const resumed = createIpcInbox(base).pending();
+    expect(resumed.held).toBe(0);
+    expect(resumed.claims.map((claim) => claim.read())).toEqual(
+      code === 'EIO' ? [body('retained'), body('later')] : [],
+    );
+  },
+);
+
+it('retains a rejected leaf and holds same-batch dispatch until post-move quarantine fsync succeeds', () => {
+  const own = source();
+  fs.mkdirSync(path.join(own, 'a-invalid.json'));
+  fs.writeFileSync(path.join(own, 'a-invalid.json', 'child'), 'retained');
+  fs.writeFileSync(path.join(own, 'b-valid.json'), body());
+  const inbox = createIpcInbox(base);
+  inbox.capture('main', 'messages');
+  const descriptors = new Map<number, string>(),
+    open = fs.openSync.bind(fs),
+    sync = fs.fsyncSync.bind(fs),
+    rename = fs.renameSync.bind(fs);
+  let moved = false;
+  vi.spyOn(fs, 'openSync').mockImplementation((file, flags, mode) => {
+    const fd = open(file, flags, mode);
+    descriptors.set(fd, String(file));
+    return fd;
+  });
+  vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+    rename(from, to);
+    if (
+      String(to).includes('/errors/rejected-') &&
+      String(to).endsWith('/captured')
+    )
+      moved = true;
+  });
+  const fault = vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
+    if (moved && descriptors.get(fd)?.includes('/errors/rejected-'))
+      throw Object.assign(new Error('fixed rejected-leaf durability failure'), {
+        code: 'EIO',
+      });
+    sync(fd);
+  });
+  expect(inbox.pending()).toEqual({ claims: [], held: 1 });
+  expect(moved).toBe(true);
+  expect(createIpcInbox(base).pending()).toEqual({ claims: [], held: 1 });
+  fault.mockRestore();
+  const resumed = createIpcInbox(base).pending();
+  expect(resumed.held).toBe(0);
+  expect(resumed.claims).toHaveLength(1);
+  expect(resumed.claims[0].read()).toBe(body());
+  const evidence = path.join(
+    base,
+    'errors',
+    fs.readdirSync(path.join(base, 'errors'))[0],
+  );
+  expect(
+    fs.readFileSync(path.join(evidence, 'captured', 'child'), 'utf8'),
+  ).toBe('retained');
+});
+
+it.each(['schema_version', 'file'] as const)(
+  'holds incompatible rejected-leaf %s after interrupted custody without admitting valid siblings',
+  (field) => {
+    const own = source();
+    fs.mkdirSync(path.join(own, 'a-invalid.json'));
+    fs.writeFileSync(path.join(own, 'b-valid.json'), body());
+    const inbox = createIpcInbox(base);
+    inbox.capture('main', 'messages');
+    const rename = fs.renameSync.bind(fs);
+    const fault = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (
+        String(to).includes('/errors/rejected-') &&
+        String(to).endsWith('/captured')
+      )
+        throw Object.assign(new Error('fixed pre-move refusal'), {
+          code: 'EIO',
+        });
+      rename(from, to);
+    });
+    expect(inbox.pending()).toEqual({ claims: [], held: 1 });
+    fault.mockRestore();
+    const evidence = path.join(
+        base,
+        'errors',
+        fs.readdirSync(path.join(base, 'errors'))[0],
+      ),
+      owner = path.join(evidence, 'owner.json');
+    const original = JSON.parse(fs.readFileSync(owner, 'utf8'));
+    const unsupported = JSON.stringify({
+      ...original,
+      [field]: field === 'schema_version' ? 2 : 'other.json',
+    });
+    fs.writeFileSync(owner, unsupported);
+    expect(createIpcInbox(base).pending()).toEqual({ claims: [], held: 1 });
+    expect(fs.readFileSync(owner, 'utf8')).toBe(unsupported);
+    expect(
+      fs
+        .lstatSync(
+          path.join(
+            base,
+            '.claimed-v1',
+            original.batch_id,
+            'requests',
+            original.request_id,
+            'captured',
+          ),
+        )
+        .isDirectory(),
+    ).toBe(true);
+    expect(fs.existsSync(path.join(evidence, 'captured'))).toBe(false);
   },
 );

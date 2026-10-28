@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { hasErrno, isFileSystemError } from './operational-errors.js';
 import { isValidGroupFolder } from './group-folder.js';
+import { logger } from './logger.js';
 
 export class IpcInboxHold extends Error {}
 type Channel = 'messages' | 'tasks';
@@ -340,6 +341,109 @@ export function createIpcInbox(base: string): IpcInbox {
     syncDirectory(errors);
     syncDirectory(batch);
   }
+  function quarantineCaptured(
+    batch: string,
+    slot: string,
+    sourceGroup: string,
+    channel: Channel,
+    file: string,
+    refuse = false,
+  ): boolean {
+    const batchId = path.basename(batch),
+      requestId = path.basename(slot);
+    const errors = path.join(base, 'errors');
+    const evidence = path.join(errors, 'rejected-' + batchId + '-' + requestId);
+    let existing = false;
+    if (exists(errors)) {
+      ownedDirectory(errors, uid, true);
+      existing = exists(evidence);
+    }
+    if (!existing && !refuse) return false;
+    // Only pre-dispatch captured input can enter this disposition. A durable
+    // pending snapshot or any effect intent alongside it is ambiguous and held.
+    if (
+      exists(path.join(slot, 'pending')) ||
+      exists(path.join(slot, 'in_flight'))
+    )
+      throw new IpcInboxHold(
+        'IPC rejected input conflicts with dispatch state; preserve both.',
+      );
+    prepareIpcQuarantineRoot(base);
+    syncDirectory(base);
+    if (!existing) {
+      fs.mkdirSync(evidence, { mode: 0o700 });
+      exclusiveWrite(
+        path.join(evidence, 'owner.json'),
+        JSON.stringify({
+          schema_version: 1,
+          source_group: sourceGroup,
+          channel,
+          batch_id: batchId,
+          request_id: requestId,
+          file,
+          reason: 'invalid_or_unreadable_input',
+        }),
+      );
+      syncDirectory(errors);
+    }
+    ownedDirectory(evidence, uid);
+    if ((fs.lstatSync(evidence).mode & 0o077) !== 0)
+      throw new IpcInboxHold(
+        'IPC rejected input quarantine must remain private.',
+      );
+    const record = metadata(
+      path.join(evidence, 'owner.json'),
+      [
+        'schema_version',
+        'source_group',
+        'channel',
+        'batch_id',
+        'request_id',
+        'file',
+        'reason',
+      ],
+      uid,
+    );
+    if (
+      record.source_group !== sourceGroup ||
+      record.channel !== channel ||
+      record.batch_id !== batchId ||
+      record.request_id !== requestId ||
+      record.file !== file ||
+      record.reason !== 'invalid_or_unreadable_input'
+    )
+      throw new IpcInboxHold(
+        'IPC rejected input quarantine identity changed; preserve its evidence.',
+      );
+    const captured = path.join(slot, 'captured'),
+      retained = path.join(evidence, 'captured');
+    if (exists(captured)) {
+      if (exists(retained))
+        throw new IpcInboxHold(
+          'IPC rejected input quarantine is ambiguous; preserve both locations.',
+        );
+      // Rename the entry itself, including aliases/FIFOs/directories. Never open
+      // its target or walk/delete unknown child contents during quarantine.
+      fs.renameSync(captured, retained);
+    }
+    if (
+      !exists(retained) ||
+      entries(evidence, 2).some(
+        (name) => name !== 'owner.json' && name !== 'captured',
+      )
+    )
+      throw new IpcInboxHold(
+        'IPC rejected input quarantine is incomplete; preserve its evidence.',
+      );
+    syncDirectory(evidence);
+    syncDirectory(errors);
+    syncDirectory(slot);
+    logger.warn(
+      { sourceGroup, channel },
+      'IPC captured input refused; inspect private quarantine before any retry.',
+    );
+    return true;
+  }
   return {
     capture(sourceGroup, channel) {
       if (!isValidGroupFolder(sourceGroup))
@@ -458,18 +562,62 @@ export function createIpcInbox(base: string): IpcInbox {
             const captured = path.join(slot, 'captured'),
               pending = path.join(slot, 'pending'),
               inflight = path.join(slot, 'in_flight');
-            if (exists(captured)) {
+            const rejected = quarantineCaptured(
+              batch,
+              slot,
+              sourceGroup,
+              channel,
+              request.file,
+            );
+            if (!rejected && exists(captured)) {
               // A new private inode freezes evidence even if a guest retained
               // an open descriptor to the original captured request.
               if (!exists(pending)) {
                 const temporary = path.join(slot, 'snapshot.tmp');
                 if (exists(temporary)) fs.unlinkSync(temporary);
-                exclusiveWrite(temporary, regularBytes(captured));
-                fs.renameSync(temporary, pending);
+                let bytes: Buffer | undefined;
+                try {
+                  const observed = fs.lstatSync(captured);
+                  if (
+                    !observed.isFile() ||
+                    observed.isSymbolicLink() ||
+                    observed.nlink !== 1 ||
+                    observed.size > MAX_BYTES
+                  )
+                    throw new IpcInboxHold(
+                      'Captured IPC input is not bounded single-link regular data.',
+                    );
+                  bytes = regularBytes(captured);
+                } catch (error) {
+                  // Source-controlled type/size/link/access refusal is known
+                  // before dispatch. Storage I/O and all other defects HOLD or
+                  // propagate through the existing owner; never infer absence.
+                  if (
+                    !(error instanceof IpcInboxHold) &&
+                    !['ELOOP', 'EACCES', 'EPERM'].some((code) =>
+                      hasErrno(error, code),
+                    )
+                  )
+                    throw error;
+                  quarantineCaptured(
+                    batch,
+                    slot,
+                    sourceGroup,
+                    channel,
+                    request.file,
+                    true,
+                  );
+                }
+                if (bytes !== undefined) {
+                  exclusiveWrite(temporary, bytes);
+                  fs.renameSync(temporary, pending);
+                  syncDirectory(slot);
+                }
+              }
+              if (exists(captured)) {
+                fs.unlinkSync(captured);
                 syncDirectory(slot);
               }
-              fs.unlinkSync(captured);
-              syncDirectory(slot);
             }
             if (!exists(pending)) {
               if (exists(inflight))
