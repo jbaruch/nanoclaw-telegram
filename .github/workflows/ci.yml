@@ -17,6 +17,12 @@ jobs:
           cache: npm
       - run: npm ci
 
+      - name: Install declared agent protocol dependencies
+        run: npm ci --ignore-scripts --prefix container/agent-runner
+
+      - name: Typecheck and build agent protocol
+        run: npm run build --prefix container/agent-runner
+
       - name: Format check
         run: npm run format:check
 
